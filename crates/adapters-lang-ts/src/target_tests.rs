@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tree_sitter::Node as TsNode;
 
 /// Modules whose `describe`/`it`/`test` exports prove a test call.
-const TEST_MODULES: &[&str] = &["vitest", "@jest/globals", "bun:test"];
+/// `node:test` is Node's built-in runner (#2008); its default export is
+/// `test` and `suite` is its `describe`.
+const TEST_MODULES: &[&str] = &["vitest", "@jest/globals", "bun:test", "node:test"];
 /// Modifiers a test call may carry (`it.only`, `describe.skip`).
 const MODIFIERS: &[&str] = &["only", "skip", "concurrent", "sequential", "todo", "fails"];
 /// A registered test client factory.
@@ -284,6 +286,9 @@ fn test_call<'tree>(
     };
     let local = cx.text(&base);
     let exported = match proofs.import(call, local) {
+        // `import test from 'node:test'`: the default export is `test`.
+        Some(("node:test", _)) if !proofs.imported_names.contains_key(local) => "test",
+        Some(("node:test", "suite")) => "describe",
         Some((module, exported)) if TEST_MODULES.contains(&module) => exported,
         Some(_) => return None,
         None if proofs.bindings.global_unshadowed(call, local) => local,
@@ -521,7 +526,11 @@ pub(crate) fn extract<'tree>(
         let mut props = serde_json::json!({
             "name": name,
             "qualified_name": qualified,
-            "framework": "vitest-jest",
+            "framework": if proofs.import_modules.values().any(|m| m == "node:test") {
+                "node-test"
+            } else {
+                "vitest-jest"
+            },
             "language": "typescript",
             "path": cx.path,
             "prov": prov(vec![evidence(cx, call)], ConfidenceTier::Confirmed, &format!("TestCase {test}")),
