@@ -1388,30 +1388,36 @@ impl<'a> Index<'a> {
         if knowledge.file_areas.is_empty() {
             return Vec::new();
         }
-        let mut reached: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for (area, story) in listed {
-            if let Some(area) = area {
-                reached
-                    .entry(area.id.as_str())
-                    .or_default()
-                    .extend(self.reached(story));
-            }
-        }
+        // Member files by area, then one area at a time: the callables its
+        // capabilities reach are held for that area only, so what is
+        // retained stays within the graph's rows (never area × callable).
         let mut by_area: BTreeMap<(&str, &str), (&'a Node, Vec<&'a str>)> = BTreeMap::new();
         for (file, area) in &knowledge.file_areas {
-            let mine = reached.get(area.id.as_str());
-            for callable in self.defined.get(file).into_iter().flatten().copied() {
-                if reach_count.get(callable).is_some_and(|n| *n > SHARED_AFTER)
-                    || mine.is_some_and(|r| r.contains(callable))
-                    || !self.governs.contains_key(callable)
-                {
-                    continue;
+            by_area
+                .entry(area_order(area))
+                .or_insert_with(|| (*area, Vec::new()))
+                .1
+                .push(file);
+        }
+        for (area, members) in by_area.values_mut() {
+            let mut mine: BTreeSet<&str> = BTreeSet::new();
+            for (_, story) in listed
+                .iter()
+                .filter(|(a, _)| a.is_some_and(|a| a.id == area.id))
+            {
+                mine.extend(self.reached(story));
+            }
+            let files = std::mem::take(members);
+            for file in files {
+                for callable in self.defined.get(file).into_iter().flatten().copied() {
+                    if reach_count.get(callable).is_some_and(|n| *n > SHARED_AFTER)
+                        || mine.contains(callable)
+                        || !self.governs.contains_key(callable)
+                    {
+                        continue;
+                    }
+                    members.push(callable);
                 }
-                by_area
-                    .entry(area_order(area))
-                    .or_insert_with(|| (*area, Vec::new()))
-                    .1
-                    .push(callable);
             }
         }
         by_area
@@ -1767,9 +1773,11 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
     // Each area's own code (#2066): the callables its capabilities reach,
     // by area, the area-ordered owners, and the arranged units.
     let own_code = sum(&[
-        map_slots::<&str, BTreeSet<&str>>(rows)?,
-        set_slots::<&str>(rows)?,
+        // The member files by area (then their callables), one area's
+        // reached set at a time.
         map_slots::<(&str, &str), (&Node, Vec<&str>)>(rows)?,
+        slots::<&str>(rows)?,
+        set_slots::<&str>(rows)?,
         slots::<&str>(rows)?,
         slots::<(Option<&Node>, Option<&Story<'_>>)>(rows)?.checked_mul(2)?,
         // State machines (#2067): the index's list, by area and loose.
@@ -2826,6 +2834,31 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         assert_eq!(text.matches("| update\\_alias |").count(), 1, "{text}");
         assert!(text.contains("Rules in an area's own code (#2066)"));
         assert!(printed >= 4, "{printed}\n{text}");
+
+        // Member areas with no Capability in one still head their own code,
+        // so a briefing finds the area's block.
+        let unplaced = Stories {
+            included: vec![crate::workbench::capabilities::Story {
+                node: &cap,
+                support: vec![(&cite, Support::Edge(&handles))],
+            }],
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: knowledge.file_areas.clone(),
+        };
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &unplaced,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let unplaced_text = out.finish();
+        assert!(
+            unplaced_text.contains("### Abuser\n\n#### Rules in the Abuser area's own code"),
+            "{unplaced_text}"
+        );
 
         // Without areas, nothing beyond the capabilities is stated.
         let plain = Stories {
