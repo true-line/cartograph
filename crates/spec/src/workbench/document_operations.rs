@@ -483,6 +483,7 @@ mod tests {
             }],
             filtered: 0,
             areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
         };
         let budget = Budget::new(None).unwrap();
         let mut assertions = Assertions::new(&budget);

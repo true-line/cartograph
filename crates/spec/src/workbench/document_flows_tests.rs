@@ -132,6 +132,7 @@ fn render_with((nodes, edges): (Vec<Node>, Vec<Edge>)) -> (String, usize, usize)
         }],
         filtered: 0,
         areas: BTreeMap::new(),
+        file_areas: BTreeMap::new(),
     };
     let budget = Budget::new(None).unwrap();
     let mut assertions = Assertions::new(&budget);
@@ -285,6 +286,7 @@ fn entry_point_capabilities_list_their_operations_and_flows_in_d1() {
         }],
         filtered: 0,
         areas: BTreeMap::new(),
+        file_areas: BTreeMap::new(),
     };
     let budget = Budget::new(None).unwrap();
     let mut assertions = Assertions::new(&budget);

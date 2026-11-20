@@ -145,6 +145,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            repo_names: &[],
             knowledge: None,
             coverage: &[],
             stale_coverage: &[],
@@ -245,6 +246,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
     for (failure, code) in failures {
         assert_eq!(json!(failure)["reason"], code);
         let supplied = Supplied {
+            repo_names: &[],
             knowledge: None,
             coverage: &[],
             stale_coverage: &[],
@@ -318,6 +320,7 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             ExportMode::BestEffort,
             &BTreeSet::new(),
             Supplied {
+                repo_names: &[],
                 knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
@@ -573,6 +576,7 @@ fn curated_is_deterministic_selected_alone_and_bounded() {
                 ids,
                 limits(max_bytes),
                 Supplied {
+                    repo_names: &[],
                     knowledge: None,
                     coverage: &[],
                     stale_coverage: &[],

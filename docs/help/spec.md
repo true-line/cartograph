@@ -351,6 +351,30 @@ Not covered today: reStructuredText and AsciiDoc structure (those files are
 read as plain text), and anything a section says in prose without naming a
 file, route, id or unique name.
 
+## Architecture diagrams
+
+Every export includes **architecture.md** and **architecture.dsl**. They
+draw your system in the [C4 model](https://c4model.com) at three levels, from
+the recovered facts alone. No model is involved.
+
+- **Level 1, system context**: who uses the system and which outside systems
+  it depends on.
+- **Level 2, containers**: the parts that run on their own (the web
+  application, each process an entry point starts, operator commands,
+  scheduled jobs, each client application), the data stores they use and
+  what they call. A repository with code and no recovered way in is drawn as
+  a Gap, never left out.
+- **Level 3, components**: per container, the subsystem areas holding the
+  files its flows pass through, and the calls between them. The areas are
+  inferred, so a `verified-only` export draws no component.
+
+Each box and arrow carries the lowest confidence of the facts it rests on,
+and the tables under each diagram cite those facts. A dashed arrow is
+InferredWeak; a dashed red box is a Gap. The diagrams are Mermaid, which
+GitHub, GitLab and most Markdown viewers render. `architecture.dsl` holds
+the same model as a Structurizr DSL workspace, for teams that keep their
+architecture in Structurizr.
+
 ## Product specification
 
 Every export includes **product-specification.md**. It is the first document
