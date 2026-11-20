@@ -8,6 +8,7 @@ mod controllers;
 pub use controllers::derive_controller_capabilities;
 pub(crate) mod actors;
 mod naming;
+mod subsystems;
 pub use actors::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     derive_permission_actors,
@@ -18,6 +19,10 @@ use core_graph::{
 };
 use core_prov::{ConfidenceTier, EvidenceBasis, EvidenceRef, ProducingMethod, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
+pub use subsystems::{
+    MAX_SUBSYSTEM_FILES, SUBSYSTEM_FILE_CAP, SUBSYSTEM_RULE, SUBSYSTEM_RULE_VERSION,
+    SubsystemReport, derive_subsystems,
+};
 
 /// Deterministic recipe naming a semantic resolver-group capability.
 pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver-group";
