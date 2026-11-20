@@ -180,11 +180,11 @@ fn entry_points_and_schedules_are_capabilities() {
                 ])
             ),
             (
-                "Run scheduled jobs (crontab.yml)".into(),
+                "Run scheduled jobs (crontab)".into(),
                 ids(&["sched:repo@crontab.yml#0", "sched:repo@crontab.yml#1"])
             ),
             (
-                "Run scheduled jobs (crontab-all-hosts.yml)".into(),
+                "Run scheduled jobs (crontab all hosts)".into(),
                 ids(&["sched:repo@crontab-all-hosts.yml#0"])
             ),
         ])
@@ -238,11 +238,11 @@ fn colliding_titles_in_one_file_name_their_entry() {
     }
     let caps = capabilities(&derive_entry_point_capabilities(&base));
     assert!(
-        caps.contains_key("Serve HTTP requests (Procfile web)"),
+        caps.contains_key("Serve HTTP requests (web process)"),
         "{caps:?}"
     );
     assert!(
-        caps.contains_key("Serve HTTP requests (Procfile api)"),
+        caps.contains_key("Serve HTTP requests (API process)"),
         "{caps:?}"
     );
 }

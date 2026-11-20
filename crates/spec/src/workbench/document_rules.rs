@@ -50,6 +50,9 @@ struct Rejection<'a> {
     owner: &'a str,
     when: String,
     outcome: String,
+    /// The rule in domain terms, when its condition and outcome are within
+    /// the rendering rules (#1999, AC-0905).
+    statement: Option<String>,
 }
 
 fn one_line(text: &str) -> String {
@@ -94,7 +97,7 @@ fn closing(text: &str) -> Option<usize> {
 /// constructor: a `new_expression` or `parenthesized_expression` whose whole
 /// stored display is that construction, so `new FooError() || fallback` is
 /// not one.
-fn constructs_error(value: &SourceExpression) -> bool {
+pub(super) fn constructs_error(value: &SourceExpression) -> bool {
     if !matches!(
         value.syntax_kind.as_str(),
         "new_expression" | "parenthesized_expression"
@@ -254,11 +257,13 @@ fn guarded<'a>(rule: &'a Node, owner: &'a str, any: bool) -> Option<Rejection<'a
             .collect::<Vec<_>>()
             .join(" and ")
     };
+    let statement = super::statements::statement(&parsed, owner);
     Some(Rejection {
         rule,
         owner,
         when,
         outcome,
+        statement,
     })
 }
 
@@ -349,10 +354,11 @@ impl<'a> Index<'a> {
             let [(read, value)] = found[..] else {
                 writeln!(
                     out,
-                    "| ↳ {} | configuration constant not stated: {} recorded reads bind this \
-                     name | — | — |",
+                    "| ↳ | The configured {} is not stated: {} recorded reads bind this name | \
+                     {} | — |",
+                    Literal(super::statements::words(token)),
+                    found.len(),
                     Literal(token),
-                    found.len()
                 )?;
                 continue;
             };
@@ -362,11 +368,12 @@ impl<'a> Index<'a> {
             });
             writeln!(
                 out,
-                "| ↳ {} | configuration constant (matched by name, inferred) | {} unless the \
-                 environment variable {} is set | {id} |",
-                Literal(token),
+                "| ↳ | The configured {} is {} unless the environment variable {} is set \
+                 (matched by name, inferred). | {} | {id} |",
+                Literal(super::statements::words(token)),
                 Literal(value.to_string()),
                 Literal(key),
+                Literal(token),
             )?;
             if asserted.insert(id) {
                 assertions.node(read, None)?;
@@ -509,7 +516,8 @@ impl<'a> Index<'a> {
                 };
                 writeln!(
                     out,
-                    "| ↳ {}() | not followed: {why} | — | — |",
+                    "| ↳ | The check “{}” is not followed: {why}. | {}() | — |",
+                    Literal(super::statements::words(name)),
                     Literal(name)
                 )?;
                 continue;
@@ -521,8 +529,9 @@ impl<'a> Index<'a> {
                 .unwrap_or(target);
             writeln!(
                 out,
-                "| ↳ {}() | followed into {} (matched by name, inferred), {PREDICATE_DEPTH} \
-                 call hops | its guarded exits: | — |",
+                "| ↳ | The check “{}” decides as follows (matched by name, inferred, \
+                 {PREDICATE_DEPTH} call hops): | {}() in {} | — |",
+                Literal(super::statements::words(name)),
                 Literal(name),
                 Literal(qualified),
             )?;
@@ -569,15 +578,18 @@ impl<'a> Index<'a> {
             if printed == 0 {
                 writeln!(
                     out,
-                    "| ↳ {}() | no guarded exit recovered in it or what it calls | — | — |",
+                    "| ↳ | No guarded exit is recovered in the check “{}” or what it calls. | \
+                     {}() | — |",
+                    Literal(super::statements::words(name)),
                     Literal(name)
                 )?;
             }
             if omitted > 0 {
                 writeln!(
                     out,
-                    "| ↳ {}() | {omitted} more guarded exits not listed; `rule-evidence.md` \
-                     has them | — | — |",
+                    "| ↳ | {omitted} more guarded exits of the check “{}” are not listed; \
+                     `rule-evidence.md` has them. | {}() | — |",
+                    Literal(super::statements::words(name)),
                     Literal(name)
                 )?;
             }
@@ -605,10 +617,14 @@ fn write_row_prefixed(
     let id = citation_id(&FactKey::Node {
         id: row.rule.id.clone(),
     });
+    // The statement is the rule; the stored condition and outcome are its
+    // source, kept beside it as evidence (#1999).
+    let rule = row.statement.as_deref().unwrap_or(NOT_STATED);
     writeln!(
         out,
-        "| {prefix}{} | {} | {} | {id} |",
+        "| {prefix}{} | {} | when {}: {} | {id} |",
         Literal(row.owner),
+        Literal(rule),
         Literal(&row.when),
         Literal(&row.outcome),
     )?;
@@ -618,7 +634,20 @@ fn write_row_prefixed(
     Ok(())
 }
 
-const HEADER: &str = "| Where | When | Outcome | Citation |\n|---|---|---|---|\n";
+const HEADER: &str = "| Where | Rule | Source | Citation |\n|---|---|---|---|\n";
+
+/// How the Rule and Source columns read, for each table's lead (#1999).
+const RULE_COLUMNS: &str = "The Rule column restates each exit in domain terms when its \
+    condition and outcome are simple enough to render by rule (a presence or flag test, a \
+    comparison with a literal or configured value, a test for no value, membership of a literal \
+    set, an ownership test, and `and`/`or`/`not` of these), keeping the fact's tier; otherwise \
+    it states a Gap. The Source column is the stored condition and outcome, kept as evidence, \
+    not as the requirement.";
+
+/// The Rule cell of an exit whose condition or outcome is outside the
+/// rendering rules: a Gap, never the source expression (#1999).
+pub(super) const NOT_STATED: &str =
+    "Not stated in domain terms (Gap): the condition or outcome is outside the rendering rules";
 
 /// The rejection exits each Capability reaches, then the shared ones.
 /// Returns the number of rows printed; prints nothing when no capability
@@ -669,7 +698,7 @@ pub(super) fn rules_per_capability(
          (`↳` rows, inferred): the guarded exits of the one repository function of that name \
          and of what it calls within {PREDICATE_DEPTH} hops, or why it was not followed. A \
          configuration constant a row names is stated with its recorded default and \
-         environment variable (`↳` rows, matched by name, inferred).\n"
+         environment variable (`↳` rows, matched by name, inferred). {RULE_COLUMNS}\n"
     )?;
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
@@ -826,7 +855,7 @@ pub(super) fn guard_checks(
          complete execution predicate is not established. A function a condition calls is \
          followed by name, and a configuration constant a row names is stated with its \
          recorded default (`↳` rows, inferred). At most {MAX_GUARD_ROWS} exits are listed per \
-         guard; `rule-evidence.md` has every observation.\n"
+         guard; `rule-evidence.md` has every observation. {RULE_COLUMNS}\n"
     )?;
     let mut printed = 0;
     for (guard, owners) in &listed {
@@ -1047,27 +1076,23 @@ function checkQuantity(qty: number) {
         assert_eq!(cited, 4);
         assert!(text.contains("### Orders 0"), "{text}");
         assert!(
-            text.contains("| checkQuantity | (qty &lt; 0) | throws new NegativeQuantityError() |"),
+            text.contains("when (qty &lt; 0): throws new NegativeQuantityError() |"),
             "{text}"
         );
         assert!(
-            text.contains(
-                "| checkQuantity | (qty &gt; 10) | returns new OrderLimitError({ max: 10 }) |"
-            ),
+            text.contains("when (qty &gt; 10): returns new OrderLimitError({ max: 10 }) |"),
             "{text}"
         );
         // A parenthesized construction is one; a construction or-ed with
         // another value is not.
         assert!(
-            text.contains(
-                "| checkQuantity | (qty &gt; 20) | returns (new OrderLimitError({ max: 20 })) |"
-            ),
+            text.contains("when (qty &gt; 20): returns (new OrderLimitError({ max: 20 })) |"),
             "{text}"
         );
         assert!(!text.contains("|| qty"), "{text}");
         // A delimiter inside a string literal does not end the arguments.
         assert!(
-            text.contains("| (qty &gt; 40) | returns (new OrderLimitError("),
+            text.contains("when (qty &gt; 40): returns (new OrderLimitError("),
             "{text}"
         );
         assert!(!text.contains("returns qty"), "{text}");
@@ -1185,14 +1210,12 @@ def update_alias(alias_id, user):
         assert_eq!(printed, 3, "{text}");
         assert!(
             text.contains(
-                "| update\\_alias | not alias or alias.user\\_id \\!= user.id | returns jsonify(error=\"Forbidden, really\"), 403 |"
+                "when not alias or alias.user\\_id \\!= user.id: returns jsonify(error=\"Forbidden, really\"), 403 |"
             ),
             "{text}"
         );
         assert!(
-            text.contains(
-                "| update\\_alias | alias.disabled | throws AliasDisabled(\"disabled\") |"
-            ),
+            text.contains("when alias.disabled: throws AliasDisabled(\"disabled\") |"),
             "{text}"
         );
         assert!(text.contains("returns (\"pending\", 409,)"), "{text}");
@@ -1230,25 +1253,18 @@ def update_alias(alias_id, user):
         assert_eq!(printed, 2, "{text}");
         assert!(
             text.contains(
-                "| ↳ can\\_create\\_new\\_alias() | followed into User.can\\_create\\_new\\_alias \
-                 (matched by name, inferred), 2 call hops | its guarded exits: | — |"
+                "| ↳ | The check “can create new alias” decides as follows (matched by name, inferred, 2 call hops): | can\\_create\\_new\\_alias() in User.can\\_create\\_new\\_alias | — |"
             ),
             "{text}"
         );
         assert!(
-            text.contains(
-                "| ↳ User.can\\_create\\_num\\_aliases | self.disabled | returns False |"
-            ),
+            text.contains("when self.disabled: returns False |"),
             "{text}"
         );
-        assert!(
-            text.contains("| ↳ User.can\\_create\\_num\\_aliases | self.premium | returns True |"),
-            "{text}"
-        );
+        assert!(text.contains("when self.premium: returns True |"), "{text}");
         assert!(
             text.contains(
-                "| ↳ outside\\_check() | not followed: no repository function of this name was \
-                 recovered | — | — |"
+                "| ↳ | The check “outside check” is not followed: no repository function of this name was recovered. | outside\\_check() | — |"
             ),
             "{text}"
         );
@@ -1292,7 +1308,7 @@ def login(user, password):
         assert_eq!(printed, 2, "{text}");
         assert!(
             text.contains(
-                "| login | not (not user or not user.check\\_password(password)) and not user.activated |"
+                "when not (not user or not user.check\\_password(password)) and not user.activated: throws"
             ),
             "{text}"
         );
@@ -1379,14 +1395,15 @@ def plain(f):
         assert!(!text.contains("#### plain"), "{text}");
         assert!(!text.contains("missing"), "{text}");
         for row in [
-            "| require\\_api\\_auth.decorated | error\\_return | returns error\\_return |",
-            "| authorize\\_request | not api\\_key | returns jsonify(error=\"Wrong api key\"), 401 |",
-            "| authorize\\_request | g.user.disabled | returns jsonify(error=\"Disabled account\"), \
-             403 |",
-            "| authorize\\_request | not g.user.is\\_active() | returns \
-             jsonify(error=\"Account does not exist\"), 401 |",
-            "| ↳ is\\_active() | followed into User.is\\_active (matched by name, inferred)",
-            "| ↳ User.is\\_active | self.delete\\_on is not None | returns False |",
+            "when error\\_return: returns error\\_return |",
+            "when not api\\_key: returns jsonify(error=\"Wrong api key\"), 401 |",
+            "when g.user.disabled: returns jsonify(error=\"Disabled account\"), 403 |",
+            "when not g.user.is\\_active(): returns jsonify(error=\"Account does not exist\"), 401 |",
+            "| ↳ | The check “is active” decides as follows (matched by name, inferred, 2 call hops): | is\\_active() in User.is\\_active | — |",
+            // AC-0905: the rules read as statements.
+            "| authorize\\_request | When the user is disabled, the request is refused with status 403 (“Disabled account”). |",
+            "| ↳ User.is\\_active | A user is not active when the user's delete on is set. |",
+            "when self.delete\\_on is not None: returns False |",
         ] {
             assert!(text.contains(row), "missing {row}\n{text}");
         }
@@ -1484,14 +1501,14 @@ def create(user):
         .unwrap();
         let text = out.finish();
         for row in [
-            "| ↳ MAX\\_OLD | configuration constant (matched by name, inferred) | 15 unless the \
-             environment variable MAX\\_OLD is set | ",
-            "| ↳ MAX\\_FREE | configuration constant (matched by name, inferred) | 5 unless the \
-             environment variable MAX\\_FREE is set | ",
-            "| ↳ TWICE | configuration constant not stated: 2 recorded reads bind this name | — | — |",
+            "| ↳ | The configured max old is 15 unless the environment variable MAX\\_OLD is set (matched by name, inferred). | MAX\\_OLD | ",
+            "| ↳ | The configured max free is 5 unless the environment variable MAX\\_FREE is set (matched by name, inferred). | MAX\\_FREE | ",
+            // AC-0905: a value a method gives is stated.
+            "| ↳ User.max\\_alias | When the user is old, the user's max alias is the configured max old. |",
+            "| ↳ | The configured twice is not stated: 2 recorded reads bind this name | TWICE | — |",
         ] {
             assert!(text.contains(row), "missing {row}\n{text}");
         }
-        assert_eq!(text.matches("| ↳ MAX\\_FREE |").count(), 1, "{text}");
+        assert_eq!(text.matches("| MAX\\_FREE |").count(), 1, "{text}");
     }
 }

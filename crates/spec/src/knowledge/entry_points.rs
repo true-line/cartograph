@@ -160,16 +160,32 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
     for (title, file, ..) in &named {
         *by_file.entry((title, file)).or_default() += 1;
     }
+    // Each colliding title names its file in words (#1999): a capability
+    // name carries no file path.
+    let mut files_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (title, file, ..) in &named {
+        files_of.entry(title).or_default().push(file);
+    }
+    let places: BTreeMap<&str, BTreeMap<&str, String>> = files_of
+        .into_iter()
+        .map(|(title, files)| (title, super::naming::places_apart(files)))
+        .collect();
     let titles: Vec<String> = named
         .iter()
         .map(|(title, file, (_, id), _)| {
-            if by_title[title.as_str()] < 2 || file.is_empty() {
+            let place = &places[title.as_str()][file.as_str()];
+            if by_title[title.as_str()] < 2 || place.is_empty() {
                 title.clone()
             } else if by_file[&(title.as_str(), file.as_str())] < 2 {
-                format!("{title} ({file})")
+                format!("{title} ({place})")
             } else {
                 let entry = id.rsplit_once('#').map_or(id.as_str(), |(_, key)| key);
-                format!("{title} ({file} {entry})")
+                let entry = super::naming::spelled_words(entry);
+                if place == "process file" {
+                    format!("{title} ({entry} process)")
+                } else {
+                    format!("{title} ({place} {entry})")
+                }
             }
         })
         .collect();

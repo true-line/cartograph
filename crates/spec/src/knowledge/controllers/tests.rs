@@ -530,6 +530,6 @@ fn colliding_titles_fall_back_to_files_when_routes_do_not_tell_them_apart() {
             pending("app/a.py", &["/dashboard/x", "/dashboard/y"]),
             pending("app/b.py", &["/dashboard/z", "/dashboard/w"]),
         ]),
-        ["Manage dashboard (app/a.py)", "Manage dashboard (app/b.py)"]
+        ["Manage dashboard (a)", "Manage dashboard (b)"]
     );
 }
