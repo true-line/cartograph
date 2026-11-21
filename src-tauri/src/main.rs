@@ -57,6 +57,8 @@ mod sources;
 mod spec_bundle_file;
 mod system_preflight;
 mod task_evidence;
+#[cfg(test)]
+mod test_app;
 mod work_packets;
 
 use adapters_fw::events::Registries;
@@ -13297,9 +13299,11 @@ export function App() {
         )
         .unwrap();
 
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         let state_path = dir.path().join("state.db");
         let mut roots = std::collections::BTreeSet::new();
         roots.insert(project.display().to_string());
@@ -14411,13 +14415,13 @@ export function App() {
     }
 
     /// A mock app managing the stores a preflight touches, rooted in `dir`.
-    pub(crate) fn preflight_test_app(
-        dir: &std::path::Path,
-    ) -> tauri::App<tauri::test::MockRuntime> {
+    pub(crate) fn preflight_test_app(dir: &std::path::Path) -> crate::test_app::TestApp {
         use tauri::Manager;
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         let state_path = dir.join("state.db");
         app.manage(super::PreflightRuns::default());
         app.manage(super::AppState {
@@ -15127,9 +15131,11 @@ export function App() {
         )
         .unwrap();
 
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         let state_path = dir.path().join("state.db");
         app.manage(super::AppState {
             graph: std::sync::Mutex::new(
