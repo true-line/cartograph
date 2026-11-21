@@ -15,6 +15,7 @@ import { LegendPopover } from './components/LegendPopover';
 import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 import { StatusBadge } from './components/StatusBadge';
 import { GraphStatsCard } from './components/GraphStatsCard';
+import { ProjectsCard } from './components/ProjectsCard';
 import { JobsSurface } from './components/JobsSurface';
 import { ConnectSurface } from './components/ConnectSurface';
 import { PreflightSurface } from './components/PreflightSurface';
@@ -146,6 +147,9 @@ export default function App() {
     clearError,
     newProjectBusy,
     newProjectError,
+    projects,
+    projectsBusy,
+    projectsError,
     findings,
     registerFindings,
     escalationEdgeLabels,
@@ -162,6 +166,9 @@ export default function App() {
     clearFinishedJobs,
     clearGraph,
     startNewProject,
+    switchProject,
+    renameProject,
+    deleteProject,
     setSpecMode,
     readSpecArtifact,
     readSpecArtifacts,
@@ -739,6 +746,20 @@ export default function App() {
                   error: newProjectError,
                   onStart: () => void startNewProject(),
                 }}
+              />
+              <ProjectsCard
+                projects={projects}
+                loadedRepos={systemContents.map((entry) => entry.display_name ?? entry.repo)}
+                canSwitch={
+                  backend === 'up' &&
+                  !ingestBusy &&
+                  !jobs.some((job) => job.status === 'queued' || job.status === 'running')
+                }
+                busy={projectsBusy}
+                error={projectsError}
+                onSwitch={(id) => void switchProject(id)}
+                onRename={(id, name) => void renameProject(id, name)}
+                onDelete={(id) => void deleteProject(id)}
               />
             </div>
             <div className="card-grid artifacts">

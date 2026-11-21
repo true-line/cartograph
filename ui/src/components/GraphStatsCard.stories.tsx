@@ -111,8 +111,8 @@ export const SameNamedRepositoriesRemainDistinct: Story = {
 };
 
 export const NewProject: Story = {
-  // AC-1013 (#1994): New project names the repos it removes and what is
-  // kept, and starts only once confirmed.
+  // AC-1013, AC-1014 (#1994): New project names the repos it sets aside
+  // and what every project shares, and starts only once confirmed.
   args: {
     stats: { nodes: 1284, edges: 4021 },
     systemContents: [
@@ -125,9 +125,9 @@ export const NewProject: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole('button', { name: 'New project…' }));
     const alert = canvas.getByRole('alert');
-    await expect(alert).toHaveTextContent('Start a new project? This removes acme/shop, local/infra');
+    await expect(alert).toHaveTextContent('Start a new project? This sets aside acme/shop, local/infra');
     await expect(alert).toHaveTextContent(
-      'Settings, provider keys, run limits, the local model and installed adapters are kept.',
+      'Settings, provider keys, run limits, the local model and installed adapters are shared by every project.',
     );
     await userEvent.click(canvas.getByRole('button', { name: 'Keep project' }));
     await expect(args.newProject?.onStart).not.toHaveBeenCalled();
