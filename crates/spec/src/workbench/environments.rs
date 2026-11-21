@@ -1065,8 +1065,8 @@ matches nothing, a transformer or generator that is not evaluated, and an enviro
 whose name is the only thing that names an environment.\n\
 - Every row carries the tier, confidence and source span of its fact. The fact index lists \
 every span. An environment file has no span: these files hold secrets, so no byte range of one \
-is stored.\n\
-- Only the names of environment keys are listed. No value is stored or shown.\n\
+is stored, except the line of a value its author allowlists (ADR-0075).\n\
+- Only the names of environment keys are listed. No value is shown.\n\
 - The last section states what is not read.\n\n";
 
 /// `environments.md` over the facts the export mode admitted and the count

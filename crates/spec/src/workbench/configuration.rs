@@ -416,8 +416,8 @@ fn language(node: &Node) -> &str {
 const INTRO: &str = "# Configuration keys\n\n\
 A deterministic projection of the configuration keys the ingested sources declare and read: \
 each key once, with the environment files that declare it and the files and symbols that read \
-it. No model is involved. Only key names are listed: no value, default or fallback is stored \
-or shown.\n\n\
+it. No model is involved. Only key names are listed: no value, default or fallback is \
+shown.\n\n\
 ## How to read this document\n\n\
 - **A key** is the name of an environment variable. Names are compared exactly, including \
 case. A key is listed once for each repository: an environment file in one repository says \
@@ -438,7 +438,7 @@ still use it.\n\
 not state as a literal. Those keys exist and are not in the tables.\n\
 - Every row carries the tier, confidence and source span of its fact. The fact index lists \
 every span. An environment file has no span: these files hold secrets, so no byte range of \
-one is stored.\n\
+one is stored, except the line of a value its author allowlists (ADR-0075).\n\
 - The last sections state which languages are read and what is not covered.\n\n";
 
 const DYNAMIC: &str = "\n## Files with reads that cannot be named\n\n\

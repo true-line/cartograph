@@ -1331,6 +1331,90 @@ mod tests {
         assert!(edge_prov.evidence.is_empty());
     }
 
+    // AC-1021 (ADR-0075): an allowlisted key's value is a toolchain setting
+    // citing its line; unlisted keys, secrets, multiline values and other
+    // env files stay keys-only and span-free; a template is labelled; a URL
+    // loses `user@`. Preflight's detection never sees a value.
+    #[test]
+    fn allowlisted_env_values_are_settings_citing_their_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = "# local\n\
+            QUEUE_URL=amqp://svc@mq:5672/orders # broker\n\
+            OTHER=hidden\n\
+            API_BASE=\"https://api.example.test\"\n\
+            DB_PASSWORD=s3cr3t-pass\n\
+            NOTE=\"two\nlines\"\n";
+        write(dir.path(), ".env", env);
+        write(dir.path(), ".env.example", "QUEUE_URL=amqp://localhost\n");
+        write(dir.path(), "config/test.env", "OTHER=x\n");
+        let read: std::collections::BTreeSet<String> =
+            ["QUEUE_URL", "API_BASE", "DB_PASSWORD", "NOTE"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let extraction = extract_dir_reading(
+            dir.path(),
+            &SourceId {
+                repo: "local/tools",
+                commit: "c0ffee",
+            },
+            &read,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let real = tool_node(&extraction, "tool:local/tools@.env");
+        assert_eq!(
+            real.props["settings"]["values"],
+            serde_json::json!({
+                "API_BASE": "https://api.example.test",
+                "QUEUE_URL": "amqp://mq:5672/orders",
+            })
+        );
+        assert!(real.props["settings"].get("template").is_none());
+        let prov: Provenance = serde_json::from_value(real.props["prov"].clone()).unwrap();
+        let lines: Vec<&str> = prov
+            .evidence
+            .iter()
+            .map(|span| &env[span.byte_start as usize..span.byte_end as usize])
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "API_BASE=\"https://api.example.test\"",
+                "QUEUE_URL=amqp://svc@mq:5672/orders # broker",
+            ]
+        );
+        assert!(prov.evidence.iter().all(|span| span.path == ".env"));
+
+        let template = tool_node(&extraction, "tool:local/tools@.env.example");
+        assert_eq!(template.props["settings"]["template"], true);
+        assert_eq!(
+            template.props["settings"]["values"]["QUEUE_URL"],
+            "amqp://localhost"
+        );
+
+        // No allowlisted value: unchanged, keys only, no span.
+        let other = tool_node(&extraction, "tool:local/tools@config/test.env");
+        assert!(other.props["settings"].get("values").is_none());
+        let prov: Provenance = serde_json::from_value(other.props["prov"].clone()).unwrap();
+        assert!(prov.evidence.is_empty());
+        // The File node and DEFINED_IN edge of the env file stay span-free.
+        let file = tool_node(&extraction, "file:local/tools@.env");
+        let prov: Provenance = serde_json::from_value(file.props["prov"].clone()).unwrap();
+        assert!(prov.evidence.is_empty());
+
+        // Without an allowlist nothing changes, and Preflight sees no value.
+        let plain = extract(dir.path());
+        assert!(
+            tool_node(&plain, "tool:local/tools@.env").props["settings"]
+                .get("values")
+                .is_none()
+        );
+        let detection = detect_in_file(".env", ".env", &dir.path().join(".env"));
+        assert!(!detection.tools[0].settings.contains_key("values"));
+    }
+
     #[test]
     fn env_keys_skip_multiline_values_and_non_assignments() {
         // A PEM body inside a quoted value, including a `==`-padded line,
