@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-05
-- **Deciders:** Chris Kane (verify-at-build executed by Claude)
+- **Deciders:** Project owner (verify-at-build executed by Claude)
 
 ## Context
 SPEC-00 §4.4 picked Kuzu as the primary embedded graph store, explicitly

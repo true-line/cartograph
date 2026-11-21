@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-21
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 Need read-only access to 1..N repos and a way to declare which repos form one system.

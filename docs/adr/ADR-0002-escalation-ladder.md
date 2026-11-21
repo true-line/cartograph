@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-21
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 Spec recovery fails when inferred facts are presented as confirmed. Pure-static misses

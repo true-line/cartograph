@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-05
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 Cartograph's long-term vision (see `docs/VISION.md`) is bigger than SPEC-00's
