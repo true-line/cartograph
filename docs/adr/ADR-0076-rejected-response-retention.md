@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-21
 - **Deciders:** Cartograph lead (delegate); Claude implements
-- **Related:** #1616; US-0032 / AC-0725, AC-1403; ADR-0071
+- **Related:** #1616; US-0032 / AC-0725, AC-1403, AC-1404, AC-1405; ADR-0071
 
 ## Context
 
@@ -22,8 +22,9 @@ supplied source (`source_replay`), must not be kept.
 ## Decision
 
 1. **One record per failed task.** When the terminal cause is a rejected
-   response (`ActionDecode` or `InvalidResponse`), the terminal transaction
-   also writes `investigation-rejected-response` schema 1. It holds the step
+   response (`ActionDecode` or `InvalidResponse`, or a finish the store
+   refuses at admission, AC-1404), the terminal transaction also writes
+   `investigation-rejected-response` schema 1. It holds the step
    id, the size and content hash of the whole response, and a retention. The
    record goes in its own immutable table, `rejected_response_records`. That
    table is created on first use and isn't counted toward task or store
@@ -47,14 +48,19 @@ supplied source (`source_replay`), must not be kept.
 
 The admitted action's canonical body (the second gap in #1616) is a separate
 slice under this ADR, with the same rules: it is bounded, kept in its own
-table, and never decisive.
+table, and never decisive. It landed as AC-1405: when a host failure
+(`PreparationAt` or `HostLimitAt`) stops a task after its last response
+decoded, `admitted_action_records` keeps the canonical action bytes that the
+saved `action_hash` covers, verbatim, up to 8 KiB. A body is never redacted in
+place, because it would no longer match its hash: a body that redaction would
+change keeps only its size and hash.
 
 ## Consequences
 
 - AC-0725's rule that no response text is kept is narrowed for rejected
   responses: a bounded redacted excerpt is kept, except for sensitive or
   replayed output.
-- The profile grows by at most about 8 KiB per failed task, outside the task
-  allowance.
+- The profile grows by at most about 12 KiB per failed task (one record of
+  either kind), outside the task allowance.
 - Redaction uses pattern matching. It covers the same secrets as question
   history (`redacted_history_text`), and no more.
