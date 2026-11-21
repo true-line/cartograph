@@ -99,6 +99,9 @@ pub struct Extraction {
     /// Calls on injected strategies and the classes implementing them
     /// (#2069), linked at directory completion.
     strategies: strategies::Pending,
+    /// Calls through configured instances and lookups of them (#2165),
+    /// linked at directory completion.
+    instances: instances::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -314,6 +317,7 @@ fn retarget_commit(
         site.retarget(commit);
     }
     extraction.strategies.retarget(commit);
+    extraction.instances.retarget(commit);
     Ok(())
 }
 
@@ -348,6 +352,7 @@ impl Extraction {
         self.service_worker_registrations.clear();
         self.next_routes.clear();
         self.strategies = strategies::Pending::default();
+        self.instances = instances::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3168,6 +3173,7 @@ fn extract_source_recording(
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
         state_machines::extract(&cx, &syntax_nodes, &mut out);
         strategies::sites(&cx, &syntax_nodes, &mut out.strategies);
+        instances::sites(&cx, &syntax_nodes, &mut out.instances);
     }
     if let Some(evidence) = service_worker {
         service_worker::mark(
@@ -3346,6 +3352,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
         .extend(ex.service_worker_registrations);
     out.next_routes.extend(ex.next_routes);
     out.strategies.extend(ex.strategies);
+    out.instances.extend(ex.instances);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3452,6 +3459,12 @@ fn complete_directory(
     )?;
     strategies::complete(
         std::mem::take(&mut out.strategies),
+        id.repo,
+        &known_symbols,
+        &mut *facts,
+    )?;
+    instances::complete(
+        std::mem::take(&mut out.instances),
         id.repo,
         &known_symbols,
         &mut *facts,
@@ -3702,6 +3715,7 @@ pub mod declarations;
 mod grammar;
 pub mod graphql_resolvers;
 pub mod indexeddb;
+mod instances;
 mod local_definitions;
 pub mod next_api;
 pub mod node_http;

@@ -396,7 +396,7 @@ fn this_field_type(cx: &FileCx<'_>, receiver: TsNode<'_>) -> Option<String> {
 
 /// The methods of an object literal, by name: shorthand methods and
 /// function-valued pairs.
-fn object_methods(cx: &FileCx<'_>, object: TsNode<'_>) -> BTreeMap<String, String> {
+pub(super) fn object_methods(cx: &FileCx<'_>, object: TsNode<'_>) -> BTreeMap<String, String> {
     let mut methods = BTreeMap::new();
     let mut walk = object.walk();
     for member in object.named_children(&mut walk) {
