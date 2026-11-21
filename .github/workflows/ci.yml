@@ -696,8 +696,14 @@ jobs:
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "SCCACHE_PATH=$wrapper" >> "$GITHUB_ENV"
-          # The app crate compiles incrementally instead (#1924).
-          echo "RUSTC_WORKSPACE_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-app-incremental.sh" >> "$GITHUB_ENV"
+          # The app crate compiles incrementally instead (#1924), when the
+          # checkout has the wrapper: a pull request branched before it was
+          # added runs this workflow from the merge ref but checks out its head.
+          if [ -x scripts/rustc-app-incremental.sh ]; then
+            echo "RUSTC_WORKSPACE_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-app-incremental.sh" >> "$GITHUB_ENV"
+          else
+            echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          fi
 
       # The app crate's incremental state (#1924). The app-incremental job
       # saves it from main at most once an hour; a shard restores the newest
@@ -829,8 +835,14 @@ jobs:
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "SCCACHE_PATH=$wrapper" >> "$GITHUB_ENV"
-          # The app crate compiles incrementally instead (#1924).
-          echo "RUSTC_WORKSPACE_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-app-incremental.sh" >> "$GITHUB_ENV"
+          # The app crate compiles incrementally instead (#1924), when the
+          # checkout has the wrapper: a pull request branched before it was
+          # added runs this workflow from the merge ref but checks out its head.
+          if [ -x scripts/rustc-app-incremental.sh ]; then
+            echo "RUSTC_WORKSPACE_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-app-incremental.sh" >> "$GITHUB_ENV"
+          else
+            echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          fi
 
       # The app crate's incremental state (#1924). The app-incremental job
       # saves it from main at most once an hour; a shard restores the newest

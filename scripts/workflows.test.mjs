@@ -723,6 +723,8 @@ test('the app crate compiles incrementally from state main saves, and only main 
   for (const contents of [shards, seed]) {
     assert.match(contents, /RUSTC_WORKSPACE_WRAPPER=\$GITHUB_WORKSPACE\/scripts\/rustc-app-incremental\.sh/u);
     assert.match(contents, /SCCACHE_PATH=\$wrapper/u);
+    // A pull request branched before the wrapper checks out no script.
+    assert.match(contents, /if \[ -x scripts\/rustc-app-incremental\.sh \]; then\n.*\n +else\n +echo "RUSTC_WORKSPACE_WRAPPER=\$wrapper" >> "\$GITHUB_ENV"\n +fi\n/u);
     assert.match(contents, /LOCK_HASH: \$\{\{ hashFiles\('rust-toolchain\.toml', 'Cargo\.lock'\) \}\}/u);
     assert.match(contents, /APP_INCREMENTAL_DIR=\$RUNNER_TEMP\/app-incremental/u);
     assert.match(contents, key);
