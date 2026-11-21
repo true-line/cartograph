@@ -53,6 +53,8 @@ pub struct Extraction {
     pending_calls: Vec<PendingCall>,
     pending_endpoints: Vec<PendingEndpoint>,
     handler_functions: Vec<vercel::HandlerFunction>,
+    pending_bases: Vec<base::Pending>,
+    base_bindings: Vec<base::Binding>,
 }
 
 #[derive(Debug, Clone)]
@@ -1060,6 +1062,7 @@ fn extract_source_with_module(
         }),
     });
     let bindings = parse_imports(&cx, root, module_path, &mut out);
+    out.base_bindings = base::bindings(&cx, root, &package_dir(path));
     let receivers = assignment_receivers(&cx, root, &bindings);
     let closures = closures(&cx, root);
     let client = client::Proof::new(&cx, &bindings);
@@ -1267,8 +1270,14 @@ fn extract_source_with_module(
         }
 
         let owner = enclosing_function(call, &functions_by_start);
-        if let Some(site) = client.fetch_site(call, owner.clone()) {
-            out.fetch_sites.push(site);
+        if let Some((site, url)) = client.fetch_site_and_url(call, owner.clone()) {
+            // A base held in a field or constant waits for the package (#2065).
+            match base::pending(&cx, site, url, call, &package_dir(path), |n| {
+                client.classify(n)
+            }) {
+                Ok(held) => out.pending_bases.push(held),
+                Err(site) => out.fetch_sites.push(*site),
+            }
         }
         config_reads.extend(config_read::site(&cx, &bindings, call, owner.clone()));
 
@@ -1332,7 +1341,12 @@ pub fn extract_source(
     path: &str,
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
-    extract_source_with_module(source, path, id, None)
+    let mut out = extract_source_with_module(source, path, id, None)?;
+    // One file is its own package here (#2065).
+    let held = std::mem::take(&mut out.pending_bases);
+    let joined = base::join(held, &std::mem::take(&mut out.base_bindings));
+    out.fetch_sites.extend(joined);
+    Ok(out)
 }
 
 fn skips_dir(name: &str) -> bool {
@@ -1601,6 +1615,8 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_calls.extend(extraction.pending_calls);
             out.pending_endpoints.extend(extraction.pending_endpoints);
             out.handler_functions.extend(extraction.handler_functions);
+            out.pending_bases.extend(extraction.pending_bases);
+            out.base_bindings.extend(extraction.base_bindings);
             Ok(())
         },
     );
@@ -1644,6 +1660,9 @@ pub fn extract_dir_incremental_with_progress(
             out.edges.push(handles);
         }
     }
+    let held = std::mem::take(&mut out.pending_bases);
+    let joined = base::join(held, &std::mem::take(&mut out.base_bindings));
+    out.fetch_sites.extend(joined);
     let functions = std::mem::take(&mut out.handler_functions);
     vercel::routes(root, id.repo, id.commit, &functions, &mut out);
     let modules = repo_modules(root)?;
@@ -1672,6 +1691,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod base;
 mod client;
 mod config_read;
 mod events;
