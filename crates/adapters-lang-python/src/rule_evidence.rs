@@ -99,6 +99,20 @@ fn owner_function(node: TsNode<'_>) -> Option<TsNode<'_>> {
     None
 }
 
+/// Whether a function is a method: defined directly in a class body,
+/// decorated or not, not nested in another function (AC-1030).
+fn in_class(function: TsNode<'_>) -> bool {
+    let mut parent = function.parent();
+    while let Some(current) = parent {
+        match current.kind() {
+            "class_definition" => return true,
+            "block" | "decorated_definition" => parent = current.parent(),
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn owner_id(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     let function = owner_function(node)?;
     let name = qualified_function_name(cx, function)?;
@@ -598,19 +612,30 @@ pub(super) fn extract(
             parameters: parameters(cx, function),
             rebound: rebound(cx, function),
         };
+        // A method that answers `True` or `False` somewhere is a predicate
+        // whatever its name (`lifetime_or_active_subscription`, AC-1030).
+        // Only a method: its rows state the earlier exits as "otherwise",
+        // which a free function's rows do not.
+        let answers_bool = in_class(function)
+            && owner_exits.iter().any(|exit| {
+                exit.kind() == "return_statement"
+                    && exit_value(*exit).is_some_and(|v| matches!(v.kind(), "true" | "false"))
+            });
         for (order, exit) in owner_exits.iter().copied().enumerate() {
             let (ancestors, limited) = branches(exit);
             let value = exit_value(exit);
             // An unguarded exit is a rule only as the answer of a predicate
-            // (`def is_active(self): return self.delete_on is None`, #2029);
-            // a constant `return True` with no exit before it answers no
-            // question, and "otherwise" would invent a branch.
+            // (`def is_active(self): return self.delete_on is None`, #2029),
+            // or as the last answer of a method that answers a boolean
+            // after an earlier exit (AC-1030); a constant `return True`
+            // with no exit before it answers no question, and "otherwise"
+            // would invent a branch.
             let constant = value.is_some_and(|v| matches!(v.kind(), "true" | "false" | "none"));
             if ancestors.is_empty()
                 && !limited
                 && !(exit.kind() == "return_statement"
                     && value.is_some()
-                    && predicate_name(&owner_id)
+                    && (predicate_name(&owner_id) || (order > 0 && answers_bool && !constant))
                     && !(order == 0 && constant))
             {
                 continue;

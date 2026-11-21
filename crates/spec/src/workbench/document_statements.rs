@@ -95,6 +95,10 @@ enum Expr {
     Lit(Lit),
     Set(Vec<Lit>),
     Not(Box<Expr>),
+    /// `a + b`: a sum of values (AC-1030).
+    Sum(Vec<Expr>),
+    /// `flags & FLAG`: a bit mask (AC-1030).
+    Mask(Box<Expr>, Box<Expr>),
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Cmp(Box<Expr>, String, Box<Expr>),
@@ -121,7 +125,11 @@ fn tokenize(text: &str) -> Option<Vec<Tok>> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() {
+        // Optional chaining reads as a member (AC-1032): `a?.b` is `a.b`.
+        if c == '?' && chars.get(i + 1) == Some(&'.') {
+            out.push(Tok::Op(".".to_owned()));
+            i += 2;
+        } else if c.is_whitespace() {
             i += 1;
         } else if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
@@ -170,7 +178,7 @@ fn tokenize(text: &str) -> Option<Vec<Tok>> {
             } else if ["==", "!=", ">=", "<=", "&&", "||"].contains(&two.as_str()) {
                 out.push(Tok::Op(two));
                 i += 2;
-            } else if "()<>.,!=[]+-".contains(c) {
+            } else if "()<>.,!=[]+-&".contains(c) {
                 out.push(Tok::Op(c.to_string()));
                 i += 1;
             } else {
@@ -233,7 +241,7 @@ impl Parser {
         self.cmp()
     }
     fn cmp(&mut self) -> Option<Expr> {
-        let left = self.operand()?;
+        let left = self.sum()?;
         let op = match self.peek() {
             Some(Tok::Op(o)) if ["==", "!=", ">", ">=", "<", "<="].contains(&o.as_str()) => {
                 let o = o.clone();
@@ -262,8 +270,28 @@ impl Parser {
             }
             _ => return Some(left),
         };
-        let right = self.operand()?;
+        let right = self.sum()?;
         Some(Expr::Cmp(Box::new(left), op, Box::new(right)))
+    }
+    /// `a + b + c` and `a & b` over operands (AC-1030); one operand is
+    /// itself.
+    fn sum(&mut self) -> Option<Expr> {
+        let first = self.operand()?;
+        if self.op("&") {
+            self.bump();
+            let mask = self.operand()?;
+            return Some(Expr::Mask(Box::new(first), Box::new(mask)));
+        }
+        let mut terms = vec![first];
+        while self.op("+") {
+            self.bump();
+            terms.push(self.operand()?);
+        }
+        Some(if terms.len() == 1 {
+            terms.remove(0)
+        } else {
+            Expr::Sum(terms)
+        })
     }
     fn literal(&mut self) -> Option<Lit> {
         match self.bump()? {
@@ -600,7 +628,7 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
             ) {
                 return Some("the current time".to_owned());
             }
-            subject(path, cx)
+            subject(&accessor(path), cx)
         }
         Expr::Lit(lit) => Some(literal(lit)),
         Expr::Apply(path, args) => {
@@ -619,6 +647,27 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                     "the “{}” result",
                     words(function.trim_start_matches('_'))
                 )),
+                // A method's value read off its receiver (AC-1030), with
+                // what it is given: `user.available_alias_domains(alias_options=o)`
+                // is "the user's available alias domains for the o", so
+                // calls given different inputs stay apart.
+                ([receiver, .., method], _)
+                    if !is_class(receiver) && predicate_verb(method).is_none() =>
+                {
+                    let what = subject(&accessor(path), cx)?;
+                    let inputs: Option<Vec<String>> = args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Pos(v) | Arg::Kw(_, v) => noun(v, cx),
+                        })
+                        .collect();
+                    let inputs = inputs?;
+                    Some(if inputs.is_empty() {
+                        what
+                    } else {
+                        format!("{what} for {}", inputs.join(" and "))
+                    })
+                }
                 _ => None,
             }
         }
@@ -638,6 +687,32 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// A compared value as a noun phrase: a sum only here, where a condition
+/// compares it (AC-1030), "the active alias count plus the num aliases";
+/// an assigned or returned sum stays outside the rendering rules.
+fn compared(expr: &Expr, cx: &Context<'_>) -> Option<String> {
+    match expr {
+        Expr::Sum(terms) => {
+            let parts: Option<Vec<String>> = terms.iter().map(|t| noun(t, cx)).collect();
+            Some(parts?.join(" plus "))
+        }
+        other => noun(other, cx),
+    }
+}
+
+/// A call's path with an accessor's `get_` dropped (AC-1030):
+/// `self.get_active_subscription` reads "the user's active subscription".
+fn accessor(path: &[String]) -> Vec<String> {
+    let mut path = path.to_vec();
+    if path.len() > 1
+        && let Some(last) = path.last_mut()
+        && let Some(rest) = last.strip_prefix("get_").filter(|r| !r.is_empty())
+    {
+        *last = rest.to_owned();
+    }
+    path
 }
 
 /// A CamelCase class name: `Alias`, `DeletedAlias`.
@@ -686,7 +761,25 @@ fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Op
         && (go_receiver(receiver, cx) || matches!(*receiver, "self" | "cls"))
     {
         let verb = if negated { negated_verb(verb) } else { verb };
+        // A literal is how much, not whom (AC-1030):
+        // `self.can_create_num_aliases(1)` is "the user can create num
+        // aliases (1)".
+        if let Expr::Lit(lit @ Lit::Num(_)) = value {
+            let who = subject(&path[..1], cx)?;
+            return Some(format!("{who} {verb} {} ({})", words(rest), literal(lit)));
+        }
         return Some(format!("{} {verb} {}", noun(value, cx)?, words(rest)));
+    }
+    // A named receiver's predicate given a number keeps it (AC-1030):
+    // `user.can_create_num_aliases(1)` is "the user can create num aliases
+    // (1)", not the same rule without its quota.
+    if let (Some((verb, rest)), [receiver], [Arg::Pos(Expr::Lit(lit @ Lit::Num(_)))]) =
+        (predicate_verb(last), owner, args)
+        && !is_class(receiver)
+    {
+        let verb = if negated { negated_verb(verb) } else { verb };
+        let who = subject(&path[..1], cx)?;
+        return Some(format!("{who} {verb} {} ({})", words(rest), literal(lit)));
     }
     if predicate_verb(last).is_some() {
         return flag(path, negated, cx);
@@ -773,12 +866,30 @@ fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Op
             format!("{whose} {what} check passes")
         });
     }
-    if owner.is_empty() && last.trim_start_matches('_').contains('_') {
+    // A function named in more than one word, in snake or camel case
+    // (`orderItemsAreShipped`, AC-1032).
+    if owner.is_empty() && words(last.trim_start_matches('_')).contains(' ') {
         let name = words(last.trim_start_matches('_'));
         return Some(if negated {
             format!("the check “{name}” does not hold")
         } else {
             format!("the check “{name}” holds")
+        });
+    }
+    // A check its receiver runs (AC-1030):
+    // `self.lifetime_or_active_subscription()` in a User method is "the
+    // check “lifetime or active subscription” holds for the user".
+    if args.is_empty()
+        && !owner.is_empty()
+        && !owner.iter().any(|o| is_class(o))
+        && last.trim_start_matches('_').contains('_')
+    {
+        let name = words(last.trim_start_matches('_'));
+        let who = subject(&path[..path.len() - 1], cx)?;
+        return Some(if negated {
+            format!("the check “{name}” does not hold for {who}")
+        } else {
+            format!("the check “{name}” holds for {who}")
         });
     }
     None
@@ -870,7 +981,17 @@ fn flag(path: &[String], negated: bool, cx: &Context<'_>) -> Option<String> {
         // A bare name: a presence test, or a predicate function.
         if let Some((verb, rest)) = predicate_verb(last) {
             let verb = if negated { negated_verb(verb) } else { verb };
-            return Some(format!("the check “{verb} {}” holds", words(rest)));
+            let rest = words(rest);
+            // "has no an authorized payment" drops its article (AC-1032).
+            let rest = match verb {
+                "has no" => rest
+                    .strip_prefix("an ")
+                    .or_else(|| rest.strip_prefix("a "))
+                    .unwrap_or(&rest)
+                    .to_owned(),
+                _ => rest,
+            };
+            return Some(format!("the check “{verb} {rest}” holds"));
         }
         let phrase = words(last);
         let article = if phrase.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
@@ -956,6 +1077,24 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
             Some(parts?.join(joiner))
         }
         Expr::Cmp(left, op, right) => {
+            // A flag bit (AC-1030): `FLAG == self.flags & FLAG` is "the
+            // user's flags include the “free old alias limit” flag".
+            if let (bit, "==" | "!=", Expr::Mask(field, mask))
+            | (Expr::Mask(field, mask), "==" | "!=", bit) =
+                (left.as_ref(), op.as_str(), right.as_ref())
+                && let (Expr::Ref(b), Expr::Ref(m)) = (bit, mask.as_ref())
+                && b.last() == m.last()
+                && let Some(name) = m.last()
+            {
+                let field = noun(field, cx)?;
+                let name = words(name.strip_prefix("FLAG_").unwrap_or(name));
+                let set = (op == "==") != negated;
+                return Some(if set {
+                    format!("{field} include the “{name}” flag")
+                } else {
+                    format!("{field} do not include the “{name}” flag")
+                });
+            }
             // Ownership: `x.user_id != user.id`.
             if let (Expr::Ref(l), Expr::Ref(r)) = (left.as_ref(), right.as_ref())
                 && l.len() >= 2
@@ -1014,7 +1153,7 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     format!("{whole} does not contain “{text}”")
                 });
             }
-            let left_np = noun(left, cx)?;
+            let left_np = compared(left, cx)?;
             let timed = matches!(right.as_ref(), Expr::Shift(..))
                 || noun(right, cx).is_some_and(|r| r == "the current time");
             let positive = |op: &str| -> Option<String> {
@@ -1054,12 +1193,12 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     }
                     ("is" | "==", Expr::Lit(Lit::None)) => format!("{left_np} is not set"),
                     ("is not" | "!=", Expr::Lit(Lit::None)) => format!("{left_np} is set"),
-                    ("==" | "is", r) => format!("{left_np} is {}", noun(r, cx)?),
-                    ("!=" | "is not", r) => format!("{left_np} is not {}", noun(r, cx)?),
-                    (">", r) => format!("{left_np} is more than {}", noun(r, cx)?),
-                    (">=", r) => format!("{left_np} is at least {}", noun(r, cx)?),
-                    ("<", r) => format!("{left_np} is less than {}", noun(r, cx)?),
-                    ("<=", r) => format!("{left_np} is at most {}", noun(r, cx)?),
+                    ("==" | "is", r) => format!("{left_np} is {}", compared(r, cx)?),
+                    ("!=" | "is not", r) => format!("{left_np} is not {}", compared(r, cx)?),
+                    (">", r) => format!("{left_np} is more than {}", compared(r, cx)?),
+                    (">=", r) => format!("{left_np} is at least {}", compared(r, cx)?),
+                    ("<", r) => format!("{left_np} is less than {}", compared(r, cx)?),
+                    ("<=", r) => format!("{left_np} is at most {}", compared(r, cx)?),
                     ("in", Expr::Set(set)) => format!(
                         "{left_np} is one of {}",
                         set.iter().map(literal).collect::<Vec<_>>().join(", ")
@@ -1087,7 +1226,7 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
             positive(if negated { flipped } else { op })
         }
         Expr::Apply(path, args) => applied(path, args, negated, cx),
-        Expr::Lit(_) | Expr::Set(_) | Expr::Shift(..) => None,
+        Expr::Lit(_) | Expr::Set(_) | Expr::Shift(..) | Expr::Sum(_) | Expr::Mask(..) => None,
     }
 }
 
@@ -2085,6 +2224,10 @@ fn rendered(
     }
     let value = match &evidence.effect {
         LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
+        // A throw in a transition guard refuses the move (AC-1032).
+        LocalExit::Throw { .. } if method == "onTransitionStart" => {
+            return Some(sentence("the move is refused with an error".to_owned()));
+        }
         LocalExit::Throw { value } => {
             // A Java or Kotlin exception names the error it raises (#2020,
             // #2021).
@@ -2108,6 +2251,28 @@ fn rendered(
         }
         LocalExit::Return { value: Some(value) } => value.display.as_str().trim().to_owned(),
     };
+    // A state machine's `onTransitionStart` refuses a move by what it
+    // returns (AC-1032): a message, `false`, or a message the export
+    // withholds.
+    if method == "onTransitionStart" {
+        let refusal = match value.as_str() {
+            "false" => Some("the move is refused".to_owned()),
+            "[REDACTED]" => {
+                Some("the move is refused with a message the export withholds".to_owned())
+            }
+            // `true` lets the move happen; any other value refuses it.
+            "true" => Some("the move is allowed".to_owned()),
+            other => match parse(other) {
+                Some(Expr::Lit(Lit::Str(message))) => {
+                    Some(format!("the move is refused with the message “{message}”"))
+                }
+                _ => Some("the move is refused".to_owned()),
+            },
+        };
+        if let Some(refusal) = refusal {
+            return Some(sentence(refusal));
+        }
+    }
     if let Some((status, message)) = response(&value) {
         return Some(sentence(refused(status, message)));
     }
@@ -2149,7 +2314,6 @@ fn rendered(
         {
             return Some(sentence(format!("it returns the {}", words(one))));
         }
-        let given = noun(&parsed, &cx)?;
         // An accessor reads as what it gives: `get_active_subscription`
         // is "active subscription".
         let named = method.trim_start_matches('_');
@@ -2158,6 +2322,29 @@ fn rendered(
             Some(class) => format!("the {}'s {}", words(class), words(named)),
             None => format!("the {}", words(named)),
         };
+        let Some(given) = noun(&parsed, &cx) else {
+            // A test the method answers with (AC-1030): `return
+            // self.get_active_subscription() is not None` after `if
+            // self.lifetime: return True` reads "Otherwise, the user's
+            // lifetime or active subscription is true when the user's
+            // active subscription is set".
+            let test = render(&parsed, false, &cx)?;
+            let s = if conditions.is_empty() {
+                format!("{what} is true when {test}.")
+            } else {
+                format!("{what} is true when {when}, and {test}.")
+            };
+            let s = format!("{}{}", s[..1].to_uppercase(), &s[1..]);
+            return Some(if conditions.is_empty() && evidence.source_order > 0 {
+                format!("Otherwise, {}{}", s[..1].to_lowercase(), &s[1..])
+            } else {
+                s
+            });
+        };
+        // The last answer after earlier exits holds otherwise (AC-1030).
+        if conditions.is_empty() && evidence.source_order > 0 {
+            return Some(format!("Otherwise, {what} is {given}."));
+        }
         return Some(sentence(format!("{what} is {given}")));
     };
     let verb = if answer { verb } else { negated_verb(verb) };
@@ -2743,6 +2930,7 @@ mod tests {
             "the alias's note is set to the “compute” result"
         );
         assert_eq!(set("alias.note", "compute(alias) + 1"), None);
+        assert_eq!(set("alias.note", "compute(alias) * 2"), None);
         assert_eq!(set("alias", "None").unwrap(), "the alias is discarded");
         assert_eq!(
             set("user.expires", "None").unwrap(),
