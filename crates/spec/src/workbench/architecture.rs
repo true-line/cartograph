@@ -355,6 +355,11 @@ fn framework_name(framework: &str) -> String {
     }
 }
 
+/// Entry-point kinds that run inside an Android app (AC-1110).
+fn android_kind(kind: &str) -> bool {
+    kind.starts_with("android-") || kind == "background-job"
+}
+
 fn router_technology(router: &str) -> Option<&'static str> {
     Some(match router {
         "vue-router" => "Vue",
@@ -693,7 +698,9 @@ impl<'a> Model<'a> {
             let mut operator: Vec<&Node> = Vec::new();
             for entry in &entries {
                 let kind = entry.props["kind"].as_str().unwrap_or("process");
-                if kind == "http-server" {
+                // Android components and workers run inside the app, which
+                // the client application below is (AC-1110).
+                if kind == "http-server" || android_kind(kind) {
                     continue;
                 }
                 if matches!(kind, "command" | "operator-shell") {
@@ -847,15 +854,34 @@ impl<'a> Model<'a> {
                     &triggers,
                 );
             }
-            if owners.by_repo.contains_key(repo) {
+            let android: Vec<&Node> = by_label("EntryPoint", repo)
+                .into_iter()
+                .filter(|e| e.props["kind"].as_str().is_some_and(android_kind))
+                .collect();
+            // A repository another container already owns keeps its
+            // Android components and workers in an app container of their
+            // own (AC-1110).
+            let owned = owners.by_repo.contains_key(repo);
+            if owned && android.is_empty() {
                 continue;
             }
+            let unowned = |label: &str| {
+                if owned {
+                    Vec::new()
+                } else {
+                    by_label(label, repo)
+                }
+            };
             // A client application: screens or an extension, no process.
-            let extension = by_label("Extension", repo).into_iter().next();
-            let screens = by_label("Screen", repo);
-            let contexts = by_label("ExtensionContext", repo);
-            let commands = by_label("Command", repo);
-            if extension.is_some() || !screens.is_empty() || !contexts.is_empty() {
+            let extension = unowned("Extension").into_iter().next();
+            let screens = unowned("Screen");
+            let contexts = unowned("ExtensionContext");
+            let commands = unowned("Command");
+            if extension.is_some()
+                || !screens.is_empty()
+                || !contexts.is_empty()
+                || !android.is_empty()
+            {
                 let routers: BTreeSet<&str> = screens
                     .iter()
                     .filter_map(|s| s.props["router"].as_str())
@@ -874,14 +900,21 @@ impl<'a> Model<'a> {
                             .filter(|n| !n.is_empty())
                             .map_or_else(|| repo_name(repo), str::to_string)
                     }
+                    None if owned => format!("{} Android app", repo_name(repo)),
                     None => repo_name(repo),
                 };
+                if !android.is_empty() && routers.iter().all(|r| !r.starts_with("Android")) {
+                    technology.push("Android".into());
+                }
                 technology.extend(routers.iter().map(|r| (*r).to_string()));
                 let mut parts = vec![format!(
                     "{} screen{}",
                     screens.len(),
                     if screens.len() == 1 { "" } else { "s" }
                 )];
+                if screens.is_empty() && !android.is_empty() {
+                    parts.clear();
+                }
                 let scripts = contexts
                     .iter()
                     .filter(|c| c.props["kind"] == "content-script")
@@ -890,6 +923,23 @@ impl<'a> Model<'a> {
                     parts.push(format!(
                         "{scripts} content script{}",
                         if scripts == 1 { "" } else { "s" }
+                    ));
+                }
+                let components = android
+                    .iter()
+                    .filter(|e| e.props["kind"] != "background-job")
+                    .count();
+                if components > 0 {
+                    parts.push(format!(
+                        "{components} Android component{}",
+                        if components == 1 { "" } else { "s" }
+                    ));
+                }
+                let jobs = android.len() - components;
+                if jobs > 0 {
+                    parts.push(format!(
+                        "{jobs} background job{}",
+                        if jobs == 1 { "" } else { "s" }
                     ));
                 }
                 if !commands.is_empty() {
@@ -902,10 +952,12 @@ impl<'a> Model<'a> {
                 let mut facts: Vec<Fact<'a>> = extension.into_iter().map(Fact::Node).collect();
                 facts.extend(contexts.iter().map(|n| Fact::Node(n)));
                 facts.extend(screens.iter().map(|n| Fact::Node(n)));
+                facts.extend(android.iter().map(|n| Fact::Node(n)));
                 let triggers: Vec<&str> = screens
                     .iter()
                     .chain(&contexts)
                     .chain(&commands)
+                    .chain(&android)
                     .map(|n| n.id.as_str())
                     .collect();
                 let at = push(
