@@ -547,9 +547,9 @@ export const TurnProgressRequiresExplicitSelection: Story = {
   args: { state: state({ catalog: turnProgressCatalog }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).not.toBeChecked();
-    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@4/ }));
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
+    await expect(canvas.getByLabelText('Specialist version')).not.toHaveValue('domain-analyst@4');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@4');
     await userEvent.type(canvas.getByLabelText('Question'), 'Audit the retained evidence.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
@@ -565,7 +565,7 @@ export const TurnProgressFollowUpKeepsSelectedVersion: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole('button', { name: 'Ask a follow-up' }));
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@4');
     await userEvent.type(canvas.getByLabelText('Follow-up question'), 'Inspect the missing evidence.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({
@@ -599,7 +599,7 @@ export const TurnProgressFollowUpWaitsForCatalog: Story = {
     useInvestigationStore.setState({ catalog: turnProgressCatalog, catalogError: null });
     await waitFor(() => expect(followUp).toBeEnabled());
     await userEvent.click(followUp);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@4');
     await userEvent.type(canvas.getByLabelText('Follow-up question'), 'Inspect the retained evidence.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
     await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
@@ -612,10 +612,10 @@ export const ExplicitRequiredSourcesUseV5: Story = {
   args: { state: state({ catalog: inspectionCatalog, draftInspectionRequirements: [inspectionTarget] }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect the required stock source.');
     await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@5/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@5');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@5',
       inspection_requirements: [inspectionTarget] }));
@@ -661,7 +661,7 @@ export const RequiredSourcesKeepExistingRequestBudget: Story = {
     fact: { kind: 'node', id: 'large-fact-id:'.repeat(700) } }] }) },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@5/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@5');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect the required source.');
     await expect(canvas.getByText(/This request exceeds the 8,192-byte limit/)).toBeVisible();
     await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
@@ -690,8 +690,8 @@ export const CoverageOnlyV6RequiresExplicitSelection: Story = {
   args: { state: state({ catalog: qualifiedCatalog }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@6/ }));
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@6');
     await userEvent.type(canvas.getByLabelText('Question'), 'What do the recorded limits establish?');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith({ specialist_id: 'domain-analyst@6',
@@ -707,7 +707,7 @@ export const V6TargetsStayExplicitAndIndependent: Story = {
     result: qualifiedResult('inv-qualified', { inspection_assessment: { ...inspectionAssessment(), disclosure_hash: qualifiedResult().disclosure_hash! } }) }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@6/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@6');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this captured source and its ingest limits.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'evidence-auditor@6',
@@ -761,28 +761,28 @@ export const CatalogRefreshRequiresExplicitReplacement: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@4/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@4');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect retained evidence.');
     useInvestigationStore.setState({ catalogLoading: true });
     await waitFor(() => expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled());
     useInvestigationStore.setState({ catalog: investigationCatalog, catalogLoading: false });
     await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).not.toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).not.toHaveValue('domain-analyst@3');
     await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@4');
     await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
     useInvestigationStore.setState({ catalog: null, catalogError: 'Catalog unavailable.' });
     await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Catalog unavailable.'));
     useInvestigationStore.setState({ catalog: investigationCatalog, catalogError: null });
     await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).not.toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).not.toHaveValue('domain-analyst@3');
     await expect(useInvestigationStore.getState().start).not.toHaveBeenCalled();
     useInvestigationStore.setState({ catalog: turnProgressCatalog });
-    await waitFor(() => expect(canvas.getByRole('radio', { name: /domain-analyst@4/ })).toBeChecked());
+    await waitFor(() => expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@4'));
     await expect(canvas.queryByText(/Choose an available specialist explicitly/)).not.toBeInTheDocument();
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).not.toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).not.toHaveValue('domain-analyst@3');
     useInvestigationStore.setState({ catalog: investigationCatalog });
     await waitFor(() => expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled());
-    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@3/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@3');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(useInvestigationStore.getState().start).toHaveBeenCalledWith(expect.objectContaining({
       specialist_id: 'evidence-auditor@3' }));
@@ -800,8 +800,8 @@ export const V7RequiresExplicitMixedSelection: Story = {
   render: function MixedCompletionStory() { return <InvestigationsSurface state={useInvestigationStore()} anchors={[]} canStart />; },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@7/ }));
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@7');
     await userEvent.click(canvas.getByRole('button', { name: 'Refresh completion choices' }));
     await waitFor(() => expect(canvas.getByRole('button', { name: 'Require inventory acme/api' })).toBeEnabled());
     await expect(canvas.getByRole('button', { name: 'Require inventory example/stale' })).toBeDisabled();
@@ -823,17 +823,10 @@ export const SpecWriterStandardFamily: Story = {
     obligationChoices: completionChoices, draftObligations: [inventoryObligation] }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    const writer = canvas.getByRole('radio', { name: /spec-writer@1/ });
-    await userEvent.click(writer);
-    await expect(writer).toBeChecked();
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.getByText((_, element) => element?.tagName === 'P'
-      && element.textContent?.includes('Selected specialist') === true
-      && element.textContent.includes('spec-writer@1 is unavailable for this investigation budget'))).toBeVisible();
-    await expect(canvas.queryByRole('radio', { name: /spec-writer@1/ })).not.toBeInTheDocument();
-    await expect(useInvestigationStore.getState().composer.specialistId).toBe('spec-writer@1');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v1');
-    await expect(canvas.getByRole('radio', { name: /spec-writer@1/ })).toBeChecked();
+    // ADR-0071: the version fixes its profile, so a writer never runs under Expanded.
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'spec-writer@1');
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('spec-writer@1');
+    await expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'spec-writer@1', limitProfile: 'investigation-v1' });
     const question = canvas.getByLabelText('Question');
     await expect(question).toHaveAttribute('placeholder', 'What specification should the cited evidence support, and what remains unresolved?');
     await userEvent.clear(question);
@@ -885,13 +878,8 @@ export const GapTriagerStandardFamily: Story = {
     obligationChoices: completionChoices, draftObligations: [inventoryObligation] }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    const role = canvas.getByRole('radio', { name: /gap-triager@1/ });
-    await userEvent.click(role);
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.queryByRole('radio', { name: /gap-triager@1/ })).not.toBeInTheDocument();
-    await expect(useInvestigationStore.getState().composer.specialistId).toBe('gap-triager@1');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v1');
-    await expect(canvas.getByRole('radio', { name: /gap-triager@1/ })).toBeChecked();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'gap-triager@1');
+    await expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'gap-triager@1', limitProfile: 'investigation-v1' });
     const question = canvas.getByLabelText('Question');
     await expect(question).toHaveAttribute('placeholder', 'Which recorded gap should be investigated next, and what evidence would reduce it?');
     await userEvent.type(question, 'What evidence should reduce the recorded gap?');
@@ -908,11 +896,8 @@ export const GapTriagerV2StandardFamily: Story = {
   ...GapTriagerStandardFamily,
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole('radio', { name: /gap-triager@2/ }));
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.queryByRole('radio', { name: /gap-triager@2/ })).not.toBeInTheDocument();
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v1');
-    await expect(canvas.getByRole('radio', { name: /gap-triager@2/ })).toBeChecked();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'gap-triager@2');
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('gap-triager@2');
     await userEvent.type(canvas.getByLabelText('Question'), 'Which evidence should reduce this gap?');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'gap-triager@2', limit_profile: 'investigation-v1' }));
@@ -952,7 +937,7 @@ export const V7FollowUpWaitsAndClearsBothKinds: Story = {
     await waitFor(() => expect(followUp).toBeEnabled()); await userEvent.click(followUp);
     await expect(useInvestigationStore.getState().draftObligations).toEqual([]);
     await expect(useInvestigationStore.getState().draftInspectionRequirements).toEqual([]);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@7/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@7');
     useInvestigationStore.setState({ catalog: investigationCatalog });
     await waitFor(() => expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible());
     await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@7');
@@ -968,7 +953,8 @@ export const ExplicitExpandedBudget: Story = {
     const canvas = within(canvasElement);
     useInvestigationStore.getState().updateComposer({ specialistId: 'domain-analyst@7' });
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect all required evidence.');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
+    // ADR-0071: choosing an Expanded version is the budget choice.
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@8');
     await expect(canvas.getByText(/Expanded investigations allow more evidence/)).toBeVisible();
     await expect(canvas.getByText(/Choose 1–56 combined obligations/)).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
@@ -990,8 +976,8 @@ export const ExpandedStartUncertain: Story = {
     // Hydration represents the frozen composer retained by an uncertain host response.
     useInvestigationStore.setState({ composer: { ...useInvestigationStore.getState().composer,
       specialistId: 'domain-analyst@8', limitProfile: 'investigation-v2', question: 'Frozen expanded investigation.' } });
-    await waitFor(() => expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v2'));
-    await expect(canvas.getByLabelText('Investigation budget')).toBeDisabled();
+    await waitFor(() => expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@8'));
+    await expect(canvas.getByLabelText('Specialist version')).toBeDisabled();
     await expect(canvas.getByLabelText('Question')).toBeDisabled();
     await userEvent.click(canvas.getByRole('button', { name: 'Retry same start request' }));
     await expect(args.state.retryStart).toHaveBeenCalledTimes(1);
@@ -1006,14 +992,12 @@ export const ExpandedBudgetRequiresCompatibleSpecialist: Story = {
     draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect required evidence.');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.getByText(/is unavailable for this investigation budget/)).toBeVisible();
-    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
-    for (const radio of canvas.getAllByRole('radio')) await expect(radio).not.toBeChecked();
-    await expect(args.state.start).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@8/ }));
+    // ADR-0071: the budget follows the chosen version, so no incompatible pair can be selected.
+    await expect(canvas.queryByLabelText('Investigation budget')).not.toBeInTheDocument();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@8');
+    await expect(useInvestigationStore.getState().composer.limitProfile).toBe('investigation-v2');
     await expect(canvas.queryByText(/is unavailable for this investigation budget/)).not.toBeInTheDocument();
     await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
@@ -1029,13 +1013,12 @@ export const ExplicitQueryHistoryFamily: Story = {
     draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v1');
-    await expect(canvas.getAllByRole('option', { name: /^Expanded/ })).toHaveLength(1);
-    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@7/ }));
+    await expect(useInvestigationStore.getState().composer.limitProfile).toBeUndefined();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@7');
     await userEvent.type(canvas.getByLabelText('Question'), 'Audit the explicitly selected evidence.');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.getByRole('radio', { name: /evidence-auditor@9/ })).toBeChecked();
-    await expect(canvas.queryByRole('radio', { name: /evidence-auditor@8/ })).not.toBeInTheDocument();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@9');
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('evidence-auditor@9');
+    await expect(canvas.queryByRole('option', { name: /^evidence-auditor@8\b/ })).not.toBeInTheDocument();
     await expect(canvas.getByText(/Choose 1–56 combined obligations/)).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'evidence-auditor@9',
@@ -1055,7 +1038,7 @@ export const HistoricalExpandedRoleNeedsExplicitReplacement: Story = {
     await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@8');
     await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
     await expect(args.state.start).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@9/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@9');
     await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@9', parent_id: 'old-task' }));
   },
@@ -1078,13 +1061,12 @@ export const ExplicitNextPromptAdmission: Story = {
     draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v1');
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
-    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@3/ }));
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@3');
     await userEvent.type(canvas.getByLabelText('Question'), 'Audit bounded continuation evidence.');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.getByRole('radio', { name: /evidence-auditor@10/ })).toBeChecked();
-    await expect(canvas.queryByRole('radio', { name: /evidence-auditor@9/ })).not.toBeInTheDocument();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@10');
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('evidence-auditor@10');
+    await expect(canvas.queryByRole('option', { name: /^evidence-auditor@9\b/ })).not.toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'evidence-auditor@10',
       limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
@@ -1102,7 +1084,7 @@ export const SavedQueryHistoryNeedsExplicitNextFamilyFollowup: Story = {
     await waitFor(() => expect(canvas.getByText(/is unavailable for this investigation budget/)).toBeVisible());
     await expect(canvas.getByRole('button', { name: 'Start follow-up' })).toBeDisabled();
     await expect(useInvestigationStore.getState().composer.specialistId).toBe('domain-analyst@9');
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@10/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@10');
     await userEvent.click(canvas.getByRole('button', { name: 'Start follow-up' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@10',
       parent_id: 'original-parent', conversation_id: 'original-conversation' }));
@@ -1296,16 +1278,36 @@ export const ExplicitAcquisitionVersion: Story = {
     draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
-    await expect(canvas.getByLabelText('Investigation budget')).toHaveValue('investigation-v1');
-    await userEvent.selectOptions(canvas.getByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@10/ })).toBeChecked();
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@18/ })).not.toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
+    await expect(useInvestigationStore.getState().composer.limitProfile).toBeUndefined();
     await expect(args.state.start).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@18/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@18');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect explicitly offered acquisition choices.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@18',
+      limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
+  },
+};
+
+export const RolesRunTheirCurrentVersion: Story = {
+  // AC-1402 (ADR-0071): a role choice runs that role's current (else newest offered) version under the
+  // profile that version uses; an older version stays an explicit choice.
+  args: { state: state({ catalog: admissionCatalog, obligationChoices: completionChoices,
+    draftObligations: [inventoryObligation], detail: null, selectedId: null }) },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByLabelText('Investigation budget')).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('radio', { name: /Evidence auditor/ }));
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('evidence-auditor@10');
+    await expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'evidence-auditor@10', limitProfile: 'investigation-v2' });
+    await expect(canvas.getByText(/Expanded budget ·/)).toBeVisible();
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@3');
+    await expect(canvas.getByRole('radio', { name: /Evidence auditor/ })).toBeChecked();
+    await expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'evidence-auditor@3', limitProfile: 'investigation-v1' });
+    await userEvent.click(canvas.getByRole('radio', { name: /Domain analyst/ }));
+    await userEvent.type(canvas.getByLabelText('Question'), 'Which behavior is evidenced?');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith(expect.objectContaining({ specialist_id: 'domain-analyst@10',
       limit_profile: 'investigation-v2', obligations: expect.objectContaining({ schema_version: 2 }) }));
   },
 };
