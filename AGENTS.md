@@ -173,7 +173,7 @@ CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
 every package except `app`, `agents` and `spec`, split into three matrix
 groups (`adapters` and `ingest` name their packages, `core` runs the rest of
 the workspace, so a new crate lands there), "Rust agents & spec
-tests" runs `cargo test -p agents -p spec`, and four "Rust app tests" shards run the `app`
+tests" runs `cargo test -p agents -p spec`, and six "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
 run does not account for exactly the tests it selected. The shards split the
 tests by the measured seconds in `scripts/rust-test-weights.json` (the script's
@@ -202,7 +202,7 @@ Which gates run where:
 | Gate | Linux (`ubuntu-latest`) | Windows (`windows-latest`) | macOS (self-hosted, `scheduled.yml`) |
 |---|---|---|---|
 | Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | — | — |
-| `cargo test` (every package; `app` in four shards) | every PR and merge | — | daily; not a PR gate |
+| `cargo test` (every package; `app` in six shards on Linux, four processes on macOS) | every PR and merge | — | daily; not a PR gate |
 | Job ownership tests (`job-execution-tests --test ownership`) | every PR and merge (in the workspace run) | every PR and merge | daily (in the workspace run) |
 | Real-repository determinism (AC-0593, MT-1812-01) | — | — | daily, Cartograph at its pinned commit |
 | SimpleLogin showcase thresholds (AC-1700) | — | — | weekly, release build |

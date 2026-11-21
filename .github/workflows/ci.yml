@@ -604,7 +604,7 @@ jobs:
   # when the tests libtest accounts for differ from the shard's selection.
   # Hosted runners are separate machines, so no heavy-build slot is taken.
   rust-app-tests:
-    name: Rust app tests (${{ matrix.shard }}/4)
+    name: Rust app tests (${{ matrix.shard }}/6)
     needs: [policy, merge-evidence, preflight-evidence, ci-image]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
@@ -637,7 +637,7 @@ jobs:
       # Every shard reports, so one failure does not hide another shard's.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     # Line tables only, as in the Rust lane (#1924).
     env:
       CARGO_BUILD_JOBS: 6
@@ -708,7 +708,7 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARD_TIMES_FILE: ${{ runner.temp }}/app-test-times-${{ matrix.shard }}.json
-        run: node scripts/rust-test-shard.mjs "$SHARD/4" -- -p app --bin app
+        run: node scripts/rust-test-shard.mjs "$SHARD/6" -- -p app --bin app
 
       - name: Keep the shard's test times
         if: ${{ !cancelled() }}
