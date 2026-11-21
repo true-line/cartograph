@@ -490,15 +490,24 @@ jobs:
 
       # As in the Linux Rust lanes: sccache serves the 15 workspace crates
       # this test builds, which rust-cache does not keep and which took most
-      # of the lane's ~6 minutes of compile (#1924).
+      # of the lane's ~6 minutes of compile (#1924). install-action fails here
+      # after installing (bash startup failure with the per-step HOME it
+      # needs, actions/partner-runner-images#169), so the pinned release is
+      # fetched and checked against its published SHA-256 directly.
       - name: Install sccache
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
-        # Per-runner home: install-action rm -rfs its shared ~/.install-action/tmp
-        # after each install, deleting a concurrent runner's download (#674).
+        shell: pwsh
         env:
-          HOME: ${{ runner.temp }}/install-action-home
-        with:
-          tool: sccache@0.19.0
+          VERSION: v0.19.0
+          SHA256: 28be8c61f6b2c89b9eb2869f6af7f78e6f992e78a8abae0ce855fcc129cbeac1
+        run: |
+          $name = "sccache-$env:VERSION-x86_64-pc-windows-msvc"
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest -TimeoutSec 120 -Uri "https://github.com/mozilla/sccache/releases/download/$env:VERSION/$name.zip" -OutFile $zip
+          if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $env:SHA256) { throw 'sccache archive checksum mismatch' }
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP -Force
+          $exe = Join-Path $env:RUNNER_TEMP "$name\sccache.exe"
+          & $exe --version
+          "SCCACHE_EXE=$exe" >> $env:GITHUB_ENV
 
       # sccache's GitHub Actions backend reads the runner's cache service URL
       # and token, which only an action's own process is given.
@@ -514,11 +523,8 @@ jobs:
       - name: Compile through sccache
         shell: pwsh
         run: |
-          $wrapper = (Get-Command sccache -ErrorAction SilentlyContinue).Source
-          if (-not $wrapper) { $wrapper = Join-Path $env:CARGO_HOME 'bin\sccache.exe' }
-          & $wrapper --version
           "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
-          "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> $env:GITHUB_ENV
+          "RUSTC_WORKSPACE_WRAPPER=$env:SCCACHE_EXE" >> $env:GITHUB_ENV
 
       # Tests here open state.db in temporary directories. Windows cannot
       # delete a file that is still open and TempDir ignores the failure, so
