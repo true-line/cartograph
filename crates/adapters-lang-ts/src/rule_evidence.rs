@@ -333,7 +333,7 @@ fn answers_a_choice(cx: &FileCx<'_>, exit: TsNode<'_>) -> bool {
     if exit.kind() != "return_statement" {
         return false;
     }
-    let Some(value) = exit_value(exit) else {
+    let Some(value) = exit_value(exit).map(unparenthesized) else {
         return false;
     };
     if matches!(value.kind(), "true" | "false" | "null" | "undefined") {
@@ -353,47 +353,91 @@ fn answers_a_choice(cx: &FileCx<'_>, exit: TsNode<'_>) -> bool {
         .child_by_field_name("name")
         .map(|name| cx.text(&name))
         .unwrap_or_default();
+    let private = cx.text(&callable).starts_with("private") || name.starts_with('#');
     let predicate = ["is", "has", "can", "should", "must"].iter().any(|prefix| {
         name.strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
     }) || callable
         .child_by_field_name("return_type")
         .is_some_and(|ty| cx.text(&ty).trim_start_matches(':').trim() == "boolean");
-    let private = cx.text(&callable).starts_with("private") || name.starts_with('#');
     if predicate && !private {
         return true;
     }
-    let value = unparenthesized(value);
     if value.kind() == "binary_expression"
         && value
             .child_by_field_name("operator")
             .is_some_and(|op| matches!(cx.text(&op), "||" | "??"))
         && let Some(left) = value.child_by_field_name("left").map(unparenthesized)
     {
-        let found = |text: &str| text.contains(".find(");
-        if found(cx.text(&left)) {
+        if is_find(cx, left) {
             return true;
         }
-        if left.kind() == "identifier" {
-            let wanted = cx.text(&left);
-            let body = callable.child_by_field_name("body");
-            let declared = body.is_some_and(|body| {
-                super::callable::walk(body).into_iter().any(|node| {
-                    node.kind() == "variable_declarator"
-                        && node
-                            .child_by_field_name("name")
-                            .is_some_and(|n| cx.text(&n) == wanted)
-                        && node
-                            .child_by_field_name("value")
-                            .is_some_and(|v| found(cx.text(&v)))
-                })
-            });
-            if declared {
-                return true;
-            }
+        if left.kind() == "identifier" && declared_as_find(cx, callable, left, exit) {
+            return true;
         }
     }
     callable.kind() == "method_definition" && !private && implements_a_strategy(cx, callable)
+}
+
+/// Whether `node` is a `.find(…)` call, through parentheses and `await`.
+fn is_find(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
+    let mut node = unparenthesized(node);
+    while node.kind() == "await_expression" {
+        let mut cursor = node.walk();
+        let Some(inner) = node
+            .named_children(&mut cursor)
+            .find(|n| n.kind() != "comment")
+        else {
+            return false;
+        };
+        node = unparenthesized(inner);
+    }
+    node.kind() == "call_expression"
+        && node
+            .child_by_field_name("function")
+            .filter(|f| f.kind() == "member_expression")
+            .and_then(|f| f.child_by_field_name("property"))
+            .is_some_and(|p| cx.text(&p) == "find")
+}
+
+/// Whether the returned `name` is declared once in `callable`'s own body,
+/// before the return and outside any nested callable, as a `.find(…)`.
+fn declared_as_find(
+    cx: &FileCx<'_>,
+    callable: TsNode<'_>,
+    name: TsNode<'_>,
+    exit: TsNode<'_>,
+) -> bool {
+    let Some(body) = callable.child_by_field_name("body") else {
+        return false;
+    };
+    let wanted = cx.text(&name);
+    let declarators: Vec<TsNode<'_>> = callable::walk(body)
+        .into_iter()
+        .filter(|node| {
+            node.kind() == "variable_declarator"
+                && node
+                    .child_by_field_name("name")
+                    .is_some_and(|n| cx.text(&n) == wanted)
+        })
+        .collect();
+    let [declarator] = declarators.as_slice() else {
+        return false;
+    };
+    let mut up = *declarator;
+    while let Some(parent) = up.parent() {
+        if parent.id() == callable.id() {
+            break;
+        }
+        if callable::is_callable(parent) {
+            return false;
+        }
+        up = parent;
+    }
+    declarator.end_byte() <= exit.start_byte()
+        && declarator
+            .child_by_field_name("value")
+            .is_some_and(|value| is_find(cx, value))
 }
 
 fn unparenthesized(mut node: TsNode<'_>) -> TsNode<'_> {
@@ -410,30 +454,41 @@ fn unparenthesized(mut node: TsNode<'_>) -> TsNode<'_> {
     node
 }
 
-/// Whether `method` is declared in a class that `implements` an interface
-/// named for a configured strategy.
+/// Whether `method` is declared in a class whose `implements` clause names
+/// an interface for a configured strategy: the implemented type's own name,
+/// not a type argument or a comment.
 fn implements_a_strategy(cx: &FileCx<'_>, method: TsNode<'_>) -> bool {
     let mut node = method;
     while let Some(parent) = node.parent() {
         if matches!(parent.kind(), "class_declaration" | "class") {
             let mut cursor = parent.walk();
-            return parent
+            let heritages: Vec<TsNode<'_>> = parent
                 .named_children(&mut cursor)
                 .filter(|child| child.kind() == "class_heritage")
-                .any(|heritage| {
-                    let mut cursor = heritage.walk();
-                    heritage
-                        .named_children(&mut cursor)
-                        .filter(|clause| clause.kind() == "implements_clause")
-                        .any(|clause| {
-                            let text = cx.text(&clause);
-                            text.split(|c: char| !c.is_alphanumeric() && c != '_')
-                                .any(|word| {
-                                    word.starts_with(|c: char| c.is_ascii_uppercase())
-                                        && STRATEGY_SUFFIXES.iter().any(|s| word.ends_with(s))
-                                })
-                        })
-                });
+                .collect();
+            return heritages.into_iter().any(|heritage| {
+                let mut cursor = heritage.walk();
+                let clauses: Vec<TsNode<'_>> = heritage
+                    .named_children(&mut cursor)
+                    .filter(|clause| clause.kind() == "implements_clause")
+                    .collect();
+                clauses.into_iter().any(|clause| {
+                    let mut cursor = clause.walk();
+                    let types: Vec<TsNode<'_>> = clause.named_children(&mut cursor).collect();
+                    types.into_iter().any(|ty| {
+                        let name = match ty.kind() {
+                            "type_identifier" => Some(ty),
+                            "generic_type" => ty.child_by_field_name("name"),
+                            _ => None,
+                        };
+                        name.filter(|n| n.kind() == "type_identifier")
+                            .is_some_and(|n| {
+                                let word = cx.text(&n);
+                                STRATEGY_SUFFIXES.iter().any(|s| word.ends_with(s))
+                            })
+                    })
+                })
+            });
         }
         node = parent;
     }

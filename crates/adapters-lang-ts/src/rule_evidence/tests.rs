@@ -601,8 +601,17 @@ export class TaxRateService {
         const rate = (await this.getActiveTaxRates(ctx)).find(r => r.test(zone, taxCategory));
         return rate || this.defaultTaxRate;
     }
-    first(list: Item[]) { return list.find(i => i.ok) ?? null; }
+    first(list: Item[]) { return list.find (i => i.ok) ?? null; }
     other(a: string) { return a || 'none'; }
+    shadowed(list: Item[]) {
+        const rate = this.rate;
+        const pick = () => { const rate = list.find(i => i.ok); return rate; };
+        return rate || pick();
+    }
+    parenthesized(): boolean { return (true); }
+}
+export class Registry implements Store<PaymentHandler> /* SomeStrategy */ {
+    lookup(code: string) { return this.byCode[code]; }
 }
 export class DefaultTaxZoneStrategy implements TaxZoneStrategy {
     determineTaxZone(ctx: RequestContext, zones: Zone[], channel: Channel): Zone {
