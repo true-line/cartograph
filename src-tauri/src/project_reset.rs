@@ -55,7 +55,13 @@ pub(crate) const REMOVED: &[&str] = &[
     "job-executions",
 ];
 
-/// The entries that belong to the application and stay.
+/// The entries that belong to the application and stay. [`apply`] only
+/// removes what [`REMOVED`] names; this list is what a test checks every
+/// entry a launch makes against, so a new store is never left out of both.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the test that checks every entry is listed")
+)]
 pub(crate) const KEPT: &[&str] = &[
     "state.db",
     "state.db-wal",
