@@ -2230,3 +2230,143 @@ mod tests {
     // The test's fixture SQL is not a table the system writes.
     assert!(!x.nodes.iter().any(|n| n.id.contains("@sql:")));
 }
+
+// AC-1300 (#2161): a `#[path]` declaration that does not wire its file in
+// is a Gap on the declaring file, naming the module, the attribute and why.
+#[test]
+fn unfollowed_path_attributes_are_gaps_on_the_declaring_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "delta/Cargo.toml",
+        "[package]\nname = \"delta\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        root,
+        "delta/src/lib.rs",
+        concat!(
+            "#[path = \"kept.rs\"]\nmod kept;\n",
+            "#[path = \"../../../outside.rs\"]\nmod escaping;\n",
+            "#[path = \"/abs/x.rs\"]\nmod absolute;\n",
+            "#[path = concat!(\"gen\", \".rs\")]\nmod computed;\n",
+            "#[cfg_attr(test, path = \"t.rs\")]\nmod conditional;\n",
+            "#[path = \"missing.rs\"]\nmod missing;\n",
+            "#[path = \"kept.rs\"]\nmod twice;\n",
+            "#[path = \"body\"]\nmod with_body {}\n",
+            "mod inline {\n    #[path = \"nested.rs\"]\n    mod nested;\n}\n",
+        ),
+    );
+    write(root, "delta/src/kept.rs", "pub fn k() {}\n");
+    write(root, "delta/src/a.rs", "#[path = \"b.rs\"]\nmod b;\n");
+    write(root, "delta/src/b.rs", "#[path = \"a.rs\"]\nmod a;\n");
+    let x = extract_dir(root, &id()).unwrap();
+    let mut gaps: Vec<(String, String, String)> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.id.starts_with("gap:module-path:"))
+        .map(|n| {
+            assert_eq!(n.props["prov"]["confidence_tier"], "Gap");
+            let file = n.props["prov"]["evidence"][0]["path"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            (
+                file,
+                n.props["module"].as_str().unwrap().to_string(),
+                n.props["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    gaps.sort();
+    let want = |f: &str, m: &str, r: &str| (f.to_string(), m.to_string(), r.to_string());
+    assert_eq!(
+        gaps,
+        [
+            want("delta/src/a.rs", "b", "cycle"),
+            want("delta/src/b.rs", "a", "cycle"),
+            want("delta/src/lib.rs", "absolute", "outside_repository"),
+            want("delta/src/lib.rs", "computed", "non_literal"),
+            want("delta/src/lib.rs", "conditional", "cfg_attr"),
+            want("delta/src/lib.rs", "escaping", "outside_repository"),
+            want("delta/src/lib.rs", "missing", "file_not_found"),
+            want("delta/src/lib.rs", "nested", "inline_module"),
+            want("delta/src/lib.rs", "twice", "already_declared"),
+            want("delta/src/lib.rs", "with_body", "module_body"),
+        ]
+    );
+    // Each Gap hangs off its declaring file and cites the attribute.
+    let escaping = x
+        .nodes
+        .iter()
+        .find(|n| n.id.starts_with("gap:module-path:") && n.props["module"] == "escaping")
+        .unwrap();
+    assert_eq!(
+        escaping.props["attribute"],
+        "#[path = \"../../../outside.rs\"]"
+    );
+    assert!(has_edge(
+        &x,
+        "DEPENDS_ON",
+        "file:local/rust-ws@delta/src/lib.rs",
+        &escaping.id
+    ));
+    let lib = std::fs::read(root.join("delta/src/lib.rs")).unwrap();
+    let evidence = &escaping.props["prov"]["evidence"][0];
+    let span = evidence["byte_start"].as_u64().unwrap() as usize
+        ..evidence["byte_end"].as_u64().unwrap() as usize;
+    assert_eq!(&lib[span], b"#[path = \"../../../outside.rs\"]");
+    // The followed declaration still takes the declared module.
+    let kept = x
+        .nodes
+        .iter()
+        .find(|n| n.id == "file:local/rust-ws@delta/src/kept.rs")
+        .unwrap();
+    assert_eq!(kept.props["module_path"], "delta::kept");
+}
+
+// AC-1300 (#2161): a file whose only path attribute sits under `cfg_attr` is still
+// scanned, and a Gap cites the exact declaration even when a name is reused.
+#[test]
+fn cfg_attr_only_files_and_reused_names_get_their_own_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "eps/Cargo.toml",
+        "[package]\nname = \"eps\"\nversion = \"0.1.0\"\n",
+    );
+    write(root, "eps/src/lib.rs", "mod a;\nmod b;\n");
+    write(
+        root,
+        "eps/src/a.rs",
+        "#[cfg_attr(test, path = \"t.rs\")]\nmod t;\n",
+    );
+    let b = concat!(
+        "#[cfg(unix)]\n#[path = \"unix.rs\"]\nmod imp;\n",
+        "#[cfg(windows)]\n#[path = \"windows.rs\"]\nmod imp;\n",
+    );
+    write(root, "eps/src/b.rs", b);
+    write(root, "eps/src/unix.rs", "pub fn u() {}\n");
+    let x = extract_dir(root, &id()).unwrap();
+    let gap = |path: &str| {
+        x.nodes
+            .iter()
+            .filter(|n| {
+                n.id.starts_with("gap:module-path:")
+                    && n.props["prov"]["evidence"][0]["path"] == path
+            })
+            .collect::<Vec<_>>()
+    };
+    let a = gap("eps/src/a.rs");
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].props["reason"], "cfg_attr");
+    let b_gaps = gap("eps/src/b.rs");
+    assert_eq!(b_gaps.len(), 1);
+    assert_eq!(b_gaps[0].props["reason"], "file_not_found");
+    assert_eq!(b_gaps[0].props["attribute"], "#[path = \"windows.rs\"]");
+    let start = b_gaps[0].props["prov"]["evidence"][0]["byte_start"]
+        .as_u64()
+        .unwrap() as usize;
+    assert_eq!(start, b.find("#[path = \"windows.rs\"]").unwrap());
+}

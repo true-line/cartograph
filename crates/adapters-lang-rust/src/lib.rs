@@ -1528,12 +1528,20 @@ fn extract_dir_with(
     cache.files.retain(|p, _| active.contains(p));
     // Files a `#[path]` attribute wires in take the declared module (#2041).
     let mut declared = BTreeMap::new();
+    let mut scanned = BTreeMap::new();
     for path in files {
         let source = read(path)?;
         if module_paths::mentions_path(&source) {
-            let decls = module_paths::declarations(&source);
+            let scan = module_paths::scan(&source);
+            let decls: Vec<(String, String)> = scan
+                .iter()
+                .filter_map(|decl| decl.path.clone().ok().map(|p| (decl.name.clone(), p)))
+                .collect();
             if !decls.is_empty() {
                 declared.insert(path.clone(), decls);
+            }
+            if !scan.is_empty() {
+                scanned.insert(path.clone(), scan);
             }
         }
     }
@@ -1619,6 +1627,7 @@ fn extract_dir_with(
         out.event_sites.extend(extraction.event_sites);
         out.test_requests.extend(extraction.test_requests);
     }
+    path_gaps(id, &scanned, &declared, &active, &mut out);
     let index = SymbolIndex::build(&out);
     for pending in std::mem::take(&mut out.pending_calls) {
         resolve_pending(pending, &index, &mut out);
@@ -1629,6 +1638,68 @@ fn extract_dir_with(
     close_imports(&mut out, &index);
     adapters_fw::sql::merge(&mut out.nodes);
     Ok((out, stats))
+}
+
+/// A Gap on the declaring file for each `#[path]` declaration that does not
+/// wire its file in (#2161, AC-1300): the file keeps its location's module,
+/// and the Gap says which declaration and why. Computed on every run from
+/// the declarations, so it never depends on the per-file cache.
+fn path_gaps(
+    id: &SourceId<'_>,
+    scanned: &BTreeMap<String, Vec<module_paths::Declaration>>,
+    declared: &BTreeMap<String, Vec<(String, String)>>,
+    files: &BTreeSet<String>,
+    out: &mut Extraction,
+) {
+    let mut gaps: Vec<(&str, &module_paths::Declaration, &'static str)> = Vec::new();
+    for (path, decls) in scanned {
+        for decl in decls {
+            if let Err(reason) = decl.path {
+                gaps.push((path, decl, reason));
+            }
+        }
+    }
+    for (declarer, index, reason) in module_paths::unresolved(declared, files) {
+        let Some((path, decls)) = scanned.get_key_value(&declarer) else {
+            continue;
+        };
+        // `declared` holds a file's followed declarations in scan order, so
+        // the index names the exact declaration, even under a reused name.
+        if let Some(decl) = decls.iter().filter(|decl| decl.path.is_ok()).nth(index) {
+            gaps.push((path, decl, reason));
+        }
+    }
+    for (path, decl, reason) in gaps {
+        let gap = format!("gap:module-path:{}@{}@{}", id.repo, path, decl.span.0);
+        let evidence = EvidenceRef {
+            repo: id.repo.into(),
+            path: path.into(),
+            byte_start: decl.span.0 as u64,
+            byte_end: decl.span.1 as u64,
+            commit_sha: id.commit.into(),
+        };
+        let props = serde_json::json!({
+            "reason": reason,
+            "module": decl.name,
+            "attribute": decl.attribute,
+            "attempted_tiers": ["T0"],
+            "prov": prov_from_evidence(&evidence, ConfidenceTier::Gap, &format!("Gap {gap}")),
+        });
+        out.nodes.push(Node {
+            id: gap.clone(),
+            label: "Gap".into(),
+            props,
+        });
+        out.edges.push(Edge {
+            src: file_id(id.repo, path),
+            dst: gap.clone(),
+            label: "DEPENDS_ON".into(),
+            props: serde_json::json!({
+                "reason": reason,
+                "prov": prov_from_evidence(&evidence, ConfidenceTier::Gap, &format!("DEPENDS_ON -> {gap}")),
+            }),
+        });
+    }
 }
 
 /// Recover a Rust directory without retaining an incremental cache.
