@@ -1792,6 +1792,12 @@ func SaveAny(db *gorm.DB, data any) {
 func SavePlain(db *gorm.DB, p Plain) {
     db.Save(&p)
 }
+func Rename(db *gorm.DB, u UserModel) {
+    db.Updates(&u)
+}
+func Dynamic(db *gorm.DB, value any) {
+    db.Model(value).Create(&Category{})
+}
 "#,
     )
     .unwrap();
@@ -1901,8 +1907,22 @@ func Authors(db *gorm.DB) {
             row("Summary", "READS", "UserModel", "read"),
             row("Authors", "READS", "UserModel", "read"),
             row("Authors", "WRITES", "UserModel", "insert"),
+            row("Rename", "WRITES", "UserModel", "update"),
         ])
     );
+    // An explicit table is cited from its `TableName()` method as well.
+    let follow = x
+        .nodes
+        .iter()
+        .find(|n| n.props["name"] == "FollowModel")
+        .unwrap();
+    let cited: Vec<&str> = follow.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(cited, ["users/models.go", "users/table.go"], "{follow:#?}");
     // A write through an unproven type, or a type that is no recovered
     // model, is a Gap; a struct with no GORM marker is no model.
     let gaps: BTreeSet<&str> = x
@@ -1911,7 +1931,8 @@ func Authors(db *gorm.DB) {
         .filter(|n| n.id.starts_with("gap:gorm:"))
         .map(|n| n.props["expression"].as_str().unwrap())
         .collect();
-    assert_eq!(gaps, BTreeSet::from(["data", "&x", "&p"]));
+    // An unresolved `Model(value)` is not replaced by the destination.
+    assert_eq!(gaps, BTreeSet::from(["data", "&x", "&p", "value"]));
 }
 
 /// AC-0963: a GORM table name is pluralized as GORM's inflection library
@@ -1976,6 +1997,7 @@ fn a_reused_files_gorm_gap_carries_the_new_commit() {
     let source = br#"package store
 import "gorm.io/gorm"
 func Save(db *gorm.DB, v Missing) { db.Create(&v) }
+func (Missing) TableName() string { return "missing" }
 "#;
     let mut extraction = extract_source(source, "store/save.go", &id()).unwrap();
     assert_eq!(
@@ -1990,4 +2012,5 @@ func Save(db *gorm.DB, v Missing) { db.Create(&v) }
         text.contains("def456") && !text.contains("abc123"),
         "{text}"
     );
+    assert_eq!(extraction.gorm_table_names[0].evidence.commit_sha, "def456");
 }

@@ -196,6 +196,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
             }
         }
     }
+    for table in &mut extraction.gorm_table_names {
+        table.evidence.commit_sha = commit.into();
+    }
     for request in &mut extraction.test_requests {
         request.retarget(commit);
     }

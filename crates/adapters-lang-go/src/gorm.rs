@@ -47,6 +47,8 @@ pub(super) struct TableName {
     package_dir: String,
     type_name: String,
     table: String,
+    /// The `TableName()` method the table is cited from.
+    pub(super) evidence: EvidenceRef,
 }
 
 fn key(package_dir: &str, type_name: &str) -> String {
@@ -457,6 +459,13 @@ fn table_name(cx: &FileCx<'_>, method: TsNode<'_>, dir: &str, out: &mut Extracti
             package_dir: dir.to_string(),
             type_name,
             table,
+            evidence: EvidenceRef {
+                repo: cx.id.repo.into(),
+                path: cx.path.into(),
+                byte_start: method.start_byte() as u64,
+                byte_end: method.end_byte() as u64,
+                commit_sha: cx.id.commit.into(),
+            },
         });
     }
 }
@@ -475,11 +484,12 @@ fn operation(method: &str) -> Option<(&'static [&'static str], bool)> {
     })
 }
 
-/// Where a method's model argument is: `Pluck(column, &dest)` and
-/// `Count(&n)` take none of their own.
+/// Where a method's model argument is: `Pluck(column, &dest)`, `Count(&n)`
+/// and `Update(column, value)` take none of their own.
 fn model_argument(method: &str) -> Option<usize> {
     match method {
-        "Count" | "Pluck" | "Update" | "UpdateColumn" | "Updates" | "UpdateColumns" => None,
+        // `Updates(&user)` names its model; `Update("name", v)` names a column.
+        "Count" | "Pluck" | "Update" | "UpdateColumn" => None,
         _ => Some(0),
     }
 }
@@ -519,9 +529,12 @@ fn access(
         return;
     };
     let src = enclosing_function(call, functions).unwrap_or_else(|| file_id(cx.id.repo, cx.path));
-    let resolved = chained
-        .and_then(|m| model_type(cx, m, call, bindings, dir))
-        .or_else(|| own.and_then(|a| model_type(cx, a, call, bindings, dir)));
+    // An explicit `Model(…)` selects the table: when it is not resolved the
+    // destination does not stand in for it.
+    let resolved = match chained {
+        Some(model) => model_type(cx, model, call, bindings, dir),
+        None => own.and_then(|a| model_type(cx, a, call, bindings, dir)),
+    };
     let label = if write { "WRITES" } else { "READS" };
     let Some((package, type_name)) = resolved else {
         if write {
@@ -757,10 +770,11 @@ fn push_gap(facts: serde_json::Value, out: &mut Extraction) {
 /// Apply `TableName()` literals and join the pending accesses to the
 /// models, merging accesses of one function to one model.
 pub(super) fn resolve(out: &mut Extraction) {
-    let tables: BTreeMap<(String, String), String> = std::mem::take(&mut out.gorm_table_names)
-        .into_iter()
-        .map(|t| ((t.package_dir, t.type_name), t.table))
-        .collect();
+    let tables: BTreeMap<(String, String), (String, EvidenceRef)> =
+        std::mem::take(&mut out.gorm_table_names)
+            .into_iter()
+            .map(|t| ((t.package_dir, t.type_name), (t.table, t.evidence)))
+            .collect();
     let mut models: BTreeMap<String, String> = BTreeMap::new();
     for node in &mut out.nodes {
         if node.label != "DataEntity" || node.props["storage"] != "gorm" {
@@ -771,10 +785,19 @@ pub(super) fn resolve(out: &mut Extraction) {
             .unwrap_or_default()
             .to_string();
         let name = node.props["name"].as_str().unwrap_or_default().to_string();
-        if let Some(table) = tables.get(&(dir.clone(), name.clone())) {
+        if let Some((table, evidence)) = tables.get(&(dir.clone(), name.clone())) {
             node.props["table"] = table.clone().into();
             node.props["store"] = table.clone().into();
             node.props["table_source"] = "explicit".into();
+            // The table literal is cited from its `TableName()` method too.
+            if let Ok(mut provenance) =
+                serde_json::from_value::<core_prov::Provenance>(node.props["prov"].clone())
+                && !provenance.evidence.contains(evidence)
+            {
+                provenance.evidence.push(evidence.clone());
+                node.props["prov"] =
+                    serde_json::to_value(provenance).expect("provenance serializes");
+            }
         }
         models.insert(key(&dir, &name), node.id.clone());
     }
