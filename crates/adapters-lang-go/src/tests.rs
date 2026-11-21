@@ -1513,3 +1513,171 @@ func TestNotATest(x int) {}
             )
     );
 }
+
+#[test]
+fn literal_sql_reads_and_writes_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("store.go"),
+        r#"package store
+import (
+    "context"
+    "database/sql"
+    "fmt"
+)
+const getUser = `SELECT u.id, u.email FROM users u
+    JOIN "Orgs" o ON o.id = u.org_id WHERE u.id = $1`
+type Store struct{ db *sql.DB }
+func (s *Store) User(ctx context.Context, id int) {
+    s.db.QueryRowContext(ctx, getUser, id)
+}
+func (s *Store) Create(email string) {
+    s.db.Exec("INSERT INTO users (email, org_id) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = excluded.email", email, 1)
+}
+func (s *Store) Disable(id int) {
+    s.db.Exec(`UPDATE users SET disabled = true, updated_at = now() WHERE id = $1`, id)
+    s.db.Exec("DELETE FROM sessions WHERE user_id = $1 AND created < (SELECT max(created) FROM audit.logins)", id)
+}
+func (s *Store) Search(table string) {
+    s.db.Query(fmt.Sprintf("SELECT * FROM %s", table))
+    s.db.Query("SELECT extract(year FROM now())")
+    sql.Open("postgres", "SELECT * FROM nothing")
+}
+func (s *Store) Feeds(tagged bool) {
+    query := `SELECT id FROM feeds WHERE true`
+    if tagged {
+        query += " AND id IN (SELECT feed_id FROM " + "tags)"
+    }
+    s.db.Query(query)
+    s.db.Query(fmt.Sprintf("SELECT * FROM icons ORDER BY %s", "id"))
+    s.db.Exec("DECLARE c CURSOR FOR SELECT 1")
+    s.db.QueryRow("FETCH NEXT FROM c")
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("other.go"),
+        "package store\nimport \"database/sql\"\nfunc Touch(db *sql.DB) { db.Exec(`UPDATE users SET seen = 1`) }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("cache.go"),
+        "package store\nfunc Get(c Cache, k string) { c.Query(k); c.Exec(k) }\n",
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let entities: BTreeMap<&str, Vec<&str>> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "DataEntity")
+        .map(|n| {
+            (
+                n.props["table"].as_str().unwrap(),
+                n.props["columns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c["name"].as_str().unwrap())
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entities,
+        BTreeMap::from([
+            ("Orgs", vec![]),
+            ("audit.logins", vec![]),
+            ("feeds", vec![]),
+            ("icons", vec![]),
+            ("sessions", vec![]),
+            ("tags", vec![]),
+            (
+                "users",
+                vec!["disabled", "email", "org_id", "seen", "updated_at"]
+            ),
+        ])
+    );
+    let access = |src: &str| -> BTreeSet<(String, String, String)> {
+        x.edges
+            .iter()
+            .filter(|e| e.src.ends_with(src) && matches!(e.label.as_str(), "READS" | "WRITES"))
+            .map(|e| {
+                (
+                    e.label.clone(),
+                    e.dst.rsplit(':').next().unwrap().to_string(),
+                    e.props["operations"]
+                        .as_array()
+                        .map(|ops| {
+                            ops.iter()
+                                .map(|o| o.as_str().unwrap())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    let t = |label: &str, table: &str, ops: &str| (label.into(), table.into(), ops.into());
+    assert_eq!(
+        access("#Store.User"),
+        BTreeSet::from([t("READS", "users", ""), t("READS", "Orgs", "")])
+    );
+    assert_eq!(
+        access("#Store.Create"),
+        BTreeSet::from([t("WRITES", "users", "insert")])
+    );
+    assert_eq!(
+        access("#Store.Disable"),
+        BTreeSet::from([
+            t("WRITES", "users", "update"),
+            t("WRITES", "sessions", "delete"),
+            t("READS", "audit.logins", ""),
+        ])
+    );
+    // A variable the function assigns, `+` and `fmt.Sprintf`'s format are
+    // followed; what they leave computed makes the read a fragment's.
+    assert_eq!(
+        access("#Store.Feeds"),
+        BTreeSet::from([
+            t("READS", "feeds", ""),
+            t("READS", "tags", ""),
+            t("READS", "icons", ""),
+        ])
+    );
+    for edge in x.edges.iter().filter(|e| e.dst.starts_with("data:")) {
+        let expected = if edge.src.ends_with("#Store.Feeds") {
+            "sql-fragments"
+        } else {
+            "sql-literal"
+        };
+        assert_eq!(edge.props["resolution"], expected, "{}", edge.dst);
+        assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
+    }
+    // A computed statement is a Gap; a file without a database/sql import
+    // states nothing.
+    let gaps: Vec<(&str, &str)> = x
+        .nodes
+        .iter()
+        .filter(|n| n.id.starts_with("gap:sql:"))
+        .map(|n| {
+            (
+                n.props["reason"].as_str().unwrap(),
+                n.props["expression"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        [(
+            "SQL statement is computed",
+            r#"fmt.Sprintf("SELECT * FROM %s", table)"#
+        )]
+    );
+    assert!(
+        access("#Search")
+            .iter()
+            .all(|(label, _, _)| label == "READS")
+    );
+}
