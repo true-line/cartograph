@@ -79,17 +79,91 @@ pub(crate) struct Access {
     storage: &'static str,
 }
 
+/// A Spring Data repository interface's managed-entity binding awaiting
+/// the join (AC-1100).
+#[derive(Debug, Clone)]
+pub(crate) struct Repository {
+    /// The interface's FQN, as call receivers name it.
+    fqn: String,
+    path: String,
+    /// Same-package names that would obscure a star-imported base.
+    shadows: Vec<String>,
+    /// The interface Symbol.
+    src: String,
+    /// The FQNs the entity type argument can denote.
+    entity: Vec<String>,
+    props: serde_json::Value,
+    gap: (Node, Edge),
+}
+
+/// A Spring Data vocabulary call on a receiver whose declared type is named
+/// at the call site (AC-1100).
+#[derive(Debug, Clone)]
+pub(crate) struct RepositoryCall {
+    src: String,
+    /// The FQNs the receiver's declared type can denote.
+    candidates: Vec<String>,
+    label: &'static str,
+    props: serde_json::Value,
+}
+
 /// One file's Room facts awaiting the directory join.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pending {
     entities: Vec<Entity>,
     accesses: Vec<Access>,
+    repositories: Vec<Repository>,
+    repository_calls: Vec<RepositoryCall>,
 }
 
 impl Pending {
     pub(crate) fn extend(&mut self, other: Pending) {
         self.entities.extend(other.entities);
         self.accesses.extend(other.accesses);
+        self.repositories.extend(other.repositories);
+        self.repository_calls.extend(other.repository_calls);
+    }
+
+    /// A Spring Data repository interface `src` (FQN `fqn`) managing the
+    /// JPA entity one of `entity` declares, or `gap` when none resolves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_repository(
+        &mut self,
+        fqn: String,
+        path: &str,
+        shadows: Vec<String>,
+        src: String,
+        entity: Vec<String>,
+        props: serde_json::Value,
+        gap: (Node, Edge),
+    ) {
+        self.repositories.push(Repository {
+            fqn,
+            path: path.to_string(),
+            shadows,
+            src,
+            entity,
+            props,
+            gap,
+        });
+    }
+
+    /// A read or write through a receiver declared as one of `candidates`;
+    /// it asserts nothing unless exactly one is a repository whose entity
+    /// resolves.
+    pub(crate) fn push_repository_call(
+        &mut self,
+        src: String,
+        candidates: Vec<String>,
+        writes: bool,
+        props: serde_json::Value,
+    ) {
+        self.repository_calls.push(RepositoryCall {
+            src,
+            candidates,
+            label: if writes { "WRITES" } else { "READS" },
+            props,
+        });
     }
 
     /// A table another persistence reader recovered (Exposed, AC-1027),
@@ -186,6 +260,14 @@ impl Pending {
             retarget_props_commit(&mut access.props, commit);
             retarget_props_commit(&mut access.gap.0.props, commit);
             retarget_props_commit(&mut access.gap.1.props, commit);
+        }
+        for repository in &mut self.repositories {
+            retarget_props_commit(&mut repository.props, commit);
+            retarget_props_commit(&mut repository.gap.0.props, commit);
+            retarget_props_commit(&mut repository.gap.1.props, commit);
+        }
+        for call in &mut self.repository_calls {
+            retarget_props_commit(&mut call.props, commit);
         }
     }
 }
@@ -942,6 +1024,64 @@ pub(crate) fn resolve(
                 nodes.push(entity.node);
             }
         }
+    }
+    let unique_jpa = |candidates: &[String]| -> Option<String> {
+        let found: BTreeSet<&String> = candidates
+            .iter()
+            .filter_map(|fqn| by_class.get(&("jpa", fqn.clone())).and_then(Option::as_ref))
+            .collect();
+        match found.into_iter().collect::<Vec<_>>()[..] {
+            [id] => Some(id.clone()),
+            _ => None,
+        }
+    };
+    // Spring Data repositories (AC-1100): each interface binds the JPA
+    // entity its type argument names. An interface FQN declared twice binds
+    // nothing, and a call through it asserts nothing.
+    let mut repository_entity: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for repository in pending.repositories {
+        let entity = if obscured(&repository.shadows, &repository.path) {
+            None
+        } else {
+            unique_jpa(&repository.entity)
+        };
+        match entity {
+            Some(entity) => {
+                repository_entity
+                    .entry(repository.fqn)
+                    .and_modify(|bound| *bound = None)
+                    .or_insert_with(|| Some(entity.clone()));
+                edges.push(Edge {
+                    src: repository.src,
+                    dst: entity,
+                    label: "REFERENCES".into(),
+                    props: repository.props,
+                });
+            }
+            None => {
+                repository_entity.insert(repository.fqn, None);
+                nodes.push(repository.gap.0);
+                edges.push(repository.gap.1);
+            }
+        }
+    }
+    // Every call site is its own occurrence: the reconciler unions repeated
+    // `(src, dst, label)` evidence, so each keeps its citation.
+    for call in pending.repository_calls {
+        let matched: Vec<&Option<String>> = call
+            .candidates
+            .iter()
+            .filter_map(|fqn| repository_entity.get(fqn))
+            .collect();
+        let [Some(entity)] = matched.as_slice() else {
+            continue;
+        };
+        edges.push(Edge {
+            src: call.src,
+            dst: entity.clone(),
+            label: call.label.into(),
+            props: call.props,
+        });
     }
     let mut seen = BTreeSet::new();
     let mut emitted_edges: HashMap<(String, String, &'static str), usize> = HashMap::new();

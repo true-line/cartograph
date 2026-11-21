@@ -18,8 +18,18 @@
 //! the shared persistence join ([`super::room`]) by the file's imports or
 //! package, among JPA entities only. A computed entity or table name, an
 //! unprovable target, a target that is no recovered entity and an entity
-//! name two classes declare are Gaps. Spring Data repositories
-//! are not read here.
+//! name two classes declare are Gaps.
+//!
+//! A Spring Data repository is an interface extending an import-proven
+//! `Repository`, `CrudRepository`, `ListCrudRepository`,
+//! `PagingAndSortingRepository`, `ListPagingAndSortingRepository` or
+//! `JpaRepository`: a `REFERENCES` edge (relation `repository`, framework
+//! `spring-data`) from the interface Symbol to the JPA entity its first type
+//! argument names, or a Gap when that is no recovered entity (AC-1100). A
+//! call of a Spring Data vocabulary method (`find…`, `get…`, `count…`,
+//! `exists…`, `save…`, `delete…`, …) on a receiver whose declaration states
+//! a repository type is a `READS` or `WRITES` edge from the calling function
+//! to that entity; any other receiver asserts nothing.
 
 use core_graph::{Edge, Node};
 use tree_sitter::Node as TsNode;
@@ -34,7 +44,46 @@ use super::{
 };
 
 const FRAMEWORK: &str = "jpa";
+const SPRING_DATA: &str = "spring-data";
 const PACKAGES: &[&str] = &["jakarta.persistence", "javax.persistence"];
+
+/// Spring Data repository base interfaces and the package that declares each.
+fn repository_package(name: &str) -> Option<&'static str> {
+    match name {
+        "Repository"
+        | "CrudRepository"
+        | "ListCrudRepository"
+        | "PagingAndSortingRepository"
+        | "ListPagingAndSortingRepository" => Some("org.springframework.data.repository"),
+        "JpaRepository" => Some("org.springframework.data.jpa.repository"),
+        _ => None,
+    }
+}
+
+/// Spring Data method-name vocabulary: `Some(false)` reads, `Some(true)`
+/// writes. The verb must end the name or be followed by an uppercase letter
+/// or digit (`findAll`, `findByName`, `deleteById`; not `savings`), as in
+/// the Java reader.
+pub(crate) fn classify(method: &str) -> Option<bool> {
+    const READS: &[&str] = &[
+        "find", "get", "read", "query", "search", "stream", "count", "exists",
+    ];
+    const WRITES: &[&str] = &["save", "delete", "remove"];
+    let boundary = |verb: &str| {
+        method.strip_prefix(verb).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|c| c.is_uppercase() || c.is_ascii_digit())
+        })
+    };
+    if READS.iter().any(|verb| boundary(verb)) {
+        Some(false)
+    } else if WRITES.iter().any(|verb| boundary(verb)) {
+        Some(true)
+    } else {
+        None
+    }
+}
 
 /// The cardinality a relation annotation declares, and whether it is a
 /// to-many (its type is a collection of the target).
@@ -168,15 +217,157 @@ pub(crate) fn extract(
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
 ) {
-    if !cx.text(&root).contains("persistence") {
+    let text = cx.text(&root);
+    let entities = text.contains("persistence");
+    let repositories = text.contains("springframework.data");
+    if !entities && !repositories {
         return;
     }
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         stack.extend(named_children(node));
-        if node.kind() == "class_declaration" {
+        if node.kind() != "class_declaration" {
+            continue;
+        }
+        if entities {
             entity(cx, node, package, imports, pending, nodes, edges);
         }
+        if repositories {
+            repository(cx, node, package, imports, pending);
+        }
+    }
+}
+
+/// Whether a declaration is an `interface` (the grammar's anonymous token).
+fn is_interface(declaration: TsNode<'_>) -> bool {
+    let mut walk = declaration.walk();
+    declaration
+        .children(&mut walk)
+        .any(|part| part.kind() == "interface")
+}
+
+/// A Spring Data repository interface's entity binding, into the join.
+fn repository(
+    cx: &FileCx<'_>,
+    interface: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    pending: &mut room::Pending,
+) {
+    if !is_interface(interface) {
+        return;
+    }
+    let Some(name) = interface.child_by_field_name("name") else {
+        return;
+    };
+    let Some(specifiers) = named_children(interface)
+        .into_iter()
+        .find(|child| child.kind() == "delegation_specifiers")
+    else {
+        return;
+    };
+    for specifier in named_children(specifiers) {
+        let Some(ty) = specifier
+            .named_child(0)
+            .filter(|first| first.kind() == "user_type")
+        else {
+            continue;
+        };
+        let Some(spelled) = super::receivers::declared_type(cx, ty) else {
+            continue;
+        };
+        let (prefix, simple) = match spelled.rsplit_once('.') {
+            Some((prefix, simple)) => (Some(prefix), simple.to_string()),
+            None => (None, spelled.clone()),
+        };
+        // A qualified spelling or a named (possibly aliased) import proves
+        // the base directly; a star import only unless obscured.
+        let shadows = match prefix {
+            Some(prefix) => match repository_package(&simple) {
+                Some(declaring) if declaring == prefix => Vec::new(),
+                _ => continue,
+            },
+            None => match imports.bindings.get(&simple) {
+                Some(bound) => {
+                    let Some((bound_package, bound_simple)) = bound.rsplit_once('.') else {
+                        continue;
+                    };
+                    match repository_package(bound_simple) {
+                        Some(declaring) if declaring == bound_package => Vec::new(),
+                        _ => continue,
+                    }
+                }
+                None => {
+                    let Some(declaring) = repository_package(&simple) else {
+                        continue;
+                    };
+                    if !imports.wildcard_packages.iter().any(|w| w == declaring) {
+                        continue;
+                    }
+                    let shadow = match package {
+                        Some(package) => format!("{package}.{simple}"),
+                        None => simple.clone(),
+                    };
+                    vec![shadow]
+                }
+            },
+        };
+        // The first type argument is the managed entity type.
+        let Some(argument) = named_children(ty)
+            .into_iter()
+            .find(|part| part.kind() == "type_arguments")
+            .and_then(|arguments| named_children(arguments).into_iter().next())
+            .and_then(|projection| {
+                named_children(projection)
+                    .into_iter()
+                    .find(|part| matches!(part.kind(), "user_type" | "nullable_type"))
+            })
+        else {
+            continue;
+        };
+        let Some(target) = super::receivers::declared_type(cx, argument) else {
+            continue;
+        };
+        let head = target.split('.').next().unwrap_or(&target);
+        if super::receivers::declares_type_parameter(cx, interface, head) {
+            // A generic base repository's type variable names no entity.
+            continue;
+        }
+        let mut chain = enclosing_type_chain(cx, interface);
+        chain.push(cx.text(&name).to_string());
+        let qualified = chain.join(".");
+        let fqn = match package {
+            Some(package) => format!("{package}.{qualified}"),
+            None => qualified.clone(),
+        };
+        let symbol = super::symbol_id(cx.id.repo, cx.path, &qualified);
+        let props = serde_json::json!({
+            "relation": "repository",
+            "framework": SPRING_DATA,
+            "repository": simple,
+            "entity_type": target,
+            "language": "kotlin",
+            "prov": cx.prov(&specifier, &format!("REFERENCES {symbol} -> {target}")),
+        });
+        let gap = framework_gap(
+            cx,
+            SPRING_DATA,
+            specifier,
+            &symbol,
+            "REFERENCES",
+            &format!("Spring Data repository entity `{target}` is not a recovered JPA entity"),
+        );
+        pending.push_repository(
+            fqn,
+            cx.path,
+            shadows,
+            symbol,
+            candidates(&target, imports, package),
+            props,
+            gap,
+        );
+        // One entity binding per repository interface.
+        return;
     }
 }
 
