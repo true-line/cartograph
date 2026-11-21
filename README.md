@@ -35,8 +35,8 @@ context, containers and components), provenance, the specification compiler and
 its exports, a read-only MCP surface, and bounded specialist investigations that
 answer cited questions. The D1 system overview is composed from the knowledge
 graph at system scope, each recovered area has a topic expert that answers from
-its area briefing, and accepted proposals and findings reach the exports through
-the curated projection.
+its area briefing, and accepted proposals and findings accepted as curated reach
+the exports through the curated projection.
 
 Not built yet: agents do not draft the D2 to D10 documents
 ([#1748](https://github.com/true-line/cartograph/issues/1748)), and documents are
