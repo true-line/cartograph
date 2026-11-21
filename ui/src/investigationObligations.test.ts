@@ -280,3 +280,24 @@ it('recognizes auditor14 only in the advertised generation7 family', async () =>
   policy.request_schema_version = 7;
   expect(investigationPolicy(catalog, 'investigation-v2', 'evidence-auditor@14')).toBe(policy);
 });
+
+// AC-1401 (#1751): the client reads the generated host capability table, so a
+// version the backend offers is never missing from a hand-kept client list.
+describe('generated capability table (AC-1401)', () => {
+  it('admits every offered expanded analyst, including the ones the old lists missed', async () => {
+    const { admissionCatalog } = await import('./completionFixtures');
+    const { completionFamily, isCompletionSpecialist, isExpandedSpecialist, usesFindingWithholding } = await import('./investigationFamilies');
+    for (const id of ['domain-analyst@21', 'domain-analyst@22', 'domain-analyst@23', 'domain-analyst@28'] as const) {
+      expect(isCompletionSpecialist(id)).toBe(true);
+      expect(isExpandedSpecialist(id)).toBe(true);
+      expect(completionFamily(7)?.specialistIds).toContain(id);
+      const catalog = { ...admissionCatalog, policies: admissionCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [id] })) };
+      expect(investigationPolicy(catalog, 'investigation-v2', id)?.request_schema_version).toBe(7);
+    }
+    expect(usesFindingWithholding('domain-analyst@28')).toBe(true);
+    expect(usesFindingWithholding('domain-analyst@24')).toBe(false);
+    expect(completionFamily(4)?.specialistIds).toEqual(['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2', 'section-writer@1']);
+    expect(completionFamily(5)?.specialistIds).toEqual(['domain-analyst@8', 'evidence-auditor@8']);
+    expect(completionFamily(6)?.specialistIds).toEqual(['domain-analyst@9', 'evidence-auditor@9']);
+  });
+});

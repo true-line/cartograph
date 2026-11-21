@@ -1,13 +1,26 @@
+import { SPECIALIST_TABLE, type SpecialistCapability, type SpecialistId } from './generated/specialistTable';
+
+/** Reads the host capability table (ADR-0071); the client keeps no version list of its own. */
+export const hasCapability = (id: string, capability: SpecialistCapability) =>
+  Object.hasOwn(SPECIALIST_TABLE, id) && SPECIALIST_TABLE[id as SpecialistId].capabilities.includes(capability);
 /** Exact public family identities; saved generations never inherit catalog upgrades. */
-export const isCompletionSpecialist = (id: string) => (id === 'evidence-auditor@14' || id === 'evidence-auditor@13' || id === 'evidence-auditor@12' || id === 'domain-analyst@12' || id === 'domain-analyst@13' || id === 'domain-analyst@14' || id === 'domain-analyst@15' || id === 'domain-analyst@17' || id === 'domain-analyst@18' || id === 'domain-analyst@19' || id === 'domain-analyst@20' || id === 'domain-analyst@25' || id === 'domain-analyst@26' || id === 'domain-analyst@27') || /^(domain-analyst|evidence-auditor)@(7|8|9|10|11)$/.test(id) || id === 'spec-writer@1' || id === 'spec-writer@2' || id === 'gap-triager@1' || id === 'gap-triager@2' || id === 'section-writer@1';
-export const isExpandedSpecialist = (id: string) => (id === 'evidence-auditor@14' || id === 'evidence-auditor@13' || id === 'evidence-auditor@12' || id === 'domain-analyst@12' || id === 'domain-analyst@13' || id === 'domain-analyst@14' || id === 'domain-analyst@15' || id === 'domain-analyst@17' || id === 'domain-analyst@18' || id === 'domain-analyst@19' || id === 'domain-analyst@20' || id === 'domain-analyst@25' || id === 'domain-analyst@26' || id === 'domain-analyst@27') || /^(domain-analyst|evidence-auditor)@(8|9|10|11)$/.test(id);
-export const usesCitedNarrative = (id: string) => id === 'spec-writer@2' || id === 'gap-triager@2';
-const families = {
-  4: { specialistIds: ['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2', 'section-writer@1'], roleVersions: [7], requestVersion: 4, resultVersion: 5, expanded: false },
-  5: { specialistIds: ['domain-analyst@8', 'evidence-auditor@8'], roleVersions: [8], requestVersion: 5, resultVersion: 5, expanded: true },
-  6: { specialistIds: ['domain-analyst@9', 'evidence-auditor@9'], roleVersions: [9], requestVersion: 6, resultVersion: 6, expanded: true },
-  7: { specialistIds: ['domain-analyst@10', 'evidence-auditor@10', 'domain-analyst@11', 'evidence-auditor@11', 'evidence-auditor@12', 'evidence-auditor@13', 'evidence-auditor@14', 'domain-analyst@12', 'domain-analyst@13', 'domain-analyst@14', 'domain-analyst@15', 'domain-analyst@17', 'domain-analyst@18', 'domain-analyst@19', 'domain-analyst@20', 'domain-analyst@25', 'domain-analyst@26', 'domain-analyst@27'], roleVersions: [10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 25, 26, 27], requestVersion: 7, resultVersion: 7, expanded: true },
-} as const;
+export const isCompletionSpecialist = (id: string) => hasCapability(id, 'completion_obligations');
+export const isExpandedSpecialist = (id: string) => hasCapability(id, 'policy_selection');
+export const usesCitedNarrative = (id: string) => hasCapability(id, 'cited_narrative');
+
+/** The completion request family a version belongs to, keyed by its summary schema version. */
+function familyVersion(id: string): 4 | 5 | 6 | 7 | undefined {
+  if (!isCompletionSpecialist(id)) return undefined;
+  if (!isExpandedSpecialist(id)) return 4;
+  if (!hasCapability(id, 'query_history_disclosure')) return 5;
+  return hasCapability(id, 'next_prompt_admission') ? 7 : 6;
+}
+const resultVersions = { 4: 5, 5: 5, 6: 6, 7: 7 } as const;
+const families = Object.fromEntries(([4, 5, 6, 7] as const).map((version) => {
+  const specialistIds = (Object.keys(SPECIALIST_TABLE) as SpecialistId[]).filter((id) => familyVersion(id) === version);
+  return [version, { specialistIds, roleVersions: [...new Set(specialistIds.map((id) => SPECIALIST_TABLE[id].version))],
+    requestVersion: version, resultVersion: resultVersions[version], expanded: version !== 4 }];
+})) as Record<4 | 5 | 6 | 7, { specialistIds: SpecialistId[]; roleVersions: number[]; requestVersion: 4 | 5 | 6 | 7; resultVersion: 5 | 6 | 7; expanded: boolean }>;
 export function completionFamily(summaryVersion: number) {
   return Number.isInteger(summaryVersion) ? families[summaryVersion as keyof typeof families] : undefined;
 }
@@ -23,4 +36,4 @@ export function isCompletionResultId(value: unknown, resultVersion: number): val
 }
 
 /** Saved partial results, not the set of creatable desktop specialists. */
-export const usesFindingWithholding = (id: string) => ['domain-analyst@25', 'domain-analyst@26', 'domain-analyst@27'].includes(id);
+export const usesFindingWithholding = (id: string) => hasCapability(id, 'finding_withholding');
