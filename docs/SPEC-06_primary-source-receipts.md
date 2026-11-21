@@ -294,3 +294,19 @@ outside the capture still carries no receipt, nor does a rule-bearing fact. As
 before, the receipt binds the cited captured spans only; input closure is not
 established, and earlier lane sections' "facts the join derives carry no
 receipt" applies only to multi-file facts from here on.
+
+## Facts citing several captured files (AC-1039, #385)
+
+A lane fact whose primary evidence cites more than one captured file of the
+same lane, such as a Flask route and the Blueprint mount in another module,
+now gets one receipt under that lane's contract. The receipt's `file` is the
+file its first evidence entry cites; the others are listed once each in
+`other_files`, sorted by path, and each range names its file by index into that
+list (`file` absent for the primary file). Every listed file must belong to the
+same capture and grammar, be cited by at least one range, and differ from the
+primary file; at most 8 are listed, an empty list or an explicit null index is
+rejected, and only provenance-only v3 receipts may carry the list. Each range is
+validated and read back against its own file. A fact citing a file outside the
+capture or of another lane, or a rule, still carries no receipt; single-file
+receipts are unchanged on the wire. As before, the receipt binds the cited
+captured spans only and input closure is not established.
