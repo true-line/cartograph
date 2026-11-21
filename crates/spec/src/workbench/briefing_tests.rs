@@ -175,3 +175,77 @@ fn neighbours_are_the_areas_across_a_call_by_name() {
     );
     assert_eq!(area_neighbours(&edges, &subsystems, "subsystem:x"), None);
 }
+
+// AC-0952: a subsection larger than its block's share keeps its heading,
+// its table header and the rows that fit, and counts the rows it loses;
+// the rules (§1.5) are fitted last, so they take what the others leave.
+#[test]
+fn a_subsection_over_its_share_keeps_the_rows_that_fit() {
+    let rows = |prefix: &str, n: usize| {
+        (0..n)
+            .map(|i| format!("| {prefix} row {i:02} | F-00000000000000{i:02} |\n"))
+            .collect::<String>()
+    };
+    let document = format!(
+        "# Product specification\n\n\
+## 1.4 Acceptance criteria per capability (P+A)\n\n### Order\n\n#### Manage orders\n\n| Scenario | Citation |\n|---|---|\n{}\n\
+## 1.5 Business rules (P+A)\n\n### Order\n\n#### Manage orders\n\n| Rule | Citation |\n|---|---|\n{}\n",
+        rows("scenario", 40),
+        rows("rule", 40)
+    );
+    let row = "| scenario row 00 | F-0000000000000000 |\n".len();
+    // Room for about 30 rows in all: neither block fits whole.
+    let briefing = area_briefing(&document, "Order", 4, &AreaNeighbours::default(), 30 * row);
+    let text = &briefing.text;
+    assert_eq!(briefing.left_out, 0, "{text}");
+    for kept in [
+        "#### Manage orders\n\n| Scenario | Citation |\n|---|---|\n| scenario row 00 |",
+        "#### Manage orders\n\n| Rule | Citation |\n|---|---|\n| rule row 00 |",
+    ] {
+        assert!(text.contains(kept), "{kept}\n{text}");
+    }
+    let count = |prefix: &str| text.matches(&format!("| {prefix} row ")).count();
+    let (scenarios, rules) = (count("scenario"), count("rule"));
+    assert!(
+        scenarios >= 5 && rules >= scenarios,
+        "{scenarios} {rules}\n{text}"
+    );
+    assert!(text.contains(&format!(
+        "The last subsection above is cut short: {} more of its rows are left out",
+        40 - scenarios
+    )));
+    assert!(text.contains(&format!(
+        "The last subsection above is cut short: {} more of its rows are left out",
+        40 - rules
+    )));
+    // The kept blocks fill the bound: no more than one row's room is unused.
+    let used: usize = text
+        .lines()
+        .filter(|l| l.starts_with("| scenario row") || l.starts_with("| rule row"))
+        .map(|l| l.len() + 1)
+        .sum();
+    assert!(used + 3 * row >= 30 * row - 200, "{used}");
+}
+
+// AC-0952: a cut counts only the data rows it leaves out (never a later
+// table's header or separator), and keeps a subsection when just its first
+// data row fits.
+#[test]
+fn a_cut_counts_only_the_data_rows_left_out() {
+    let block = "### Order\n\n#### Manage orders\n\n| Rule | Citation |\n|---|---|\n\
+| rule one | F-01 |\n| rule two | F-02 |\n\nChanges:\n\n| Where | Change |\n|---|---|\n\
+| here | F-03 |\n";
+    let head = heading_len(block);
+    let one_row = block.find("| rule two").unwrap();
+    let fit = fitted(block, one_row - head);
+    assert_eq!(fit.text, &block[..one_row]);
+    assert_eq!(fit.left_out, 0);
+    // `rule two` and `here`: the second table's header and separator are
+    // not rows.
+    assert_eq!(fit.rows_cut, 2);
+    // Room for the heading and table header only keeps no partial row.
+    let header_only = block.find("| rule one").unwrap();
+    let fit = fitted(block, header_only - head);
+    assert_eq!(fit.text, &block[..block.find("#### ").unwrap()]);
+    assert_eq!((fit.left_out, fit.rows_cut), (1, 0));
+}
