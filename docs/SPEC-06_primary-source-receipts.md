@@ -222,3 +222,18 @@ templates, requirement pins, Alembic migrations and module names from the
 checkout, outside closure, so facts it derives (routes, migrations, screens)
 carry no receipt. Inspection, task evidence and MCP reads accept the prefix
 like any v3 receipt.
+
+## Go lane (AC-1026, #385)
+
+A source's `.go` files (the Go adapter's own selection) join the same capture
+as the Python lane's. If the combined set cannot be retained, both lanes keep
+their uncaptured reads and the TS/JS capture stands alone. With a capture, the
+Go pass parses each file's retained bytes, and each fact a captured file emits
+whose primary provenance lies wholly in that file gets a receipt under its own
+contract: prefix `go-primary-v1:`, producer `t0.adapter-go/direct-lexical-v1`,
+grammar `go` (`tree-sitter-go@0.25.0`, pinned exactly), in the v3 shape with
+provenance ranges only, under the same per-file minting, survivor check and
+budget admission as Python. Directory resolution still reads `go.mod`, module
+layout and Vercel configuration from the checkout, outside closure, so facts
+it derives or rewrites carry no receipt. Inspection, task evidence and MCP
+reads accept the prefix like any v3 receipt.
