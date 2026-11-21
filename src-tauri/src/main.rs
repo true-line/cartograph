@@ -2640,8 +2640,9 @@ fn extract_tree_packed(
     // file name is a Gap. Runs for every layer selection, as the toolchain
     // reader does. The reader emits no File node and leaves the toolchain
     // reader's Compose `Tool` fact and the schedule reader's `CronJob`
-    // facts as they are. Helm charts and manifests of other kinds are named
-    // by Preflight's findings, which the coverage inventory lists.
+    // facts as they are. Helm charts are workloads and helmfile releases
+    // are environments (AC-1502); manifests of other kinds are named by
+    // Preflight's findings, which the coverage inventory lists.
     {
         let environment_id = ingest::environments::SourceId { repo, commit };
         let environment_facts =

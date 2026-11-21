@@ -458,8 +458,8 @@ fn what_is_not_read_is_stated_and_an_empty_export_renders_every_section() {
     }
     for stated in [
         "A file or directory name is never used as an environment name.",
-        // AC-0662: Kubernetes manifests and kustomize files are read now.
-        "Helm charts and Helm values files are not read",
+        // AC-0662 and AC-1502: manifests, kustomize files and Helm charts are read now.
+        "Helm charts are read from `Chart.yaml` and the key paths of their values files",
         "Nothing is merged.",
         "No value of an environment key is read or stored, and no secret.",
         "Terraform resources are not attached to an environment.",
@@ -663,3 +663,85 @@ fn every_row_cites_a_fact_that_resolves_in_the_fact_index() {
 
 #[path = "environments_kustomize_tests.rs"]
 mod kustomize;
+
+// AC-1502 (T-1502, #2167): a helmfile release is an environment listed by
+// its helmfile path and release; the Helm chart it installs is listed under
+// it with the chart's default values keys and the key paths of each values
+// file the release names; a chart no release installs is listed with no
+// environment. No value is shown.
+#[test]
+fn helmfile_releases_list_their_chart_and_values_keys() {
+    const HELMFILE: &str = "deploy/helmfile.yaml";
+    const CHART: &str = "charts/shop/Chart.yaml";
+    let mut f = Fixture::default();
+    let release = format!("{HELMFILE}#shop-prod");
+    let env = environment_id(SHOP, &release);
+    f.nodes.push(Node {
+        id: env.clone(),
+        label: "Environment".into(),
+        props: json!({
+            "declared_by": "helmfile",
+            "path": release,
+            "file": HELMFILE,
+            "release": "shop-prod",
+            "name": "shop-production",
+            "prov": confirmed(SHOP, HELMFILE, &[(10, 90)], &env),
+        }),
+    });
+    for (path, name) in [(CHART, "shop"), ("charts/cache/Chart.yaml", "cache")] {
+        let id = format!("workload:{SHOP}@{path}");
+        f.nodes.push(Node {
+            props: json!({
+                "kind": "helm-chart",
+                "name": name,
+                "path": path,
+                "version": "1.2.0",
+                "values_keys": ["image.tag", "replicaCount"],
+                "prov": confirmed(SHOP, path, &[(0, 40)], &id),
+            }),
+            id,
+            label: "Workload".into(),
+        });
+    }
+    let chart = format!("workload:{SHOP}@{CHART}");
+    f.edges.push(Edge {
+        props: json!({
+            "values": [{"path": "charts/shop/values-prod.yaml", "keys": ["replicaCount"]}],
+            "prov": confirmed(SHOP, HELMFILE, &[(10, 90)], &format!("{env} DECLARES {chart}")),
+        }),
+        src: env.clone(),
+        dst: chart,
+        label: "DECLARES".into(),
+    });
+    for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+        let content = f.artifact(mode).content;
+        assert!(
+            content.contains("Environments: 1. Workloads: 2."),
+            "{content}"
+        );
+        assert_eq!(
+            table(&content, "Environments"),
+            [
+                "| acme/shop | deploy/helmfile.yaml\\#shop-prod | shop-production | helmfile | 1 | \
+              Deterministic | Confirmed | acme/shop:deploy/helmfile.yaml bytes 10..90 @ 0123abc \
+              | — |"
+            ]
+        );
+        assert!(
+            content.contains(
+                "| acme/shop | deploy/helmfile.yaml\\#shop-prod | shop | charts/shop/Chart.yaml | \
+             1.2.0 | — | image.tag, replicaCount | charts/shop/values-prod.yaml: replicaCount | \
+             Deterministic | Confirmed | acme/shop:charts/shop/Chart.yaml bytes 0..40 @ 0123abc \
+             | — |"
+            ),
+            "{content}"
+        );
+        assert!(
+            content.contains(
+                "| acme/shop | no environment | cache | charts/cache/Chart.yaml | 1.2.0 | — | \
+             image.tag, replicaCount | — |"
+            ),
+            "{content}"
+        );
+    }
+}

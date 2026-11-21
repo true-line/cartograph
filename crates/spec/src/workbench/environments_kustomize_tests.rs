@@ -445,7 +445,7 @@ fn workloads_no_environment_declares_and_the_new_gaps_are_listed() {
         );
         for stated in [
             "only `Deployment`, `StatefulSet`, `DaemonSet` and `Job` documents are read",
-            "Helm charts and Helm values files are not read",
+            "Helm charts are read from `Chart.yaml` and the key paths of their values files",
             "Nothing is applied",
             "at most 16 kustomizations deep",
             "`valueFrom` and the `data` of any document are not read",

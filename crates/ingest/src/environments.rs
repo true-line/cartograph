@@ -53,9 +53,15 @@
 //! transformer is applied. A file that a kustomization names as a patch and
 //! none names as a resource is read only as a patch.
 //!
-//! Helm charts and values files are not read, and neither is a manifest of
-//! any other kind. They are named as present and not read ([`unread`]), a
-//! manifest by its kind.
+//! **Helm (the `helm` module).** A `Chart.yaml` is a `Workload` with the key
+//! paths of its default values file; templates are not rendered. A
+//! helmfile release is an `Environment` that `DECLARES` its chart when the
+//! chart is a directory of the repository, listing the key paths of each
+//! values file it names. A values file named only by its file name is a
+//! name-only Gap. No value of a values file is stored or cited.
+//!
+//! A manifest of any other kind is named as present and not read
+//! ([`unread`]), by its kind.
 //!
 //! This tier never calls an LLM.
 
@@ -77,12 +83,6 @@ pub const NAME_ONLY_REASON: &str =
 
 /// What every present-and-not-read message ends with.
 const NOT_READ: &str = "present and not read: no installed producer recovers environments from it";
-
-/// Files detected and not read: finding kind and what the file is.
-const UNREAD: &[(&str, &str)] = &[
-    ("helm-chart", "Helm chart"),
-    ("helm-values-file", "Helm values file"),
-];
 
 /// What the finding kind of an unread manifest document starts with; the
 /// document's `kind` follows.
@@ -133,7 +133,7 @@ pub struct Unread {
 /// True when `kind` is a finding kind this module produces. Coverage quotes
 /// such a finding's own message as its reason.
 pub fn is_limit_kind(kind: &str) -> bool {
-    kind.starts_with(UNREAD_MANIFEST) || UNREAD.iter().any(|(known, _)| *known == kind)
+    kind.starts_with(UNREAD_MANIFEST)
 }
 
 fn yaml(name: &str) -> bool {
@@ -201,21 +201,12 @@ fn manifest_candidate(name: &str, rel: &str) -> bool {
 /// are read, a `batch/*` `CronJob` is the schedule reader's, and a
 /// kustomization is read, so none of them is named.
 pub fn unread(name: &str, rel: &str, path: &Path) -> Vec<Unread> {
-    let file = |index: usize| {
-        let (kind, what) = UNREAD[index];
-        vec![Unread {
-            kind: kind.into(),
-            line: 1,
-            message: format!("{what} is {NOT_READ}"),
-        }]
-    };
-    if name == "Chart.yaml" {
-        return file(0);
-    }
-    if yaml(name) && helm_values(name) && path.with_file_name("Chart.yaml").is_file() {
-        return file(1);
-    }
-    if !manifest_candidate(name, rel) {
+    // Helm charts, values files and helmfiles are read (the `helm` module).
+    if name == "Chart.yaml"
+        || helm::HELMFILE_NAMES.contains(&name)
+        || (helm::values_name(name) && path.with_file_name("Chart.yaml").is_file())
+        || !manifest_candidate(name, rel)
+    {
         return Vec::new();
     }
     // Bounded: a manifest is small, and a larger YAML file is not opened to
@@ -249,12 +240,6 @@ pub fn unread(name: &str, rel: &str, path: &Path) -> Vec<Unread> {
             },
         })
         .collect()
-}
-
-/// `values.yaml` and its variants (`values-prod.yaml`, `values.dev.yml`).
-fn helm_values(name: &str) -> bool {
-    name.strip_prefix("values")
-        .is_some_and(|rest| rest.starts_with(['.', '-', '_']))
 }
 
 /// Props under construction: what redaction replaced and which properties
@@ -708,6 +693,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
         source_walk::Gitignores::Honor,
     )?;
     let tree = Tree::read(&walked);
+    let charts = helm::Index::read(&walked);
     let mut out = EnvironmentExtraction::default();
     for file in &walked {
         let emitter = Emitter { id, rel: &file.rel };
@@ -748,6 +734,19 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
                     findings.add(*reason, *span);
                     out.nodes.push(emitter.kustomization_gap(findings, &[]));
                 }
+            }
+        } else if file.name == "Chart.yaml" {
+            out.files += 1;
+            emitter.chart(file, &charts, &mut out);
+        } else if let Some(parsed) = charts.helmfiles.get(file.rel.as_str()) {
+            out.files += 1;
+            emitter.helmfile(parsed, &charts, &mut out);
+        } else if charts.chart_values(&file.rel, &file.name) {
+            // A chart's values file is read through its chart or a release;
+            // one named only by its file name names no declared environment.
+            if !charts.named(&file.rel) && helm::values_names_an_environment(&file.name) {
+                out.files += 1;
+                out.nodes.push(emitter.name_only());
             }
         } else if emitter.manifest(tree.documents(&file.rel), &mut out) {
             out.files += 1;
@@ -911,6 +910,172 @@ impl Emitter<'_> {
             if !service.findings.reasons.is_empty() {
                 out.nodes
                     .push(self.gap("compose-service", Some(&service.name), service.findings));
+            }
+        }
+    }
+
+    /// The key paths of the values file `rel`, or why none are read.
+    fn values_keys(&self, path: &Path) -> Result<(Vec<String>, usize), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|_| "the values file is not readable UTF-8 text".to_string())?;
+        helm::values_keys(&text).map_err(|reason| format!("the values file: {reason}"))
+    }
+
+    /// One `Chart.yaml`: a `Workload` of kind `helm-chart` with the key paths
+    /// of the chart's default values file, or a Gap.
+    fn chart(
+        &self,
+        file: &source_walk::WalkedFile,
+        index: &helm::Index,
+        out: &mut EnvironmentExtraction,
+    ) {
+        let parsed = std::fs::read_to_string(&file.path)
+            .map_err(|_| ("the file is not readable UTF-8 text", (0, 0)))
+            .and_then(|text| helm::chart(&text));
+        let decl = match parsed {
+            Ok(decl) => decl,
+            Err((reason, span)) => {
+                let mut findings = Findings::default();
+                findings.add(reason, span);
+                out.nodes.push(self.gap("helm-chart", None, findings));
+                return;
+            }
+        };
+        let id = format!("workload:{}@{}", self.id.repo, self.rel);
+        let mut props = decl.props;
+        props.insert("path".into(), self.rel.into());
+        let mut findings = Findings::default();
+        if let Some(values) = index.default_values(self.rel) {
+            let keys = index
+                .path(&values)
+                .ok_or_else(|| "the default values file is not readable".to_string())
+                .and_then(|path| self.values_keys(path));
+            match keys {
+                Ok((keys, omitted)) => {
+                    props.insert("values_file".into(), values.into());
+                    props.insert("values_keys".into(), keys.into());
+                    if omitted > 0 {
+                        props.insert("values_keys_omitted".into(), omitted.into());
+                    }
+                }
+                Err(reason) => findings.add(reason, decl.span),
+            }
+        }
+        out.nodes.push(Node {
+            props: self.seal(props, ConfidenceTier::Confirmed, &[decl.span], &id),
+            id,
+            label: "Workload".into(),
+        });
+        if !findings.reasons.is_empty() {
+            out.nodes.push(self.gap("helm-chart", None, findings));
+        }
+    }
+
+    /// One helmfile: an `Environment` per release, `DECLARES` to each
+    /// release's chart in the repository with its values files' key paths,
+    /// and a Gap per file and per release for what is not read.
+    fn helmfile(
+        &self,
+        parsed: &Result<helm::Helmfile, (&'static str, Span)>,
+        index: &helm::Index,
+        out: &mut EnvironmentExtraction,
+    ) {
+        let decl = match parsed {
+            Ok(decl) => decl,
+            Err((reason, span)) => {
+                let mut findings = Findings::default();
+                findings.add(*reason, *span);
+                out.nodes.push(self.gap("helmfile", None, findings));
+                return;
+            }
+        };
+        if !decl.findings.reasons.is_empty() {
+            out.nodes
+                .push(self.gap("helmfile", None, decl.findings.clone()));
+        }
+        for release in &decl.releases {
+            let environment = format!("env:{}@{}#{}", self.id.repo, self.rel, release.release);
+            let mut props = release.props.clone();
+            props.insert("declared_by".into(), "helmfile".into());
+            // The environment is the release, so its path names it within
+            // the helmfile; `file` is the helmfile itself.
+            props.insert(
+                "path".into(),
+                format!("{}#{}", self.rel, release.release).into(),
+            );
+            props.insert("file".into(), self.rel.into());
+            if !decl.environments.is_empty() {
+                props.insert(
+                    "helmfile_environments".into(),
+                    decl.environments.clone().into(),
+                );
+            }
+            out.nodes.push(Node {
+                props: self.seal(
+                    props,
+                    ConfidenceTier::Confirmed,
+                    &[release.span],
+                    &environment,
+                ),
+                id: environment.clone(),
+                label: "Environment".into(),
+            });
+            let mut findings = release.findings.clone();
+            let mut values = Vec::new();
+            let mut cited = vec![release.span];
+            for (entry, span) in &release.values {
+                match index.values_file(self.rel, entry) {
+                    Ok(rel) => {
+                        match index
+                            .path(&rel)
+                            .and_then(|path| self.values_keys(path).ok())
+                        {
+                            Some((keys, omitted)) => {
+                                let mut value = serde_json::json!({ "path": rel, "keys": keys });
+                                if omitted > 0 {
+                                    value["keys_omitted"] = omitted.into();
+                                }
+                                values.push(value);
+                                cited.push(*span);
+                            }
+                            None => findings.add(
+                                format!("values file `{rel}` does not parse as a mapping"),
+                                *span,
+                            ),
+                        }
+                    }
+                    Err(reason) => findings.add(reason, *span),
+                }
+            }
+            if let Some((chart, span)) = &release.chart {
+                match index.chart_of(self.rel, chart) {
+                    helm::ChartTarget::Chart(rel) => {
+                        let dst = format!("workload:{}@{rel}", self.id.repo);
+                        let mut props = Props::new();
+                        if !values.is_empty() {
+                            props.insert("values".into(), values.into());
+                        }
+                        cited.push(*span);
+                        cited.sort();
+                        cited.dedup();
+                        out.edges.push(Edge {
+                            props: self.seal(
+                                props,
+                                ConfidenceTier::Confirmed,
+                                &cited,
+                                &format!("{environment} DECLARES {dst}"),
+                            ),
+                            src: environment.clone(),
+                            dst,
+                            label: "DECLARES".into(),
+                        });
+                    }
+                    helm::ChartTarget::Problem(reason) => findings.add(reason, *span),
+                }
+            }
+            if !findings.reasons.is_empty() {
+                out.nodes
+                    .push(self.gap("helmfile-release", Some(&release.release), findings));
             }
         }
     }
@@ -1100,6 +1265,7 @@ impl Emitter<'_> {
     }
 }
 
+mod helm;
 mod kubernetes;
 mod kustomize;
 

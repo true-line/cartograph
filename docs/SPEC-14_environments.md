@@ -180,6 +180,37 @@ read.
 **Workloads no environment declares.** A manifest workload that no
 kustomization reaches is still a `Workload`; it has no `DECLARES` edge.
 
+## Facts (increment 3: Helm charts and helmfiles)
+
+- **Chart:** each `Chart.yaml` is a `Workload` with id
+  `workload:{repo}@{chartdir}/Chart.yaml`, kind `helm-chart`, carrying
+  `name`, `version`, `app_version`, `chart_type`, dependency names, the
+  chart's `values.yaml` path when present, and `values_keys`: the sorted
+  leaf key paths of that file (`a.b.c`; `[]` marks a sequence), at most 8
+  levels deep and 512 paths, with `values_keys_omitted` counting the rest.
+  No value is read. Templates are never rendered.
+- **Helmfile release:** each release of a `helmfile.yaml` or `helmfile.yml`
+  (`helmfile.d/` is not read) is an `Environment` with id
+  `env:{repo}@{helmfile}#{release}`, `path` `{helmfile}#{release}`,
+  declared by the helmfile, named only by the `namespace` it states. It has
+  `DECLARES` to the chart its `chart:` names when that is a local chart
+  directory; the edge carries `values`: for each values file the release
+  lists, its path and key paths (or a problem). The helmfile's
+  `environments` names are listed on each release, not turned into
+  environments, because which one applies is chosen at run time.
+- **Gaps:** kind `helmfile` for a helmfile that is templated (`{{`), does
+  not parse, or uses `bases` or `helmfiles`; kind `helmfile-release` for a
+  remote or missing chart, a missing or unreadable values file, inline
+  values, `set`, `setString`, `secrets` and `valuesTemplate` (each named,
+  none read); kind `helm-chart` for a `Chart.yaml` or values file that
+  does not parse. A chart values file that no release lists and whose name
+  names an environment (`values-prod.yaml`, `values.staging.yaml`) is a
+  name-only Gap (decision 3).
+- **Document:** a **Helm charts** table after the Kubernetes tables, one row
+  per chart and environment that installs it (or "no environment"), with
+  version, app version, default values keys and each release's values files
+  and their keys.
+
 ## The document
 
 `environments.md`, artifact id `environments`, in both export modes:
@@ -214,8 +245,9 @@ decision says otherwise.
 
 1. **Compose** (this specification).
 2. Kubernetes manifests and kustomize (specified above; AC-0662).
-3. Helm values files and per-environment settings files, if a file states
-   the environment; otherwise they stay Gaps.
+3. Helm charts and helmfiles (specified above; AC-1502); per-environment
+   settings files, if a file states the environment, otherwise they stay
+   Gaps.
 4. Terraform root modules, after #1844.
 
 AC-0661 covers increment 1 and AC-0662 increment 2. The issue's evidence (a
@@ -227,7 +259,8 @@ after increment 2.
 - Manifest recognition reads two keys of every YAML file that is not a
   Compose file or a workflow. US-0019 says only name-matched configuration
   files are read; this is the one exception and it stores nothing from them.
-- Helm templates that are not valid YAML are not recognised as manifests.
+- Helm templates that are not valid YAML are not recognised as manifests,
+  and charts are never rendered (AC-1502).
 
 - Whether a `Workload` should appear in `topology.md`.
 - Linking a `Workload`'s image to the Dockerfile pipeline that builds it
