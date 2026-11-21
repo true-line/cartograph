@@ -28,13 +28,20 @@ still need validation; the presence of an artifact is not proof of completeness.
 
 ## Status
 
-As of 0.67 the deterministic foundation is built: the desktop recovery engine,
-language and infrastructure adapters, graph and flow views, provenance, the
-specification compiler and its exports, a read-only MCP surface, and bounded
-specialist investigations that answer cited questions.
+As of 0.72 the deterministic foundation is built: the desktop recovery engine,
+language adapters (TypeScript, Python, Go, Rust, Java and Kotlin) and
+infrastructure adapters, graph and flow views, C4 architecture views (system
+context, containers and components), provenance, the specification compiler and
+its exports, a read-only MCP surface, and bounded specialist investigations that
+answer cited questions. The D1 system overview is composed from the knowledge
+graph at system scope, each recovered area has a topic expert that answers from
+its area briefing, and accepted proposals and findings accepted as curated reach
+the exports through the curated projection.
 
-Not built yet: agents do not write document sections, accepted proposals do not
-reach the exports, and documents are not updated when the code drifts. The plan
+Not built yet: agents do not draft the D2 to D10 documents
+([#1748](https://github.com/true-line/cartograph/issues/1748)), and documents are
+not updated when the code drifts
+([#1749](https://github.com/true-line/cartograph/issues/1749)). The plan
 for those stages is [ROADMAP §10](docs/ROADMAP.md#10-realignment-2026-11-09);
 the direction is [ADR-0056](docs/adr/ADR-0056-documentation-reconstruction-pipeline.md).
 Planned capabilities have separate delivery gates and are not shipped until
