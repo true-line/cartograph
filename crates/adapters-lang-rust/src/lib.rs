@@ -144,6 +144,9 @@ struct FileCx<'a> {
     /// Names of modules this file declares (`mod foo;` / `mod foo {}`), so
     /// a 2018-edition `use foo::x` resolves locally rather than as a crate.
     declared_mods: BTreeSet<String>,
+    /// Whether the file is a module an out-of-line `#[cfg(test)] mod x;`
+    /// declares, or one nested in it (#2018).
+    test_module: bool,
 }
 
 impl FileCx<'_> {
@@ -758,6 +761,7 @@ fn extract_source_inner(
     module: Vec<String>,
     crate_name: String,
     workspace_crates: BTreeSet<String>,
+    test_module: bool,
 ) -> Result<Extraction, ExtractError> {
     let mut parser = Parser::new();
     parser.set_language(&language())?;
@@ -781,6 +785,7 @@ fn extract_source_inner(
         crate_name,
         workspace_crates,
         declared_mods,
+        test_module,
     };
     let mut out = Extraction::default();
     out.nodes.push(Node {
@@ -893,7 +898,13 @@ fn extract_source_inner(
     sql::extract(&cx, root, &bindings, &functions_by_start, &mut out);
     // Target tests and the requests they build (#2018, AC-1016).
     let mut test_requests = Vec::new();
-    target_tests::extract(&cx, &function_items, &mut out, &mut test_requests);
+    target_tests::extract(
+        &cx,
+        &bindings,
+        &function_items,
+        &mut out,
+        &mut test_requests,
+    );
     out.test_requests = test_requests;
 
     let client_fields = reqwest::client_fields(&cx, root, &bindings);
@@ -1205,6 +1216,7 @@ pub fn extract_source(
         module,
         crate_name.clone(),
         BTreeSet::from([crate_name]),
+        false,
     )?;
     finalize_single(&mut out);
     Ok(out)
@@ -1470,6 +1482,25 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     let wired = module_paths::modules(&declared, &crates);
+    // Modules an out-of-line `#[cfg(test)] mod x;` declares: the files at
+    // or under them are test code (#2018).
+    let mut test_prefixes: BTreeSet<Vec<String>> = BTreeSet::new();
+    for path in &files {
+        let source = std::fs::read(root.join(path))?;
+        let names = target_tests::cfg_test_declarations(&source);
+        if names.is_empty() {
+            continue;
+        }
+        let (module, _) = wired
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| module_for(path, &crates));
+        for name in names {
+            let mut prefix = module.clone();
+            prefix.push(name);
+            test_prefixes.insert(prefix);
+        }
+    }
     let mut out = Extraction::default();
     for path in &files {
         on_file(path);
@@ -1478,9 +1509,12 @@ pub fn extract_dir_incremental_with_progress(
             .get(path)
             .cloned()
             .unwrap_or_else(|| module_for(path, &crates));
+        let test_module = test_prefixes
+            .iter()
+            .any(|prefix| module.starts_with(prefix));
         let source_hash = core_prov::content_hash(&source);
         let context = format!(
-            "{source_hash}\0{}\0{}",
+            "{source_hash}\0{}\0{}\0{test_module}",
             module.join("::"),
             workspace_crates
                 .iter()
@@ -1505,6 +1539,7 @@ pub fn extract_dir_incremental_with_progress(
                     module,
                     crate_name,
                     workspace_crates.clone(),
+                    test_module,
                 )?
             }
         };

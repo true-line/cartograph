@@ -194,6 +194,7 @@ pub(super) fn resolve_external_paths(
             | "http"
             | "std"
             | "alloc"
+            | "hyper"
             | "rusqlite"
             | "sqlx"
             | "postgres"

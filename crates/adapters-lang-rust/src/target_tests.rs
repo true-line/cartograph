@@ -111,12 +111,62 @@ pub(super) fn test_attribute(cx: &FileCx<'_>, function: TsNode<'_>) -> Option<St
     None
 }
 
-/// Whether `node` is test code: in a crate's `tests/` integration tests,
-/// in a module named `tests` or `*_tests` (the `#[cfg(test)] mod tests;`
-/// convention, whose `cfg` sits in the declaring file), inside a test
-/// function, or in a module under `#[cfg(test)]`.
+/// The names of out-of-line modules a file declares under `#[cfg(test)]`
+/// (`#[cfg(test)] mod fixtures;`, other attributes and `pub` allowed).
+pub(super) fn cfg_test_declarations(source: &[u8]) -> Vec<String> {
+    const CFG: &str = "#[cfg(test)]";
+    let Ok(text) = std::str::from_utf8(source) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(CFG) {
+        from += at + CFG.len();
+        let mut rest = text[from..].trim_start();
+        // Further attributes and comments between the cfg and the item.
+        loop {
+            if rest.starts_with("#[") {
+                let Some(end) = rest.find(']') else { break };
+                rest = rest[end + 1..].trim_start();
+            } else if rest.starts_with("//") {
+                let end = rest.find('\n').unwrap_or(rest.len());
+                rest = rest[end..].trim_start();
+            } else {
+                break;
+            }
+        }
+        if let Some(after) = rest.strip_prefix("pub") {
+            rest = after.trim_start();
+            if rest.starts_with('(') {
+                let Some(end) = rest.find(')') else { continue };
+                rest = rest[end + 1..].trim_start();
+            }
+        }
+        let Some(after) = rest.strip_prefix("mod") else {
+            continue;
+        };
+        if !after.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let after = after.trim_start();
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && after[name.len()..].trim_start().starts_with(';') {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Whether `node` is test code: in a crate's `tests/` integration tests, in
+/// a module an out-of-line `#[cfg(test)] mod x;` declares, in a module
+/// named `tests` or `*_tests` (the convention when the declaration is not
+/// read), inside a test function, or in a module under `#[cfg(test)]`.
 pub(super) fn in_test_code(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
-    if cx.path.starts_with("tests/")
+    if cx.test_module
+        || cx.path.starts_with("tests/")
         || cx.path.contains("/tests/")
         || cx
             .module
@@ -292,9 +342,13 @@ fn path(cx: &FileCx<'_>, node: TsNode<'_>) -> Result<String, &'static str> {
 }
 
 /// Where a request chain starts: its default method and the argument of the
-/// constructor that holds its target, if any.
+/// constructor that holds its target, if any. The type must resolve through
+/// the file's `use`s (a test module's `use super::*` included) or a
+/// qualified path to `http`, `axum`, `hyper` or `actix_web`, so a workspace
+/// type named `Request` is not one.
 fn chain_start<'t>(
     cx: &FileCx<'_>,
+    bindings: &Bindings,
     call: TsNode<'t>,
 ) -> Option<(Option<&'static str>, Option<TsNode<'t>>)> {
     let function = call.child_by_field_name("function")?;
@@ -302,8 +356,35 @@ fn chain_start<'t>(
         return None;
     }
     let text: String = cx.text(&function).split_whitespace().collect();
-    let (head, name) = text.rsplit_once("::")?;
-    let ty = head.rsplit("::").next()?;
+    let scopes = visible_scopes(cx, call);
+    let mut paths = http::resolve_external_paths(cx, bindings, &scopes, &text, None);
+    if paths.is_empty() {
+        // `use super::*;` in a test module brings in the parent's own
+        // `use`s: resolve the name there, once for each glob.
+        let mut through: BTreeSet<Vec<String>> = BTreeSet::new();
+        for prefix in bindings.globs(&scopes) {
+            let scope = [prefix.join("::")];
+            through.extend(http::resolve_external_paths(
+                cx, bindings, &scope, &text, None,
+            ));
+        }
+        paths = through.into_iter().collect();
+    }
+    let [path] = paths.as_slice() else {
+        return None;
+    };
+    let (Some(krate), [.., ty, name]) = (path.first(), path.as_slice()) else {
+        return None;
+    };
+    let (ty, name) = (ty.as_str(), name.as_str());
+    let allowed = match ty {
+        "Request" => matches!(krate.as_str(), "http" | "axum" | "hyper"),
+        "TestRequest" => krate == "actix_web",
+        _ => false,
+    };
+    if !allowed {
+        return None;
+    }
     let arguments = http::call_arguments(call);
     let verb = VERBS.iter().find(|verb| **verb == name).copied();
     match ty {
@@ -321,6 +402,7 @@ fn chain_start<'t>(
 /// The test cases a file defines and the requests they build.
 pub(super) fn extract(
     cx: &FileCx<'_>,
+    bindings: &Bindings,
     functions: &[(TsNode<'_>, String)],
     out: &mut Extraction,
     requests: &mut Vec<TestRequest>,
@@ -375,7 +457,7 @@ pub(super) fn extract(
             if node.kind() != "call_expression" {
                 continue;
             }
-            let Some((verb, mut target)) = chain_start(cx, node) else {
+            let Some((verb, mut target)) = chain_start(cx, bindings, node) else {
                 continue;
             };
             let mut method_node = None;
