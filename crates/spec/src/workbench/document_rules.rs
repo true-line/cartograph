@@ -1385,12 +1385,22 @@ fn state_machine<'a>(
         if guards.is_empty() {
             continue;
         }
-        writeln!(
-            out,
-            "Guards in `{}`, which the framework runs before a move (`fromState`, `toState`); a \
-             returned message or a throw refuses the move:\n",
-            Literal(hook_name)
-        )?;
+        // Only `onTransitionStart` runs before a move and can refuse it;
+        // `onTransitionEnd` runs after it (AC-1032).
+        if hook_name == "onTransitionEnd" {
+            writeln!(
+                out,
+                "Effects in `{}`, which the framework runs after a move (`fromState`, `toState`):\n",
+                Literal(hook_name)
+            )?;
+        } else {
+            writeln!(
+                out,
+                "Guards in `{}`, which the framework runs before a move (`fromState`, `toState`); \
+                 a returned message or a throw refuses the move:\n",
+                Literal(hook_name)
+            )?;
+        }
         out.push_str(HEADER)?;
         for row in &guards {
             write_row(row, assertions, asserted, out)?;
@@ -2982,7 +2992,9 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         );
         assert!(
             at("Guards in `onTransitionStart`")
-                < at("| onTransitionStart | Not stated in domain terms (Gap)")
+                < at(
+                    "| onTransitionStart | When the to state is “ArrangingPayment” and the lines's length is 0, the move is refused with a message the export withholds. |"
+                )
         );
         assert!(text.contains(
             "when (toState === 'ArrangingPayment' &amp;&amp; order.lines.length === 0): returns"
@@ -2999,6 +3011,90 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             plain
                 .contains("### State machines\n\n#### State machine: configureDefaultOrderProcess"),
             "{plain}"
+        );
+    }
+
+    // AC-1032 (T-1032): a transition guard of a state machine reads as a
+    // refused move, whatever message it returns (one the export withholds,
+    // a plain one or `false`), over conditions with optional chaining and
+    // camel-case checks.
+    #[test]
+    fn transition_guards_are_stated_as_refused_moves() {
+        let source = "export function configureDefaultOrderProcess(options) {
+    const orderProcess: OrderProcess<OrderState> = {
+        transitions: {
+            AddingItems: { to: ['ArrangingPayment', 'Cancelled'] },
+            ArrangingPayment: { to: ['PaymentSettled', 'Cancelled'] },
+            PaymentSettled: { to: ['Cancelled'] },
+            Cancelled: { to: [] },
+        },
+        async onTransitionStart(fromState, toState, { order }) {
+            if (toState === 'ArrangingPayment') {
+                if (options.arrangingPaymentRequiresContents !== false && order.lines.length === 0) {
+                    return 'message.cannot-transition-to-payment-when-order-is-empty';
+                }
+                if (options.arrangingPaymentRequiresShipping !== false && order.shippingLines?.length === 0) {
+                    return 'no shipping';
+                }
+            }
+            if (toState === 'PaymentSettled' && !orderTotalIsCovered(order, 'Settled')) {
+                return false;
+            }
+            if (toState === 'Cancelled' && !hasAnAuthorizedPayment) {
+                return ctx.translate('message.cannot-cancel');
+            }
+            if (toState === 'Shipped') {
+                return true;
+            }
+        },
+    };
+    return orderProcess;
+}
+";
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/config/order/default-order-process.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let knowledge = Stories {
+            included: Vec::new(),
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        for line in [
+            "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires contents is not false and the lines's length is 0, the move is refused with a message the export withholds. |",
+            "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires shipping is not false and the shipping lines's length is 0, the move is refused with the message “no shipping”. |",
+            "| onTransitionStart | When the to state is “PaymentSettled” and the check “order total is covered” does not hold, the move is refused. |",
+            "| onTransitionStart | When the to state is “Cancelled” and the check “has no authorized payment” holds, the move is refused. |",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        assert!(!text.contains(NOT_STATED), "{text}");
+        // `true` lets the move happen.
+        assert!(
+            text.contains(
+                "| onTransitionStart | When the to state is “Shipped”, the move is allowed. |"
+            ),
+            "{text}"
         );
     }
 

@@ -121,7 +121,11 @@ fn tokenize(text: &str) -> Option<Vec<Tok>> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() {
+        // Optional chaining reads as a member (AC-1032): `a?.b` is `a.b`.
+        if c == '?' && chars.get(i + 1) == Some(&'.') {
+            out.push(Tok::Op(".".to_owned()));
+            i += 2;
+        } else if c.is_whitespace() {
             i += 1;
         } else if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
@@ -773,7 +777,9 @@ fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Op
             format!("{whose} {what} check passes")
         });
     }
-    if owner.is_empty() && last.trim_start_matches('_').contains('_') {
+    // A function named in more than one word, in snake or camel case
+    // (`orderItemsAreShipped`, AC-1032).
+    if owner.is_empty() && words(last.trim_start_matches('_')).contains(' ') {
         let name = words(last.trim_start_matches('_'));
         return Some(if negated {
             format!("the check “{name}” does not hold")
@@ -870,7 +876,17 @@ fn flag(path: &[String], negated: bool, cx: &Context<'_>) -> Option<String> {
         // A bare name: a presence test, or a predicate function.
         if let Some((verb, rest)) = predicate_verb(last) {
             let verb = if negated { negated_verb(verb) } else { verb };
-            return Some(format!("the check “{verb} {}” holds", words(rest)));
+            let rest = words(rest);
+            // "has no an authorized payment" drops its article (AC-1032).
+            let rest = match verb {
+                "has no" => rest
+                    .strip_prefix("an ")
+                    .or_else(|| rest.strip_prefix("a "))
+                    .unwrap_or(&rest)
+                    .to_owned(),
+                _ => rest,
+            };
+            return Some(format!("the check “{verb} {rest}” holds"));
         }
         let phrase = words(last);
         let article = if phrase.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
@@ -2100,6 +2116,28 @@ fn rendered(
         }
         LocalExit::Return { value: Some(value) } => value.display.as_str().trim().to_owned(),
     };
+    // A state machine's `onTransitionStart` refuses a move by what it
+    // returns (AC-1032): a message, `false`, or a message the export
+    // withholds.
+    if method == "onTransitionStart" {
+        let refusal = match value.as_str() {
+            "false" => Some("the move is refused".to_owned()),
+            "[REDACTED]" => {
+                Some("the move is refused with a message the export withholds".to_owned())
+            }
+            // `true` lets the move happen; any other value refuses it.
+            "true" => Some("the move is allowed".to_owned()),
+            other => match parse(other) {
+                Some(Expr::Lit(Lit::Str(message))) => {
+                    Some(format!("the move is refused with the message “{message}”"))
+                }
+                _ => Some("the move is refused".to_owned()),
+            },
+        };
+        if let Some(refusal) = refusal {
+            return Some(sentence(refusal));
+        }
+    }
     if let Some((status, message)) = response(&value) {
         return Some(sentence(refused(status, message)));
     }
