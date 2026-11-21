@@ -146,7 +146,22 @@ fn member_of_named_type(declaration: TsNode<'_>) -> bool {
 /// `throw` leave that function.
 const SCOPE_FUNCTIONS: &[&str] = &["let", "run", "also", "apply", "with", "use"];
 
-/// The file's source and the scope-function names it may rebind: a function
+/// Standard-library preconditions: `require`/`check` (and their `NotNull`
+/// forms) throw when their argument is false (or null); `error` always
+/// throws.
+const PRECONDITIONS: &[&str] = &[
+    "require",
+    "check",
+    "requireNotNull",
+    "checkNotNull",
+    "error",
+];
+
+/// Scope functions that rebind `this`, so a bare call in their lambda may
+/// resolve to a member of the receiver.
+const RECEIVER_SCOPES: &[&str] = &["run", "apply", "with"];
+
+/// The file's source and the scope-function and precondition names it may rebind: a function
 /// it declares (top level, member or local) or a name it imports from
 /// outside `kotlin.` by a named import or alias. A call of such a name is no
 /// proven standard-library scope function, so its lambda stays a boundary.
@@ -190,40 +205,42 @@ impl<'a> Inline<'a> {
             let mut cursor = node.walk();
             stack.extend(node.named_children(&mut cursor));
         }
-        shadowed.retain(|name| SCOPE_FUNCTIONS.contains(&name.as_str()));
+        shadowed.retain(|name| {
+            SCOPE_FUNCTIONS.contains(&name.as_str()) || PRECONDITIONS.contains(&name.as_str())
+        });
         Self { source, shadowed }
     }
 }
 
-/// Whether `lambda` is the trailing lambda of a scope-function call
-/// (`x?.let { … }`, `run { … }`) whose name the file does not rebind, which
-/// belongs to the enclosing function.
-fn scope_lambda(inline: &Inline<'_>, lambda: TsNode<'_>) -> bool {
+/// The scope function whose trailing lambda `lambda` is (`x?.let { … }`,
+/// `run { … }`), when the file does not rebind its name: the name and
+/// whether the call is bare (no explicit receiver). Its lambda belongs to the
+/// enclosing function.
+fn scope_call(inline: &Inline<'_>, lambda: TsNode<'_>) -> Option<(&'static str, bool)> {
     if lambda.kind() != "lambda_literal" {
-        return false;
+        return None;
     }
-    let Some(call) = lambda
+    let call = lambda
         .parent()
         .filter(|annotated| annotated.kind() == "annotated_lambda")
         .and_then(|annotated| annotated.parent())
-        .filter(|call| call.kind() == "call_expression")
-    else {
-        return false;
-    };
-    let Some(head) = call.named_child(0) else {
-        return false;
-    };
-    let name = match head.kind() {
-        "identifier" => Some(head),
-        "navigation_expression" => head.named_child(1).filter(|n| n.kind() == "identifier"),
+        .filter(|call| call.kind() == "call_expression")?;
+    let head = call.named_child(0)?;
+    let identifier = |n: &TsNode<'_>| n.kind() == "identifier";
+    let (name, bare) = match head.kind() {
+        "identifier" => (head, true),
+        "navigation_expression" => (head.named_child(1).filter(identifier)?, false),
         // `with(x) { … }`
-        "call_expression" => head.named_child(0).filter(|n| n.kind() == "identifier"),
-        _ => None,
+        "call_expression" => (head.named_child(0).filter(identifier)?, true),
+        _ => return None,
     };
-    name.is_some_and(|name| {
-        name.utf8_text(inline.source)
-            .is_ok_and(|text| SCOPE_FUNCTIONS.contains(&text) && !inline.shadowed.contains(text))
-    })
+    let text = name.utf8_text(inline.source).ok()?;
+    let name = SCOPE_FUNCTIONS.iter().find(|known| **known == text)?;
+    (!inline.shadowed.contains(text)).then_some((*name, bare))
+}
+
+fn scope_lambda(inline: &Inline<'_>, lambda: TsNode<'_>) -> bool {
+    scope_call(inline, lambda).is_some()
 }
 
 type Branch<'t> = (TsNode<'t>, TsNode<'t>, BranchPolarity);
@@ -262,32 +279,458 @@ fn if_branch(
     })
 }
 
-/// The `if` / `else` branches around `node` up to its function, outermost
-/// first: the consequence's condition truthy, an `else` (or `else if`) the
-/// earlier condition falsy.
-fn branches<'t>(inline: &Inline<'_>, mut node: TsNode<'t>) -> (Vec<Branch<'t>>, bool) {
+/// The branches around `node` up to its function, outermost first: an
+/// `if`'s consequence takes its condition truthy and an `else` (or `else
+/// if`) the earlier condition falsy; the right side of an elvis (`x ?:
+/// throw …`) takes its left side falsy (absent); an entry of a subject-less
+/// `when` takes its condition truthy and every earlier entry's falsy. The
+/// second flag is a capture limit; the third is false when a branch cannot
+/// be stated as conditions (an entry of a `when (subject)` or one with
+/// several conditions).
+fn branches<'t>(inline: &Inline<'_>, mut node: TsNode<'t>) -> (Vec<Branch<'t>>, bool, bool) {
     let mut conditions: Vec<Branch<'_>> = Vec::new();
     let mut steps = 0;
+    let mut supported = true;
     while let Some(parent) = node.parent() {
         if BOUNDARIES.contains(&parent.kind()) && !scope_lambda(inline, parent) {
             break;
         }
         steps += 1;
         if steps > MAX_ANCESTOR_STEPS || conditions.len() > MAX_CONDITIONS {
-            return (conditions, true);
+            return (conditions, true, supported);
         }
-        if parent.kind() == "if_expression"
-            && let Some(condition) = parent.child_by_field_name("condition")
-            && let Some(polarity) = if_branch(parent, condition, node)
-        {
-            conditions.push((parent, unparenthesized(condition), polarity));
+        match parent.kind() {
+            "if_expression" => {
+                if let Some(condition) = parent.child_by_field_name("condition")
+                    && let Some(polarity) = if_branch(parent, condition, node)
+                {
+                    conditions.push((parent, unparenthesized(condition), polarity));
+                }
+            }
+            "binary_expression" => {
+                if parent
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| op.kind() == "?:")
+                    && parent.child_by_field_name("right") == Some(node)
+                    && let Some(left) = parent.child_by_field_name("left")
+                {
+                    conditions.push((parent, unparenthesized(left), BranchPolarity::FalsyBranch));
+                }
+            }
+            "when_entry" => match when_branch(parent, node) {
+                Some(entries) => conditions.extend(entries),
+                None => supported = false,
+            },
+            _ => {}
         }
         node = parent;
     }
     conditions.reverse();
     let limited = conditions.len() > MAX_CONDITIONS;
     conditions.truncate(MAX_CONDITIONS);
-    (conditions, limited)
+    (conditions, limited, supported)
+}
+
+fn entry_conditions(entry: TsNode<'_>) -> Vec<TsNode<'_>> {
+    let mut cursor = entry.walk();
+    entry
+        .children_by_field_name("condition", &mut cursor)
+        .collect()
+}
+
+fn has_subject(when: TsNode<'_>) -> bool {
+    let mut cursor = when.walk();
+    when.named_children(&mut cursor)
+        .any(|child| child.kind() == "when_subject")
+}
+
+/// Whether every entry of a `when` is stated by its conditions: no subject
+/// and at most one condition an entry.
+fn when_stated(when: TsNode<'_>) -> bool {
+    let mut cursor = when.walk();
+    !has_subject(when)
+        && when
+            .named_children(&mut cursor)
+            .filter(|entry| entry.kind() == "when_entry")
+            .all(|entry| entry_conditions(entry).len() <= 1)
+}
+
+/// The conditions, innermost first, under which the body `child` of a
+/// subject-less `when` entry runs; empty for a child that is a condition;
+/// `None` when they cannot be stated.
+fn when_branch<'t>(entry: TsNode<'t>, child: TsNode<'t>) -> Option<Vec<Branch<'t>>> {
+    let own = entry_conditions(entry);
+    if own.contains(&child) {
+        return Some(Vec::new());
+    }
+    let when = entry.parent().filter(|w| w.kind() == "when_expression")?;
+    if has_subject(when) {
+        return None;
+    }
+    let mut out = Vec::new();
+    match own.as_slice() {
+        [] => {}
+        [condition] => out.push((
+            entry,
+            unparenthesized(*condition),
+            BranchPolarity::TruthyBranch,
+        )),
+        _ => return None,
+    }
+    let mut cursor = when.walk();
+    let earlier: Vec<_> = when
+        .named_children(&mut cursor)
+        .filter(|e| e.kind() == "when_entry" && e.start_byte() < entry.start_byte())
+        .collect();
+    for earlier in earlier.into_iter().rev() {
+        for condition in entry_conditions(earlier).into_iter().rev() {
+            out.push((
+                earlier,
+                unparenthesized(condition),
+                BranchPolarity::FalsyBranch,
+            ));
+        }
+    }
+    Some(out)
+}
+
+/// A standard-library precondition call: its exit (the call, with its
+/// message lambda), its name, the guarded argument (none for `error`) and
+/// the value the exit carries (the message literal, else the call).
+struct Precondition<'t> {
+    exit: TsNode<'t>,
+    name: &'static str,
+    condition: Option<TsNode<'t>>,
+    value: TsNode<'t>,
+}
+
+fn precondition<'t>(inline: &Inline<'_>, call: TsNode<'t>) -> Option<Precondition<'t>> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let head = call.named_child(0).filter(|n| n.kind() == "identifier")?;
+    let text = head.utf8_text(inline.source).ok()?;
+    let name = *PRECONDITIONS.iter().find(|known| **known == text)?;
+    if inline.shadowed.contains(text) {
+        return None;
+    }
+    let mut cursor = call.walk();
+    let arguments = call
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "value_arguments")?;
+    let mut cursor = arguments.walk();
+    let values: Vec<_> = arguments
+        .named_children(&mut cursor)
+        .filter(|n| !is_comment(*n))
+        .collect();
+    let [argument] = values.as_slice() else {
+        return None;
+    };
+    // A named argument (`value = …`) is not read.
+    let mut cursor = argument.walk();
+    if argument
+        .children(&mut cursor)
+        .any(|token| !token.is_named() && token.kind() == "=")
+    {
+        return None;
+    }
+    let mut cursor = argument.walk();
+    let expression = argument
+        .named_children(&mut cursor)
+        .filter(|n| !is_comment(*n))
+        .last()?;
+    let outer = call
+        .parent()
+        .filter(|outer| outer.kind() == "call_expression" && outer.named_child(0) == Some(call));
+    let lambda = outer
+        .and_then(|outer| {
+            let mut cursor = outer.walk();
+            outer
+                .named_children(&mut cursor)
+                .find(|n| n.kind() == "annotated_lambda")
+        })
+        .and_then(|annotated| annotated.named_child(0))
+        .filter(|lambda| lambda.kind() == "lambda_literal");
+    if outer.is_some() && lambda.is_none() {
+        return None;
+    }
+    let exit = outer.unwrap_or(call);
+    if name == "error" {
+        return lambda.is_none().then_some(Precondition {
+            exit,
+            name,
+            condition: None,
+            value: call,
+        });
+    }
+    let message = lambda.and_then(|lambda| {
+        let mut cursor = lambda.walk();
+        let parts: Vec<_> = lambda
+            .named_children(&mut cursor)
+            .filter(|n| !is_comment(*n))
+            .collect();
+        match parts.as_slice() {
+            [only] if only.kind() == "string_literal" => Some(*only),
+            _ => None,
+        }
+    });
+    Some(Precondition {
+        exit,
+        name,
+        condition: Some(expression),
+        value: message.unwrap_or(call),
+    })
+}
+
+/// The proven-by-name standard-library functions an exit relies on, inner
+/// first: the scope functions whose lambdas it crosses and its precondition.
+/// A name is bare when it was called without a receiver and no enclosing
+/// `run`/`apply`/`with` lambda rebinds `this` around it; otherwise a member
+/// of an unknown receiver may own it.
+fn relied_names(
+    inline: &Inline<'_>,
+    exit: TsNode<'_>,
+    precondition: Option<&'static str>,
+) -> Vec<(String, bool)> {
+    let mut uses: Vec<(&'static str, bool)> =
+        precondition.map(|name| (name, true)).into_iter().collect();
+    let mut node = exit;
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "function_declaration" {
+            break;
+        }
+        if let Some((name, bare)) = scope_call(inline, parent) {
+            if RECEIVER_SCOPES.contains(&name) {
+                for inner in &mut uses {
+                    inner.1 = false;
+                }
+            }
+            uses.push((name, bare));
+        }
+        node = parent;
+    }
+    uses.into_iter()
+        .map(|(name, bare)| (name.to_owned(), bare))
+        .collect()
+}
+
+/// The named type declaring `function`, as `package.Outer.Inner`.
+fn enclosing_type(source: &[u8], function: TsNode<'_>, package: Option<&str>) -> Option<String> {
+    let mut chain = Vec::new();
+    let mut node = function;
+    while let Some(parent) = node.parent() {
+        if matches!(parent.kind(), "class_declaration" | "object_declaration")
+            && let Some(name) = parent.child_by_field_name("name")
+        {
+            chain.push(name.utf8_text(source).ok()?.to_owned());
+        }
+        node = parent;
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    chain.reverse();
+    Some(match package {
+        Some(package) => format!("{package}.{}", chain.join(".")),
+        None => chain.join("."),
+    })
+}
+
+/// A rule whose exit relies on standard-library names another file of the
+/// repository may rebind, settled at the directory join.
+#[derive(Debug, Clone)]
+pub(super) struct PendingRule {
+    rule_id: String,
+    uses: Vec<(String, bool)>,
+    package: Option<String>,
+    stars: Vec<String>,
+    /// Relied-on names the file imports explicitly from `kotlin`: an
+    /// explicit import outranks same-package and star-imported callables.
+    std_imported: BTreeSet<String>,
+    enclosing: Option<String>,
+}
+
+/// A product type's declarations that may rebind a standard-library name.
+#[derive(Debug, Clone, Default)]
+pub(super) struct RebindingType {
+    /// Candidate FQNs of each direct supertype.
+    pub(super) supers: Vec<Vec<String>>,
+    /// Non-private member functions named like a relied-on function.
+    pub(super) members: BTreeSet<String>,
+    /// Private ones, visible inside the type only.
+    pub(super) private_members: BTreeSet<String>,
+}
+
+/// The product declarations of a repository that may rebind a
+/// standard-library name a rule relies on (AC-1108).
+#[derive(Debug, Clone, Default)]
+pub(super) struct Rebinding {
+    /// Non-private top-level functions and properties (extensions
+    /// included), as `package.name`, or `name` in the default package.
+    pub(super) top_level: BTreeSet<String>,
+    /// Types by FQN (`Outer.Inner` in the default package).
+    pub(super) types: BTreeMap<String, RebindingType>,
+}
+
+impl Rebinding {
+    pub(super) fn extend(&mut self, other: Rebinding) {
+        self.top_level.extend(other.top_level);
+        for (fqn, ty) in other.types {
+            self.types.entry(fqn).or_insert(ty);
+        }
+    }
+}
+
+fn relied_on(name: &str) -> bool {
+    SCOPE_FUNCTIONS.contains(&name) || PRECONDITIONS.contains(&name)
+}
+
+fn is_private(source: &[u8], declaration: TsNode<'_>) -> bool {
+    let mut cursor = declaration.walk();
+    declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut cursor = modifiers.walk();
+            modifiers.named_children(&mut cursor).any(|modifier| {
+                modifier.kind() == "visibility_modifier"
+                    && modifier
+                        .utf8_text(source)
+                        .is_ok_and(|text| text == "private")
+            })
+        })
+}
+
+/// The member functions of `declaration`'s own body named like a relied-on
+/// function: (non-private, private).
+pub(super) fn rebinding_members(
+    source: &[u8],
+    declaration: TsNode<'_>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let (mut members, mut private) = (BTreeSet::new(), BTreeSet::new());
+    let mut cursor = declaration.walk();
+    let Some(body) = declaration
+        .named_children(&mut cursor)
+        .find(|part| part.kind() == "class_body")
+    else {
+        return (members, private);
+    };
+    let mut cursor = body.walk();
+    for function in body
+        .named_children(&mut cursor)
+        .filter(|member| member.kind() == "function_declaration")
+    {
+        let Some(name) = function
+            .child_by_field_name("name")
+            .and_then(|name| name.utf8_text(source).ok())
+            .filter(|name| relied_on(name))
+        else {
+            continue;
+        };
+        if is_private(source, function) {
+            private.insert(name.to_owned());
+        } else {
+            members.insert(name.to_owned());
+        }
+    }
+    (members, private)
+}
+
+/// The file's non-private top-level functions (extensions included) and
+/// properties named like a relied-on function.
+pub(super) fn rebinding_top_level(
+    source: &[u8],
+    root: TsNode<'_>,
+    package: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = root.walk();
+    for declaration in root.named_children(&mut cursor) {
+        let name = match declaration.kind() {
+            "function_declaration" => declaration.child_by_field_name("name"),
+            "property_declaration" => {
+                let mut cursor = declaration.walk();
+                declaration
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "variable_declaration")
+                    .and_then(|variable| variable.named_child(0))
+                    .filter(|name| name.kind() == "identifier")
+            }
+            _ => None,
+        };
+        let Some(name) = name
+            .and_then(|name| name.utf8_text(source).ok())
+            .filter(|name| relied_on(name))
+        else {
+            continue;
+        };
+        if is_private(source, declaration) {
+            continue;
+        }
+        out.push(match package {
+            Some(package) => format!("{package}.{name}"),
+            None => name.to_owned(),
+        });
+    }
+    out
+}
+
+/// Repository declarations a pending rule is checked against.
+pub(super) struct Declarations<'a> {
+    /// Every declared top-level FQN (types, functions, extensions,
+    /// properties).
+    pub(super) top_level: &'a dyn Fn(&str) -> bool,
+    /// Whether the type `fqn`, or a repository supertype of it, declares a
+    /// member function `name`.
+    pub(super) member_of: &'a dyn Fn(&str, &str) -> bool,
+    /// Whether any repository type declares a member function `name`.
+    pub(super) any_member: &'a dyn Fn(&str) -> bool,
+}
+
+/// Drop the rules (with their Gaps and edges) whose relied-on names the
+/// repository rebinds: a same-package or star-imported top-level
+/// declaration, a member of the enclosing type or its repository supertypes
+/// for a bare call, or any repository member for a call on another receiver.
+pub(super) fn settle(
+    pending: Vec<PendingRule>,
+    declared: &Declarations<'_>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    let dropped: BTreeSet<String> = pending
+        .into_iter()
+        .filter(|rule| {
+            rule.uses.iter().any(|(name, bare)| {
+                let top = !rule.std_imported.contains(name)
+                    && rule
+                        .package
+                        .iter()
+                        .chain(&rule.stars)
+                        .map(|package| format!("{package}.{name}"))
+                        .chain(rule.package.is_none().then(|| name.clone()))
+                        .any(|fqn| (declared.top_level)(&fqn));
+                let member = if *bare {
+                    rule.enclosing
+                        .as_deref()
+                        .is_some_and(|ty| (declared.member_of)(ty, name))
+                } else {
+                    (declared.any_member)(name)
+                };
+                top || member
+            })
+        })
+        .map(|rule| rule.rule_id)
+        .collect();
+    if dropped.is_empty() {
+        return;
+    }
+    let owned_gap = |id: &str| {
+        id.strip_prefix("gap:")
+            .and_then(|rest| rest.rsplit_once(':'))
+            .is_some_and(|(rule, _)| dropped.contains(rule))
+    };
+    nodes.retain(|node| !dropped.contains(&node.id) && !owned_gap(&node.id));
+    edges.retain(|edge| !dropped.contains(&edge.src));
 }
 
 fn control_reason(cx: &FileCx<'_>, inline: &Inline<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
@@ -295,7 +738,7 @@ fn control_reason(cx: &FileCx<'_>, inline: &Inline<'_>, node: TsNode<'_>) -> Opt
         "for_statement" | "while_statement" | "do_while_statement" => {
             Some(RuleGapReason::LoopDependency)
         }
-        "when_expression" => Some(RuleGapReason::SwitchControl),
+        "when_expression" => (!when_stated(node)).then_some(RuleGapReason::SwitchControl),
         "try_expression" => Some(RuleGapReason::ExceptionControl),
         "unary_expression" => {
             let mut cursor = node.walk();
@@ -506,6 +949,15 @@ impl<'tree> RuleBuilder<'_, 'tree> {
     }
 }
 
+/// An observed exit: a `return`, a `throw` or a precondition call, with the
+/// value it carries.
+struct Exit<'t> {
+    node: TsNode<'t>,
+    value: Option<TsNode<'t>>,
+    throws: bool,
+    precondition: Option<(&'static str, Option<TsNode<'t>>)>,
+}
+
 /// The expression a `return` or `throw` carries; a labelled `return@x` is
 /// no exit of the function.
 fn exit_value(exit: TsNode<'_>) -> Option<TsNode<'_>> {
@@ -522,6 +974,9 @@ pub(super) fn extract(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
     functions: &HashMap<usize, String>,
+    package: Option<&str>,
+    stars: &[String],
+    std_imported: &BTreeSet<String>,
     out: &mut Extraction,
 ) {
     // Test code states no product rule.
@@ -552,7 +1007,7 @@ pub(super) fn extract(
         omission_gap(cx, at, &owner, RuleGapReason::UnsupportedRuleSyntax, out);
         return;
     }
-    let mut observed: BTreeMap<String, Vec<TsNode<'_>>> = BTreeMap::new();
+    let mut observed: BTreeMap<String, Vec<Exit<'_>>> = BTreeMap::new();
     let mut controls: BTreeMap<String, BTreeMap<String, (RuleGapReason, TsNode<'_>)>> =
         BTreeMap::new();
     let mut stack = vec![root];
@@ -564,6 +1019,17 @@ pub(super) fn extract(
                 .into_iter()
                 .rev(),
         );
+        if let Some(pre) = precondition(&inline, node) {
+            if let Some(owner) = owner(&inline, pre.exit, functions) {
+                observed.entry(owner.clone()).or_default().push(Exit {
+                    node: pre.exit,
+                    value: Some(pre.value),
+                    throws: true,
+                    precondition: Some((pre.name, pre.condition)),
+                });
+            }
+            continue;
+        }
         let Some(owner) = owner(&inline, node, functions) else {
             continue;
         };
@@ -571,7 +1037,12 @@ pub(super) fn extract(
             // A bare `return` is no rule but still precedes later exits.
             "return_expression" | "throw_expression" => {
                 if node.child_by_field_name("label").is_none() {
-                    observed.entry(owner.clone()).or_default().push(node);
+                    observed.entry(owner.clone()).or_default().push(Exit {
+                        node,
+                        value: exit_value(node),
+                        throws: node.kind() == "throw_expression",
+                        precondition: None,
+                    });
                 }
             }
             _ => {
@@ -590,10 +1061,22 @@ pub(super) fn extract(
     let mut emitted: BTreeSet<String> = BTreeSet::new();
     for (owner_id, exits) in observed {
         let mut prior: Option<TsNode<'_>> = None;
-        for (order, exit) in exits.iter().copied().enumerate() {
-            let (ancestors, limited) = branches(&inline, exit);
+        for (order, observed) in exits.iter().enumerate() {
+            let exit = observed.node;
+            let (mut ancestors, limited, supported) = branches(&inline, exit);
+            // A precondition throws when its argument is false or null.
+            if let Some((_, Some(condition))) = observed.precondition {
+                ancestors.push((
+                    exit,
+                    unparenthesized(condition),
+                    BranchPolarity::FalsyBranch,
+                ));
+            }
             let earlier = prior.replace(exit);
-            if exit_value(exit).is_none() || (ancestors.is_empty() && !limited) {
+            let Some(value) = observed.value else {
+                continue;
+            };
+            if !supported || (ancestors.is_empty() && !limited) {
                 continue;
             }
             if limited || rule_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
@@ -628,9 +1111,8 @@ pub(super) fn extract(
                     polarity,
                 });
             }
-            let value = exit_value(exit).expect("observed exits carry a value");
             let value = builder.captured(value, DependencyRole::ExitValue, &mut redactions);
-            let effect = if exit.kind() == "throw_expression" {
+            let effect = if observed.throws {
                 LocalExit::Throw { value }
             } else {
                 LocalExit::Return { value: Some(value) }
@@ -690,6 +1172,31 @@ pub(super) fn extract(
                     "prov": cx.prov(&exit, &format!("GOVERNS {rule_id} -> {owner_id}")),
                 }),
             });
+            let uses = relied_names(&inline, exit, observed.precondition.map(|(name, _)| name));
+            if !uses.is_empty() {
+                let function = {
+                    let mut node = exit;
+                    while let Some(parent) = node.parent()
+                        && node.kind() != "function_declaration"
+                    {
+                        node = parent;
+                    }
+                    node
+                };
+                let imported = uses
+                    .iter()
+                    .filter(|(name, _)| std_imported.contains(name))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                out.pending_rules.push(PendingRule {
+                    rule_id: rule_id.clone(),
+                    uses,
+                    package: package.map(str::to_owned),
+                    stars: stars.to_vec(),
+                    std_imported: imported,
+                    enclosing: enclosing_type(cx.source, function, package),
+                });
+            }
             for (reason, (gap_id, gap_at)) in builder.gaps {
                 let props = serde_json::json!({
                     "rule_evidence_gap": true,
@@ -810,6 +1317,47 @@ fn capture(cx: &FileCx<'_>, node: TsNode<'_>) -> (SourceExpression, Vec<SourceRe
                 };
                 let decoded = match string_value(cx, current) {
                     Ok(decoded) => decoded,
+                    // A template of plain names stays as written; one naming a
+                    // sensitive value, or holding a secret, is withheld
+                    // (AC-1108).
+                    Err(RedactionReason::UnsupportedSyntax)
+                        if let Some(template) = template(cx, current) =>
+                    {
+                        let mut reasons: Vec<RedactionReason> = Vec::new();
+                        let found = template
+                            .segments
+                            .iter()
+                            .flat_map(|segment| secret_reasons(segment))
+                            .chain(
+                                recognized_secrets(cx.text(&current))
+                                    .into_iter()
+                                    .map(redaction_reason),
+                            );
+                        for reason in found {
+                            if !reasons.contains(&reason) {
+                                reasons.push(reason);
+                            }
+                        }
+                        if (context || template.sensitive)
+                            && !reasons.contains(&RedactionReason::CredentialValue)
+                        {
+                            reasons.push(RedactionReason::CredentialValue);
+                        }
+                        if !reasons.is_empty() {
+                            replacements.push(Replacement {
+                                start: current.start_byte(),
+                                end: current.end_byte(),
+                                text: WITHHELD,
+                            });
+                            for reason in reasons {
+                                redactions.push(SourceRedaction {
+                                    source: source(cx, current),
+                                    reason,
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     Err(reason) => {
                         if current == node {
                             result.literal = Some(LiteralEvidence::Withheld {
@@ -969,6 +1517,7 @@ fn supported_container(kind: &str) -> bool {
             | "type_projection"
             | "string_content"
             | "escape_sequence"
+            | "interpolation"
     )
 }
 
@@ -1013,6 +1562,89 @@ fn supported_token(kind: &str) -> bool {
             | "="
             | "\""
     )
+}
+
+/// A string template whose substitutions are plain names (`$id`,
+/// `${owner.id}`): its decoded literal segments, and whether a substituted
+/// name is sensitive.
+struct Template {
+    segments: Vec<String>,
+    sensitive: bool,
+}
+
+fn template(cx: &FileCx<'_>, literal: TsNode<'_>) -> Option<Template> {
+    if cx.text(&literal).starts_with("\"\"\"") {
+        return None;
+    }
+    fn plain(cx: &FileCx<'_>, node: TsNode<'_>, names: &mut Vec<String>) -> bool {
+        match node.kind() {
+            "identifier" => {
+                names.push(cx.text(&node).to_owned());
+                true
+            }
+            "navigation_expression" => {
+                let mut cursor = node.walk();
+                let parts: Vec<_> = node.named_children(&mut cursor).collect();
+                !parts.is_empty() && parts.into_iter().all(|part| plain(cx, part, names))
+            }
+            _ => false,
+        }
+    }
+    // `$name` templates are read across the content runs the grammar splits
+    // them into.
+    fn scan(run: &str, segments: &mut Vec<String>, names: &mut Vec<String>) -> Option<()> {
+        let mut chars = run.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '$' && chars.peek().is_some_and(|n| n.is_alphabetic() || *n == '_') {
+                let mut name = String::new();
+                while let Some(n) = chars.peek().filter(|n| n.is_alphanumeric() || **n == '_') {
+                    name.push(*n);
+                    chars.next();
+                }
+                names.push(name);
+                segments.push(String::new());
+            } else if c == '$' && chars.peek().is_some_and(|n| *n == '`' || *n == '{') {
+                return None;
+            } else {
+                segments.last_mut()?.push(c);
+            }
+        }
+        Some(())
+    }
+    let mut segments = vec![String::new()];
+    let mut names = Vec::new();
+    let mut run = String::new();
+    let mut cursor = literal.walk();
+    for part in literal.named_children(&mut cursor) {
+        if part.kind() == "string_content" {
+            run.push_str(cx.text(&part));
+            continue;
+        }
+        scan(&std::mem::take(&mut run), &mut segments, &mut names)?;
+        match part.kind() {
+            "escape_sequence" => {
+                let decoded = decode_escapes(cx.text(&part)).ok()?;
+                segments.last_mut()?.push_str(&decoded);
+            }
+            "interpolation" => {
+                let mut cursor = part.walk();
+                let inner: Vec<_> = part.named_children(&mut cursor).collect();
+                let [expression] = inner.as_slice() else {
+                    return None;
+                };
+                if !plain(cx, *expression, &mut names) {
+                    return None;
+                }
+                segments.push(String::new());
+            }
+            _ => return None,
+        }
+    }
+    scan(&run, &mut segments, &mut names)?;
+    Some(Template {
+        segments,
+        sensitive: names.iter().any(|name| is_sensitive_name(name)),
+    })
 }
 
 /// The decoded value of a Kotlin string literal; a raw string or a
