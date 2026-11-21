@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-14
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 
