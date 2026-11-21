@@ -2309,6 +2309,7 @@ fn extract_tree_packed(
             nodes: distinct_node_count(&tf.nodes),
             edges: distinct_edge_count(&tf.edges),
         };
+        let tf_root_modules = tf.root_modules;
         facts.extend(tf.nodes, tf.edges).map_err(pack_err)?;
         // T1: observed state supersedes ambiguous T0 refs (AC-0009).
         if let Some(state_path) = state_json {
@@ -2325,6 +2326,7 @@ fn extract_tree_packed(
                         &observed,
                         &state_path.to_string_lossy(),
                         &raw,
+                        &tf_root_modules,
                     );
                     added.extend(enrichment.unapplied);
                 })

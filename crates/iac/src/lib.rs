@@ -46,6 +46,11 @@ pub struct Extraction {
     pub nodes: Vec<Node>,
     /// Graph edges (props carry provenance under `prov`).
     pub edges: Vec<Edge>,
+    /// Repo-relative directories outside the repository root that hold
+    /// Terraform and are not the source of a local module call: the root
+    /// modules of a directory walk (ADR-0077), including one that declares
+    /// no resource. Empty for a single-file extraction.
+    pub root_modules: BTreeSet<String>,
     policy_documents: BTreeMap<String, PolicyDocument>,
     module_declarations: Vec<ModuleDeclaration>,
 }
@@ -863,6 +868,12 @@ pub fn extract_dir_incremental_with_progress(
     out.resolve_policy_document_grants();
     out.close_over_endpoints();
     annotate_module_scopes(&mut out.nodes, &child_module_dirs);
+    out.root_modules = files
+        .iter()
+        .map(|rel| parent_dir(rel))
+        .filter(|dir| !dir.is_empty() && !child_module_dirs.contains(*dir))
+        .map(str::to_string)
+        .collect();
     run.stats.deleted_files = old_keys.difference(&run.active).count() as u64;
     run.stats.distinct_files = run.paths.len() as u64;
     run.cache.files.retain(|key, _| run.active.contains(key));

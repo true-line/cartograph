@@ -575,6 +575,7 @@ pub fn enrich_resources(
     state: &ObservedState,
     state_path: &str,
     state_raw: &str,
+    root_modules: &BTreeSet<String>,
 ) -> Enrichment {
     let by_address: BTreeMap<&str, &ObservedResource> = state
         .resources
@@ -596,11 +597,14 @@ pub fn enrich_resources(
     if out.resources_enriched > 0 {
         return out;
     }
+    // Every root module the walk found counts, including one that declares
+    // no resource: its state could be the one supplied.
     let root_modules: BTreeSet<String> = nodes
         .iter()
         .filter(|node| node.label == "Resource")
         .filter_map(|node| node.props.get("root_module")?.as_str())
         .map(str::to_string)
+        .chain(root_modules.iter().cloned())
         .collect();
     match root_modules.len() {
         0 => {}
@@ -1392,7 +1396,14 @@ mod tests {
             "res:local/infra@aws_sqs_queue.orders",
             "aws_sqs_queue",
         )];
-        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        let report = enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &BTreeSet::new(),
+        );
         assert_eq!(report.resources_enriched, 1);
         // T0 fact untouched (R-INT-1); observation lands beside it.
         assert_eq!(nodes[0].props["prov"]["tier"], "Deterministic");
@@ -1436,7 +1447,14 @@ mod tests {
                 "modules/q",
             ),
         ];
-        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        let report = enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &BTreeSet::new(),
+        );
         assert_eq!(report.resources_enriched, 1);
         assert_eq!(report.root_module, None);
         assert!(report.unapplied.is_none());
@@ -1462,7 +1480,14 @@ mod tests {
                 "modules/q",
             ),
         ];
-        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        let report = enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &BTreeSet::new(),
+        );
         assert_eq!(report.resources_enriched, 1);
         assert_eq!(report.root_module.as_deref(), Some("infra"));
         assert!(nodes[0].props.get("observed").is_some());
@@ -1490,7 +1515,14 @@ mod tests {
                 "envs/staging",
             ),
         ];
-        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        let report = enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &BTreeSet::new(),
+        );
         assert_eq!(report.resources_enriched, 0);
         assert!(
             nodes
@@ -1509,6 +1541,35 @@ mod tests {
     }
 
     #[test]
+    fn a_root_module_without_resources_still_makes_the_state_ambiguous() {
+        // AC-1501: `envs/staging` holds only variables, so no node carries
+        // its scope; the walk still reports it, and the state is not applied
+        // to the one root module that has resources.
+        let state = parse_state(STATE).unwrap();
+        let mut nodes = vec![scoped(
+            "res:local/infra@envs/prod/aws_sqs_queue.orders",
+            "root_module",
+            "envs/prod",
+        )];
+        let walked = BTreeSet::from(["envs/prod".to_string(), "envs/staging".to_string()]);
+        let report = enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &walked,
+        );
+        assert_eq!(report.resources_enriched, 0);
+        assert!(nodes[0].props.get("observed").is_none());
+        let gap = report.unapplied.expect("ambiguous state is a Gap");
+        assert_eq!(
+            gap.props["root_modules"],
+            serde_json::json!(["envs/prod", "envs/staging"])
+        );
+    }
+
+    #[test]
     fn observation_supersedes_placeholder_refs() {
         // AC-0009: the module placeholder was an ambiguous T0 ref; state
         // confirms it exists and what it holds.
@@ -1523,7 +1584,14 @@ mod tests {
                 "attempted_tiers": ["T0"],
             }),
         }];
-        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        let report = enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &BTreeSet::new(),
+        );
         assert_eq!(report.placeholders_resolved, 1);
         assert!(nodes[0].props.get("placeholder").is_none());
         assert_eq!(nodes[0].props["type"], "module");
@@ -1543,7 +1611,14 @@ mod tests {
             "res:local/infra@aws_sqs_queue.orders",
             "aws_sqs_queue",
         )];
-        enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        enrich_resources(
+            &mut nodes,
+            "local/infra",
+            &state,
+            "state.json",
+            STATE,
+            &BTreeSet::new(),
+        );
         let edges = backing_candidates(&nodes, Registries::builtin());
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].label, "BACKS");
