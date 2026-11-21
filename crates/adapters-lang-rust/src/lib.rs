@@ -1446,11 +1446,26 @@ pub fn extract_dir_incremental_with_progress(
         ..IncrementalStats::default()
     };
     cache.files.retain(|p, _| active.contains(p));
+    // Files a `#[path]` attribute wires in take the declared module (#2041).
+    let mut declared = BTreeMap::new();
+    for path in &files {
+        let source = std::fs::read(root.join(path))?;
+        if module_paths::mentions_path(&source) {
+            let decls = module_paths::declarations(&source);
+            if !decls.is_empty() {
+                declared.insert(path.clone(), decls);
+            }
+        }
+    }
+    let wired = module_paths::modules(&declared, &crates);
     let mut out = Extraction::default();
     for path in &files {
         on_file(path);
         let source = std::fs::read(root.join(path))?;
-        let (module, crate_name) = module_for(path, &crates);
+        let (module, crate_name) = wired
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| module_for(path, &crates));
         let source_hash = core_prov::content_hash(&source);
         let context = format!(
             "{source_hash}\0{}\0{}",
@@ -1516,6 +1531,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 
 mod config_read;
 mod http;
+mod module_paths;
 mod rdkafka;
 mod reqwest;
 

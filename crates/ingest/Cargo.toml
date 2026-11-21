@@ -32,6 +32,8 @@ tree-sitter-python = "0.25"
 tree-sitter-typescript = "=0.23.2"
 # Java process starts, listeners, schedules and runners (#2020).
 tree-sitter-java = "0.23"
+# Rust process starts, Tauri IPC commands and tonic gRPC methods (#2041).
+tree-sitter-rust = "0.24"
 url = "2"
 dunce = "1"
 # Anchored no-follow reads of declared API docs, as in source-capture.

@@ -20,6 +20,9 @@
 //! - a Java `public static void main`, a message-listener, `@Scheduled` or
 //!   runner method is a process start, queue consumer, scheduled job or
 //!   startup task (`java.rs`).
+//! - a Rust `fn main()` in a binary root is a process start, a
+//!   `#[tauri::command]` function an IPC command and a tonic service method
+//!   a gRPC method (`rust.rs`).
 //!
 //! What starts a Python process is read from the module and the repository
 //! modules it imports, never guessed from its name, and recorded as `kind`
@@ -178,6 +181,9 @@ pub fn extract_dir(
         } else if go::candidate(rel) {
             let Some(text) = read(rel) else { continue };
             starts.extend(go::go_start(id.repo, rel, &text, symbols));
+        } else if rust::candidate(rel) {
+            let Some(text) = read(rel) else { continue };
+            starts.extend(rust::rust_starts(id.repo, rel, &text, symbols));
         } else if java::candidate(rel) {
             let Some(text) = read(rel) else { continue };
             java_files.push((rel.to_string(), text));
@@ -1065,6 +1071,9 @@ fn started_by(kind: &str) -> &'static str {
         "edge-worker" => "an HTTP request at the edge",
         "scheduled-job" => "its schedule",
         "startup-task" => "the application starting",
+        "desktop-app" => "a person opens the application",
+        "grpc-server" | "grpc-method" => "a gRPC call",
+        "ipc-command" => "the desktop front end invoking the command",
         _ => "the process is started",
     }
 }
@@ -1081,6 +1090,10 @@ fn display(start: &Start) -> String {
         "edge-worker" => "Edge worker",
         "scheduled-job" => "Scheduled job",
         "startup-task" => "Startup task",
+        "desktop-app" => "Desktop application",
+        "grpc-server" => "gRPC server",
+        "grpc-method" => "gRPC method",
+        "ipc-command" => "IPC command",
         _ => "Process",
     };
     let handler = start
@@ -1235,6 +1248,7 @@ fn emit(
 mod go;
 mod java;
 mod node;
+mod rust;
 mod wrangler;
 
 #[cfg(test)]
