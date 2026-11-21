@@ -124,6 +124,8 @@ fn a_question_finds_its_area_by_the_words_of_its_name() {
         choice("Product option", 12),
         choice("Tax", 9),
         choice("Custom domain", 5),
+        choice("Alias", 30),
+        choice("Status", 3),
     ];
     let name = |wanted| named(&choices, wanted).map(|choice| choice.name.as_str());
     assert_eq!(name("Tax"), Some("Tax"));
@@ -136,6 +138,9 @@ fn a_question_finds_its_area_by_the_words_of_its_name() {
     );
     assert_eq!(name("Products"), Some("Product variant"));
     assert_eq!(name("Product options"), Some("Product option"));
+    assert_eq!(name("Aliases"), Some("Alias"));
+    assert_eq!(name("alias"), Some("Alias"));
+    assert_eq!(name("Statuses"), Some("Status"));
     assert_eq!(name("Order"), None);
     assert_eq!(name("  "), None);
 }
