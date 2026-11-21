@@ -2028,6 +2028,30 @@ type Note struct {
     assert_eq!(columns, ["id", "created_on", "deleted_at"], "{note:#?}");
 }
 
+/// A file importing both supported GORM packages recovers the models of
+/// each, whatever order its imports are read in.
+#[test]
+fn gorm_models_embedding_either_imported_package_are_entities() {
+    let source = br#"package store
+import (
+    g1 "gorm.io/gorm"
+    g2 "github.com/jinzhu/gorm"
+)
+type New struct { g1.Model }
+type Old struct { g2.Model }
+"#;
+    for _ in 0..8 {
+        let out = extract_source(source, "store/both.go", &id()).unwrap();
+        let models: BTreeSet<&str> = out
+            .nodes
+            .iter()
+            .filter(|n| n.label == "DataEntity")
+            .map(|n| n.props["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(models, BTreeSet::from(["New", "Old"]));
+    }
+}
+
 /// A reused file's GORM write to an unproven model keeps its Gap on the
 /// new commit.
 #[test]

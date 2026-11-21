@@ -64,11 +64,16 @@ pub(super) fn entity_id(repo: &str, package_dir: &str, type_name: &str) -> Strin
     format!("data:{repo}@gorm:{package_dir}#{type_name}")
 }
 
-fn gorm_binding(bindings: &HashMap<String, ImportBinding>) -> Option<&str> {
-    bindings
+/// Every name the file imports GORM under, in a stable order: a file may
+/// import both supported packages.
+fn gorm_bindings(bindings: &HashMap<String, ImportBinding>) -> Vec<&str> {
+    let mut names: Vec<&str> = bindings
         .iter()
-        .find(|(_, binding)| IMPORTS.contains(&binding.path.as_str()))
+        .filter(|(_, binding)| IMPORTS.contains(&binding.path.as_str()))
         .map(|(name, _)| name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
 }
 
 /// GORM's default column name: `UserModelID` is `user_model_id`.
@@ -311,15 +316,16 @@ pub(super) fn extract(
             table_name(cx, node, &dir, out);
         }
     }
-    let Some(gorm) = gorm_binding(bindings) else {
+    let gorm = gorm_bindings(bindings);
+    if gorm.is_empty() {
         return;
-    };
+    }
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
         match node.kind() {
-            "type_spec" => model(cx, node, gorm, bindings, &dir, out),
+            "type_spec" => model(cx, node, &gorm, bindings, &dir, out),
             "call_expression" => access(cx, node, functions, bindings, &dir, out),
             _ => {}
         }
@@ -329,7 +335,7 @@ pub(super) fn extract(
 fn model(
     cx: &FileCx<'_>,
     spec: TsNode<'_>,
-    gorm: &str,
+    gorm: &[&str],
     bindings: &HashMap<String, ImportBinding>,
     dir: &str,
     out: &mut Extraction,
@@ -368,7 +374,11 @@ fn model(
             .collect();
         if names.is_empty() {
             // An embedded field.
-            if cx.text(&field_type).trim_start_matches('*') == format!("{gorm}.Model") {
+            let embedded = cx.text(&field_type).trim_start_matches('*');
+            if gorm
+                .iter()
+                .any(|alias| embedded == format!("{alias}.Model"))
+            {
                 is_model = true;
                 for column in ["id", "created_at", "updated_at", "deleted_at"] {
                     columns.push(serde_json::json!({ "name": column, "embedded": "gorm.Model" }));
