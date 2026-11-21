@@ -1094,14 +1094,28 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
             "!=" => negated,
             _ => return None,
         };
+        // Either operand order: `mode == "yearly"` and `"yearly" == mode`.
         match (*left, *right) {
-            (left @ (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..)), Expr::Lit(lit))
+            (value @ (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..)), Expr::Lit(lit))
+            | (Expr::Lit(lit), value @ (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..)))
                 if !matches!(lit, Lit::None) =>
             {
-                Some((left, equal, lit))
+                Some((value, equal, lit))
             }
             _ => None,
         }
+    };
+    // Two literals proven to be different values: texts without escapes that
+    // differ, numbers whose values differ (`1_000` is `1000`), or booleans.
+    // Literals of different kinds are never proven distinct (`1 == True`).
+    let distinct = |a: &Lit, b: &Lit| match (a, b) {
+        (Lit::Str(a), Lit::Str(b)) => !a.contains('\\') && !b.contains('\\') && a != b,
+        (Lit::Num(a), Lit::Num(b)) => {
+            let value = |n: &str| n.replace('_', "").parse::<f64>().ok();
+            matches!((value(a), value(b)), (Some(a), Some(b)) if a != b)
+        }
+        (Lit::Bool(a), Lit::Bool(b)) => a != b,
+        _ => false,
     };
     let tests: Vec<Option<(Expr, bool, Lit)>> = conditions
         .iter()
@@ -1115,7 +1129,7 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
                     && tests
                         .iter()
                         .flatten()
-                        .any(|(other, pinned, to)| *pinned && other == value && to != lit)
+                        .any(|(other, pinned, to)| *pinned && other == value && distinct(to, lit))
             })
         })
         .collect()
@@ -1931,6 +1945,11 @@ mod tests {
             implied_by_pin(&[("count != 0", t), ("count == 3", t)]),
             vec![true, false]
         );
+        // The literal may be written first.
+        assert_eq!(
+            implied_by_pin(&[("mode != \"cancel\"", t), ("\"yearly\" == mode", t)]),
+            vec![true, false]
+        );
         for kept in [
             // Another source that reads alike pins nothing here.
             vec![
@@ -1940,6 +1959,9 @@ mod tests {
             vec![(cancel.as_str(), f), ("plan == \"yearly\"", t)],
             vec![(cancel.as_str(), f), ("request.form.get(\"form-name\")", t)],
             vec![(cancel.as_str(), f), (form("cancel").as_str(), t)],
+            // One value spelled two ways is not two values.
+            vec![("count != 1_000", t), ("count == 1000", t)],
+            vec![("count != 1", t), ("count == True", t)],
         ] {
             assert_eq!(implied_by_pin(&kept), vec![false; kept.len()], "{kept:?}");
         }
