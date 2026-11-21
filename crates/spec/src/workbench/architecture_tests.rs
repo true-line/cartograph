@@ -682,3 +682,20 @@ fn a_store_read_through_a_fallback_variable_is_one_store() {
         "{l2}"
     );
 }
+
+/// AC-0961: a program whose file is `main.go` is named for its directory.
+#[test]
+fn a_main_file_is_named_for_its_directory() {
+    let mut f = system();
+    f.node(
+        &format!("entry:{TOOLS}@worker/main.go#main"),
+        "EntryPoint",
+        json!({"kind": "process", "name": "Process (worker/main.go)",
+               "how": "func main", "file": "worker/main.go"}),
+        (TOOLS, "worker/main.go"),
+    );
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert!(l2.contains("<b>Worker</b>"), "{l2}");
+    assert!(!l2.contains("<b>Main</b>"), "{l2}");
+}

@@ -266,8 +266,15 @@ fn repo_of(id: &str) -> &str {
 /// A file's stem in words, first letter upper case: `job_runner.py` reads
 /// `Job runner`.
 fn stem_title(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let mut parts = path.rsplit('/');
+    let name = parts.next().unwrap_or(path);
+    let mut stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    // `cmd/worker/main.go`, `src/index.ts`: the directory names the program.
+    if matches!(stem, "main" | "index" | "__main__")
+        && let Some(dir) = parts.next().filter(|d| !matches!(*d, "src" | "cmd" | ""))
+    {
+        stem = dir;
+    }
     let words = stem.replace(['_', '-'], " ");
     let mut chars = words.trim().chars();
     match chars.next() {

@@ -170,6 +170,9 @@ pub fn extract_dir(
         } else if file.name == "pyproject.toml" {
             let Some(text) = read(rel) else { continue };
             starts.extend(console_scripts(rel, &text, &files, id, symbols));
+        } else if go::candidate(rel) {
+            let Some(text) = read(rel) else { continue };
+            starts.extend(go::go_start(id.repo, rel, &text, symbols));
         } else if node::candidate(rel) && !rel.contains("node_modules/") {
             if scheduled.contains(rel) {
                 continue;
@@ -1211,6 +1214,7 @@ fn emit(
     }
 }
 
+mod go;
 mod node;
 mod wrangler;
 
