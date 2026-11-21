@@ -1334,6 +1334,23 @@ pub(super) fn is_java(evidence: &GuardedExitEvidence) -> bool {
     evidence.exit_source.path.ends_with(".java")
 }
 
+/// Whether a rule was recovered from Kotlin source (#2021).
+pub(super) fn is_kotlin(evidence: &GuardedExitEvidence) -> bool {
+    evidence.exit_source.path.ends_with(".kt")
+}
+
+/// The error a Kotlin `throw` raises: Kotlin constructs without `new`, so
+/// only a call of a capitalized class name is read, as a Java one is.
+pub(super) fn kotlin_thrown(display: &str) -> Option<String> {
+    let display = display.trim();
+    let class = display.split('(').next()?;
+    let simple = class.rsplit('.').next()?;
+    if !simple.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
+    java_thrown(&format!("new {display}"))
+}
+
 /// `a “login taken” error`, `an “expired” error`.
 fn an_error_named(name: &str) -> String {
     let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
@@ -2056,11 +2073,16 @@ fn rendered(
     let value = match &evidence.effect {
         LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
         LocalExit::Throw { value } => {
-            // A Java exception names the error it raises (#2020).
-            let error = is_java(evidence)
-                .then(|| java_thrown(value.display.as_str()))
-                .flatten()
-                .unwrap_or_else(|| "an error".to_owned());
+            // A Java or Kotlin exception names the error it raises (#2020,
+            // #2021).
+            let error = if is_java(evidence) {
+                java_thrown(value.display.as_str())
+            } else if is_kotlin(evidence) {
+                kotlin_thrown(value.display.as_str())
+            } else {
+                None
+            }
+            .unwrap_or_else(|| "an error".to_owned());
             return Some(sentence(format!("it fails with {error}")));
         }
         LocalExit::Return { value: None } => return None,
@@ -2492,6 +2514,17 @@ mod tests {
             Some("an error")
         );
         assert_eq!(java_thrown("error"), None);
+        // AC-1106: a Kotlin construction has no `new`; a lowercase call is
+        // no construction.
+        assert_eq!(
+            kotlin_thrown("BadRequestException(\"Invalid id\")").as_deref(),
+            Some("the error “Invalid id”")
+        );
+        assert_eq!(
+            kotlin_thrown("LoginAlreadyUsedException()").as_deref(),
+            Some("a “login already used” error")
+        );
+        assert_eq!(kotlin_thrown("failure(\"x\")"), None);
         // A literal with an apostrophe or escapes is still the message.
         assert_eq!(
             java_thrown("new ValidationException(\"User's id is \\\"bad\\\"\\nnow\")").as_deref(),
