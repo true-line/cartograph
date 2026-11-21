@@ -355,12 +355,16 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
 
+      # Workspace crates only: rust-cache already holds the dependencies, and
+      # sending their ~4,800 rustc calls through sccache too made a cold run
+      # write thousands of cache entries, which the Actions cache throttled
+      # (3,019 write errors) so the workspace crates were often not stored.
       - name: Compile through sccache
         run: |
           wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
 
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
@@ -380,14 +384,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # The app unit-test binary runs in the Rust app tests shards (#1924);
-      # `app` is a binary-only package, so excluding it drops nothing else.
+      # The app unit-test binary runs in the Rust app tests shards and the
+      # agents and spec packages in Rust agents & spec tests (#1924); `app` is
+      # a binary-only package, so excluding it drops nothing else.
       - name: Test
-        run: cargo test --workspace --exclude app
+        run: cargo test --workspace --exclude app --exclude agents --exclude spec
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
-        run: '"$RUSTC_WRAPPER" --show-stats'
+        run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
 
       # A cancelled job frees its slot when the runner reaps its processes.
       - name: Release the host heavy-build slot
@@ -605,12 +610,16 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
 
+      # Workspace crates only: rust-cache already holds the dependencies, and
+      # sending their ~4,800 rustc calls through sccache too made a cold run
+      # write thousands of cache entries, which the Actions cache throttled
+      # (3,019 write errors) so the workspace crates were often not stored.
       - name: Compile through sccache
         run: |
           wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
 
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
@@ -625,7 +634,108 @@ jobs:
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
-        run: '"$RUSTC_WRAPPER" --show-stats'
+        run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
+
+  # The agents and spec test binaries were the two longest compiles in the
+  # Rust job (about 3.5 minutes each) and a test binary is never served by
+  # sccache, so they build in parallel here (#1924). The Rust job excludes
+  # exactly these packages; `cargo test -p agents -p spec` runs every target
+  # of both: unit, integration and doc tests.
+  rust-heavy-tests:
+    name: Rust agents & spec tests
+    needs: [policy, merge-evidence, preflight-evidence, ci-image]
+    if: >-
+      !cancelled() && needs.policy.result == 'success' &&
+      ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
+      (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
+    runs-on: ubuntu-latest
+    container:
+      # A digest reference: ci-image resolves the hashed tag to its digest.
+      image: ${{ needs.ci-image.outputs.image }} # zizmor: ignore[unpinned-images]
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      # Not root: root passes the tests that expect permission-denied errors.
+      options: --user 1001
+      # bounded-command runs `${{ github.action_path }}`, which the runner
+      # leaves as the host path in a container (actions/runner#716,
+      # true-line/trueline-agent-ci#8). Mount the work tree there too; a
+      # symlink would not do, as the script's main-module check compares
+      # real paths and silently skips the task.
+      volumes:
+        - /home/runner/work:/home/runner/work
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      pull-requests: read
+    timeout-minutes: 60
+    # Line tables only, as in the Rust lane (#1924).
+    env:
+      CARGO_BUILD_JOBS: 6
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # Fixed, so the cache key is stable across jobs (see the Rust lane).
+      - name: Use a fixed cargo home
+        run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # As in the Rust lane.
+      - name: Install sccache
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        # Per-runner home: install-action rm -rfs its shared ~/.install-action/tmp
+        # after each install, deleting a concurrent runner's download (#674).
+        env:
+          HOME: ${{ runner.temp }}/install-action-home
+        with:
+          tool: sccache@0.19.0
+
+      # sccache's GitHub Actions backend reads the runner's cache service URL
+      # and token, which only an action's own process is given.
+      - name: Expose the Actions cache service to sccache
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
+
+      # Workspace crates only: rust-cache already holds the dependencies, and
+      # sending their ~4,800 rustc calls through sccache too made a cold run
+      # write thousands of cache entries, which the Actions cache throttled
+      # (3,019 write errors) so the workspace crates were often not stored.
+      - name: Compile through sccache
+        run: |
+          wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
+          "$wrapper" --version
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+
+      - name: Enable Rust problem matcher
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      - name: Test
+        run: cargo test -p agents -p spec
+
+      - name: sccache statistics
+        if: ${{ !cancelled() }}
+        run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
 
   compliance:
     name: License & supply-chain
@@ -868,7 +978,7 @@ jobs:
 
   complete:
     name: Complete suite
-    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
+    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, rust-heavy-tests, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
@@ -882,6 +992,7 @@ jobs:
           CI_IMAGE: ${{ needs.ci-image.result }}
           RUST: ${{ needs.rust.result }}
           RUST_APP_TESTS: ${{ needs.rust-app-tests.result }}
+          RUST_HEAVY_TESTS: ${{ needs.rust-heavy-tests.result }}
           WINDOWS_JOB_OWNERSHIP: ${{ needs.windows-job-ownership.result }}
           COMPLIANCE: ${{ needs.compliance.result }}
           ZIZMOR: ${{ needs.zizmor.result }}
@@ -893,6 +1004,7 @@ jobs:
           test "$CI_IMAGE" = success
           test "$RUST" = success
           test "$RUST_APP_TESTS" = success
+          test "$RUST_HEAVY_TESTS" = success
           test "$WINDOWS_JOB_OWNERSHIP" = success
           test "$COMPLIANCE" = success
           test "$ZIZMOR" = success

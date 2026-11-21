@@ -168,9 +168,16 @@ npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run
 ```
 
 CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
-every package except `app`, and four "Rust app tests" shards run the `app`
+every package except `app`, `agents` and `spec`, "Rust agents & spec
+tests" runs `cargo test -p agents -p spec`, and four "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
 run does not account for exactly the tests it selected.
+
+The Rust lanes keep dependencies in rust-cache and workspace library crates
+in sccache (GitHub Actions cache). rust-cache keys on the job id and on the
+values of `CARGO_*` and `RUST*` job env vars, so renaming a Rust job or
+changing such a variable costs one cold run (~20 minutes) before the lane is
+warm again; test binaries are always compiled, as sccache cannot cache them.
 
 The complete CI suite also requires native job ownership tests on Windows:
 `cargo test --locked -p job-execution-tests --test ownership`. Every run uses
