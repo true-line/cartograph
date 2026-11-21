@@ -3,9 +3,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, symlink, writeFile, readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { compare, contained, parseManifest, parseTime, realPath, selectRoot, summarize } from './bench-ingest.mjs';
+import { checkout, compare, contained, parseManifest, parseTime, realPath, selectRoot, summarize } from './bench-ingest.mjs';
 
 const sha = 'a'.repeat(40);
 
@@ -139,4 +140,34 @@ test('containment compares whole path components', () => {
   assert.ok(!contained('/a/b', '/a/bc'));
   assert.ok(!contained('/a/b', '/a'));
   assert.ok(!contained('/a/b', '/x'));
+});
+
+test('a kept clean checkout moves to a new pin, and a dirty one is refused', async (t) => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'bench-checkout-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const origin = path.join(base, 'origin');
+  const git = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-C', cwd, ...args], { encoding: 'utf8' }).trim();
+  await mkdir(origin);
+  git(origin, 'init', '--quiet');
+  await writeFile(path.join(origin, 'a'), '1');
+  git(origin, 'add', 'a');
+  git(origin, 'commit', '--quiet', '-m', 'one');
+  const first = git(origin, 'rev-parse', 'HEAD');
+  await writeFile(path.join(origin, 'a'), '2');
+  git(origin, 'commit', '--quiet', '-am', 'two');
+  const second = git(origin, 'rev-parse', 'HEAD');
+  const work = path.join(base, 'work');
+  const dir = path.join(work, 'sources', 'repo');
+  checkout({ name: 'repo', url: origin, commit: first }, work);
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), first);
+  await writeFile(path.join(origin, 'a'), '3');
+  git(origin, 'commit', '--quiet', '-am', 'three');
+  const third = git(origin, 'rev-parse', 'HEAD');
+  checkout({ name: 'repo', url: origin, commit: third }, work);
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), third);
+  checkout({ name: 'repo', url: origin, commit: second }, work);
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), second);
+  await writeFile(path.join(dir, 'a'), 'local');
+  assert.throws(() => checkout({ name: 'repo', url: origin, commit: first }, work), /not a clean checkout/u);
+  assert.equal(await readFile(path.join(dir, 'a'), 'utf8'), 'local');
 });

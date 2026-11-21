@@ -200,9 +200,16 @@ export function checkout(repo, work) {
     run('git', ['clone', '--quiet', '--no-checkout', repo.url, dir]);
     run('git', ['-C', dir, 'checkout', '--quiet', '--detach', repo.commit]);
   }
-  const head = run('git', ['-C', dir, 'rev-parse', 'HEAD']).stdout.trim();
-  const dirty = run('git', ['-C', dir, 'status', '--porcelain']).stdout.trim();
-  if (head !== repo.commit || dirty) throw new Error(`${dir} is not a clean checkout of ${repo.commit}`);
+  const dirty = () => run('git', ['-C', dir, 'status', '--porcelain']).stdout.trim();
+  const head = () => run('git', ['-C', dir, 'rev-parse', 'HEAD']).stdout.trim();
+  // A clean checkout kept from an earlier run (the scheduled lanes keep their
+  // work directory) moves to a new pin; local changes are never discarded.
+  if (!dirty() && head() !== repo.commit) {
+    const known = spawnSync('git', ['-C', dir, 'cat-file', '-e', `${repo.commit}^{commit}`]).status === 0;
+    if (!known) run('git', ['-C', dir, 'fetch', '--quiet', repo.url, repo.commit]);
+    run('git', ['-C', dir, 'checkout', '--quiet', '--detach', repo.commit]);
+  }
+  if (head() !== repo.commit || dirty()) throw new Error(`${dir} is not a clean checkout of ${repo.commit}`);
   return selectRoot(dir, repo.path);
 }
 
