@@ -140,7 +140,16 @@ fn tokenize(text: &str) -> Option<Vec<Tok>> {
             let start = i + 1;
             i += 1;
             while i < chars.len() && chars[i] != quote {
+                // A string that is only a line break (`"\n"`) is kept as
+                // `\n`; any other escape is outside the rules.
                 if chars[i] == '\\' {
+                    if i == start
+                        && chars.get(i + 1) == Some(&'n')
+                        && chars.get(i + 2) == Some(&quote)
+                    {
+                        i += 2;
+                        break;
+                    }
                     return None;
                 }
                 i += 1;
@@ -797,6 +806,7 @@ fn request_input(path: &[String]) -> bool {
 
 fn literal(lit: &Lit) -> String {
     match lit {
+        Lit::Str(s) if s == "\\n" => "a line break".to_owned(),
         Lit::Str(s) => format!("“{s}”"),
         Lit::Num(n) => n.clone(),
         Lit::Bool(true) => "true".into(),
@@ -988,6 +998,13 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     });
                 }
                 let whole = noun(right, cx)?;
+                if text == "\\n" {
+                    return Some(if present {
+                        format!("{whole} contains a line break")
+                    } else {
+                        format!("{whole} does not contain a line break")
+                    });
+                }
                 return Some(if present {
                     format!("{whole} contains “{text}”")
                 } else {
@@ -1425,7 +1442,9 @@ pub(super) fn go_error(display: &str) -> Option<String> {
 /// request acts as the API key's user"; `alias.enabled = False` is "the
 /// alias is no longer enabled"; `alias.delete_on = arrow.now().shift(days=+N)`
 /// is "the alias's delete on is set to N days from now"; otherwise "the
-/// alias's note is set to the note". `None` outside these rules.
+/// alias's note is set to the note"; `alias.name =
+/// alias.name.replace("\n", "")` is "line breaks are removed from the
+/// alias's name". `None` outside these rules.
 fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
     let Expr::Ref(path) = parse(target.trim())? else {
         return None;
@@ -1445,6 +1464,18 @@ fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
         }
         _ => subject(&path, cx)?,
     };
+    // `x.name = x.name.replace("\n", "")`: line breaks are removed.
+    if let Some(args) = value
+        .strip_prefix(target.trim())
+        .and_then(|r| r.strip_prefix(".replace("))
+        .and_then(|r| r.strip_suffix(')'))
+        && matches!(
+            args.split_once(',').map(|(a, b)| (a.trim(), b.trim())),
+            Some(("\"\\n\"" | "'\\n'", "\"\"" | "''"))
+        )
+    {
+        return Some(format!("line breaks are removed from {place}"));
+    }
     // `arrow.now().shift(days=+N)`: N days from now.
     if let Some(rest) = value
         .strip_prefix("arrow.now().shift(")
@@ -2465,6 +2496,24 @@ mod tests {
             "the alias's note is set to the “compute” result"
         );
         assert_eq!(set("alias.note", "compute(alias) + 1"), None);
+        assert_eq!(
+            set("alias.name", r#"alias.name.replace("\n", "")"#).unwrap(),
+            "line breaks are removed from the alias's name"
+        );
+        assert_eq!(
+            set("alias.name", r#"alias.name.replace('\n', '')"#).unwrap(),
+            "line breaks are removed from the alias's name"
+        );
+        assert_eq!(set("alias.name", r#"other.name.replace("\n", "")"#), None);
+        assert_eq!(
+            condition(
+                r#"alias.name and "\n" in alias.name"#,
+                BranchPolarity::TruthyBranch,
+                &cx
+            )
+            .unwrap(),
+            "the alias's name is set and the alias's name contains a line break"
+        );
         assert_eq!(set("items[0]", "1"), None);
         assert_eq!(
             called("perform_alias_deletion(alias, user)").unwrap(),
