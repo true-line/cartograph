@@ -1348,6 +1348,14 @@ fn kotlin_path(path: &str) -> bool {
 /// only a call of a capitalized class name is read, as a Java one is.
 pub(super) fn kotlin_thrown(display: &str) -> Option<String> {
     let display = display.trim();
+    // A precondition's message literal (`require(…) { "…" }`) or an
+    // `error("…")` call is the message it fails with (AC-1108).
+    if display.starts_with('"') {
+        return java_thrown(&format!("new IllegalArgumentException({display})"));
+    }
+    if let Some(arguments) = display.strip_prefix("error(") {
+        return java_thrown(&format!("new IllegalStateException({arguments}"));
+    }
     let class = display.split('(').next()?;
     let simple = class.rsplit('.').next()?;
     if !simple.starts_with(|c: char| c.is_ascii_uppercase()) {
@@ -2530,6 +2538,16 @@ mod tests {
             Some("a “login already used” error")
         );
         assert_eq!(kotlin_thrown("failure(\"x\")"), None);
+        // AC-1108: a precondition message and `error("…")` read as the error.
+        assert_eq!(
+            kotlin_thrown("\"too many\"").as_deref(),
+            Some("the error “too many”")
+        );
+        assert_eq!(
+            kotlin_thrown("error(\"locked\")").as_deref(),
+            Some("the error “locked”")
+        );
+        assert_eq!(kotlin_thrown("check(order.open)"), None);
         assert!(kotlin_path("build.gradle.kts") && kotlin_path("src/A.kt"));
         assert!(!kotlin_path("src/A.java"));
         // A literal with an apostrophe or escapes is still the message.
