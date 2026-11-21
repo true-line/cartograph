@@ -1076,10 +1076,32 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
 /// the same source expression to another literal. "the form name is not
 /// “cancel”, and the form name is “change-yearly”" says only the second,
 /// which a reader (and a small model) cannot misread as no option matching.
-/// Values are matched by their parsed source, so two inputs that read alike
+/// Values are matched by their source tokens, so two inputs that read alike
 /// (a form field and a query parameter) are never taken for one.
 fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
-    let equality = |display: &str, polarity: BranchPolarity| -> Option<(Expr, bool, Lit)> {
+    // The value's identity is its source tokens, not its parsed form: the
+    // parser reads `data.get("mode", "cancel")` as `data.mode` and drops the
+    // default, so two getters with different defaults would look alike.
+    let operand = |display: &str| -> Option<Vec<Tok>> {
+        let mut toks = tokenize(display)?;
+        let comparison = |tok: &Tok| matches!(tok, Tok::Op(op) if op == "==" || op == "!=");
+        let literal = |tok: &Tok| match tok {
+            Tok::Str(_) | Tok::Num(_) => true,
+            Tok::Ident(word) => matches!(word.as_str(), "True" | "False" | "true" | "false"),
+            Tok::Op(_) => false,
+        };
+        let n = toks.len();
+        if n >= 3 && comparison(&toks[n - 2]) && literal(&toks[n - 1]) {
+            toks.truncate(n - 2);
+        } else if n >= 3 && comparison(&toks[1]) && literal(&toks[0]) {
+            toks.drain(..2);
+        } else {
+            return None;
+        }
+        Some(toks)
+    };
+    let equality = |display: &str, polarity: BranchPolarity| -> Option<(Vec<Tok>, bool, Lit)> {
+        let source = operand(display)?;
         let mut expr = parse(display)?;
         let mut negated = polarity == BranchPolarity::FalsyBranch;
         while let Expr::Not(inner) = expr {
@@ -1096,11 +1118,11 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
         };
         // Either operand order: `mode == "yearly"` and `"yearly" == mode`.
         match (*left, *right) {
-            (value @ (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..)), Expr::Lit(lit))
-            | (Expr::Lit(lit), value @ (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..)))
+            (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..), Expr::Lit(lit))
+            | (Expr::Lit(lit), Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..))
                 if !matches!(lit, Lit::None) =>
             {
-                Some((value, equal, lit))
+                Some((source, equal, lit))
             }
             _ => None,
         }
@@ -1117,7 +1139,7 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
         (Lit::Bool(a), Lit::Bool(b)) => a != b,
         _ => false,
     };
-    let tests: Vec<Option<(Expr, bool, Lit)>> = conditions
+    let tests: Vec<Option<(Vec<Tok>, bool, Lit)>> = conditions
         .iter()
         .map(|&(display, polarity)| equality(display, polarity))
         .collect();
@@ -1962,6 +1984,11 @@ mod tests {
             // One value spelled two ways is not two values.
             vec![("count != 1_000", t), ("count == 1000", t)],
             vec![("count != 1", t), ("count == True", t)],
+            // A getter's default is part of the value it reads.
+            vec![
+                ("data.get(\"mode\", \"cancel\") == \"cancel\"", f),
+                ("data.get(\"mode\", \"yearly\") == \"yearly\"", t),
+            ],
         ] {
             assert_eq!(implied_by_pin(&kept), vec![false; kept.len()], "{kept:?}");
         }
