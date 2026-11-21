@@ -2,12 +2,12 @@
 //! Java (AC-1031), Rust (AC-1033) and Kotlin (AC-1035) lanes (#385).
 //!
 //! Each adapter parses a captured `.py`, `.go`, `.java`, `.rs`, `.kt` or
-//! `.kts` file's retained bytes; this module binds that file's own facts to the exact
-//! captured spans their primary provenance cites. Rules and facts citing
-//! another file get none.
-//! Receipts are kept only for facts that survive directory resolution
-//! unchanged, and are admitted after every TypeScript receipt within the same
-//! extraction budget.
+//! `.kts` file's retained bytes; this module binds a lane's facts to the exact
+//! captured spans their primary provenance cites. Rules and facts citing more
+//! than one file get none. Facts are bound in their final form, after
+//! directory resolution (AC-1037), so those the directory join builds or
+//! rewrites are covered too; receipts are admitted after every TypeScript
+//! receipt within the same extraction budget.
 
 use super::{
     CapturedError, Charge, Grammar, MAX_EXTRACTION_RECEIPT_BYTES, MAX_EXTRACTION_RECEIPTS,
@@ -101,6 +101,56 @@ fn mint_lane_file_receipts(
         }
     }
     Ok(receipts)
+}
+
+/// Receipt candidates for a lane's final facts, after directory resolution
+/// (AC-1037). Each fact whose primary provenance lies wholly in one of the
+/// captured `files` is minted against that file, file by file in `files`
+/// order, and staged within the extraction budget; a fact citing several
+/// files, or a file outside the capture, gets none.
+pub fn stage_lane_receipts(
+    grammar: Grammar,
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &SourceId,
+    nodes: &[Node],
+    edges: &[Edge],
+) -> ReceiptStage {
+    let mut by_file: std::collections::BTreeMap<&str, (Vec<&Node>, Vec<&Edge>)> =
+        std::collections::BTreeMap::new();
+    for node in nodes {
+        if let Some(path) = sole_evidence_path(&node.props) {
+            by_file.entry(path).or_default().0.push(node);
+        }
+    }
+    for edge in edges {
+        if let Some(path) = sole_evidence_path(&edge.props) {
+            by_file.entry(path).or_default().1.push(edge);
+        }
+    }
+    let mut stage = ReceiptStage::default();
+    for path in files {
+        let (Some((nodes, edges)), Ok(file)) = (by_file.get(path.as_str()), capture.file(path))
+        else {
+            continue;
+        };
+        let nodes: Vec<Node> = nodes.iter().map(|node| (*node).clone()).collect();
+        let edges: Vec<Edge> = edges.iter().map(|edge| (*edge).clone()).collect();
+        if let Ok(receipts) = mint_lane_file_receipts(grammar, file, id, &nodes, &edges) {
+            stage.extend(receipts);
+        }
+    }
+    stage
+}
+
+/// The one file every primary evidence entry of a fact cites, if there is one.
+fn sole_evidence_path(props: &serde_json::Value) -> Option<&str> {
+    let evidence = props.get("prov")?.get("evidence")?.as_array()?;
+    let mut paths = evidence
+        .iter()
+        .map(|entry| entry.get("path").and_then(serde_json::Value::as_str));
+    let first = paths.next()??;
+    paths.all(|path| path == Some(first)).then_some(first)
 }
 
 /// Python receipt candidates staged while the lane mints them, charged
@@ -433,6 +483,93 @@ mod tests {
             assert!(mint_rust_file_receipts(file, &id, &[own], &[]).is_err());
         }
         assert_eq!(&KOTLIN.as_bytes()[4..10], b"handle");
+    }
+
+    fn prov_spanning(spans: &[(&str, (u64, u64))]) -> serde_json::Value {
+        let evidence = spans
+            .iter()
+            .map(|(path, span)| EvidenceRef {
+                repo: "local/src_11111111111111111111111111111111".into(),
+                path: (*path).into(),
+                byte_start: span.0,
+                byte_end: span.1,
+                commit_sha: "workdir".into(),
+            })
+            .collect();
+        serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                evidence,
+                "t0.adapter-python",
+                b"fact",
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    // AC-1037: final facts, including those the directory join builds from
+    // several spans of one file, are bound per captured file in `files`
+    // order; a fact citing two files, or a file outside the capture, gets none.
+    #[test]
+    fn lane_receipts_bind_final_facts_citing_one_captured_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), SOURCE).unwrap();
+        std::fs::write(dir.path().join("b.py"), SOURCE).unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap(),
+            &["a.py".to_string(), "b.py".to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let id = SourceId {
+            repo: "local/src_11111111111111111111111111111111",
+            commit: "workdir",
+        };
+        let joined = node(
+            "ep:a",
+            json!({ "prov": prov_spanning(&[("a.py", (0, 3)), ("a.py", (4, 11))]) }),
+        );
+        let nodes = [
+            joined.clone(),
+            node(
+                "ep:cross",
+                json!({ "prov": prov_spanning(&[("a.py", (0, 3)), ("b.py", (0, 3))]) }),
+            ),
+            node("sym:b", json!({ "prov": prov("b.py", (4, 11)) })),
+            node("sym:c", json!({ "prov": prov("c.py", (0, 3)) })),
+        ];
+        let edges = [Edge {
+            src: "ep:a".into(),
+            dst: "sym:b".into(),
+            label: "HANDLES".into(),
+            props: json!({ "prov": prov("a.py", (0, 3)) }),
+        }];
+        let files = ["b.py".to_string(), "a.py".to_string(), "c.py".to_string()];
+        let staged = stage_lane_receipts(Grammar::Python, &capture, &files, &id, &nodes, &edges)
+            .into_receipts();
+        let keys: Vec<_> = staged
+            .iter()
+            .map(|receipt| receipt.fact_key().clone())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                core_graph::source::FactKey::Node { id: "sym:b".into() },
+                core_graph::source::FactKey::Node { id: "ep:a".into() },
+                core_graph::source::FactKey::Edge {
+                    source: "ep:a".into(),
+                    label: "HANDLES".into(),
+                    destination: "sym:b".into(),
+                },
+            ]
+        );
+        let receipt = staged[1].to_receipt().unwrap();
+        assert!(receipt.id().starts_with("py-primary-v1:"));
+        assert!(receipt.matches_node(&joined));
+        assert_eq!(receipt.ranges().len(), 2);
     }
 
     // AC-1024: Python receipts are admitted after those already held, within

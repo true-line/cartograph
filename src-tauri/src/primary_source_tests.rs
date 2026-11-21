@@ -3906,3 +3906,161 @@ fn kotlin_facts_are_parsed_from_the_capture_and_cited() {
         FactKey::Node { id } if id.contains("handler")
     )));
 }
+
+// AC-1037: a fact the Java directory join builds, a Spring endpoint composed
+// from the class and method mappings of one captured file, gets a Java
+// receipt bound to its final form and citing both mapping spans.
+#[test]
+fn directory_built_lane_facts_are_cited_from_the_capture() {
+    const CONTROLLER: &str = "package com.demo.web;\n\nimport org.springframework.web.bind.annotation.*;\n\n@RestController\n@RequestMapping(\"/api/users\")\npublic class UserController {\n    @GetMapping(\"/{id}\")\n    public String get() { return \"u\"; }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("UserController.java"), CONTROLLER).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string(), "server".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let endpoint = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Endpoint" && node.props["path"] == "/api/users/{id}")
+        .expect("the Spring endpoint is recovered");
+    let receipt = receipts
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Node { id } if *id == endpoint.id))
+        .expect("the directory-built endpoint carries a receipt")
+        .to_receipt()
+        .unwrap();
+    assert!(receipt.id().starts_with("java-primary-v1:"));
+    assert!(receipt.matches_node(endpoint));
+    // Both the class base and the method mapping are cited and read back.
+    assert_eq!(receipt.ranges().len(), 2);
+    let file = capture.file("UserController.java").unwrap();
+    for range in receipt.ranges() {
+        assert_eq!(range.captured.file, *file.reference());
+        assert!(
+            file.span(range.evidence.byte_start, range.evidence.byte_end)
+                .is_ok()
+        );
+    }
+    let bound = crate::primary_source::matching_bindings(&extraction, &receipts);
+    assert!(
+        bound
+            .iter()
+            .any(|binding| binding.receipt_id == receipt.id())
+    );
+}
+
+// AC-1037: a lane relation repeated across occurrences, and a node id emitted
+// twice, are minted in the form publication keeps (merged evidence, last
+// value), so the receipt binds the published fact.
+#[test]
+fn lane_receipts_cite_published_merged_relations() {
+    const SOURCE: &str = "def a():\n    b()\n    b()\n\ndef b():\n    pass\n";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.py"), SOURCE).unwrap();
+    let source_id = source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap();
+    let capture = source_capture::capture_working_tree(
+        dir.path(),
+        &source_id,
+        &["a.py".to_string()],
+        source_capture::CaptureLimits::default(),
+    )
+    .unwrap();
+    let repo = "local/src_11111111111111111111111111111111";
+    let prov = |span: (u64, u64)| {
+        serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                vec![core_prov::EvidenceRef {
+                    repo: repo.into(),
+                    path: "a.py".into(),
+                    byte_start: span.0,
+                    byte_end: span.1,
+                    commit_sha: "workdir".into(),
+                }],
+                "t0.adapter-python",
+                b"fact",
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let node = |id: &str, span, name: &str| core_graph::Node {
+        id: id.into(),
+        label: "Symbol".into(),
+        props: json!({ "name": name, "prov": prov(span) }),
+    };
+    let call = |span| core_graph::Edge {
+        src: "sym:a".into(),
+        dst: "sym:b".into(),
+        label: "CALLS".into(),
+        props: json!({ "prov": prov(span) }),
+    };
+    let nodes = [
+        node("sym:a", (0, 9), "stale"),
+        node("sym:b", (29, 38), "b"),
+        node("sym:a", (0, 9), "a"),
+    ];
+    let edges = [call((14, 17)), call((22, 25))];
+    let id = adapters_lang_ts::SourceId {
+        repo,
+        commit: "workdir",
+    };
+    let mut receipts = Vec::new();
+    stage_lane_publication_receipts(
+        adapters_lang_ts::captured::Grammar::Python,
+        &capture,
+        &["a.py".to_string()],
+        &id,
+        &nodes,
+        &edges,
+        &mut receipts,
+    );
+    let edge = receipts
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Edge { .. }))
+        .expect("the merged relation carries a receipt")
+        .to_receipt()
+        .unwrap();
+    // Both call sites are cited, as the published relation unions them.
+    assert_eq!(edge.ranges().len(), 2);
+    let node_a = receipts
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Node { id } if id == "sym:a"))
+        .expect("the last value of a repeated node carries a receipt")
+        .to_receipt()
+        .unwrap();
+    assert!(node_a.matches_node(&nodes[2]));
+    assert_eq!(receipts.len(), 3);
+}
