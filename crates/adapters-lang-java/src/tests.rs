@@ -5960,6 +5960,27 @@ public class OrderController {
     public void unchecked(@RequestBody Unchecked body) {}
     @PostMapping("/admin")
     public void admin(@Validated(Admin.class) @RequestBody OrderDTO order) {}
+    @GetMapping("/sku")
+    public void sku(@RequestParam @com.acme.check.Sku String sku, @RequestParam String plain) {}
+    @GetMapping("/message")
+    public void message(@RequestParam @Email(message = Messages.MISSING) String to) {}
+}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/web/GroupController.java",
+        r#"package com.acme.web;
+import jakarta.validation.constraints.NotNull;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@Validated(Admin.class)
+public class GroupController {
+    @GetMapping("/grouped")
+    public void grouped(@RequestParam @NotNull String id) {}
+    @GetMapping("/bare")
+    public void bare(@RequestParam String id) {}
 }
 "#,
     );
@@ -6078,4 +6099,30 @@ public class PlainController {
     );
     assert_eq!(rows("POST:/orders/admin").unwrap(), Vec::<String>::new());
     assert!(gaps("PATCH:/orders").is_empty());
+    // A custom constraint on a parameter, an unsettled `message`, and a
+    // class-level `@Validated(...)` naming groups are Gaps, never rows.
+    assert_eq!(
+        gaps("GET:/orders/sku"),
+        [(
+            "custom_constraint".to_string(),
+            "@com.acme.check.Sku".to_string()
+        )]
+    );
+    assert_eq!(rows("GET:/orders/sku").unwrap(), Vec::<String>::new());
+    assert_eq!(
+        gaps("GET:/orders/message"),
+        [(
+            "constraint_value".to_string(),
+            "@Email(message = Messages.MISSING)".to_string()
+        )]
+    );
+    assert_eq!(
+        gaps("GET:/grouped"),
+        [(
+            "validation_group".to_string(),
+            "@Validated(Admin.class)".to_string()
+        )]
+    );
+    assert_eq!(rows("GET:/grouped").unwrap(), Vec::<String>::new());
+    assert!(rows("GET:/bare").is_none());
 }

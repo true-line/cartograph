@@ -215,6 +215,9 @@ pub(super) struct Param {
 #[derive(Debug, Clone)]
 pub(super) struct Handler {
     handler: String,
+    /// The controller class's `@Validated(...)` naming groups: its
+    /// parameter constraints run only for those groups.
+    class_groups: Option<(String, (String, usize), serde_json::Value)>,
     params: Vec<Param>,
 }
 
@@ -251,6 +254,9 @@ pub(super) fn retarget_all(beans: &mut [Bean], handlers: &mut [Handler], commit:
             if let Some((_, _, prov)) = &mut param.groups {
                 retarget(prov, commit);
             }
+        }
+        if let Some((_, _, prov)) = &mut handler.class_groups {
+            retarget(prov, commit);
         }
     }
 }
@@ -593,10 +599,12 @@ pub(super) fn handler(
     handler: &str,
     class_annotations: &[(String, TsNode<'_>)],
 ) -> Option<Handler> {
-    let class_validated = class_annotations.iter().any(|(name, annotation)| {
+    let class_validation = class_annotations.iter().find(|(name, annotation)| {
         name == "Validated"
             && proof(cx, *annotation, name, imports, package, SPRING_VALIDATION).is_some()
     });
+    let class_validated = class_validation.is_some();
+    let class_groups = class_validation.and_then(|(_, annotation)| groups(cx, *annotation));
     let parameters = method.child_by_field_name("parameters")?;
     let mut params = Vec::new();
     let mut walk = parameters.walk();
@@ -622,26 +630,23 @@ pub(super) fn handler(
                 Some(shadow) => {
                     validated = true;
                     shadowed_by = shadowed_by.or(shadow);
-                    if simple == "Validated"
-                        && annotation
-                            .child_by_field_name("arguments")
-                            .is_some_and(|a| a.named_child_count() > 0)
-                    {
-                        groups = Some((
-                            shorten(cx.text(annotation)),
-                            anchor(cx, *annotation),
-                            gap_prov(cx, *annotation),
-                        ));
+                    if simple == "Validated" {
+                        groups = groups.or(self::groups(cx, *annotation));
                     }
                 }
                 None => rest.push((simple.clone(), *annotation)),
             }
         }
-        // Only constraints matter on the parameter itself; other annotations
-        // (`@RequestBody`, `@PathVariable`) are Spring's binding.
+        // Constraints, and any annotation that may be a repository-declared
+        // constraint, matter on the parameter itself; the join drops the
+        // rest (`@RequestBody`, `@PathVariable` are Spring's binding).
         let marks: Vec<Mark> = marks(cx, imports, package, chain, &rest, false)
             .into_iter()
-            .filter(|mark| matches!(mark, Mark::Constraint(_)))
+            .filter(|mark| match mark {
+                Mark::Constraint(_) => true,
+                Mark::Other { candidates, .. } => !candidates.is_empty(),
+                Mark::Cascade { .. } => false,
+            })
             .collect();
         if !validated && (marks.is_empty() || !class_validated) {
             continue;
@@ -665,8 +670,26 @@ pub(super) fn handler(
     }
     (!params.is_empty()).then(|| Handler {
         handler: handler.to_string(),
+        class_groups,
         params,
     })
+}
+
+/// `@Validated(...)` naming groups, as a Gap site.
+fn groups(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'_>,
+) -> Option<(String, (String, usize), serde_json::Value)> {
+    annotation
+        .child_by_field_name("arguments")
+        .is_some_and(|a| a.named_child_count() > 0)
+        .then(|| {
+            (
+                shorten(cx.text(&annotation)),
+                anchor(cx, annotation),
+                gap_prov(cx, annotation),
+            )
+        })
 }
 
 /// A Gap this pass records on an endpoint.
@@ -682,6 +705,9 @@ struct GapSite<'a> {
 struct Reading<'a> {
     rows: Vec<serde_json::Value>,
     gaps: Vec<GapSite<'a>>,
+    /// Some parameter is `@Valid`/`@Validated`, so an empty list is a
+    /// reading, not an absence.
+    validated: bool,
 }
 
 /// Settle `marks` declared on `field` (of `declared_in`) into `reading`.
@@ -730,10 +756,22 @@ fn read_marks<'a>(
                     });
                     continue;
                 }
-                let message = constraint
-                    .message
-                    .as_deref()
-                    .and_then(|parts| settled.text(parts));
+                // A `message` that names an unsettled constant is unread too.
+                let message = match constraint.message.as_deref() {
+                    None => None,
+                    Some(parts) => match settled.text(parts) {
+                        Some(text) => Some(text),
+                        None => {
+                            reading.gaps.push(GapSite {
+                                reason: "constraint_value",
+                                text: &constraint.text,
+                                anchor: &constraint.gap_anchor,
+                                prov: &constraint.gap_prov,
+                            });
+                            continue;
+                        }
+                    },
+                };
                 reading.rows.push(serde_json::json!({
                     "parameter": parameter,
                     "type": declared_in,
@@ -816,19 +854,45 @@ pub(super) fn resolve(
             if param.shadowed_by.as_deref().is_some_and(shadowed) {
                 continue;
             }
-            read_marks(
-                &param.marks,
-                &param.name,
-                None,
-                None,
-                settled,
-                shadowed,
-                &constraint_types,
-                &mut reading,
-            );
+            match &handler.class_groups {
+                // Under `@Validated(Group.class)` a parameter constraint runs
+                // only for that group, which is not read.
+                Some((text, anchor, prov)) if !param.marks.is_empty() => {
+                    let mut probe = Reading::default();
+                    read_marks(
+                        &param.marks,
+                        &param.name,
+                        None,
+                        None,
+                        settled,
+                        shadowed,
+                        &constraint_types,
+                        &mut probe,
+                    );
+                    if probe.rows.len() + probe.gaps.len() > 0 {
+                        reading.gaps.push(GapSite {
+                            reason: "validation_group",
+                            text,
+                            anchor,
+                            prov,
+                        });
+                    }
+                }
+                _ => read_marks(
+                    &param.marks,
+                    &param.name,
+                    None,
+                    None,
+                    settled,
+                    shadowed,
+                    &constraint_types,
+                    &mut reading,
+                ),
+            }
             if !param.validated {
                 continue;
             }
+            reading.validated = true;
             if let Some((text, anchor, prov)) = &param.groups {
                 reading.gaps.push(GapSite {
                     reason: "validation_group",
@@ -877,6 +941,9 @@ pub(super) fn resolve(
         let Some(reading) = readings.get(handler) else {
             continue;
         };
+        if !reading.validated && reading.rows.is_empty() && reading.gaps.is_empty() {
+            continue;
+        }
         let mut rows = reading.rows.clone();
         rows.sort_by_key(|row| {
             (
