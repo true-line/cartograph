@@ -98,6 +98,9 @@ pub struct Extraction {
     /// Requests JUnit tests perform, joined to endpoints repo-wide
     /// (AC-1102).
     test_requests: Vec<target_tests::Request>,
+    /// Rules relying on standard-library names another file may rebind,
+    /// settled repo-wide (AC-1108).
+    pending_rules: Vec<rule_evidence::PendingRule>,
 }
 
 /// A top-level class, interface, object, enum, annotation class or type
@@ -302,6 +305,68 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
         evidence.commit_sha = commit.into();
     }
     props["prov"] = serde_json::to_value(provenance).expect("provenance serializes");
+}
+
+/// Settle guarded-exit rules that rely on standard-library names against
+/// the declarations `out` holds (AC-1108).
+fn settle_rules(out: &mut Extraction) {
+    let pending = std::mem::take(&mut out.pending_rules);
+    if pending.is_empty() {
+        return;
+    }
+    let top_level: BTreeSet<&str> = out
+        .declared_types
+        .iter()
+        .chain(&out.declared_functions)
+        .chain(&out.declared_importables)
+        .map(|item| item.fqn.as_str())
+        .collect();
+    let types: BTreeMap<&str, &Declared> = out
+        .declared_types
+        .iter()
+        .map(|ty| (ty.fqn.as_str(), ty))
+        .collect();
+    let top = |fqn: &str| top_level.contains(fqn);
+    // The type or a repository supertype declares the member; an
+    // unresolved (external) supertype is not read.
+    let member_of = |fqn: &str, name: &str| {
+        let mut queue = vec![fqn.to_owned()];
+        let mut seen = BTreeSet::new();
+        while let Some(fqn) = queue.pop() {
+            if !seen.insert(fqn.clone()) || seen.len() > 64 {
+                continue;
+            }
+            let Some(ty) = types.get(fqn.as_str()) else {
+                continue;
+            };
+            if ty.members.contains(name) {
+                return true;
+            }
+            for candidates in &ty.supers {
+                if let Some(found) = candidates.iter().find(|c| types.contains_key(c.as_str())) {
+                    queue.push(found.clone());
+                }
+            }
+        }
+        false
+    };
+    let any_member = |name: &str| {
+        out.declared_types
+            .iter()
+            .any(|ty| ty.members.contains(name))
+    };
+    let declared = rule_evidence::Declarations {
+        top_level: &top,
+        member_of: &member_of,
+        any_member: &any_member,
+    };
+    let (mut nodes, mut edges) = (
+        std::mem::take(&mut out.nodes),
+        std::mem::take(&mut out.edges),
+    );
+    rule_evidence::settle(pending, &declared, &mut nodes, &mut edges);
+    out.nodes = nodes;
+    out.edges = edges;
 }
 
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
@@ -1525,6 +1590,7 @@ pub fn extract_source(
     id: &SourceId<'_>,
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
+    settle_rules(&mut out);
     let unjoined_sites = std::mem::take(&mut out.unjoined_sites);
     out.fetch_sites.extend(unjoined_sites);
     let names = out.shadow_names.clone();
@@ -1797,7 +1863,14 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     }
 
     // Guarded returns and throws of the file's functions (AC-1106).
-    rule_evidence::extract(&cx, root, &functions_by_start, &mut out);
+    rule_evidence::extract(
+        &cx,
+        root,
+        &functions_by_start,
+        package.as_deref(),
+        &imports.wildcard_packages,
+        &mut out,
+    );
 
     for (symbol, function, return_type) in returns {
         if let Some(ty) = return_type {
@@ -2685,6 +2758,7 @@ fn extract_dir_with(
             out.ktor_routes.extend(extraction.ktor_routes);
             out.room.extend(extraction.room);
             out.test_requests.extend(extraction.test_requests);
+            out.pending_rules.extend(extraction.pending_rules);
             out.shadow_names.extend(extraction.shadow_names);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
@@ -2737,6 +2811,7 @@ fn extract_dir_with(
             .or_insert_with(|| Some(item.path.clone()));
     }
     let functions_by_fqn = unique_by_fqn(&out.declared_functions);
+    settle_rules(&mut out);
     ktor_routes::resolve(
         id.repo,
         std::mem::take(&mut out.ktor_routes),

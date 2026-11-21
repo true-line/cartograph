@@ -311,7 +311,9 @@ class Gate {
         LocalExit::Throw { value } => value.clone(),
         other => panic!("{other:?}"),
     };
-    assert_eq!(templated.capture, ExpressionCapture::Unsupported);
+    // AC-1108: a template naming a sensitive value is withheld.
+    assert_eq!(templated.capture, ExpressionCapture::Redacted);
+    assert_eq!(templated.display.as_str(), "TooMany([REDACTED])");
     assert!(!gaps(&rules[3]).contains(&"mutation".to_owned()));
     assert!(gaps(&rules[4]).contains(&"mutation".to_owned()));
     let test = extract(source, "src/test/kotlin/com/acme/GateTest.kt");
@@ -358,4 +360,202 @@ class Jobs {
     let out = extract(source, "src/main/kotlin/com/acme/Jobs.kt");
     let read: Vec<_> = rules(&out).iter().map(|rule| effect(rule).1).collect();
     assert_eq!(read, ["IllegalStateException(\"inline\")"], "{read:?}");
+}
+
+// AC-1108: an elvis right side takes its left side falsy (absent), a
+// subject-less `when` entry takes its condition truthy and earlier entries'
+// falsy, and `require`/`check`/`requireNotNull`/`checkNotNull` throw with
+// their argument falsy, carrying their message literal; an unguarded
+// `error(…)`, a `when (subject)` entry and a several-condition entry are no
+// rules, and only the `when (subject)` is a control Gap.
+#[test]
+fn elvis_when_and_precondition_exits_are_guarded_rules() {
+    let source = r#"package com.acme
+
+class Orders(private val repo: Repo) {
+    fun place(id: String?, qty: Int): Order {
+        val key = id ?: throw IllegalArgumentException("id is required")
+        val order = repo.find(key) ?: return Order.EMPTY
+        when {
+            qty < 0 -> throw IllegalArgumentException("negative")
+            qty == 0 -> return Order.EMPTY
+            else -> Unit
+        }
+        require(qty < 100) { "too many" }
+        check(order.open)
+        requireNotNull(order.owner) { "owner is required" }
+        if (order.locked) error("locked")
+        error("unguarded")
+    }
+
+    fun kind(n: Int): String {
+        when (n) {
+            1 -> return "one"
+        }
+        when {
+            n > 1, n < -1 -> return "many"
+        }
+        if (n == 0) return "zero"
+        return "other"
+    }
+}
+"#;
+    let out = extract(source, "src/main/kotlin/com/acme/Orders.kt");
+    let rules = rules(&out);
+    let read: Vec<_> = rules
+        .iter()
+        .map(|rule| {
+            (
+                rule.owner_id.rsplit('#').next().unwrap().to_owned(),
+                conditions(rule),
+                effect(rule),
+            )
+        })
+        .collect();
+    use BranchPolarity::*;
+    let s = |text: &str| text.to_owned();
+    assert_eq!(
+        read,
+        vec![
+            (
+                s("Orders.place"),
+                vec![(s("id"), FalsyBranch)],
+                ("throw", s("IllegalArgumentException(\"id is required\")"))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("repo.find(key)"), FalsyBranch)],
+                ("return", s("Order.EMPTY"))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("qty < 0"), TruthyBranch)],
+                ("throw", s("IllegalArgumentException(\"negative\")"))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("qty < 0"), FalsyBranch), (s("qty == 0"), TruthyBranch)],
+                ("return", s("Order.EMPTY"))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("qty < 100"), FalsyBranch)],
+                ("throw", s("\"too many\""))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("order.open"), FalsyBranch)],
+                ("throw", s("check(order.open)"))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("order.owner"), FalsyBranch)],
+                ("throw", s("\"owner is required\""))
+            ),
+            (
+                s("Orders.place"),
+                vec![(s("order.locked"), TruthyBranch)],
+                ("throw", s("error(\"locked\")"))
+            ),
+            (
+                s("Orders.kind"),
+                vec![(s("n == 0"), TruthyBranch)],
+                ("return", s("\"zero\""))
+            ),
+        ],
+        "{read:#?}"
+    );
+    assert!(
+        !gaps(&rules[0]).contains(&s("switch_control")),
+        "{:?}",
+        gaps(&rules[0])
+    );
+    assert!(
+        gaps(&rules[8]).contains(&s("switch_control")),
+        "{:?}",
+        gaps(&rules[8])
+    );
+}
+
+// AC-1108: across files, a same-package top-level `require` and a `run`
+// member of a repository supertype rebind those names, so the rules that
+// relied on them are dropped with their Gaps; `?.let` and `check` stay.
+#[test]
+fn names_rebound_in_other_files_drop_the_rules_relying_on_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let full = dir.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    };
+    write(
+        "src/main/kotlin/com/acme/Checks.kt",
+        "package com.acme\n\nfun require(ok: Boolean, message: () -> String) {}\n",
+    );
+    write(
+        "src/main/kotlin/com/acme/Base.kt",
+        "package com.acme\n\nopen class Base {\n    fun run(block: () -> Unit) {}\n}\n",
+    );
+    let svc = "package com.acme\n\nclass Svc : Base() {\n    fun a(n: Int) {\n        require(n > 0) { \"positive\" }\n    }\n\n    fun b(n: Int?) {\n        n?.let { if (it < 0) throw IllegalStateException(\"neg\") }\n    }\n\n    fun c(n: Int) {\n        run { if (n < 0) throw IllegalStateException(\"run\") }\n    }\n\n    fun d(n: Int) {\n        check(n > 0)\n    }\n}\n";
+    write("src/main/kotlin/com/acme/Svc.kt", svc);
+    let id = SourceId {
+        repo: "acme/shop",
+        commit: "c0ffee",
+    };
+    let out = crate::extract_dir(dir.path(), &id).expect("extracts");
+    let owners: Vec<String> = rules(&out)
+        .iter()
+        .map(|rule| rule.owner_id.rsplit('#').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(owners, ["Svc.b", "Svc.d"], "{owners:?}");
+    let dangling = out.nodes.iter().any(|n| {
+        n.label == "Gap"
+            && n.id.starts_with("gap:rule:")
+            && !out.nodes.iter().any(|rule| {
+                rule.label == "BusinessRule" && n.id.starts_with(&format!("gap:{}:", rule.id))
+            })
+    });
+    assert!(!dangling, "a dropped rule's Gaps are dropped with it");
+    // Read alone, the file has no rebinding, so all four are rules.
+    let alone = extract(svc, "src/main/kotlin/com/acme/Svc.kt");
+    assert_eq!(rules(&alone).len(), 4);
+}
+
+// AC-1108: a template of plain names keeps its text as written, with no
+// literal value; a secret in a template withholds it.
+#[test]
+fn plain_name_templates_stay_readable_in_rule_values() {
+    let source = r#"package com.acme
+
+class Owners(private val owners: Repo) {
+    fun show(ownerId: Int): Owner {
+        return owners.find(ownerId) ?: throw NotFound("Owner $ownerId of ${owners.name} not found")
+    }
+
+    fun token(id: Int): String {
+        if (id < 0) throw Bad("key ghp_abcdefghijklmnopqrstuvwxyz0123456789 for $id")
+        return ""
+    }
+}
+"#;
+    let out = extract(source, "src/main/kotlin/com/acme/Owners.kt");
+    let rules = rules(&out);
+    let values: Vec<_> = rules
+        .iter()
+        .map(|rule| match &rule.effect {
+            LocalExit::Throw { value } => (value.display.as_str().to_owned(), value.capture),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            (
+                "NotFound(\"Owner $ownerId of ${owners.name} not found\")".to_owned(),
+                ExpressionCapture::CompleteSyntax
+            ),
+            ("Bad([REDACTED])".to_owned(), ExpressionCapture::Redacted),
+        ],
+        "{values:?}"
+    );
 }
