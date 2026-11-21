@@ -246,6 +246,7 @@ const RULE_LANGUAGES: &[&str] = &[
     "jsx",
     "go",
     "java",
+    "rust",
 ];
 
 /// Source files of each language in `nodes` that no rule-evidence producer
@@ -293,7 +294,7 @@ pub fn unread_rule_sentence(unread: &BTreeMap<&str, usize>) -> Option<String> {
         [] => unreachable!(),
     };
     Some(format!(
-        "Rule evidence is recovered from Python, TypeScript/JavaScript, Go and Java source only. \
+        "Rule evidence is recovered from Python, TypeScript/JavaScript, Go, Java and Rust source only. \
          It is not extracted from the {listed} in this export, so the guards in them are \
          not listed here and these rules do not cover them.\n\n"
     ))
@@ -1432,7 +1433,8 @@ mod tests {
     fn rule_inventory_states_the_source_it_reads_no_rules_from() {
         // AC-0922 (#2009): Kotlin files in the export are named as source no
         // rule evidence was read from, so the rules are not taken to cover
-        // them; Python, Go (AC-0923) and Java (AC-0967) files are not.
+        // them; Python, Go (AC-0923), Java (AC-0967) and Rust (AC-1017)
+        // files are not.
         let mut nodes = base();
         nodes.push(rule_node(
             "rule:guard",
@@ -1445,6 +1447,7 @@ mod tests {
             ("file:c.py", "python"),
             ("file:d.go", "go"),
             ("file:E.java", "java"),
+            ("file:f.rs", "rust"),
         ] {
             let mut file = node(id, "File", Tier::Deterministic, ConfidenceTier::Confirmed);
             file.props["language"] = language.into();
@@ -1480,6 +1483,7 @@ mod tests {
         );
         assert!(!output.content.contains("Go file"), "{}", output.content);
         assert!(!output.content.contains("Java file"), "{}", output.content);
+        assert!(!output.content.contains("Rust file"), "{}", output.content);
         let only_python: Vec<Node> = nodes
             .into_iter()
             .filter(|n| n.props["language"] != "kotlin")
