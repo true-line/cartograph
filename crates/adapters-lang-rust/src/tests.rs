@@ -2095,6 +2095,18 @@ pub fn app() -> Router {
 
 pub fn helper() {}
 
+pub mod local {
+    pub struct Request;
+    impl Request {
+        pub fn get(_: &str) -> Self {
+            Request
+        }
+    }
+}
+
+#[cfg(test)]
+mod fixtures;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,6 +2128,8 @@ mod tests {
         let _ = Request::get("http://localhost/users/42?x=1").body(());
         let _ = Request::get(format!("/users/{id}")).body(());
         let _ = Request::builder().uri("/nowhere").body(());
+        // A workspace type named `Request` builds no HTTP request.
+        let _ = crate::local::Request::get("/users");
         let response = fake();
         assert!(response.status() == 404);
         helper();
@@ -2138,6 +2152,15 @@ mod tests {
         "src/store_tests.rs",
         r#"pub fn fixture(conn: &rusqlite::Connection) {
     conn.execute("DELETE FROM users", []).unwrap();
+}
+"#,
+    );
+    // So is any module an out-of-line `#[cfg(test)] mod fixtures;` declares.
+    write(
+        dir.path(),
+        "src/fixtures.rs",
+        r#"pub fn seed(conn: &rusqlite::Connection) {
+    conn.execute("UPDATE accounts SET balance = 0", []).unwrap();
 }
 "#,
     );
