@@ -770,7 +770,8 @@ jobs:
       volumes:
         - /home/runner/work:/home/runner/work
     permissions:
-      actions: read
+      # write: to delete its older cache entries.
+      actions: write
       contents: read
       packages: read
       pull-requests: read
@@ -870,6 +871,27 @@ jobs:
         with:
           path: ${{ env.APP_INCREMENTAL_DIR }}
           key: ${{ steps.incremental.outputs.key }}
+
+      # Keep only the newest entry: each hour saves under a new key, and
+      # about 1 GB an hour would push the other lanes' caches out of the
+      # repository's budget.
+      - name: Drop older app incremental caches
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          KEY: ${{ steps.incremental.outputs.key }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const caches = await github.paginate(github.rest.actions.getActionsCacheList, {
+              owner, repo, key: 'app-incremental-', per_page: 100,
+            });
+            for (const cache of caches) {
+              if (cache.key.startsWith('app-incremental-') && cache.key !== process.env.KEY) {
+                await github.rest.actions.deleteActionsCacheById({ owner, repo, cache_id: cache.id });
+                core.info(`deleted ${cache.key}`);
+              }
+            }
 
       - name: sccache statistics
         if: ${{ !cancelled() }}

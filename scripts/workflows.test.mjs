@@ -736,6 +736,10 @@ test('the app crate compiles incrementally from state main saves, and only main 
   assert.match(seed, /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
   assert.match(seed, /run: cargo test -p app --bin app --no-run/u);
   assert.match(seed, /save-if: false/u);
+  // Each hour saves a new key, so the job deletes the older entries.
+  assert.match(seed, /actions: write/u);
+  assert.match(seed, /deleteActionsCacheById/u);
+  assert.doesNotMatch(shards, /actions: write/u);
 });
 
 test('every job runs on GitHub-hosted runners except release packaging', () => {
