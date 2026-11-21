@@ -425,6 +425,10 @@ pub struct Observation {
     /// False when the layer hints exclude the layers that read this input,
     /// so a declared input was never read.
     pub selected: bool,
+    /// Declared paths, among every observation input of the repo, read
+    /// without a capture, so their evidence is unverified (ADR-0080). Only
+    /// those this producer declared are named.
+    pub uncaptured: Vec<String>,
 }
 
 /// Everything the inventory reads, all recorded by the ingest itself.
@@ -619,10 +623,24 @@ impl RepoCoverage {
                     ),
                 )
             } else if !observation.declared.is_empty() {
+                let uncaptured: Vec<&str> = observation
+                    .declared
+                    .iter()
+                    .filter(|path| observation.uncaptured.contains(path))
+                    .map(String::as_str)
+                    .collect();
+                let unverified = if uncaptured.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; not captured, so unverified (outside the manifest folder or past the capture limits): {}",
+                        uncaptured.join(", ")
+                    )
+                };
                 (
                     ProducerState::Ran,
                     format!(
-                        "applied {} declared {} file(s) to {} {} facts in {scope}",
+                        "applied {} declared {} file(s) to {} {} facts in {scope}{unverified}",
                         observation.declared.len(),
                         observation.input,
                         observation.targets,
