@@ -1460,8 +1460,20 @@ pub fn extract_dir_incremental_with_progress(
     cache: &mut IncrementalCache,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
-    let crates = discover_crates(root)?;
-    let workspace_crates: BTreeSet<String> = crates.iter().map(|c| c.name.clone()).collect();
+    let files = rust_paths(root)?;
+    extract_dir_with(
+        root,
+        id,
+        &files,
+        &|path| std::fs::read(root.join(path)),
+        cache,
+        on_file,
+        &mut |_, _| {},
+    )
+}
+
+/// The `.rs` files the ordinary walk selects, sorted, without parsing them.
+pub fn rust_paths(root: &Path) -> Result<Vec<String>, ExtractError> {
     let mut files: Vec<String> = Vec::new();
     for file in source_walk::files(root, &skip_dir, source_walk::Gitignores::Honor)? {
         if file.path.extension().and_then(|e| e.to_str()) == Some("rs") {
@@ -1469,6 +1481,45 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     files.sort();
+    Ok(files)
+}
+
+/// Recover a Rust directory whose `.rs` sources are the retained bytes `read`
+/// returns for each of `files`, instead of the checkout (#385). Each file's
+/// own extraction is handed to `on_parsed` before directory resolution, so a
+/// caller can bind receipts to it; crate discovery still reads `Cargo.toml`
+/// files under `root`, outside any receipt.
+pub fn extract_dir_from_sources(
+    root: &Path,
+    id: &SourceId<'_>,
+    files: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+    on_parsed: &mut dyn FnMut(&str, &Extraction),
+) -> Result<Extraction, ExtractError> {
+    extract_dir_with(
+        root,
+        id,
+        files,
+        read,
+        &mut IncrementalCache::default(),
+        on_file,
+        on_parsed,
+    )
+    .map(|(extraction, _)| extraction)
+}
+
+fn extract_dir_with(
+    root: &Path,
+    id: &SourceId<'_>,
+    files: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    cache: &mut IncrementalCache,
+    on_file: &mut dyn FnMut(&str),
+    on_parsed: &mut dyn FnMut(&str, &Extraction),
+) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    let crates = discover_crates(root)?;
+    let workspace_crates: BTreeSet<String> = crates.iter().map(|c| c.name.clone()).collect();
     let active: BTreeSet<String> = files.iter().cloned().collect();
     let mut stats = IncrementalStats {
         deleted_files: cache.files.keys().filter(|p| !active.contains(*p)).count() as u64,
@@ -1477,8 +1528,8 @@ pub fn extract_dir_incremental_with_progress(
     cache.files.retain(|p, _| active.contains(p));
     // Files a `#[path]` attribute wires in take the declared module (#2041).
     let mut declared = BTreeMap::new();
-    for path in &files {
-        let source = std::fs::read(root.join(path))?;
+    for path in files {
+        let source = read(path)?;
         if module_paths::mentions_path(&source) {
             let decls = module_paths::declarations(&source);
             if !decls.is_empty() {
@@ -1490,8 +1541,8 @@ pub fn extract_dir_incremental_with_progress(
     // Modules an out-of-line `#[cfg(test)] mod x;` declares: the files at
     // or under them are test code (#2018).
     let mut test_prefixes: BTreeSet<Vec<String>> = BTreeSet::new();
-    for path in &files {
-        let source = std::fs::read(root.join(path))?;
+    for path in files {
+        let source = read(path)?;
         let names = target_tests::cfg_test_declarations(&source);
         if names.is_empty() {
             continue;
@@ -1507,9 +1558,9 @@ pub fn extract_dir_incremental_with_progress(
         }
     }
     let mut out = Extraction::default();
-    for path in &files {
+    for path in files {
         on_file(path);
-        let source = std::fs::read(root.join(path))?;
+        let source = read(path)?;
         let (module, crate_name) = wired
             .get(path)
             .cloned()
@@ -1548,6 +1599,7 @@ pub fn extract_dir_incremental_with_progress(
                 )?
             }
         };
+        on_parsed(path, &extraction);
         cache.files.insert(
             path.clone(),
             CachedFile {
