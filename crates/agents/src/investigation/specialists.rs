@@ -2,7 +2,7 @@
     missing_docs,
     reason = "undocumented before workspace lints (#1764): document and delete"
 )]
-use super::{InvestigationError, bounded_bytes};
+use super::{Capability, InvestigationError, bounded_bytes};
 use core_prov::{ConfidenceTier, Tier};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -251,522 +251,99 @@ const POLICY_TARGET_LOCATION: &str = "Exact captured source targets appear once 
 
 impl SpecialistId {
     pub fn uses_compact_disclosure(self) -> bool {
-        matches!(
-            self,
-            Self::SpecWriterV1
-                | Self::SpecWriterV2
-                | Self::GapTriagerV1
-                | Self::GapTriagerV2
-                | Self::SectionWriterV1
-                | Self::DomainAnalystV3
-                | Self::EvidenceAuditorV3
-                | Self::DomainAnalystV4
-                | Self::EvidenceAuditorV4
-                | Self::DomainAnalystV5
-                | Self::EvidenceAuditorV5
-                | Self::DomainAnalystV6
-                | Self::EvidenceAuditorV6
-                | Self::DomainAnalystV7
-                | Self::EvidenceAuditorV7
-                | Self::DomainAnalystV8
-                | Self::EvidenceAuditorV8
-                | Self::DomainAnalystV9
-                | Self::EvidenceAuditorV9
-                | Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::CompactDisclosure)
     }
 
     pub fn uses_turn_progress(self) -> bool {
-        matches!(
-            self,
-            Self::SpecWriterV1
-                | Self::SpecWriterV2
-                | Self::GapTriagerV1
-                | Self::GapTriagerV2
-                | Self::SectionWriterV1
-                | Self::DomainAnalystV4
-                | Self::EvidenceAuditorV4
-                | Self::DomainAnalystV5
-                | Self::EvidenceAuditorV5
-                | Self::DomainAnalystV6
-                | Self::EvidenceAuditorV6
-                | Self::DomainAnalystV7
-                | Self::EvidenceAuditorV7
-                | Self::DomainAnalystV8
-                | Self::EvidenceAuditorV8
-                | Self::DomainAnalystV9
-                | Self::EvidenceAuditorV9
-                | Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::TurnProgress)
     }
 
     pub fn uses_inspection_requirements(self) -> bool {
-        matches!(self, Self::DomainAnalystV5 | Self::EvidenceAuditorV5)
+        self.has(Capability::InspectionRequirements)
     }
 
     /// Explicit coverage-qualified protocol; legacy definitions never acquire it.
     pub fn uses_coverage_qualification(self) -> bool {
-        matches!(
-            self,
-            Self::SpecWriterV1
-                | Self::SpecWriterV2
-                | Self::GapTriagerV1
-                | Self::GapTriagerV2
-                | Self::SectionWriterV1
-                | Self::DomainAnalystV6
-                | Self::EvidenceAuditorV6
-                | Self::DomainAnalystV7
-                | Self::EvidenceAuditorV7
-                | Self::DomainAnalystV8
-                | Self::EvidenceAuditorV8
-                | Self::DomainAnalystV9
-                | Self::EvidenceAuditorV9
-                | Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::CoverageQualification)
     }
 
     pub fn uses_completion_obligations(self) -> bool {
-        matches!(
-            self,
-            Self::SpecWriterV1
-                | Self::SpecWriterV2
-                | Self::GapTriagerV1
-                | Self::GapTriagerV2
-                | Self::SectionWriterV1
-                | Self::DomainAnalystV7
-                | Self::EvidenceAuditorV7
-                | Self::DomainAnalystV8
-                | Self::EvidenceAuditorV8
-                | Self::DomainAnalystV9
-                | Self::EvidenceAuditorV9
-                | Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::CompletionObligations)
     }
 
     pub fn uses_policy_selection(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV8
-                | Self::EvidenceAuditorV8
-                | Self::DomainAnalystV9
-                | Self::EvidenceAuditorV9
-                | Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::PolicySelection)
     }
 
     /// Fixed query references and charged historical replay are a new family;
     /// the unchanged V2 policy never opts an older specialist into this meaning.
     pub fn uses_query_history_disclosure(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV9
-                | Self::EvidenceAuditorV9
-                | Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::QueryHistoryDisclosure)
     }
 
     /// Internal identity only. This does not authorize public admission or dispatch.
     pub fn uses_next_prompt_admission(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV10
-                | Self::EvidenceAuditorV10
-                | Self::DomainAnalystV11
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::NextPromptAdmission)
     }
 
     /// Exact immutable roles using the schema-2 finish/schema-8 cited narrative.
     pub fn uses_cited_narrative(self) -> bool {
-        matches!(self, Self::SpecWriterV2 | Self::GapTriagerV2)
+        self.has(Capability::CitedNarrative)
     }
 
     fn version(self) -> u32 {
-        match self {
-            Self::DomainAnalystV1
-            | Self::EvidenceAuditorV1
-            | Self::SpecWriterV1
-            | Self::GapTriagerV1
-            | Self::SectionWriterV1 => 1,
-            Self::DomainAnalyst
-            | Self::EvidenceAuditor
-            | Self::SpecWriterV2
-            | Self::GapTriagerV2 => 2,
-            Self::DomainAnalystV3 | Self::EvidenceAuditorV3 => 3,
-            Self::DomainAnalystV4 | Self::EvidenceAuditorV4 => 4,
-            Self::DomainAnalystV5 | Self::EvidenceAuditorV5 => 5,
-            Self::DomainAnalystV6 | Self::EvidenceAuditorV6 => 6,
-            Self::DomainAnalystV7 | Self::EvidenceAuditorV7 => 7,
-            Self::DomainAnalystV8 | Self::EvidenceAuditorV8 => 8,
-            Self::DomainAnalystV9 | Self::EvidenceAuditorV9 => 9,
-            Self::DomainAnalystV10 | Self::EvidenceAuditorV10 => 10,
-            Self::DomainAnalystV11 | Self::EvidenceAuditorV11 => 11,
-            Self::DomainAnalystV12 | Self::EvidenceAuditorV12 => 12,
-            Self::DomainAnalystV13 | Self::EvidenceAuditorV13 => 13,
-            Self::DomainAnalystV14 | Self::EvidenceAuditorV14 => 14,
-            Self::DomainAnalystV15 => 15,
-            Self::DomainAnalystV17 => 17,
-            Self::DomainAnalystV18 => 18,
-            Self::DomainAnalystV19 => 19,
-            Self::DomainAnalystV20 => 20,
-            Self::DomainAnalystV21 => 21,
-            Self::DomainAnalystV22 => 22,
-            Self::DomainAnalystV23 => 23,
-            Self::DomainAnalystV24 => 24,
-            Self::DomainAnalystV25 => 25,
-            Self::DomainAnalystV26 => 26,
-            Self::DomainAnalystV27 => 27,
-            Self::DomainAnalystV28 => 28,
-        }
+        self.row().version
     }
 
     /// Role identity versions are independent from private prompt protocol
     /// generations. Spec Writer reuses the current schema-4 prompt protocol.
     fn prompt_generation(self) -> u32 {
-        if self == Self::EvidenceAuditorV14 {
-            return 13;
-        }
-        if matches!(
-            self,
-            Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        ) {
-            return 14;
-        }
-        if self == Self::DomainAnalystV23 {
-            return 13;
-        }
-        if matches!(
-            self,
-            Self::DomainAnalystV22 | Self::EvidenceAuditorV13 | Self::EvidenceAuditorV14
-        ) {
-            return 12;
-        }
-        if self == Self::DomainAnalystV21 {
-            return 11;
-        }
-        if matches!(
-            self,
-            Self::DomainAnalystV11
-                | Self::EvidenceAuditorV11
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-                | Self::DomainAnalystV12
-                | Self::DomainAnalystV13
-                | Self::DomainAnalystV14
-                | Self::DomainAnalystV15
-                | Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        ) {
-            return 10;
-        }
-        if matches!(
-            self,
-            Self::SpecWriterV1
-                | Self::SpecWriterV2
-                | Self::GapTriagerV1
-                | Self::GapTriagerV2
-                | Self::SectionWriterV1
-        ) {
-            7
-        } else {
-            self.version()
-        }
+        self.row().prompt_generation
     }
 
     /// Same receipt sizing and correction protocol; withholding authorization
     /// remains an independent @25/@26 host decision.
     pub fn uses_combined_finish_feedback(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        )
+        self.has(Capability::CombinedFinishFeedback)
     }
 
     /// @27 volatile finish-patch correction; @28 keeps it unchanged.
     pub fn uses_finish_patch(self) -> bool {
-        matches!(self, Self::DomainAnalystV27 | Self::DomainAnalystV28)
+        self.has(Capability::FinishPatch)
     }
 
     /// @28 only: the selected per-call response schema is also model-visible
     /// prompt text. Every historical role keeps its exact prompt and wire.
     pub fn uses_visible_action_schema(self) -> bool {
-        self == Self::DomainAnalystV28
+        self.has(Capability::VisibleActionSchema)
     }
 
     pub fn uses_exact_source_reservation(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        )
+        self.has(Capability::ExactSourceReservation)
     }
 
     pub fn uses_query_budget_refusals(self) -> bool {
-        matches!(
-            self,
-            Self::EvidenceAuditorV12 | Self::EvidenceAuditorV13 | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::QueryBudgetRefusals)
     }
 
     pub fn uses_acquisition_choices(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::AcquisitionChoices)
     }
 
     pub fn uses_exact_node_queries(self) -> bool {
-        matches!(
-            self,
-            Self::DomainAnalystV17
-                | Self::DomainAnalystV18
-                | Self::DomainAnalystV19
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-                | Self::EvidenceAuditorV12
-                | Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-        )
+        self.has(Capability::ExactNodeQueries)
     }
 
     pub fn uses_capacity_exclusions(self) -> bool {
-        matches!(
-            self,
-            Self::EvidenceAuditorV14
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        )
+        self.has(Capability::CapacityExclusions)
     }
 
     pub fn uses_finish_feedback_witness(self) -> bool {
-        matches!(
-            self,
-            Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        )
+        self.has(Capability::FinishFeedbackWitness)
     }
 
     pub fn uses_typed_citation_correction(self) -> bool {
-        matches!(
-            self,
-            Self::EvidenceAuditorV13
-                | Self::EvidenceAuditorV14
-                | Self::DomainAnalystV20
-                | Self::DomainAnalystV21
-                | Self::DomainAnalystV22
-                | Self::DomainAnalystV23
-                | Self::DomainAnalystV24
-                | Self::DomainAnalystV25
-                | Self::DomainAnalystV26
-                | Self::DomainAnalystV27
-                | Self::DomainAnalystV28
-        )
+        self.has(Capability::TypedCitationCorrection)
     }
 
     pub(super) fn is_typed_citation_prompt(system: &str) -> bool {
