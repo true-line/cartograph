@@ -344,11 +344,53 @@ fn the_auditor_sends_unsupported_claims_back_once_then_drops_them() {
 }
 
 #[test]
-fn an_auditor_reply_outside_the_schema_skips_the_audit() {
-    let mut model = Fake::new(vec![reply(vec![good(1)]), "not json".into()]);
+fn an_auditor_reply_outside_the_schema_is_asked_again_then_its_claims_are_left_out() {
+    // A second reply in the schema judges the claims.
+    let mut model = Fake::new(vec![reply(vec![good(1)]), "not json".into(), supported(1)]);
     let outcome = run_with(&Workflow::shipped().unwrap(), 1, &mut model);
     assert_eq!(outcome.stats.audit_failed, 1);
     assert_eq!(outcome.finish.expect("kept").claims.len(), 1);
+    // Two replies outside it: no claim is staged unjudged.
+    let mut model = Fake::new(vec![
+        reply(vec![good(1), good(2)]),
+        "not json".into(),
+        serde_json::json!({"verdicts": [{"claim": 1, "verdict": "supported"}]}).to_string(),
+    ]);
+    let outcome = run_with(&Workflow::shipped().unwrap(), 2, &mut model);
+    assert_eq!(outcome.stats.audit_failed, 2);
+    assert_eq!(outcome.stats.audit_dropped, 2);
+    assert_eq!(outcome.left_out, 2);
+    assert!(outcome.finish.is_none());
+}
+
+#[test]
+fn claims_past_the_stage_bound_are_left_out_and_fail_the_reply() {
+    let workflow = Workflow {
+        max_claims: 2,
+        max_retries: 0,
+        ..no_audit()
+    };
+    let mut model = Fake::new(vec![reply(vec![good(1), good(2), good(3)])]);
+    let outcome = run_with(&workflow, 3, &mut model);
+    assert_eq!(outcome.finish.expect("kept").claims.len(), 2);
+    assert_eq!(outcome.left_out, 1);
+    assert_eq!(outcome.stats.first_try_passed, 0);
+    // The retry is told the bound.
+    let workflow = Workflow {
+        max_claims: 2,
+        max_retries: 1,
+        ..no_audit()
+    };
+    let mut model = Fake::new(vec![
+        reply(vec![good(1), good(2), good(3)]),
+        reply(vec![good(1), good(2)]),
+    ]);
+    run_with(&workflow, 3, &mut model);
+    assert!(
+        model.prompts[1].contains("Reply with at most 2 claims; the 1 after them were left out."),
+        "{}",
+        model.prompts[1]
+    );
 }
 
 #[test]
@@ -379,28 +421,35 @@ fn an_auditor_reply_that_misses_or_repeats_a_claim_is_a_failed_audit() {
     let mut model = Fake::new(vec![
         reply(vec![good(1), good(2)]),
         serde_json::json!({"verdicts": []}).to_string(),
+        serde_json::json!({"verdicts": []}).to_string(),
     ]);
     let outcome = run_with(&Workflow::shipped().unwrap(), 2, &mut model);
-    assert_eq!(outcome.stats.audit_failed, 1);
+    assert_eq!(outcome.stats.audit_failed, 2);
+    assert!(outcome.finish.is_none());
 }
 
 #[test]
-fn assemble_drops_duplicates_across_chunks() {
+fn assemble_keeps_one_claim_per_exact_statement_citing_every_row() {
     let workflow = Workflow {
         max_rows: 1,
         ..no_audit()
     };
-    let same = |n: usize| {
-        claim(
-            "When a plan is chosen, the billing page confirms the choice.",
-            &[n],
-        )
-    };
-    let mut model = Fake::new(vec![reply(vec![same(1)]), reply(vec![same(2)])]);
-    let outcome = run_with(&workflow, 2, &mut model);
-    assert_eq!(outcome.stats.chunks, 2);
-    assert_eq!(outcome.finish.expect("kept").claims.len(), 1);
-    assert_eq!(outcome.left_out, 1);
+    let same = |statement: &str, n: usize| claim(statement, &[n]);
+    let text = "When a plan is chosen, the billing page confirms the choice.";
+    let mut model = Fake::new(vec![
+        reply(vec![same(text, 1)]),
+        reply(vec![same(&text.replace(' ', "  "), 2)]),
+        reply(vec![same(&text.replace("the choice", "the CHOICE"), 3)]),
+    ]);
+    let outcome = run_with(&workflow, 3, &mut model);
+    assert_eq!(outcome.stats.chunks, 3);
+    // Spacing alone is the same claim, which then cites both rows; a
+    // statement that differs in case is another claim.
+    let claims = outcome.finish.expect("kept").claims;
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0].citations, vec![id(1), id(2)]);
+    assert_eq!(outcome.left_out, 0);
+    assert_eq!(outcome.stats.rows_covered, 3);
 }
 
 #[test]

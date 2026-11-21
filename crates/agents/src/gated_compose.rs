@@ -10,7 +10,8 @@
 //! 1. **partition** (deterministic): the compiled section is cut into
 //!    chunks of at most `max_rows` rule rows, by capability.
 //! 2. **draft** (model, per chunk): the composer's prompt over one chunk,
-//!    at most `max_claims` claims. A deterministic gate checks the reply
+//!    at most `max_claims` claims (claims past the bound are left out and
+//!    fail the reply). A deterministic gate checks the reply
 //!    against the rows the chunk cites ([`gate`]); a failing gate's
 //!    prescriptions become the next attempt's feedback, up to
 //!    `max_retries`. After the last attempt the claims that pass every
@@ -18,9 +19,10 @@
 //! 3. **audit** (model, per chunk, `rules-auditor@1`): each kept claim is
 //!    judged against the rows it cites. Unsupported claims are sent back to
 //!    the drafter once with the auditor's reason; claims still unsupported
-//!    after that are left out.
-//! 4. **assemble** (deterministic): kept claims in chunk order, exact
-//!    duplicates dropped.
+//!    after that are left out. An audit reply outside the schema is asked
+//!    for once more; claims still without a verdict are left out.
+//! 4. **assemble** (deterministic): kept claims in chunk order; a statement
+//!    drafted again word for word is one claim citing the rows of both.
 //!
 //! The stage parameters and gate checks are read from the declarative
 //! workflow file `workflows/draft-rules.workflow.json`, so the same file
@@ -30,7 +32,9 @@
 //! prescription never carries anything the model has not seen.
 
 use crate::section_compose::{self, ComposeFact, ComposeInput};
-use crate::section_draft::{Claim, ClaimKind, MAX_CLAIMS, SectionAddress, SectionDraftFinish};
+use crate::section_draft::{
+    Claim, ClaimKind, MAX_CITATIONS, MAX_CLAIMS, SectionAddress, SectionDraftFinish,
+};
 use llm::{AnalysisTier, CompletionAction, CompletionPayload};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,6 +42,9 @@ use std::fmt::Write as _;
 
 /// The role a gated composition records.
 pub const DRAFT_RULES_ROLE: &str = "draft-rules@1";
+/// Audit replies asked for per round before the round's claims are dropped
+/// unjudged.
+const AUDIT_ATTEMPTS: usize = 2;
 /// The auditor stage's role.
 pub const RULES_AUDITOR_ROLE: &str = "rules-auditor@1";
 /// The declarative workflow this module runs.
@@ -881,8 +888,8 @@ struct AuditVerdict {
 /// Decode an auditor reply into one verdict per claim. The reply must give
 /// exactly one verdict for each claim, numbered 1 to `claims`; a reply that
 /// is not the schema, omits a claim, repeats one or numbers one out of range
-/// is `None`, and the audit is counted as failed (`audit_failed`), so no
-/// claim is ever taken as judged without a verdict.
+/// is `None`, and the audit is counted as failed (`audit_failed`); claims
+/// no valid reply judged are left out, never taken as judged.
 pub fn decode_audit(text: &str, claims: usize) -> Option<Vec<Verdict>> {
     let reply: AuditReply = serde_json::from_str(text.trim()).ok()?;
     let mut verdicts: Vec<Option<Verdict>> = vec![None; claims];
@@ -937,7 +944,8 @@ pub struct GatedStats {
     pub sent_back: usize,
     /// Claims left out because the auditor still found them unsupported.
     pub audit_dropped: usize,
-    /// Audits skipped because the reply was not the schema.
+    /// Audit replies that were not the schema; a round with no valid reply
+    /// drops its claims.
     pub audit_failed: usize,
     /// Per-claim gate failures among the claims left out, by check.
     pub failures: BTreeMap<String, usize>,
@@ -1002,16 +1010,33 @@ fn attempt(
     stats.calls += 1;
     let reply = model.complete(&action)?;
     let decoded = section_compose::decode(input.address, &reply, &chunk.ids()).ok();
-    let (claims, left_out) = match decoded {
+    let (mut claims, left_out) = match decoded {
         Some(composed) => (composed.finish.claims, Some(composed.left_out)),
         None => (Vec::new(), None),
     };
-    let gate = gate(&workflow.checks, &claims, left_out, chunk, names_source);
+    // The stage's claim bound holds whatever the model returns: claims past
+    // it are left out and fail the reply.
+    let surplus = claims.len().saturating_sub(workflow.max_claims);
+    claims.truncate(workflow.max_claims);
+    let mut gate = gate(&workflow.checks, &claims, left_out, chunk, names_source);
+    if surplus > 0 {
+        gate.passed = false;
+        if !gate.failures.contains(&CheckType::ReplyMatchesSchema) {
+            gate.failures.insert(0, CheckType::ReplyMatchesSchema);
+        }
+        gate.prescriptions.insert(
+            0,
+            format!(
+                "Reply with at most {} claims; the {surplus} after them were left out.",
+                workflow.max_claims
+            ),
+        );
+    }
     Ok(Attempt {
         claims,
         gate,
         reply,
-        left_out: left_out.unwrap_or(0),
+        left_out: left_out.unwrap_or(0) + surplus,
     })
 }
 
@@ -1150,14 +1175,29 @@ pub fn run(
         if let Some(round_trips) = workflow.audit_round_trips {
             let mut round = 0;
             while !chunk_claims.is_empty() {
-                stats.calls += 1;
-                let reply = model.complete(&audit_action(
-                    chunk,
-                    &chunk_claims,
-                    id("audit", round as usize),
-                ))?;
-                let Some(verdicts) = decode_audit(&reply, chunk_claims.len()) else {
+                // An audit reply outside the schema is asked for once more;
+                // claims no verdict judged are never kept.
+                let mut verdicts = None;
+                for again in 0..AUDIT_ATTEMPTS {
+                    stats.calls += 1;
+                    let reply = model.complete(&audit_action(
+                        chunk,
+                        &chunk_claims,
+                        id(
+                            if again == 0 { "audit" } else { "audit-again" },
+                            round as usize,
+                        ),
+                    ))?;
+                    verdicts = decode_audit(&reply, chunk_claims.len());
+                    if verdicts.is_some() {
+                        break;
+                    }
                     stats.audit_failed += 1;
+                }
+                let Some(verdicts) = verdicts else {
+                    stats.audit_dropped += chunk_claims.len();
+                    left_out += chunk_claims.len();
+                    chunk_claims.clear();
                     break;
                 };
                 let lines: Vec<String> = verdicts
@@ -1223,10 +1263,33 @@ pub fn run(
         }
         claims.extend(chunk_claims);
     }
-    // Assemble: chunk order, exact duplicates dropped.
-    let mut seen = BTreeSet::new();
+    // Assemble: chunk order. A statement drafted again word for word (only
+    // spacing may differ) is one claim citing the rows of both.
+    let mut assembled: Vec<Claim> = Vec::with_capacity(claims.len());
+    let mut slot: BTreeMap<String, usize> = BTreeMap::new();
+    for claim in claims {
+        let key = claim
+            .statement
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        match slot.get(&key) {
+            Some(&kept) => {
+                let kept = &mut assembled[kept];
+                for id in claim.citations {
+                    if kept.citations.len() < MAX_CITATIONS && !kept.citations.contains(&id) {
+                        kept.citations.push(id);
+                    }
+                }
+            }
+            None => {
+                slot.insert(key, assembled.len());
+                assembled.push(claim);
+            }
+        }
+    }
+    let mut claims = assembled;
     let before = claims.len();
-    claims.retain(|claim| seen.insert(norm(&claim.statement)));
     claims.truncate(MAX_CLAIMS);
     left_out += before - claims.len();
     let cited: BTreeSet<&String> = claims.iter().flat_map(|claim| &claim.citations).collect();
