@@ -9,48 +9,21 @@ use agents::investigation::*;
 use std::time::Instant;
 use tauri::Manager;
 
-// Shared by the production catalog and staged-version boundary test.
-const AVAILABLE_SPECIALISTS: [SpecialistId; 15] = [
-    SpecialistId::DomainAnalystV3,
-    SpecialistId::EvidenceAuditorV3,
-    SpecialistId::DomainAnalystV4,
-    SpecialistId::EvidenceAuditorV4,
-    SpecialistId::DomainAnalystV5,
-    SpecialistId::EvidenceAuditorV5,
-    SpecialistId::DomainAnalystV6,
-    SpecialistId::EvidenceAuditorV6,
-    SpecialistId::DomainAnalystV7,
-    SpecialistId::EvidenceAuditorV7,
-    SpecialistId::SpecWriterV1,
-    SpecialistId::SpecWriterV2,
-    SpecialistId::GapTriagerV1,
-    SpecialistId::GapTriagerV2,
-    SpecialistId::SectionWriterV1,
-];
-
+// The catalog is the capability table's offered rows (ADR-0071, #1751).
 fn available_specialists() -> Vec<SpecialistId> {
-    let mut specialists = AVAILABLE_SPECIALISTS.to_vec();
-    if InvestigationPolicy::for_profile("investigation-v2").is_some() {
-        specialists.extend([
-            SpecialistId::DomainAnalystV10,
-            SpecialistId::EvidenceAuditorV10,
-            SpecialistId::DomainAnalystV11,
-            SpecialistId::DomainAnalystV12,
-            SpecialistId::EvidenceAuditorV11,
-            SpecialistId::EvidenceAuditorV12,
-            SpecialistId::EvidenceAuditorV13,
-            SpecialistId::EvidenceAuditorV14,
-            SpecialistId::DomainAnalystV18, // Preserve historical catalog entry.
-            SpecialistId::DomainAnalystV19,
-            SpecialistId::DomainAnalystV20,
-            SpecialistId::DomainAnalystV21,
-            SpecialistId::DomainAnalystV22,
-            SpecialistId::DomainAnalystV23,
-            SpecialistId::DomainAnalystV27,
-            SpecialistId::DomainAnalystV28,
-        ]);
+    offered_specialists()
+}
+
+/// The one availability refusal every start path uses (ADR-0071 decision 2).
+fn offered_for_start(id: SpecialistId) -> Result<(), InvestigationStartError> {
+    if available_specialists().contains(&id) {
+        Ok(())
+    } else {
+        Err(rejected(
+            "invalid_input",
+            "This specialist version is not available.",
+        ))
     }
-    specialists
 }
 
 /// The offered specialists whose desktop runs use the saved run limits
@@ -81,36 +54,18 @@ fn policy_catalog() -> Vec<InvestigationPolicyCatalogEntry> {
                 max_completion_obligations: policy.max_completion_obligations(),
                 request_bytes: policy.request_bytes(),
                 envelope_bytes: policy.envelope_bytes(),
-                specialist_ids: if v2 {
-                    vec![
-                        SpecialistId::DomainAnalystV10,
-                        SpecialistId::EvidenceAuditorV10,
-                        SpecialistId::DomainAnalystV11,
-                        SpecialistId::DomainAnalystV12,
-                        SpecialistId::EvidenceAuditorV11,
-                        SpecialistId::EvidenceAuditorV12,
-                        SpecialistId::EvidenceAuditorV13,
-                        SpecialistId::EvidenceAuditorV14,
-                        SpecialistId::DomainAnalystV18,
-                        SpecialistId::DomainAnalystV19,
-                        SpecialistId::DomainAnalystV20,
-                        SpecialistId::DomainAnalystV21,
-                        SpecialistId::DomainAnalystV22,
-                        SpecialistId::DomainAnalystV23,
-                        SpecialistId::DomainAnalystV27,
-                        SpecialistId::DomainAnalystV28,
-                    ]
-                } else {
-                    vec![
-                        SpecialistId::DomainAnalystV7,
-                        SpecialistId::EvidenceAuditorV7,
-                        SpecialistId::SpecWriterV1,
-                        SpecialistId::SpecWriterV2,
-                        SpecialistId::GapTriagerV1,
-                        SpecialistId::GapTriagerV2,
-                        SpecialistId::SectionWriterV1,
-                    ]
-                },
+                // Expanded lists the policy-selecting versions; Standard
+                // lists the completion versions that keep the v1 contract.
+                specialist_ids: available_specialists()
+                    .into_iter()
+                    .filter(|id| {
+                        if v2 {
+                            id.uses_policy_selection()
+                        } else {
+                            !id.uses_policy_selection() && id.uses_completion_obligations()
+                        }
+                    })
+                    .collect(),
             })
         })
         .collect()
@@ -249,6 +204,14 @@ pub(super) fn start_access<R: tauri::Runtime>(
         }
         .map_err(|error| error.to_string())
     };
+    // ADR-0071 decision 2: every start path offers only catalog versions. A
+    // committed retry still recovers its saved run.
+    if let Err(refused) = offered_for_start(request.specialist_id) {
+        if let Some(prior) = existing()? {
+            return Ok(prior.summary);
+        }
+        return Err(refused);
+    }
     if (session.is_some() || request.inspection_requirements.is_some())
         && let Some(prior) = existing()?
     {
@@ -779,7 +742,7 @@ mod staged_tests {
     fn v7_catalog_requires_completion_contract_and_rejects_legacy_start() {
         for id in ["domain-analyst@7", "evidence-auditor@7"] {
             assert!(
-                AVAILABLE_SPECIALISTS
+                available_specialists()
                     .iter()
                     .any(|specialist| serde_json::to_value(specialist).unwrap() == id)
             );
@@ -854,6 +817,32 @@ mod staged_tests {
 #[cfg(test)]
 mod policy_catalog_tests {
     use super::*;
+
+    // AC-1400 (#1751): the legacy path refuses a version the catalog does not
+    // offer, even one its own request validation accepts.
+    #[test]
+    fn legacy_start_refuses_a_version_the_catalog_does_not_offer() {
+        let request: StartInvestigationRequest = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"request_nonce":"retired-version","specialist_id":"domain-analyst@1",
+            "question":"Inspect selected evidence","scope":{"type":"all"},"provider_mode":"local",
+            "limit_profile":"investigation-v1"}))
+        .unwrap();
+        request.validate().unwrap();
+        assert!(matches!(
+            offered_for_start(request.specialist_id),
+            Err(InvestigationStartError::Rejected {
+                code: "invalid_input",
+                definitive: true,
+                ..
+            })
+        ));
+        for id in available_specialists() {
+            assert!(offered_for_start(id).is_ok(), "{id:?}");
+        }
+        for id in SpecialistId::all().filter(|id| !available_specialists().contains(id)) {
+            assert!(offered_for_start(id).is_err(), "{id:?}");
+        }
+    }
 
     // AC-0584 (#1757): the catalog, not the client, says which offered
     // specialists use the saved run limits, and it says exactly what the
