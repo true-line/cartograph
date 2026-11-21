@@ -178,7 +178,10 @@ test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
 run does not account for exactly the tests it selected. The shards split the
 tests by the measured seconds in `scripts/rust-test-weights.json` (the script's
 header says how to regenerate it); keep each slow replay scenario its own test,
-since one test can't be split across shards. Clippy runs in its
+since one test can't be split across shards. The app crate itself compiles
+incrementally from state the "App incremental cache" job saves from main
+(`scripts/rustc-app-incremental.sh`), so a shard recompiles only what the
+pull request changed. Clippy runs in its
 own "Rust clippy" lane.
 
 The Rust lanes keep dependencies in rust-cache and workspace library crates

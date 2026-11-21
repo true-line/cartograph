@@ -695,7 +695,31 @@ jobs:
           wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "SCCACHE_PATH=$wrapper" >> "$GITHUB_ENV"
+          # The app crate compiles incrementally instead (#1924).
+          echo "RUSTC_WORKSPACE_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-app-incremental.sh" >> "$GITHUB_ENV"
+
+      # The app crate's incremental state (#1924). The app-incremental job
+      # saves it from main at most once an hour; a shard restores the newest
+      # and recompiles only what the pull request changed. rustc keys its
+      # state on the crate's content, so a stale entry costs time, not
+      # correctness; a new toolchain or Cargo.lock starts a new prefix.
+      - name: Name the app incremental cache
+        id: incremental
+        env:
+          LOCK_HASH: ${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        run: |
+          echo "APP_INCREMENTAL_DIR=$RUNNER_TEMP/app-incremental" >> "$GITHUB_ENV"
+          echo "prefix=app-incremental-$LOCK_HASH-" >> "$GITHUB_OUTPUT"
+          echo "key=app-incremental-$LOCK_HASH-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the app incremental cache
+        id: restore
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.APP_INCREMENTAL_DIR }}
+          key: ${{ steps.incremental.outputs.key }}
+          restore-keys: ${{ steps.incremental.outputs.prefix }}
 
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
@@ -721,7 +745,157 @@ jobs:
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
-        run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
+        run: '"$SCCACHE_PATH" --show-stats'
+
+  # Saves the app crate's incremental state from main for the shards (#1924).
+  app-incremental:
+    name: App incremental cache
+    needs: [policy, ci-image]
+    # Main only: a pull request's cache is visible to that pull request alone.
+    if: github.event_name == 'push' && needs.ci-image.result == 'success'
+    runs-on: ubuntu-latest
+    container:
+      # A digest reference: ci-image resolves the hashed tag to its digest.
+      image: ${{ needs.ci-image.outputs.image }} # zizmor: ignore[unpinned-images]
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      # Not root: root passes the tests that expect permission-denied errors.
+      options: --user 1001
+      # bounded-command runs `${{ github.action_path }}`, which the runner
+      # leaves as the host path in a container (actions/runner#716,
+      # true-line/trueline-agent-ci#8). Mount the work tree there too; a
+      # symlink would not do, as the script's main-module check compares
+      # real paths and silently skips the task.
+      volumes:
+        - /home/runner/work:/home/runner/work
+    permissions:
+      # write: to delete its older cache entries.
+      actions: write
+      contents: read
+      packages: read
+      pull-requests: read
+    timeout-minutes: 60
+    # Line tables only, as in the Rust lane (#1924).
+    env:
+      CARGO_BUILD_JOBS: 6
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      # Fixed, so the cache key is stable across jobs (see the Rust lane).
+      - name: Use a fixed cargo home
+        run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
+
+      # The shards' dependency cache; the shards write it.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: app-tests
+          save-if: false
+
+      # As in the Rust lane.
+      - name: Install sccache
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        # Per-runner home: install-action rm -rfs its shared ~/.install-action/tmp
+        # after each install, deleting a concurrent runner's download (#674).
+        env:
+          HOME: ${{ runner.temp }}/install-action-home
+        with:
+          tool: sccache@0.19.0
+
+      # sccache's GitHub Actions backend reads the runner's cache service URL
+      # and token, which only an action's own process is given.
+      - name: Expose the Actions cache service to sccache
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
+
+      # Workspace crates only: rust-cache already holds the dependencies, and
+      # sending their ~4,800 rustc calls through sccache too made a cold run
+      # write thousands of cache entries, which the Actions cache throttled
+      # (3,019 write errors) so the workspace crates were often not stored.
+      - name: Compile through sccache
+        run: |
+          wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
+          "$wrapper" --version
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "SCCACHE_PATH=$wrapper" >> "$GITHUB_ENV"
+          # The app crate compiles incrementally instead (#1924).
+          echo "RUSTC_WORKSPACE_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-app-incremental.sh" >> "$GITHUB_ENV"
+
+      # The app crate's incremental state (#1924). The app-incremental job
+      # saves it from main at most once an hour; a shard restores the newest
+      # and recompiles only what the pull request changed. rustc keys its
+      # state on the crate's content, so a stale entry costs time, not
+      # correctness; a new toolchain or Cargo.lock starts a new prefix.
+      - name: Name the app incremental cache
+        id: incremental
+        env:
+          LOCK_HASH: ${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        run: |
+          echo "APP_INCREMENTAL_DIR=$RUNNER_TEMP/app-incremental" >> "$GITHUB_ENV"
+          echo "prefix=app-incremental-$LOCK_HASH-" >> "$GITHUB_OUTPUT"
+          echo "key=app-incremental-$LOCK_HASH-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the app incremental cache
+        id: restore
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.APP_INCREMENTAL_DIR }}
+          key: ${{ steps.incremental.outputs.key }}
+          restore-keys: ${{ steps.incremental.outputs.prefix }}
+
+      - name: Enable Rust problem matcher
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      - name: Build the app test binary
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: cargo test -p app --bin app --no-run
+
+      # One entry an hour, so frequent merges do not crowd the other lanes'
+      # caches out: once this hour's entry exists, later merges skip the build.
+      - name: Save the app incremental cache
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ env.APP_INCREMENTAL_DIR }}
+          key: ${{ steps.incremental.outputs.key }}
+
+      # Keep only the newest entry: each hour saves under a new key, and
+      # about 1 GB an hour would push the other lanes' caches out of the
+      # repository's budget.
+      - name: Drop older app incremental caches
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          KEY: ${{ steps.incremental.outputs.key }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const caches = await github.paginate(github.rest.actions.getActionsCacheList, {
+              owner, repo, key: 'app-incremental-', per_page: 100,
+            });
+            for (const cache of caches) {
+              if (cache.key.startsWith('app-incremental-') && cache.key !== process.env.KEY) {
+                await github.rest.actions.deleteActionsCacheById({ owner, repo, cache_id: cache.id });
+                core.info(`deleted ${cache.key}`);
+              }
+            }
+
+      - name: sccache statistics
+        if: ${{ !cancelled() }}
+        run: '"$SCCACHE_PATH" --show-stats'
 
   # The agents and spec test binaries were the two longest compiles in the
   # Rust job (about 3.5 minutes each) and a test binary is never served by
