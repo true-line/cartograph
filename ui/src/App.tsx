@@ -203,6 +203,7 @@ export default function App() {
     consentAndRun,
     dismissPreview,
     decideProposal,
+    withdrawProposal,
     runClassEscalation,
     recordProposalDecision,
     stagedProposals,
@@ -1184,6 +1185,8 @@ export default function App() {
           onDecide={(decision) => void decideProposal(decision)}
           onClose={closeResolution}
           onAssessBasis={() => void assessStagedBasis()}
+          onWithdraw={() => void withdrawProposal()}
+          onResolveAgain={(gapId) => void openResolution(gapId)}
         />
       )}
     </div>
