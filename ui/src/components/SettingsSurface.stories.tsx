@@ -172,6 +172,18 @@ export const QuickInvestigationHasSettingsEntry: Story = {
   },
 };
 
+// AC-1702: a hidden dispatch hint can be turned back on from Settings.
+export const DispatchHintCanBeTurnedBackOn: Story = {
+  args: { quickDispatchHintShown: false, onQuickDispatchHintChange: fn() },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const toggle = canvas.getByRole('checkbox', { name: 'Show the "Dispatch to an agent" hint' });
+    await expect(toggle).not.toBeChecked();
+    await userEvent.click(toggle);
+    await expect(args.onQuickDispatchHintChange).toHaveBeenCalledWith(true);
+  },
+};
+
 export const CloudSelectedShowsFullDisclosure: Story = {
   args: {
     tiers: DEFAULTS.map((tier) =>
