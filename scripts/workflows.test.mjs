@@ -266,7 +266,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 12);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 13);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -332,8 +332,8 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   const rust = job('rust');
   const shards = job('rust-app-tests');
   const complete = job('complete');
-  assert.match(rust, /run: cargo test --workspace --exclude app\n/u);
-  assert.equal([...rust.matchAll(/--exclude/gu)].length, 1);
+  assert.match(rust, /run: cargo test --workspace --exclude app --exclude agents\n/u);
+  assert.equal([...rust.matchAll(/--exclude/gu)].length, 2);
   assert.ok(condition(shards));
   assert.equal(condition(shards), condition(rust));
   assert.match(shards, /needs: \[policy, merge-evidence, preflight-evidence, ci-image\]/u);
@@ -353,6 +353,16 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.match(complete, /needs: \[.*\brust-app-tests\b.*\]/u);
   assert.match(complete, /RUST_APP_TESTS: \$\{\{ needs\.rust-app-tests\.result \}\}/u);
   assert.match(complete, /test "\$RUST_APP_TESTS" = success/u);
+  // The agents package the Rust job excludes runs whole in its own lane.
+  const agents = job('rust-agents-tests');
+  assert.equal(condition(agents), condition(rust));
+  assert.match(agents, /needs: \[policy, merge-evidence, preflight-evidence, ci-image\]/u);
+  assert.match(agents, /runs-on: ubuntu-latest$/mu);
+  assert.match(agents, /run: cargo test -p agents\n/u);
+  assert.doesNotMatch(agents, /continue-on-error|--skip|--exclude/u);
+  assert.match(complete, /needs: \[.*\brust-agents-tests\b.*\]/u);
+  assert.match(complete, /RUST_AGENTS_TESTS: \$\{\{ needs\.rust-agents-tests\.result \}\}/u);
+  assert.match(complete, /test "\$RUST_AGENTS_TESTS" = success/u);
   // `app` has no library, integration-test or doc-test target the exclusion
   // could drop: its tests are the binary's unit tests.
   const manifest = readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8');
@@ -624,7 +634,7 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
   // A concurrent main run may already have removed a listed version.
   assert.match(image, /- name: Prune old CI images\n +if: [^\n]+\n +continue-on-error: true\n/u);
   assert.match(image, /gh api -X DELETE "\$PACKAGE\/versions\/\$id" \|\| echo/u);
-  for (const name of ['rust', 'rust-app-tests', 'compliance']) {
+  for (const name of ['rust', 'rust-app-tests', 'rust-agents-tests', 'compliance']) {
     const lane = job(name);
     assert.match(lane, /needs: \[[^\]]*\bci-image\b[^\]]*\]/u, name);
     assert.match(lane, /container:\n(?: +#.*\n)* +image: \$\{\{ needs\.ci-image\.outputs\.image \}\} # zizmor: ignore\[unpinned-images\]\n/u, name);

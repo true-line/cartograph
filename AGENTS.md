@@ -168,7 +168,8 @@ npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run
 ```
 
 CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
-every package except `app`, and four "Rust app tests" shards run the `app`
+every package except `app` and `agents`, "Rust agents tests" runs
+`cargo test -p agents`, and four "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
 run does not account for exactly the tests it selected.
 
