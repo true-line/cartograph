@@ -1,0 +1,26 @@
+{
+  "nodes": [
+    {
+      "label": "Endpoint",
+      "id": "ep:local/p@GET:/users/{id}",
+      "props": {
+        "framework": "ktor",
+        "language": "kotlin"
+      }
+    },
+    {
+      "label": "Symbol",
+      "id": "sym:local/p@Routes.kt#Application.module/get@261",
+      "props": {
+        "kind": "route handler"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "HANDLES",
+      "src": "ep:local/p@GET:/users/{id}",
+      "dst": "sym:local/p@Routes.kt#Application.module/get@261"
+    }
+  ]
+}

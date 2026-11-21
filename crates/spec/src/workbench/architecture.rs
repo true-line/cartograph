@@ -344,6 +344,7 @@ fn framework_name(framework: &str) -> String {
         "express" => "Express".into(),
         "nestjs" | "nest" => "NestJS".into(),
         "spring" => "Spring".into(),
+        "ktor" => "Ktor".into(),
         "gin" => "Gin".into(),
         "nethttp" | "net/http" => "net/http".into(),
         "axum" => "Axum".into(),

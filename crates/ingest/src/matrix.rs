@@ -164,6 +164,8 @@ const KT_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(�
 const KT_OKHTTP: &str = "inline `Request.Builder()…build()` chains on a named-imported (or aliased) or fully qualified `okhttp3.Request.Builder` whose every link is a positional builder member; a builder held in a variable and built later, a trailing lambda, a link name the file declares or imports and files with wildcard imports are not read, and a URL is a literal only as a pure string `url(\"…\")`";
 /// What the Kotlin Apache HttpClient cell reads (AC-0471).
 const KT_APACHE: &str = "`HttpGet(<url>)` and the other HttpClient 4 and 5 request classes, named-imported (or aliased) or fully qualified, with one positional argument and no trailing lambda; a file-declared name, a binding of the first segment, a captured `org` (declared, imported or possibly wildcard-imported) and no-argument constructors are not read, and a URL is a literal only as a pure string literal";
+/// What the Kotlin Ktor server routes cell reads (AC-1023).
+const KT_KTOR_ROUTES: &str = "`routing { }` blocks and `Route` extension functions whose builders (`route`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`) are imported from `io.ktor.server.routing` (or Ktor 1's `io.ktor.routing`), named or by a star import no same-package declaration obscures; a path is a literal only as one pure string literal, a group gets its prefix only from a zero-argument call of its name inside routing, and type-safe `Resources` routes, `method(...)` blocks and routes installed through plugins are not read";
 /// What the Kotlin Ktor client cell reads (AC-0479).
 const KT_KTOR: &str = "`<client>.<verb>(<url>)` `io.ktor.client.request` extensions (named or aliased imports; a wildcard import proves nothing) on a named-imported or fully qualified `HttpClient` typed or constructed local, parameter or property, or `this.x`; block-only calls and named arguments are not read, a block naming `method` or `url` gives `?` or a computed URL, a URL is a literal only as a pure string literal, and a non-absolute URL joins an undeclared runtime `defaultRequest` base";
 /// What the Kotlin RestTemplate client cell reads (AC-0456).
@@ -367,6 +369,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Kotlin", CORE, Types, Supported, ""),
     cell("Kotlin", CORE, Calls, Supported, ""),
     cell("Kotlin", "spring-web", HttpEndpoints, Supported, ""),
+    cell("Kotlin", "ktor", HttpEndpoints, Partial, KT_KTOR_ROUTES),
     cell(
         "Kotlin",
         "navigation3",
