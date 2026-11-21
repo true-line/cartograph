@@ -1603,11 +1603,12 @@ fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
         .map(|r| r.id().to_owned())
         .collect();
     first_ids.sort();
-    assert_eq!(first_ids.len(), 3);
+    // The rule, its owner, GOVERNS and the File node (AC-1019).
+    assert_eq!(first_ids.len(), 4);
     drop(first_parsed);
 
-    // Narrow capacity to 3 so the reclaim ledger holds at most 3 rows.
-    state.primary_sources.receipts.lock().unwrap().capacity.0 = 3;
+    // Narrow capacity to 4 so the reclaim ledger holds at most 4 rows.
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 4;
 
     let preview1 = primary_source::preview(&state, &first_source.source_id).unwrap();
     primary_source::forget(&state, &first_source.source_id, &preview1.fingerprint).unwrap();
@@ -1624,8 +1625,8 @@ fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
         ));
     }
 
-    // Second source: 1 pinned receipt + 2 unpinned receipts -> pushes reclaim ledger from 3 to 5,
-    // pruning the 2 oldest rows (first_ids[0] and first_ids[1]) while keeping first_ids[2].
+    // Second source: 1 pinned receipt + 3 unpinned receipts -> pushes reclaim ledger from 4 to 7,
+    // pruning the 3 oldest rows (first_ids[0..3]) while keeping first_ids[3].
     let second_parsed = parse(&state, &second_source, || {});
     let second_bindings = publish(&state, &second_source, &second_parsed);
     let second_rule = FactKey::from_node(&rule_node(&second_parsed));
@@ -1640,7 +1641,7 @@ fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
         .filter(|id| id != &second_pinned.receipt_id)
         .collect();
     second_unpinned.sort();
-    assert_eq!(second_unpinned.len(), 2);
+    assert_eq!(second_unpinned.len(), 3);
     drop(second_parsed);
 
     retain_investigation_selection(&state, &second_source, &second_pinned, "prune-second-pin");
@@ -1657,8 +1658,12 @@ fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
             receipts_guard.receipt_status(&first_ids[1]).unwrap(),
             primary_source::ReceiptStatus::Unknown
         );
-        assert!(matches!(
+        assert_eq!(
             receipts_guard.receipt_status(&first_ids[2]).unwrap(),
+            primary_source::ReceiptStatus::Unknown
+        );
+        assert!(matches!(
+            receipts_guard.receipt_status(&first_ids[3]).unwrap(),
             primary_source::ReceiptStatus::Reclaimed { .. }
         ));
         assert!(matches!(
@@ -1675,9 +1680,9 @@ fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
         }
     }
 
-    // Third source: 3 unpinned receipts (raise capacity.0 to 4 during persist because second_pinned
-    // occupies 1 slot in receipts, then narrow capacity.0 back to 3 before forget).
-    state.primary_sources.receipts.lock().unwrap().capacity.0 = 4;
+    // Third source: 4 unpinned receipts (raise capacity.0 to 5 during persist because second_pinned
+    // occupies 1 slot in receipts, then narrow capacity.0 back to 4 before forget).
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 5;
     let third_parsed = parse(&state, &third_source, || {});
     publish(&state, &third_source, &third_parsed);
     let mut third_ids: Vec<String> = third_parsed
@@ -1686,9 +1691,9 @@ fn primary_source_reclaim_ledger_prunes_oldest_rows_and_orphaned_tombstones() {
         .map(|r| r.id().to_owned())
         .collect();
     third_ids.sort();
-    assert_eq!(third_ids.len(), 3);
+    assert_eq!(third_ids.len(), 4);
     drop(third_parsed);
-    state.primary_sources.receipts.lock().unwrap().capacity.0 = 3;
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 4;
 
     let preview3 = primary_source::preview(&state, &third_source.source_id).unwrap();
     primary_source::forget(&state, &third_source.source_id, &preview3.fingerprint).unwrap();
@@ -3178,14 +3183,14 @@ fn receipt_share_follows_each_sources_captured_bytes() {
     };
     // Alone in the store, the large source has all of it.
     let (total, kept, omitted) = retain(&large_source);
-    assert_eq!((total, kept), (3, 3));
+    assert_eq!((total, kept), (4, 4));
     assert!(omitted.is_empty());
     let (total, kept, omitted) = retain(&small_source);
-    assert_eq!((total, kept), (3, 2));
-    assert_eq!(omitted, BTreeMap::from([("source.ts".to_string(), 1)]));
+    assert_eq!((total, kept), (4, 2));
+    assert_eq!(omitted, BTreeMap::from([("source.ts".to_string(), 2)]));
     // Three quarters of the store still holds every large-source receipt.
     let (_, kept, omitted) = retain(&large_source);
-    assert_eq!(kept, 3);
+    assert_eq!(kept, 4);
     assert!(omitted.is_empty());
 }
 
@@ -3203,7 +3208,7 @@ fn ac0838_forget_and_supersession_free_room_for_omitted_receipts() {
     let state = app_state(&app_data);
     let forgotten = register_local_source(&state, &forgotten_root).unwrap();
     let waiting = register_local_source(&state, &waiting_root).unwrap();
-    state.primary_sources.receipts.lock().unwrap().capacity.0 = 3;
+    state.primary_sources.receipts.lock().unwrap().capacity.0 = 4;
 
     // Persist, publish the retained receipts' bindings, and report what was
     // kept, what the store named as omitted, and the capture id.
@@ -3229,18 +3234,18 @@ fn ac0838_forget_and_supersession_free_room_for_omitted_receipts() {
         let capture_id = parsed.input.capture.as_ref().unwrap().id().to_owned();
         (parsed.receipts.len(), kept.len(), omitted, capture_id)
     };
-    let all_omitted = BTreeMap::from([("source.ts".to_string(), 3)]);
+    let all_omitted = BTreeMap::from([("source.ts".to_string(), 4)]);
 
     // Forget: the first source fills the store, so the second keeps nothing.
-    assert_eq!(recover(&forgotten).1, 3);
+    assert_eq!(recover(&forgotten).1, 4);
     let (total, kept, omitted, _) = recover(&waiting);
-    assert_eq!((total, kept), (3, 0));
+    assert_eq!((total, kept), (4, 0));
     assert_eq!(omitted, all_omitted);
     let preview = primary_source::preview(&state, &forgotten.source_id).unwrap();
     primary_source::forget(&state, &forgotten.source_id, &preview.fingerprint).unwrap();
     assert_eq!(receipt_store_accounting(&app_data).0, 0);
     let (total, kept, omitted, capture_id) = recover(&waiting);
-    assert_eq!((total, kept), (3, 3));
+    assert_eq!((total, kept), (4, 4));
     assert!(omitted.is_empty());
     assert_eq!(
         primary_source::reclaim_superseded(&state, &waiting, &capture_id).unwrap(),
@@ -3251,14 +3256,14 @@ fn ac0838_forget_and_supersession_free_room_for_omitted_receipts() {
     // earlier receipts, which its publish no longer binds.
     std::fs::write(waiting_root.join("source.ts"), STABLE_B).unwrap();
     let (total, kept, omitted, capture_id) = recover(&waiting);
-    assert_eq!((total, kept), (3, 0));
+    assert_eq!((total, kept), (4, 0));
     assert_eq!(omitted, all_omitted);
     assert_eq!(
         primary_source::reclaim_superseded(&state, &waiting, &capture_id).unwrap(),
-        3
+        4
     );
     assert_eq!(receipt_store_accounting(&app_data).0, 0);
     let (total, kept, omitted, _) = recover(&waiting);
-    assert_eq!((total, kept), (3, 3));
+    assert_eq!((total, kept), (4, 4));
     assert!(omitted.is_empty());
 }

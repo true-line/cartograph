@@ -1082,3 +1082,44 @@ fn captured_task_refuses_ninth_file_validation_before_exceeding_128_mib() {
         (0, 0, 0)
     );
 }
+
+#[test]
+fn captured_spans_past_the_task_cap_are_omitted() {
+    // AC-1019: a captured File node is citable, but a whole file past the
+    // per-span cap is omitted by name instead of failing the task.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    let text = format!("{ORIGINAL}// {}\n", "padding".repeat(2048));
+    std::fs::write(root.join("source.ts"), &text).unwrap();
+    let state = app_state(&app_data);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let captured = capture(&state, &source, true);
+    let (owner, candidate) = rule_pair(&captured);
+    let file = captured
+        .nodes
+        .iter()
+        .find(|node| node.label == "File")
+        .unwrap()
+        .clone();
+    receipt_for(&captured, &file);
+    install_task(&state, &owner, &[file.clone(), candidate]);
+    let prepared = prepare(&state, GAP, "task:captured-over-cap").unwrap();
+    let selection = &prepared.source_basis().selection;
+    // The fixture Gap cites nothing; the File is the one over the cap.
+    let over: Vec<_> = selection
+        .omissions
+        .iter()
+        .filter(|omission| omission.reason == SelectionOmissionReason::CapturedSpanOverLimit)
+        .collect();
+    assert_eq!(over.len(), 1);
+    assert_eq!(over[0].fact, task_fact(&FactKey::from_node(&file)));
+    assert_eq!(prepared.task().evidence.len(), 2);
+    assert!(
+        prepared
+            .source_basis()
+            .evidence
+            .iter()
+            .all(|item| matches!(item.origin, TaskEvidenceKind::CapturedPrimarySource { .. }))
+    );
+}
