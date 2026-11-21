@@ -1096,12 +1096,8 @@ pub(super) fn rules_per_capability(
         total += index.each(owners.iter().copied(), |_| Ok(()))?;
         changes += index.each_picked(owners.iter().copied(), effect, |_| Ok(()))?;
     }
-<<<<<<< HEAD
     let (machines, loose_machines) = index.area_machines(knowledge);
     if total + changes + index.machines.len() == 0 {
-=======
-    if total + changes == 0 {
->>>>>>> origin/main
         return Ok(0);
     }
     writeln!(
@@ -1125,7 +1121,6 @@ pub(super) fn rules_per_capability(
          what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
          capability, nearest callable first.\n"
     )?;
-<<<<<<< HEAD
     if !index.machines.is_empty() {
         writeln!(
             out,
@@ -1137,8 +1132,6 @@ pub(super) fn rules_per_capability(
             index.machines.len()
         )?;
     }
-=======
->>>>>>> origin/main
     if !own_code.is_empty() {
         writeln!(
             out,
@@ -1158,10 +1151,7 @@ pub(super) fn rules_per_capability(
         .iter()
         .filter_map(|(area, _)| *area)
         .chain(own_code.iter().map(|(area, _)| *area))
-<<<<<<< HEAD
         .chain(machines.iter().map(|(area, _)| *area))
-=======
->>>>>>> origin/main
         .collect();
     named.sort_by(|a, b| area_order(a).cmp(&area_order(b)));
     named.dedup_by(|a, b| a.id == b.id);
@@ -1173,13 +1163,9 @@ pub(super) fn rules_per_capability(
                 .filter(|(a, _)| a.is_some_and(|a| a.id == area.id))
                 .map(|(a, story)| (*a, Some(*story))),
         );
-<<<<<<< HEAD
         if own_code.iter().any(|(a, _)| a.id == area.id)
             || machines.iter().any(|(a, _)| a.id == area.id)
         {
-=======
-        if own_code.iter().any(|(a, _)| a.id == area.id) {
->>>>>>> origin/main
             units.push((Some(area), None));
         }
     }
@@ -1192,7 +1178,6 @@ pub(super) fn rules_per_capability(
     for (area, story) in units {
         let Some(story) = story else {
             let area = area.expect("an own-code unit names its area");
-<<<<<<< HEAD
             if let Some((_, owners)) = own_code.iter().find(|(a, _)| a.id == area.id) {
                 printed +=
                     index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
@@ -1205,14 +1190,6 @@ pub(super) fn rules_per_capability(
                 let marks = headings.before(Some(area), out)?;
                 printed += state_machine(&index, machine, marks, assertions, asserted, out)?;
             }
-=======
-            let owners = &own_code
-                .iter()
-                .find(|(a, _)| a.id == area.id)
-                .expect("listed above")
-                .1;
-            printed += index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
->>>>>>> origin/main
             continue;
         };
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
@@ -1284,7 +1261,6 @@ pub(super) const MAX_EFFECT_ROWS: usize = 16;
 /// Rejection rows printed for one area's own code (#2066).
 pub(super) const MAX_AREA_OWN_ROWS: usize = 32;
 
-<<<<<<< HEAD
 /// One state machine's table (#2067): its states, then each state with the
 /// states it may move to, citing the machine. Returns the rows printed.
 fn state_machine<'a>(
@@ -1392,8 +1368,6 @@ fn state_machine<'a>(
     Ok(rows)
 }
 
-=======
->>>>>>> origin/main
 /// The order areas are listed in: by name, then id.
 fn area_order(area: &Node) -> (&str, &str) {
     (area_name(area), area.id.as_str())
@@ -1458,7 +1432,6 @@ impl<'a> Index<'a> {
             .collect()
     }
 
-<<<<<<< HEAD
     /// The state machines by the area of the file that declares them, keyed
     /// in [`area_order`], and those in no area (#2067).
     fn area_machines(
@@ -1485,8 +1458,6 @@ impl<'a> Index<'a> {
         (by_area.into_values().collect(), loose)
     }
 
-=======
->>>>>>> origin/main
     /// The rules of one area's own code (#2066), under the area's heading:
     /// its rejections, at most [`MAX_AREA_OWN_ROWS`], then its changes.
     #[allow(clippy::too_many_arguments)]
@@ -1809,12 +1780,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         set_slots::<&str>(rows)?,
         slots::<&str>(rows)?,
         slots::<(Option<&Node>, Option<&Story<'_>>)>(rows)?.checked_mul(2)?,
-<<<<<<< HEAD
         // State machines (#2067): the index's list, by area and loose.
         slots::<&Node>(rows)?.checked_mul(3)?,
         map_slots::<(&str, &str), (&Node, Vec<&Node>)>(rows)?,
-=======
->>>>>>> origin/main
     ])?;
     sum(&[index, reach_count, traversal, row, guards, own_code])
 }
@@ -2908,7 +2876,6 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         .unwrap();
         assert!(!out.finish().contains("own code"));
     }
-<<<<<<< HEAD
 
     // AC-0951: a state machine is stated under the area of the file that
     // declares it, with each state and where it may move; the guard of its
@@ -3001,6 +2968,4 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             "{plain}"
         );
     }
-=======
->>>>>>> origin/main
 }
