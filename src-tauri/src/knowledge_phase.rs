@@ -288,7 +288,7 @@ fn run_within(
         .collect();
     // Section text is read only when it can be embedded, and outside the
     // graph lock (AC-1505).
-    let admitted = knowledge_ingest::admitted_sections(&snapshot.graph.0);
+    let admitted = knowledge_ingest::admitted_sections(&snapshot.graph.0, &flows);
     let section_text = if provider.is_some_and(|p| p.capabilities().embeddings) {
         sections(&admitted)
     } else {
@@ -674,6 +674,9 @@ pub(crate) fn source_sections(
             if spec::section_content_hash(id, &text) != *hash {
                 continue;
             }
+            // Bound the collapsed text, as the unit renders it, so a run of
+            // whitespace never crowds out the prose after it.
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let mut end = text.len().min(SECTION_TEXT_BYTES);
             while !text.is_char_boundary(end) {
                 end -= 1;

@@ -472,10 +472,30 @@ fn sections_past_their_share_are_counted_and_admission_matches() {
     let (units, omitted) = units(&nodes);
     assert_eq!(units.len(), MAX_SECTION_UNITS);
     assert_eq!(omitted, 3);
-    let admitted: Vec<&str> = admitted_sections(&nodes)
+    let admitted: Vec<&str> = admitted_sections(&nodes, &[])
         .into_iter()
         .map(|node| node.id.as_str())
         .collect();
     let embedded: Vec<&str> = units.iter().map(|unit| unit.node_id.as_str()).collect();
     assert_eq!(admitted, embedded);
+    // When higher-ranked units fill the global cap, no section is admitted,
+    // so the host reads none it could not embed.
+    let mut full: Vec<Node> = (0..MAX_UNITS)
+        .map(|n| {
+            node(
+                &format!("ep:r@GET /{n:05}"),
+                "Endpoint",
+                serde_json::json!({}),
+            )
+        })
+        .collect();
+    full.push(section("docsec:r@README.md#1", "Part"));
+    assert!(admitted_sections(&full, &[]).is_empty());
+    let mut room = full[1..].to_vec();
+    room.push(section("docsec:r@README.md#0", "Part"));
+    let admitted: Vec<&str> = admitted_sections(&room, &[])
+        .into_iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(admitted, ["docsec:r@README.md#0"]);
 }

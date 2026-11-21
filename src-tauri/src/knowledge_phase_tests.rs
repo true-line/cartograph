@@ -889,8 +889,13 @@ impl LlmProvider for Recording {
 fn sections_are_embedded_with_text_read_from_their_source() {
     let host = host();
     let repo = tempfile::tempdir().unwrap();
-    let readme = "# Shop\n\nIntro.\n\n## Refunds\n\nRefunds settle nightly.\n";
-    std::fs::write(repo.path().join("README.md"), readme).unwrap();
+    // A run of whitespace past the text bound never crowds out the prose
+    // after it: the bound applies to the collapsed text.
+    let readme = format!(
+        "# Shop\n\nIntro.\n\n## Refunds\n\n{}Refunds settle nightly.\n",
+        " ".repeat(5000)
+    );
+    std::fs::write(repo.path().join("README.md"), &readme).unwrap();
     let data = tempfile::tempdir().unwrap();
     let mut registry =
         crate::sources::SourceRegistry::open(data.path().join("sources.db"), data.path()).unwrap();

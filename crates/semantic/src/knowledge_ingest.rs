@@ -95,17 +95,16 @@ pub fn units(nodes: &[Node]) -> (Vec<KnowledgeUnit>, usize) {
     units_with_flows(nodes, &[])
 }
 
-/// The `DocSection` ids the phase admits, in order: the host reads the text
-/// of exactly these before the phase runs.
-pub fn admitted_sections(nodes: &[Node]) -> Vec<&Node> {
-    let mut sections: Vec<&Node> = nodes
-        .iter()
+/// The `DocSection` nodes the phase embeds, in order: the host reads the
+/// text of exactly these before the phase runs. They are the sections that
+/// survive every cap of the final unit list, so no read is wasted on a
+/// section the global cap drops.
+pub fn admitted_sections<'a>(nodes: &'a [Node], flows: &[&'a Node]) -> Vec<&'a Node> {
+    kept(nodes, flows)
+        .0
+        .into_iter()
         .filter(|node| node.label == SECTION_LABEL)
-        .collect();
-    sections.sort_by(|a, b| a.id.cmp(&b.id));
-    sections.dedup_by(|a, b| a.id == b.id);
-    sections.truncate(MAX_SECTION_UNITS);
-    sections
+        .collect()
 }
 
 /// Deterministic units for a base snapshot and the flows derived from it,
@@ -125,6 +124,19 @@ pub fn units_with_sources(
     flows: &[&Node],
     section_text: &SectionText,
 ) -> (Vec<KnowledgeUnit>, usize) {
+    let (kept, omitted) = kept(nodes, flows);
+    let units = kept
+        .into_iter()
+        .map(|node| KnowledgeUnit {
+            node_id: node.id.clone(),
+            text: render(node, section_text.get(&node.id).map(String::as_str)),
+        })
+        .collect();
+    (units, omitted)
+}
+
+/// The nodes that become units, in unit order, and the count past the caps.
+fn kept<'a>(nodes: &'a [Node], flows: &[&'a Node]) -> (Vec<&'a Node>, usize) {
     let rank = |node: &Node| LABELS.iter().position(|label| *label == node.label);
     let base = nodes.iter().filter(|node| node.label != FLOW_LABEL);
     // A flow cannot take the id of a base node: the base node is the unit.
@@ -157,15 +169,12 @@ pub fn units_with_sources(
         flows_kept <= MAX_FLOW_UNITS
     });
     let omitted = before - ranked.len() + ranked.len().saturating_sub(MAX_UNITS);
-    let units = ranked
+    let kept = ranked
         .into_iter()
         .take(MAX_UNITS)
-        .map(|(_, node)| KnowledgeUnit {
-            node_id: node.id.clone(),
-            text: render(node, section_text.get(&node.id).map(String::as_str)),
-        })
+        .map(|(_, node)| node)
         .collect();
-    (units, omitted)
+    (kept, omitted)
 }
 
 /// Redaction passes allowed before a unit falls back to its bare label.
