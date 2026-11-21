@@ -185,6 +185,44 @@ pub(super) fn sanitize_expression(
                 continue;
             }
             "this" | "super" => continue,
+            // An expression-bodied arrow over plain names passed as an
+            // argument, the predicate of a pick (`find(r => r.test(zone,
+            // taxCategory))`, AC-0956): its names and
+            // body are checked like any other expression. A block body,
+            // typed, defaulted or destructured parameters stay withheld.
+            "arrow_function" => {
+                let body = current.child_by_field_name("body");
+                let parameters = match current.child_by_field_name("parameter") {
+                    Some(name) if name.kind() == "identifier" => Some(vec![name]),
+                    Some(_) => None,
+                    None => current.child_by_field_name("parameters").and_then(|list| {
+                        let mut cursor = list.walk();
+                        list.named_children(&mut cursor)
+                            .map(|parameter| {
+                                let mut inner = parameter.walk();
+                                let named: Vec<_> = parameter.named_children(&mut inner).collect();
+                                (parameter.kind() == "required_parameter"
+                                    && named.len() == 1
+                                    && named[0].kind() == "identifier")
+                                    .then_some(named[0])
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    }),
+                };
+                let passed = current.parent().is_some_and(|p| p.kind() == "arguments");
+                let Some((body, parameters)) = body
+                    .filter(|body| passed && body.kind() != "statement_block")
+                    .zip(parameters.filter(|names| !names.is_empty()))
+                else {
+                    return withheld_expression(result, source, RedactionReason::UnsupportedSyntax);
+                };
+                if cx.text(&current).starts_with("async") {
+                    return withheld_expression(result, source, RedactionReason::UnsupportedSyntax);
+                }
+                stack.extend(parameters);
+                stack.push(body);
+                continue;
+            }
             // Templates (including chunks/interpolation), regexes, JSX,
             // callable bodies, and TS type syntax are intentionally absent.
             // Their display is withheld wholesale until a safe policy exists.
@@ -712,7 +750,7 @@ mod tests {
 
     #[test]
     fn unsupported_syntax_and_decoding_never_copy_raw_source_as_fallback() {
-        // AC-0123/AC-0124: unsupported expressions stay explicit; regex,
+        // AC-0123/AC-0124/AC-0956: unsupported expressions stay explicit; regex,
         // templates, JSX, and undecodable values cannot enter raw properties.
         for source in [
             "`template-secret-${value}`",
@@ -720,6 +758,10 @@ mod tests {
             "<div data-key='jsx-secret' />",
             r"'\uD800undecodable-secret'",
             "(() => 'callback-secret')()",
+            "items.map(() => 'callback-secret')",
+            "items.map(async (x) => 'callback-secret')",
+            "items.map((x) => { return 'callback-secret'; })",
+            "items.map((x: string) => 'callback-secret')",
             "0xffffffffffffffffffffn",
         ] {
             let (expression, redactions) = returned(source);

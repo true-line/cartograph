@@ -95,6 +95,9 @@ struct RuleBuilder<'cx, 'tree> {
     gaps: BTreeMap<String, (String, TsNode<'tree>)>,
     dependencies: Vec<RuleDependency>,
     definition_seeds: Vec<TsNode<'tree>>,
+    /// Whether the exit value's names are followed to their definitions:
+    /// for an unguarded choice the value is the rule (AC-0956).
+    seed_values: bool,
 }
 
 impl<'cx, 'tree> RuleBuilder<'cx, 'tree> {
@@ -221,7 +224,9 @@ impl<'cx, 'tree> RuleBuilder<'cx, 'tree> {
                         })
                     })
             } else if is_value_identifier(node) {
-                if role == DependencyRole::Condition {
+                if role == DependencyRole::Condition
+                    || (self.seed_values && role == DependencyRole::ExitValue)
+                {
                     self.definition_seeds.push(node);
                 }
                 Some(
@@ -310,6 +315,130 @@ fn branches(mut exit: TsNode<'_>) -> (Vec<(TsNode<'_>, TsNode<'_>, BranchPolarit
     }
     conditions.reverse();
     (conditions, limited, recovered)
+}
+
+/// Interface names whose implementations are configured choices (#2069).
+const STRATEGY_SUFFIXES: [&str; 4] = ["Strategy", "Handler", "Calculator", "Process"];
+
+/// Whether an unguarded `return` states how a value is chosen (AC-0956),
+/// so it is a rule though no branch guards it:
+/// - the answer of a predicate, a method named `isX`, `hasX`, `canX`,
+///   `shouldX` or `mustX` or declared `: boolean`
+///   (`test(zone, category): boolean { return … && … }`), unless a constant;
+/// - a pick with a fallback, `return found || fallback` (or `??`) where
+///   `found` is, or is declared as, a `.find(…)` (`rate || this.defaultTaxRate`);
+/// - the answer of a configured strategy, a method of a class that
+///   `implements` an interface named for one (`DefaultTaxZoneStrategy`).
+fn answers_a_choice(cx: &FileCx<'_>, exit: TsNode<'_>) -> bool {
+    if exit.kind() != "return_statement" {
+        return false;
+    }
+    let Some(value) = exit_value(exit) else {
+        return false;
+    };
+    if matches!(value.kind(), "true" | "false" | "null" | "undefined") {
+        return false;
+    }
+    let mut owner = exit;
+    let callable = loop {
+        let Some(parent) = owner.parent() else {
+            return false;
+        };
+        if callable::is_callable(parent) {
+            break parent;
+        }
+        owner = parent;
+    };
+    let name = callable
+        .child_by_field_name("name")
+        .map(|name| cx.text(&name))
+        .unwrap_or_default();
+    let predicate = ["is", "has", "can", "should", "must"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+    }) || callable
+        .child_by_field_name("return_type")
+        .is_some_and(|ty| cx.text(&ty).trim_start_matches(':').trim() == "boolean");
+    if predicate {
+        return true;
+    }
+    let value = unparenthesized(value);
+    if value.kind() == "binary_expression"
+        && value
+            .child_by_field_name("operator")
+            .is_some_and(|op| matches!(cx.text(&op), "||" | "??"))
+        && let Some(left) = value.child_by_field_name("left").map(unparenthesized)
+    {
+        let found = |text: &str| text.contains(".find(");
+        if found(cx.text(&left)) {
+            return true;
+        }
+        if left.kind() == "identifier" {
+            let wanted = cx.text(&left);
+            let body = callable.child_by_field_name("body");
+            let declared = body.is_some_and(|body| {
+                super::callable::walk(body).into_iter().any(|node| {
+                    node.kind() == "variable_declarator"
+                        && node
+                            .child_by_field_name("name")
+                            .is_some_and(|n| cx.text(&n) == wanted)
+                        && node
+                            .child_by_field_name("value")
+                            .is_some_and(|v| found(cx.text(&v)))
+                })
+            });
+            if declared {
+                return true;
+            }
+        }
+    }
+    callable.kind() == "method_definition"
+        && !cx.text(&callable).starts_with("private")
+        && implements_a_strategy(cx, callable)
+}
+
+fn unparenthesized(mut node: TsNode<'_>) -> TsNode<'_> {
+    while node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        let Some(inner) = node
+            .named_children(&mut cursor)
+            .find(|n| n.kind() != "comment")
+        else {
+            break;
+        };
+        node = inner;
+    }
+    node
+}
+
+/// Whether `method` is declared in a class that `implements` an interface
+/// named for a configured strategy.
+fn implements_a_strategy(cx: &FileCx<'_>, method: TsNode<'_>) -> bool {
+    let mut node = method;
+    while let Some(parent) = node.parent() {
+        if matches!(parent.kind(), "class_declaration" | "class") {
+            let mut cursor = parent.walk();
+            return parent
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "class_heritage")
+                .any(|heritage| {
+                    let mut cursor = heritage.walk();
+                    heritage
+                        .named_children(&mut cursor)
+                        .filter(|clause| clause.kind() == "implements_clause")
+                        .any(|clause| {
+                            let text = cx.text(&clause);
+                            text.split(|c: char| !c.is_alphanumeric() && c != '_')
+                                .any(|word| {
+                                    word.starts_with(|c: char| c.is_ascii_uppercase())
+                                        && STRATEGY_SUFFIXES.iter().any(|s| word.ends_with(s))
+                                })
+                        })
+                });
+        }
+        node = parent;
+    }
+    false
 }
 
 fn exit_value(exit: TsNode<'_>) -> Option<TsNode<'_>> {
@@ -464,7 +593,8 @@ pub(super) fn extract<'tree>(
                 );
                 return;
             }
-            if ancestors.is_empty() && !limited {
+            let choice = ancestors.is_empty() && !limited && answers_a_choice(cx, exit);
+            if ancestors.is_empty() && !limited && !choice {
                 continue;
             }
             if rule_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
@@ -482,6 +612,7 @@ pub(super) fn extract<'tree>(
                 gaps: BTreeMap::new(),
                 dependencies: Vec::new(),
                 definition_seeds: Vec::new(),
+                seed_values: choice,
             };
             builder.control_gap(RuleGapReason::ExecutionPredicateUnknown, exit);
             builder.control_gap(RuleGapReason::ConsumerSemanticsUnknown, exit);
