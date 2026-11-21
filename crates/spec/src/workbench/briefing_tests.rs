@@ -411,6 +411,12 @@ fn a_briefing_carries_the_rules_of_the_implementations_its_area_dispatches_to() 
             "sym:r@zones.ts#Calculator.calculate",
             json!({"resolution": "configured-lookup", "through": "Calculator.calculate"}),
         ),
+        // Another repository's same-named interface is not the Tax area's.
+        dispatch(
+            "sym:other@x.ts#Caller.run",
+            "sym:other@x.ts#ElsewhereZoneStrategy.determineTaxZone",
+            json!({"resolution": "strategy-implementation", "interface": "TaxZoneStrategy"}),
+        ),
         // A direct call is not a dispatch.
         edge(
             "sym:r@calculator.ts#OrderCalculator.apply",

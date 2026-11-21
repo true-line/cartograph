@@ -134,12 +134,13 @@ pub fn area_neighbours(
             owner.entry(edge.src.as_str()).or_insert(*found);
         }
     }
-    // The names (after `#`) of the symbols the area declares: an interface
-    // or class it holds dispatches from wherever it is called.
-    let declared: BTreeSet<&str> = owner
+    // The symbols the area declares, by repository and name (after `#`):
+    // an interface or class it holds dispatches from wherever it is called
+    // in its own repository.
+    let declared: BTreeSet<(&str, &str)> = owner
         .iter()
         .filter(|(_, (id, _))| *id == area)
-        .filter_map(|(symbol, _)| symbol.rsplit_once('#').map(|(_, name)| name))
+        .filter_map(|(symbol, _)| symbol_name(symbol))
         .collect();
     let mut calls = BTreeSet::new();
     let mut called_by = BTreeSet::new();
@@ -154,7 +155,7 @@ pub fn area_neighbours(
             && owner
                 .get(edge.dst.as_str())
                 .is_none_or(|(to, _)| *to != area)
-            && let Some((_, target)) = edge.dst.rsplit_once('#')
+            && let Some((repo, target)) = symbol_name(&edge.dst)
         {
             // The interface (a strategy) or the class (`Class.field`,
             // `Class.method`) the call dispatches through.
@@ -165,7 +166,7 @@ pub fn area_neighbours(
             let from_here = owner
                 .get(edge.src.as_str())
                 .is_some_and(|(from, _)| *from == area);
-            if from_here || through.is_some_and(|name| declared.contains(name)) {
+            if from_here || through.is_some_and(|name| declared.contains(&(repo, name))) {
                 dispatches.insert(target.to_owned());
             }
         }
@@ -188,6 +189,13 @@ pub fn area_neighbours(
         called_by: called_by.into_iter().collect(),
         dispatches: dispatches.into_iter().collect(),
     })
+}
+
+/// A symbol id's repository and name: `sym:<repo>@<path>#<name>`.
+fn symbol_name(id: &str) -> Option<(&str, &str)> {
+    let (head, name) = id.rsplit_once('#')?;
+    let repo = head.strip_prefix("sym:")?.split_once('@')?.0;
+    Some((repo, name))
 }
 
 /// The state machines other areas declare (AC-1032): each `#### State
