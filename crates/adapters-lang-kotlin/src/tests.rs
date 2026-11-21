@@ -7105,3 +7105,147 @@ class CustomerRepository {
         ]
     );
 }
+
+/// AC-1112: Kotest spec classes proven by import declare TestCases named
+/// by their class and container chain, in every style; requests in a test
+/// lambda link to endpoints; a computed name is a Gap; an unproven spec
+/// supertype and a non-test call are no tests.
+#[test]
+fn kotest_specs_are_test_cases_named_by_their_containers() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/api/Routes.kt",
+        r#"package com.shop.api
+
+import io.ktor.server.routing.*
+
+fun Application.module() {
+    routing { get("/health") { } }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/api/Specs.kt",
+        r#"package com.shop.api
+
+import io.kotest.core.spec.style.BehaviorSpec
+import io.kotest.core.spec.style.DescribeSpec
+import io.kotest.core.spec.style.FreeSpec
+import io.kotest.core.spec.style.FunSpec
+import io.kotest.core.spec.style.StringSpec
+import io.kotest.core.spec.style.WordSpec
+import io.ktor.client.request.get
+import io.ktor.server.testing.testApplication
+
+class HealthSpec : FunSpec({
+    test("is healthy") {
+        testApplication { client.get("/health") }
+    }
+    context("when down") {
+        test("reports") { }
+        xtest("skipped") { }
+    }
+    for (n in listOf(1, 2)) {
+        test("case $n") { }
+    }
+    helper("not a test") { }
+})
+
+class Strings : StringSpec({
+    "trims input" { }
+})
+
+class Describe : DescribeSpec() {
+    init {
+        describe("cart") {
+            it("adds") { }
+        }
+    }
+}
+
+class Behavior : BehaviorSpec({
+    given("a cart") {
+        `when`("empty") {
+            then("total is zero") { }
+        }
+    }
+})
+
+class Free : FreeSpec({
+    "orders" - {
+        "ship" { }
+    }
+})
+
+class Words : WordSpec({
+    "a parser" should {
+        "parse" { }
+    }
+})
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/fake/Fake.kt",
+        r#"package com.shop.fake
+
+open class FunSpec(body: FunSpec.() -> Unit)
+
+class NotKotest : FunSpec({
+    test("nothing") { }
+})
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut tests: Vec<(&str, &str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "TestCase")
+        .map(|node| {
+            (
+                node.props["qualified_name"].as_str().unwrap(),
+                node.props["style"].as_str().unwrap(),
+                node.props["modifier"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    tests.sort();
+    assert_eq!(
+        tests,
+        [
+            (
+                "Behavior > a cart > empty > total is zero",
+                "BehaviorSpec",
+                ""
+            ),
+            ("Describe > cart > adds", "DescribeSpec", ""),
+            ("Free > orders > ship", "FreeSpec", ""),
+            ("HealthSpec > is healthy", "FunSpec", ""),
+            ("HealthSpec > when down > reports", "FunSpec", ""),
+            ("HealthSpec > when down > skipped", "FunSpec", "disabled"),
+            ("Strings > trims input", "StringSpec", ""),
+            ("Words > a parser > parse", "WordSpec", ""),
+        ]
+    );
+    let healthy = "test:local/demo@src/test/kotlin/com/shop/api/Specs.kt#HealthSpec > is healthy";
+    edge(
+        &out.edges,
+        healthy,
+        "file:local/demo@src/test/kotlin/com/shop/api/Specs.kt",
+        "DEFINED_IN",
+    );
+    edge(&out.edges, healthy, "ep:local/demo@GET:/health", "REQUESTS");
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.src == healthy && edge.label == "IMPLEMENTED_BY")
+    );
+    let gaps = out
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:test-name:"))
+        .count();
+    assert_eq!(gaps, 1);
+}
