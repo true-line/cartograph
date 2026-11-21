@@ -46,6 +46,11 @@ pub struct Extraction {
     pub nodes: Vec<Node>,
     /// Graph edges (props carry provenance under `prov`).
     pub edges: Vec<Edge>,
+    /// Repo-relative directories outside the repository root that hold
+    /// Terraform and are not the source of a local module call: the root
+    /// modules of a directory walk (ADR-0077), including one that declares
+    /// no resource. Empty for a single-file extraction.
+    pub root_modules: BTreeSet<String>,
     policy_documents: BTreeMap<String, PolicyDocument>,
     module_declarations: Vec<ModuleDeclaration>,
 }
@@ -69,6 +74,9 @@ struct ModuleDeclaration {
     node_id: String,
     source: String,
     declaring_path: String,
+    /// Root-module scope of the declaring block (ADR-0077): the module's
+    /// resources are instantiated under it.
+    scope: String,
     evidence: EvidenceRef,
     ancestors: Vec<PathBuf>,
 }
@@ -137,8 +145,8 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
 }
 
-fn cached_file_key(path: &str, address_prefix: Option<&str>) -> String {
-    format!("{}@{path}", address_prefix.unwrap_or_default())
+fn cached_file_key(path: &str, address_prefix: Option<&str>, scope: &str) -> String {
+    format!("{scope}|{}@{path}", address_prefix.unwrap_or_default())
 }
 
 fn extract_file_incremental(
@@ -146,12 +154,13 @@ fn extract_file_incremental(
     path: &str,
     id: &SourceId,
     address_prefix: Option<&str>,
+    scope: &str,
     module_ancestors: &[PathBuf],
     run: &mut CacheRun<'_>,
 ) -> Result<Extraction, ExtractError> {
     let source = std::fs::read_to_string(root.join(path))?;
     let source_hash = core_prov::content_hash(source.as_bytes());
-    let key = cached_file_key(path, address_prefix);
+    let key = cached_file_key(path, address_prefix, scope);
     run.active.insert(key.clone());
     run.paths.insert(path.to_string());
     let extraction = if let Some(cached) = run
@@ -166,7 +175,7 @@ fn extract_file_incremental(
         extraction
     } else {
         run.stats.recomputed_files += 1;
-        extract_source_unresolved(&source, path, id, address_prefix, module_ancestors)?
+        extract_source_unresolved(&source, path, id, address_prefix, scope, module_ancestors)?
     };
     run.cache.files.insert(
         key,
@@ -580,9 +589,26 @@ fn policy_statements(body: &Body, address_prefix: Option<&str>) -> Vec<PolicySta
 }
 
 /// Resource ids are repo-namespaced (US-0001 slice 2): the same Terraform
-/// address in two repos must never merge into one node.
-fn resource_id(repo: &str, address: &str) -> String {
-    format!("res:{repo}@{address}")
+/// address in two repos must never merge into one node. Within a repository
+/// they are scoped by root module (ADR-0077, #1844): `scope` is the
+/// repo-relative directory of the root module (or of a directly read child
+/// module), and the repository root has no prefix, so a repository whose
+/// Terraform lives only at its root keeps `res:{repo}@{address}`.
+fn resource_id(repo: &str, scope: &str, address: &str) -> String {
+    if scope.is_empty() {
+        format!("res:{repo}@{address}")
+    } else {
+        format!("res:{repo}@{scope}/{address}")
+    }
+}
+
+/// Repository and root-module scope of a Terraform resource id built by
+/// [`resource_id`]. A Terraform address never contains `/`, so the scope is
+/// everything after the first `@` up to the last `/`. Only Terraform ids may
+/// be split this way: observed and Pulumi `res:` ids can contain `/`.
+fn terraform_id_scope(node_id: &str) -> Option<(&str, &str)> {
+    let (repo, rest) = node_id.strip_prefix("res:")?.split_once('@')?;
+    Some((repo, rest.rsplit_once('/').map_or("", |(scope, _)| scope)))
 }
 
 fn scoped_address(prefix: Option<&str>, address: &str) -> String {
@@ -599,12 +625,9 @@ fn scoped_refs(refs: BTreeSet<String>, prefix: Option<&str>) -> BTreeSet<String>
 }
 
 fn resource_id_from_node(source_node_id: &str, address: &str) -> String {
-    let repo = source_node_id
-        .strip_prefix("res:")
-        .and_then(|rest| rest.split_once('@'))
-        .map(|(repo, _)| repo)
+    let (repo, scope) = terraform_id_scope(source_node_id)
         .expect("IaC resource node id has a repository namespace");
-    resource_id(repo, address)
+    resource_id(repo, scope, address)
 }
 
 fn joined_policy_prov(edge: &Edge, document: &PolicyDocument, fact: &str) -> serde_json::Value {
@@ -630,6 +653,7 @@ fn extract_source_unresolved(
     path: &str,
     id: &SourceId,
     address_prefix: Option<&str>,
+    scope: &str,
     module_ancestors: &[PathBuf],
 ) -> Result<Extraction, ExtractError> {
     let body: Body = source
@@ -654,7 +678,7 @@ fn extract_source_unresolved(
             _ => continue,
         };
         let address = scoped_address(address_prefix, &local_address);
-        let node_id = resource_id(id.repo, &address);
+        let node_id = resource_id(id.repo, scope, &address);
         let rtype = if kind == "module" {
             "module".to_string()
         } else {
@@ -678,6 +702,7 @@ fn extract_source_unresolved(
                 node_id: node_id.clone(),
                 source: module_source.to_string(),
                 declaring_path: path.to_string(),
+                scope: scope.to_string(),
                 evidence: evidence_ref(id, path, &span),
                 ancestors: module_ancestors.to_vec(),
             });
@@ -699,7 +724,7 @@ fn extract_source_unresolved(
         for dep in scoped_refs(raw_deps.clone(), address_prefix) {
             out.edges.push(Edge {
                 src: node_id.clone(),
-                dst: resource_id(id.repo, &dep),
+                dst: resource_id(id.repo, scope, &dep),
                 label: "DEPENDS_ON".into(),
                 props: serde_json::json!({
                     "prov": prov(id, path, &span, &format!("DEPENDS_ON {address} -> {dep}")),
@@ -715,7 +740,7 @@ fn extract_source_unresolved(
             let referenced = scoped_address(address_prefix, &raw_reference);
             out.edges.push(Edge {
                 src: node_id.clone(),
-                dst: resource_id(id.repo, &referenced),
+                dst: resource_id(id.repo, scope, &referenced),
                 label: "REFERENCES".into(),
                 props: serde_json::json!({
                     "prov": prov(id, path, &span, &format!("REFERENCES {address} -> {referenced}")),
@@ -740,8 +765,8 @@ fn extract_source_unresolved(
             for s in &sources {
                 for t in &targets {
                     out.edges.push(Edge {
-                        src: resource_id(id.repo, s),
-                        dst: resource_id(id.repo, t),
+                        src: resource_id(id.repo, scope, s),
+                        dst: resource_id(id.repo, scope, t),
                         label: cap.kind.edge_label().into(),
                         props: serde_json::json!({
                             "via": node_id,
@@ -766,7 +791,7 @@ fn extract_source_unresolved(
             for target in scoped_refs(refs_for_attr(block, "policy"), address_prefix) {
                 out.edges.push(Edge {
                     src: node_id.clone(),
-                    dst: resource_id(id.repo, &target),
+                    dst: resource_id(id.repo, scope, &target),
                     label: "GRANTS".into(),
                     props: serde_json::json!({
                         "actions": actions,
@@ -783,7 +808,7 @@ fn extract_source_unresolved(
 
 /// Extract facts from one Terraform file.
 pub fn extract_source(source: &str, path: &str, id: &SourceId) -> Result<Extraction, ExtractError> {
-    let mut out = extract_source_unresolved(source, path, id, None, &[])?;
+    let mut out = extract_source_unresolved(source, path, id, None, "", &[])?;
     out.resolve_policy_document_grants();
     Ok(out)
 }
@@ -827,26 +852,28 @@ pub fn extract_dir_incremental_with_progress(
     let mut out = Extraction::default();
     for rel in &files {
         on_file(rel);
+        // Each file the walk reads is scoped by its own directory: a root
+        // module, or a child module read directly (ADR-0077).
         out.absorb(extract_file_incremental(
             &root,
             rel,
             id,
             None,
+            parent_dir(rel),
             &[],
             &mut run,
         )?);
     }
-    // Declarations the plain walk read without a module prefix, captured
-    // before module expansion adds prefixed child contexts.
-    let unprefixed = unprefixed_declarations(&out.nodes);
     let child_module_dirs = expand_local_modules(&root, id, &mut out, &mut run)?;
     out.resolve_policy_document_grants();
     out.close_over_endpoints();
-    out.nodes.extend(root_module_collision_gaps(
-        id,
-        unprefixed,
-        &child_module_dirs,
-    ));
+    annotate_module_scopes(&mut out.nodes, &child_module_dirs);
+    out.root_modules = files
+        .iter()
+        .map(|rel| parent_dir(rel))
+        .filter(|dir| !dir.is_empty() && !child_module_dirs.contains(*dir))
+        .map(str::to_string)
+        .collect();
     run.stats.deleted_files = old_keys.difference(&run.active).count() as u64;
     run.stats.distinct_files = run.paths.len() as u64;
     run.cache.files.retain(|key, _| run.active.contains(key));
@@ -862,116 +889,34 @@ pub fn terraform_file_count(root: &Path) -> Result<u64, ExtractError> {
     Ok(files.len() as u64)
 }
 
-/// One unprefixed `Resource` declaration read by the plain directory walk.
-struct UnprefixedDeclaration {
-    address: String,
-    evidence: EvidenceRef,
-}
-
-fn unprefixed_declarations(nodes: &[Node]) -> Vec<UnprefixedDeclaration> {
-    nodes
-        .iter()
-        .filter(|node| node.label == "Resource")
-        .filter_map(|node| {
-            let address = node.props.get("logical_id")?.as_str()?.to_string();
-            let provenance =
-                serde_json::from_value::<Provenance>(node.props.get("prov")?.clone()).ok()?;
-            let evidence = provenance.evidence.into_iter().next()?;
-            Some(UnprefixedDeclaration { address, evidence })
-        })
-        .collect()
-}
-
 /// Repo-relative directory of a repo-relative file path (`""` = the root).
 fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-/// Gap id for a Terraform address declared by more than one root module.
-fn root_module_collision_gap_id(repo: &str, address: &str) -> String {
-    format!("gap:tf-address-collision:{repo}@{address}")
-}
-
-/// Resource ids are `res:{repo}@{address}` with no root-module scope, so the
-/// same address declared in two root-module directories (`envs/prod`,
-/// `envs/staging`) names one node and the store keeps only one declaration
-/// (#1844). Until ids are scoped by root module, each such address gets an
-/// explicit Gap citing every declaring span (R-INT-4) instead of a silent
-/// loss. Directories that are the resolved source of a local module call are
-/// child modules, not root modules: the plain walk reads them unprefixed as
-/// well, and those reads never count as a collision. A repository with no
-/// collision gets no Gap, so its graph is unchanged.
-fn root_module_collision_gaps(
-    id: &SourceId,
-    declarations: Vec<UnprefixedDeclaration>,
-    child_module_dirs: &BTreeSet<String>,
-) -> Vec<Node> {
-    let mut by_address = BTreeMap::<String, BTreeMap<String, Vec<EvidenceRef>>>::new();
-    for declaration in declarations {
-        let dir = parent_dir(&declaration.evidence.path).to_string();
-        if child_module_dirs.contains(&dir) {
+/// Record each Terraform node's scope as a prop (ADR-0077): `root_module`
+/// for a root module outside the repository root, `child_module` for a
+/// directory that is the resolved source of a local module call and was read
+/// directly. The repository root carries neither, so root-only repositories
+/// keep byte-identical nodes. Placeholders take the scope of their id.
+fn annotate_module_scopes(nodes: &mut [Node], child_module_dirs: &BTreeSet<String>) {
+    for node in nodes.iter_mut().filter(|node| node.label == "Resource") {
+        let Some((_, scope)) = terraform_id_scope(&node.id) else {
+            continue;
+        };
+        if scope.is_empty() {
             continue;
         }
-        by_address
-            .entry(declaration.address)
-            .or_default()
-            .entry(dir)
-            .or_default()
-            .push(declaration.evidence);
-    }
-
-    let mut gaps = Vec::new();
-    for (address, mut by_root) in by_address {
-        if by_root.len() < 2 {
-            continue;
+        let key = if child_module_dirs.contains(scope) {
+            "child_module"
+        } else {
+            "root_module"
+        };
+        let scope = scope.to_string();
+        if let Some(props) = node.props.as_object_mut() {
+            props.insert(key.into(), scope.into());
         }
-        let gap_id = root_module_collision_gap_id(id.repo, &address);
-        let mut evidence = Vec::new();
-        let mut cited = Vec::new();
-        for (dir, spans) in &mut by_root {
-            spans.sort_by(|a, b| {
-                (&a.path, a.byte_start, a.byte_end).cmp(&(&b.path, b.byte_start, b.byte_end))
-            });
-            let root_module = if dir.is_empty() { "." } else { dir.as_str() };
-            for span in spans.iter() {
-                cited.push(serde_json::json!({
-                    "root_module": root_module,
-                    "path": span.path,
-                    "byte_start": span.byte_start,
-                    "byte_end": span.byte_end,
-                }));
-                evidence.push(span.clone());
-            }
-        }
-        let root_modules: Vec<&str> = by_root
-            .keys()
-            .map(|dir| if dir.is_empty() { "." } else { dir.as_str() })
-            .collect();
-        let provenance = Provenance::new(
-            Tier::Deterministic,
-            ConfidenceTier::Gap,
-            evidence,
-            EXTRACTOR_ID,
-            format!("Gap {gap_id} {}", serde_json::json!(cited)).as_bytes(),
-        )
-        .expect("Deterministic/Gap is always within ceiling");
-        gaps.push(Node {
-            id: gap_id,
-            label: "Gap".into(),
-            props: serde_json::json!({
-                "address": address,
-                "resource": resource_id(id.repo, &address),
-                "root_modules": root_modules,
-                "declarations": cited,
-                "reason": "Terraform address declared in more than one root module; \
-                    resource ids are not scoped by root module, so only one \
-                    declaration is kept",
-                "attempted_tiers": ["T0"],
-                "prov": provenance,
-            }),
-        });
     }
-    gaps
 }
 
 /// Expand local module calls; returns the repo-relative directories resolved
@@ -1027,6 +972,7 @@ fn expand_local_modules(
                 &rel,
                 id,
                 Some(&declaration.address),
+                &declaration.scope,
                 &ancestors,
                 run,
             )?);
