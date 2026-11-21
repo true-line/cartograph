@@ -8,7 +8,8 @@
 //! **Permission sites.** Two shapes exist today, both properties of the
 //! `Endpoint` fact with their own provenance ([`RECOVERY`] lists the
 //! producers): `permission_site` (NestJS GraphQL `Allow(...)` decorator
-//! syntax) and `auth` (Flask and Flask-Admin guards). No adapter records a
+//! syntax) and `auth` (Flask and Flask-Admin guards, Spring method-security
+//! annotations). No adapter records a
 //! site on a fact below the endpoint, so a check made inside a handler body
 //! or in a function it calls is not recovered; the document says so.
 //!
@@ -64,6 +65,8 @@ struct Recovery {
     /// The endpoint property that holds the site.
     property: &'static str,
     recovers: &'static str,
+    /// What the adapter read when it records no guard (`auth.state` none).
+    absent_read: &'static str,
     producer: &'static str,
 }
 
@@ -81,6 +84,7 @@ const RECOVERY: &[Recovery] = &[
                    repository decorators whose wrapper returns or aborts with 401 or 403. Request \
                    hooks and wsgi_app middleware are read only to decide whether that reading is \
                    complete",
+        absent_read: "view decorators, request hooks and wsgi_app middleware",
         producer: "adapters-lang-python (auth_guards)",
     },
     Recovery {
@@ -89,7 +93,21 @@ const RECOVERY: &[Recovery] = &[
         property: "auth",
         recovers: "Flask-Admin view classes whose is_accessible returns flask_login \
                    current_user.is_authenticated",
+        absent_read: "view decorators, request hooks and wsgi_app middleware",
         producer: "adapters-lang-python (flask_admin)",
+    },
+    Recovery {
+        framework: "spring",
+        language: "Java",
+        property: "auth",
+        recovers: "import-bound method-security annotations on the handler method, else its \
+                   class (@PreAuthorize and @PostAuthorize SpEL role, authority and sign-in \
+                   checks, @Secured, @RolesAllowed, @PermitAll and @DenyAll), and the first \
+                   HttpSecurity authorizeHttpRequests rule whose matcher covers the endpoint, \
+                   both with string constants the repository declares. Servlet filters and \
+                   interceptors are not read",
+        absent_read: "method-security annotations and HttpSecurity URL rules",
+        producer: "adapters-lang-java (method_security)",
     },
     Recovery {
         framework: "nestjs-graphql",
@@ -98,6 +116,7 @@ const RECOVERY: &[Recovery] = &[
         recovers: "one Allow(...) decorator on a resolver operation, with Allow and Permission \
                    bound by named imports. The fact records decorator syntax, not what the \
                    decorator does at run time",
+        absent_read: "resolver operation decorators",
         producer: "adapters-lang-ts (graphql_resolvers)",
     },
 ];
@@ -175,7 +194,7 @@ fn reading<'a>(endpoint: &'a Node, recovery: &Recovery) -> Reading<'a> {
             }
         }
         Some("none") => Reading::Absent {
-            read: "view decorators, request hooks and wsgi_app middleware",
+            read: recovery.absent_read,
             basis: raw["basis"].as_str().unwrap_or("no guard recorded"),
         },
         Some("unknown") => {
@@ -498,9 +517,14 @@ impl Caller {
 /// The caller a guard admits, read from what the adapter recognized: a
 /// Flask-Login or Flask-JWT-Extended decorator by its library name, a
 /// Flask-Admin view by its `is_accessible`, and any other repository guard
-/// as the guard itself. The Python adapter records a Flask-Admin view as a
+/// as the guard itself; a Spring endpoint by the caller its annotation names.
+/// The Python adapter records a Flask-Admin view as a
 /// `flask` endpoint with the `flask_admin` mount.
 fn role(endpoint: &Node, guards: &[&str]) -> String {
+    // The Java adapter reads the caller from the annotation itself.
+    if let Some(caller) = endpoint.props["auth"]["caller"].as_str() {
+        return caller.to_owned();
+    }
     let named = |guard: &str| match guard {
         "flask_login.login_required" => Some("signed-in user"),
         "flask_login.fresh_login_required" => Some("freshly signed-in user"),
@@ -684,7 +708,8 @@ pub(super) fn callers_frame(
         out,
         "\nCallers by recovered guard: {} callers over {guarded} guarded operations; \
          {unguarded} operations with no guard recovered. Read from each operation's guard \
-         decorators or Flask-Admin `is_accessible` (decorator or hook syntax), not effective \
+         decorators, Flask-Admin `is_accessible` or Spring method-security annotations \
+         (decorator, annotation or hook syntax), not effective \
          runtime authorization or an identified user; `security.md` lists each operation's \
          caller under its capability.\n",
         by_caller.len() - usize::from(unguarded > 0)
