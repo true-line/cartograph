@@ -14,9 +14,10 @@
 //! Matching follows Spring's path patterns: `**` spans segments, `*` and
 //! `{var}` match one segment. An endpoint's `{id}` segment matches a literal
 //! pattern segment for only some requests, so such a rule leaves the reading
-//! unknown rather than guessing. Rules inside an `if` are conditional and
-//! decide nothing. Several filter chains, a `securityMatcher` or a matcher
-//! the adapter does not read leave the reading unknown.
+//! unknown rather than guessing. Rules inside an `if`, `switch` or loop are
+//! conditional and decide nothing. Several filter chains, a
+//! `securityMatcher` or a matcher the adapter does not read leave the
+//! reading unknown.
 
 use super::method_security::{Part, parts};
 use super::{ConfidenceTier, FileCx, Imports, TsNode};
@@ -280,9 +281,17 @@ pub(super) fn chains(
         let mut conditional = false;
         let mut up = call;
         while let Some(parent) = up.parent() {
+            // A branch, loop or switch may not run the configuring call.
             if matches!(
                 parent.kind(),
-                "if_statement" | "switch_expression" | "conditional_expression"
+                "if_statement"
+                    | "switch_expression"
+                    | "switch_statement"
+                    | "conditional_expression"
+                    | "for_statement"
+                    | "enhanced_for_statement"
+                    | "while_statement"
+                    | "do_statement"
             ) {
                 conditional = true;
             }

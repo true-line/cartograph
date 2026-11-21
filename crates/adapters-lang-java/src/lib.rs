@@ -99,6 +99,9 @@ pub struct Extraction {
     /// annotation types included: the package members that can shadow a
     /// wildcard import.
     package_types: Vec<String>,
+    /// The same for test-only files: they shadow a test file's wildcard
+    /// import (a JUnit annotation, #2020) but never a product file's.
+    test_types: Vec<String>,
     /// `System.getenv` sites awaiting the repo-wide `System` check (#1789).
     pending_config: Vec<adapters_fw::config_read::ConfigReadSite>,
     /// Some file declares or imports something named `System`.
@@ -859,6 +862,7 @@ pub fn extract_source(
         (&mut out.nodes, &mut out.edges),
         id.repo,
         &|parts| settled.text(parts),
+        &|fqn| package_types.contains(fqn) || out.test_types.iter().any(|t| t == fqn),
     );
     out.fetch_sites.extend(feign_sites);
     config_read::resolve(
@@ -1432,6 +1436,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     if product {
         out.package_types
             .extend(jaxrs::top_level_types(&cx, root, package.as_deref()));
+    } else {
+        out.test_types
+            .extend(jaxrs::top_level_types(&cx, root, package.as_deref()));
     }
 
     // Calls: same-class unqualified/this calls resolve locally; calls on an
@@ -1777,6 +1784,7 @@ pub fn extract_dir_incremental_with_progress(
             out.http_chains.extend(extraction.http_chains);
             out.test_requests.extend(extraction.test_requests);
             out.package_types.extend(extraction.package_types);
+            out.test_types.extend(extraction.test_types);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
             Ok(())
@@ -1851,6 +1859,7 @@ pub fn extract_dir_incremental_with_progress(
         (&mut out.nodes, &mut out.edges),
         id.repo,
         &|parts| settled.text(parts),
+        &|fqn| package_types.contains(fqn) || out.test_types.iter().any(|t| t == fqn),
     );
     out.fetch_sites.extend(feign_sites);
     config_read::resolve(

@@ -407,7 +407,11 @@ fn enclosing_class(cx: &FileCx<'_>, mut node: TsNode<'_>, package: Option<&str>)
     while let Some(parent) = node.parent() {
         if matches!(
             parent.kind(),
-            "class_declaration" | "interface_declaration" | "enum_declaration"
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "annotation_type_declaration"
         ) && let Some(name) = parent.child_by_field_name("name")
         {
             names.push(cx.text(&name).to_string());
@@ -442,7 +446,12 @@ pub(super) fn constants(
         let in_interface = node
             .parent()
             .and_then(|body| body.parent())
-            .is_some_and(|decl| decl.kind() == "interface_declaration");
+            .is_some_and(|decl| {
+                matches!(
+                    decl.kind(),
+                    "interface_declaration" | "annotation_type_declaration"
+                )
+            });
         let mut walk = node.walk();
         let modifiers = node
             .named_children(&mut walk)

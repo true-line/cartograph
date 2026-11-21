@@ -6,7 +6,9 @@
 //! A test is a method annotated `@Test`, `@ParameterizedTest` or
 //! `@RepeatedTest` whose annotation is proven by a named or wildcard import
 //! of `org.junit.jupiter.api` / `org.junit.jupiter.params` (JUnit 5) or
-//! `org.junit` (JUnit 4), or by its qualified spelling. Each becomes a
+//! `org.junit` (JUnit 4), or by its qualified spelling; one proven by a
+//! wildcard import alone is no test when the file's package declares a type
+//! of that name, which Java would bind instead. Each becomes a
 //! Confirmed `TestCase` citing its method, `DEFINED_IN` its file and
 //! `IMPLEMENTED_BY` its method Symbol.
 //!
@@ -87,18 +89,32 @@ const JUNIT: &[(&str, &str)] = &[
     ("Test", "org.junit"),
 ];
 
-fn is_test_annotation(cx: &FileCx<'_>, imports: &Imports, name: &str, node: TsNode<'_>) -> bool {
+/// Whether `node` is a JUnit test annotation: `Some(false)` when a named
+/// import or its spelling proves it, `Some(true)` when only a wildcard import
+/// does (a same-package type of that name would shadow it).
+fn test_annotation(
+    cx: &FileCx<'_>,
+    imports: &Imports,
+    name: &str,
+    node: TsNode<'_>,
+) -> Option<bool> {
     let spelled = node.child_by_field_name("name").map_or("", |n| cx.text(&n));
-    JUNIT.iter().any(|(simple, package)| {
-        *simple == name
-            && (imports
-                .bindings
-                .get(name)
-                .is_some_and(|fqn| fqn == &format!("{package}.{simple}"))
-                || (!imports.bindings.contains_key(name)
-                    && imports.wildcard_packages.iter().any(|p| p == package))
-                || spelled == format!("{package}.{simple}"))
-    })
+    let mut wildcard = None;
+    for (simple, package) in JUNIT {
+        if *simple != name {
+            continue;
+        }
+        let fqn = format!("{package}.{simple}");
+        if imports.bindings.get(name) == Some(&fqn) || spelled == fqn {
+            return Some(false);
+        }
+        if !imports.bindings.contains_key(name)
+            && imports.wildcard_packages.iter().any(|p| p == package)
+        {
+            wildcard = Some(true);
+        }
+    }
+    wildcard
 }
 
 const BUILDER_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
@@ -213,21 +229,39 @@ pub(super) fn extract(
     out: &mut Extraction,
 ) {
     let statics = static_imports(cx, root);
+    // Each test with the same-package names that would shadow it, when
+    // only wildcard imports prove its annotations.
     let tests: Vec<_> = methods
         .iter()
-        .filter(|(method, ..)| {
-            declaration_annotations(cx, *method)
+        .filter_map(|entry| {
+            let proofs: Vec<(String, bool)> = declaration_annotations(cx, entry.0)
                 .iter()
-                .any(|(n, a)| is_test_annotation(cx, imports, n, *a))
+                .filter_map(|(n, a)| Some((n.clone(), test_annotation(cx, imports, n, *a)?)))
+                .collect();
+            if proofs.is_empty() {
+                return None;
+            }
+            let shadowed_by: Vec<String> = if proofs.iter().any(|(_, wildcard)| !wildcard) {
+                Vec::new()
+            } else {
+                proofs
+                    .into_iter()
+                    .map(|(name, _)| match package {
+                        Some(package) => format!("{package}.{name}"),
+                        None => name,
+                    })
+                    .collect()
+            };
+            Some((entry, shadowed_by))
         })
         .collect();
     let mut overloads: HashMap<String, usize> = HashMap::new();
-    for (_, _, chain, name) in &tests {
+    for ((_, _, chain, name), _) in &tests {
         *overloads
             .entry(format!("{}.{name}", chain.join(".")))
             .or_default() += 1;
     }
-    for (method, symbol, chain, name) in tests {
+    for ((method, symbol, chain, name), shadowed_by) in tests {
         let Some(body) = method.child_by_field_name("body") else {
             continue;
         };
@@ -240,16 +274,20 @@ pub(super) fn extract(
             qualified.clone()
         };
         let test = format!("test:{}@{}#{key}", cx.id.repo, cx.path);
+        let mut props = serde_json::json!({
+            "name": qualified,
+            "framework": "junit",
+            "language": "java",
+            "path": cx.path,
+            "prov": cx.prov(method, &format!("TestCase {test}")),
+        });
+        if !shadowed_by.is_empty() {
+            props["shadowed_by"] = shadowed_by.into();
+        }
         out.nodes.push(Node {
             id: test.clone(),
             label: "TestCase".into(),
-            props: serde_json::json!({
-                "name": qualified,
-                "framework": "junit",
-                "language": "java",
-                "path": cx.path,
-                "prov": cx.prov(method, &format!("TestCase {test}")),
-            }),
+            props,
         });
         out.edges.push(Edge {
             src: test.clone(),
@@ -348,7 +386,40 @@ pub(super) fn resolve(
     (nodes, edges): (&mut Vec<Node>, &mut Vec<Edge>),
     repo: &str,
     text: &dyn Fn(&[Part]) -> Option<String>,
+    declared: &dyn Fn(&str) -> bool,
 ) {
+    // A test proven only by wildcard imports whose names the repository
+    // declares in the test's package is annotated with those types instead.
+    let mut shadowed: BTreeSet<String> = BTreeSet::new();
+    for node in nodes.iter_mut() {
+        if node.label != "TestCase" {
+            continue;
+        }
+        let Some(names) = node
+            .props
+            .as_object_mut()
+            .and_then(|props| props.remove("shadowed_by"))
+        else {
+            continue;
+        };
+        let names: Vec<&str> = names
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|n| n.as_str())
+            .collect();
+        if !names.is_empty() && names.iter().all(|fqn| declared(fqn)) {
+            shadowed.insert(node.id.clone());
+        }
+    }
+    if !shadowed.is_empty() {
+        nodes.retain(|n| !shadowed.contains(&n.id));
+        edges.retain(|e| !shadowed.contains(&e.src));
+    }
+    let requests: Vec<Request> = requests
+        .into_iter()
+        .filter(|r| !shadowed.contains(&r.test))
+        .collect();
     if requests.is_empty() {
         return;
     }

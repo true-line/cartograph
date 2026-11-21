@@ -5763,3 +5763,112 @@ class CheckTest {
     assert_eq!(tests.len(), 3, "{tests:?}");
     assert!(tests.contains("CheckTest.other"), "{tests:?}");
 }
+
+// AC-0964: a rule configured inside a loop or switch is conditional; a
+// record's string constant resolves like a class's. AC-0965: a JUnit
+// annotation proven only by a wildcard import is no test when the test's
+// package declares that name.
+#[test]
+fn spring_loop_rules_record_constants_and_shadowed_junit() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    let test = dir.path().join("src/test/java/com/acme");
+    let other = dir.path().join("src/test/java/com/other");
+    for d in [&base, &test, &other] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        base.join("Roles.java"),
+        "package com.acme;\npublic record Roles() {\n    public static final String ADMIN = \"ROLE_ADMIN\";\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("SecurityConfiguration.java"),
+        r#"package com.acme;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, int mode) throws Exception {
+        for (int i = 0; i < mode; i++) {
+            http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/loop/**").permitAll());
+        }
+        switch (mode) {
+            case 1:
+                http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/switch/**").permitAll());
+                break;
+        }
+        http.authorizeHttpRequests(authz -> authz.anyRequest().authenticated());
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("Resource.java"),
+        r#"package com.acme;
+import org.springframework.security.access.annotation.Secured;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @GetMapping("/api/loop/x") public void loop() {}
+    @GetMapping("/api/switch/x") public void sw() {}
+    @Secured(Roles.ADMIN)
+    @GetMapping("/api/admin") public void admin() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("Test.java"),
+        "package com.acme;\npublic @interface Test {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("ShadowedTest.java"),
+        "package com.acme;\nimport org.junit.jupiter.api.*;\nclass ShadowedTest {\n    @Test void notJunit() {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other.join("RealTest.java"),
+        "package com.other;\nimport org.junit.jupiter.api.*;\nclass RealTest {\n    @Test void junit() {}\n}\n",
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["auth"]
+            .clone()
+    };
+    for path in ["/api/loop/x", "/api/switch/x"] {
+        let reading = auth(path);
+        assert_eq!(reading["state"], "unknown", "{path}: {reading}");
+        assert!(
+            reading.to_string().contains("under a condition"),
+            "{reading}"
+        );
+    }
+    let admin = auth("/api/admin");
+    assert_eq!(admin["roles"], serde_json::json!(["ADMIN"]), "{admin}");
+    assert_eq!(admin["caller"], "caller with role ADMIN", "{admin}");
+    let tests: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tests, BTreeSet::from(["RealTest.junit"]));
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.props.get("shadowed_by").is_some())
+    );
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.src.starts_with("test:") && e.src.contains("ShadowedTest"))
+    );
+}
