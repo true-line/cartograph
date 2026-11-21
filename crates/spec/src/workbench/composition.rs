@@ -8,9 +8,10 @@
 //!   `## <number> ` heading up to the next `## ` heading.
 //! - [`composition_facts`] lists the facts the composer may cite: every base
 //!   fact whose citation id the section text prints, and for each derived
-//!   knowledge fact the text prints (a Capability), the base facts it rests
-//!   on. A derived fact is not in the base graph, so a draft citing it would
-//!   not stage. It is listed as a group heading and is not citable.
+//!   knowledge fact the text prints (a Capability or an Actor), that fact
+//!   and the base facts it rests on. The derived fact is citable (#2040): the
+//!   export lists it in the fact index and a draft citing it stages and
+//!   resolves. It is also listed as a group heading over its base facts.
 //!
 //! **What a row shows.** The fact's label, tier and confidence, and its
 //! display name, unless that name is one of the fact's source identifiers
@@ -47,7 +48,7 @@ pub struct CompositionFact {
 /// A derived fact the section prints, with the base facts it rests on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedGroup {
-    /// The derived fact's citation id; not citable.
+    /// The derived fact's citation id; citable too (#2040).
     pub citation_id: String,
     /// Its label, such as `Capability`.
     pub label: String,
@@ -186,7 +187,7 @@ pub fn composition_facts(
         let id = citation_id(&FactKey::Node {
             id: node.id.clone(),
         });
-        if !wanted(&id) || groups.contains_key(&id) {
+        if !wanted(&id) {
             continue;
         }
         // A derived fact's code declarations add nothing a reader can use.
@@ -229,6 +230,20 @@ pub fn composition_facts(
         rows.insert(
             id,
             (edge.label.clone(), name, provenance(&edge.props, &identity)),
+        );
+    }
+    // Each derived fact the text prints is citable as itself (#2040).
+    for (id, (node, _)) in &groups {
+        cited.insert(id.clone());
+        let name = NodeName(node).to_string();
+        let name = (name != node.id).then_some(name);
+        rows.insert(
+            id.clone(),
+            (
+                node.label.clone(),
+                name,
+                provenance(&node.props, &format!("node:{}", node.id)),
+            ),
         );
     }
     // No row shows a name a statement may not use.

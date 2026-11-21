@@ -102,8 +102,8 @@ fn the_composer_cites_base_facts_and_never_sees_a_source_identifier() {
     let nodes = vec![endpoint, rule, file, symbol];
     let composed = composition_facts(&section, &nodes, &[], &[(&capability, &cites)]);
 
-    // The derived Capability is a group heading over the base fact it rests
-    // on; its cited code declaration is left out.
+    // The derived Capability is citable and a group heading over the base
+    // fact it rests on; its cited code declaration is left out (AC-1011).
     assert_eq!(
         composed.derived,
         vec![DerivedGroup {
@@ -114,7 +114,7 @@ fn the_composer_cites_base_facts_and_never_sees_a_source_identifier() {
         }]
     );
     let citable = composed.citable();
-    assert!(!citable.contains(&cite("cap:orders")));
+    assert!(citable.contains(&cite("cap:orders")));
     assert!(!citable.contains(&cite("sym:create")));
     let row = |id: &str| {
         composed
@@ -124,6 +124,8 @@ fn the_composer_cites_base_facts_and_never_sees_a_source_identifier() {
             .unwrap()
             .clone()
     };
+    assert_eq!(row("cap:orders").label, "Capability");
+    assert_eq!(row("cap:orders").name.as_deref(), Some("Orders"));
     assert_eq!(row("endpoint:orders").name.as_deref(), Some("POST /orders"));
     assert_eq!(row("rule:limit").name.as_deref(), Some("Order limit"));
     assert_eq!(row("rule:limit").tier, "Deterministic");
