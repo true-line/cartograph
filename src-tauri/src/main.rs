@@ -32,6 +32,7 @@ mod metrics;
 mod model_debug;
 #[cfg(test)]
 mod name_unique_tests;
+mod observation_inputs;
 mod paths;
 mod primary_source;
 #[cfg(test)]
@@ -1065,7 +1066,10 @@ fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
     let mut repos: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for node in nodes {
         let evidence = &node.props["prov"]["evidence"][0];
-        let Some(repo) = evidence["repo"].as_str().filter(|repo| !repo.is_empty()) else {
+        // A captured observation input is not a source registration (ADR-0080).
+        let Some(repo) = evidence["repo"].as_str().filter(|repo| {
+            !repo.is_empty() && !repo.starts_with(observation_inputs::INPUT_REPO_PREFIX)
+        }) else {
             continue;
         };
         let commit = evidence["commit_sha"].as_str().unwrap_or("workdir");
@@ -1299,6 +1303,9 @@ struct DeclaredInputs {
     state_json: Option<String>,
     pulumi_json: Option<String>,
     otel_jsonl: Vec<String>,
+    /// Declared paths read without a capture: outside the manifest folder or
+    /// past the capture limits, so their evidence stays unverified (AC-1041).
+    uncaptured: Vec<String>,
 }
 
 /// One repo's coverage inventory from what its extraction recorded
@@ -1516,6 +1523,7 @@ fn repo_coverage(
                 input: "state_json",
                 enriches: "Terraform",
                 declared: declared.state_json.iter().cloned().collect(),
+                uncaptured: declared.uncaptured.clone(),
                 // Only Terraform-extracted resources take observed state;
                 // Pulumi resources share the `res:` id space.
                 targets: counted(&|node| {
@@ -1529,6 +1537,7 @@ fn repo_coverage(
                 input: "pulumi_json",
                 enriches: "Pulumi resource",
                 declared: declared.pulumi_json.iter().cloned().collect(),
+                uncaptured: declared.uncaptured.clone(),
                 targets: counted(&|node| node.props["source"].as_str() == Some("pulumi")),
                 selected: infra,
             },
@@ -1537,6 +1546,7 @@ fn repo_coverage(
                 input: "otel_jsonl",
                 enriches: "endpoint and channel",
                 declared: declared.otel_jsonl.clone(),
+                uncaptured: declared.uncaptured.clone(),
                 targets: counted(&|node| node.label == "Endpoint" || node.label == "Channel"),
                 selected: true,
             },
@@ -1683,9 +1693,7 @@ fn extract_tree_with_registries(
         manifest_env,
         &std::collections::BTreeSet::new(),
         deferred_origins,
-        state_json,
-        pulumi_json,
-        otel_jsonl,
+        &observation_inputs::ObservationInputs::uncaptured(state_json, pulumi_json, otel_jsonl),
         api_docs,
         cache,
         plugins,
@@ -1808,9 +1816,9 @@ fn extract_tree_packed(
     env_read: &std::collections::BTreeSet<String>,
     // Origins the system manifest binds (#589); empty outside a system add.
     deferred_origins: &std::collections::BTreeSet<String>,
-    state_json: Option<&std::path::Path>,
-    pulumi_json: Option<&std::path::Path>,
-    otel_jsonl: &[std::path::PathBuf],
+    // Declared Terraform state, Pulumi and trace inputs, captured under their
+    // own input identity when they can be (ADR-0080).
+    observed: &observation_inputs::ObservationInputs,
     api_docs: &[ingest::api_docs::ApiDocDeclaration],
     cache: &mut RepoExtractionCache,
     plugins: &[ActivePlugin],
@@ -2353,37 +2361,39 @@ fn extract_tree_packed(
         let tf_root_modules = tf.root_modules;
         facts.extend(tf.nodes, tf.edges).map_err(pack_err)?;
         // T1: observed state supersedes ambiguous T0 refs (AC-0009).
-        if let Some(state_path) = state_json {
-            let raw = std::fs::read_to_string(state_path)
-                .map_err(|e| format!("state_json {}: {e}", state_path.display()))?;
-            let observed = dynamic::parse_state(&raw).map_err(|e| e.to_string())?;
+        if let Some(input) = &observed.state_json {
+            let read = observed.read(input, "state_json")?;
+            let state = dynamic::parse_state(&read.raw).map_err(|e| e.to_string())?;
             // ADR-0077: a state that cannot be tied to one root module is
             // not applied; its Gap joins the graph instead.
             facts
                 .update_nodes(&["Resource"], |nodes, added| {
-                    let enrichment = dynamic::enrich_resources(
+                    let mut enrichment = dynamic::enrich_resources(
                         nodes,
                         repo,
-                        &observed,
-                        &state_path.to_string_lossy(),
-                        &raw,
+                        &state,
+                        &read.cited_path,
+                        &read.raw,
                         &tf_root_modules,
+                    );
+                    observed.cite(
+                        nodes
+                            .iter_mut()
+                            .chain(enrichment.unapplied.as_mut())
+                            .map(|node| &mut node.props),
                     );
                     added.extend(enrichment.unapplied);
                 })
                 .map_err(pack_err)?;
         }
-        if let Some(pulumi_path) = pulumi_json {
-            let raw = std::fs::read_to_string(pulumi_path)
-                .map_err(|error| format!("pulumi_json {}: {error}", pulumi_path.display()))?;
-            let deployment = dynamic::parse_pulumi_json(&raw).map_err(|error| error.to_string())?;
+        if let Some(input) = &observed.pulumi_json {
+            let read = observed.read(input, "pulumi_json")?;
+            let deployment =
+                dynamic::parse_pulumi_json(&read.raw).map_err(|error| error.to_string())?;
             facts
                 .update_nodes(&["Resource"], |nodes, _| {
-                    dynamic::enrich_pulumi_resources(
-                        nodes,
-                        &deployment,
-                        &pulumi_path.to_string_lossy(),
-                    )
+                    dynamic::enrich_pulumi_resources(nodes, &deployment, &read.cited_path);
+                    observed.cite(nodes.iter_mut().map(|node| &mut node.props));
                 })
                 .map_err(pack_err)?;
         }
@@ -2442,11 +2452,10 @@ fn extract_tree_packed(
     // All trace files are applied together so an EventBridge identity
     // conflict split across files is still seen (#573).
     let mut traces = Vec::new();
-    for trace_path in otel_jsonl {
-        let raw = std::fs::read_to_string(trace_path)
-            .map_err(|e| format!("otel_jsonl {}: {e}", trace_path.display()))?;
-        let trace = dynamic::parse_otlp_jsonl(&raw).map_err(|e| e.to_string())?;
-        traces.push((trace, trace_path.to_string_lossy().into_owned()));
+    for input in &observed.otel_jsonl {
+        let read = observed.read(input, "otel_jsonl")?;
+        let trace = dynamic::parse_otlp_jsonl(&read.raw).map_err(|e| e.to_string())?;
+        traces.push((trace, read.cited_path));
     }
     let traces: Vec<(&dynamic::ObservedTrace, &str)> = traces
         .iter()
@@ -2458,6 +2467,12 @@ fn extract_tree_packed(
         // only when it can change anything.
         let (mut nodes, mut edges) = std::mem::take(&mut facts).into_facts().map_err(pack_err)?;
         dynamic::apply_traces(&mut nodes, &mut edges, &traces);
+        observed.cite(
+            nodes
+                .iter_mut()
+                .map(|node| &mut node.props)
+                .chain(edges.iter_mut().map(|edge| &mut edge.props)),
+        );
         facts = FactStore::from_facts(nodes, edges).map_err(pack_err)?;
     }
     drop(gaps);
@@ -5658,9 +5673,7 @@ fn run_ingest<R: tauri::Runtime>(
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeSet::new(),
             &std::collections::BTreeSet::new(),
-            None,
-            None,
-            &[],
+            &observation_inputs::ObservationInputs::default(),
             &[],
             cache,
             &active_plugins,
@@ -6116,9 +6129,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeSet::new(),
             &std::collections::BTreeSet::new(),
-            None,
-            None,
-            &[],
+            &observation_inputs::ObservationInputs::default(),
             &[],
             cache,
             &active_plugins,
@@ -6404,10 +6415,15 @@ fn add_system_blocking<R: tauri::Runtime>(
         };
         // state_json travels with the manifest, so it resolves against the
         // manifest dir — same rule as local repo paths.
-        let state_path = entry.state_json.as_ref().map(|p| base.join(p));
-        let pulumi_path = entry.pulumi_json.as_ref().map(|p| base.join(p));
-        let trace_paths: Vec<std::path::PathBuf> =
-            entry.otel_jsonl.iter().map(|p| base.join(p)).collect();
+        // Those inside the manifest folder are captured under their own input
+        // identity, never the repo's (ADR-0080, AC-1041).
+        let observed = observation_inputs::ObservationInputs::declared(
+            base,
+            &source.source_id,
+            entry.state_json.as_deref(),
+            entry.pulumi_json.as_deref(),
+            &entry.otel_jsonl,
+        );
         let active_plugins = active_plugins_for_root(&app, &state, root).map_err(&fail)?;
         // A managed clone is captured from its cloned commit's Git objects
         // (AC-1022); a local entry keeps a working-tree capture.
@@ -6440,9 +6456,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &manifest.env,
                 &manifest.env_read_keys(),
                 &deferred_origins,
-                state_path.as_deref(),
-                pulumi_path.as_deref(),
-                &trace_paths,
+                &observed,
                 &entry.api_docs,
                 cache,
                 &active_plugins,
@@ -6486,6 +6500,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 state_json: entry.state_json.clone(),
                 pulumi_json: entry.pulumi_json.clone(),
                 otel_jsonl: entry.otel_jsonl.clone(),
+                uncaptured: observed.uncaptured_paths(),
             },
             &reads,
         )
@@ -13939,6 +13954,105 @@ export function App() {
             serde_json::from_str(&stored.record.inventory_json).unwrap();
         assert_eq!(documents, 1);
         assert_eq!(inventory.documents.map(|counted| counted.read), Some(1));
+    }
+
+    #[test]
+    fn manifest_observation_inputs_are_captured_under_their_own_identity() {
+        // AC-1041 (ADR-0080, #385): a declared state file inside the manifest
+        // folder is captured under `input/<source id>` and its observed
+        // evidence cites that identity and the declared relative path; one
+        // outside the folder is still read, but its evidence stays uncaptured
+        // and coverage names it unverified. Neither becomes a system repo.
+        use tauri::Manager;
+        const STATE: &str = r#"{"format_version":"1.0","values":{"root_module":{"resources":[
+            {"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{"url":"https://sqs.example/jobs"},"sensitive_values":{}}]}}}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        for repo in ["inside", "outside"] {
+            let root = system.join(repo);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("main.tf"),
+                "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(system.join("inside.tfstate.json"), STATE).unwrap();
+        std::fs::write(dir.path().join("outside.tfstate.json"), STATE).unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"inside\"\nlayers = [\"infra\"]\nstate_json = \"./inside.tfstate.json\"\n\n\
+             [[repos]]\nurl = \"outside\"\nlayers = [\"infra\"]\nstate_json = \"../outside.tfstate.json\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        let summary =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+        let sources = state.sources.lock().unwrap().list().unwrap();
+        let source_of = |name: &str| {
+            sources
+                .iter()
+                .find(|source| source.repo_key.ends_with(name) || source.display_name == name)
+                .unwrap()
+                .clone()
+        };
+        let inside = source_of("inside");
+        let outside = source_of("outside");
+        let resources = state
+            .graph
+            .lock()
+            .unwrap()
+            .nodes_with_label("Resource")
+            .unwrap();
+        let observed = |source: &crate::sources::RegisteredSource| {
+            resources
+                .iter()
+                .find(|node| node.id == format!("res:{}@aws_sqs_queue.jobs", source.repo_key))
+                .unwrap()
+                .props["observed_prov"]["evidence"][0]
+                .clone()
+        };
+        let cited = observed(&inside);
+        assert_eq!(cited["repo"], format!("input/{}", inside.source_id));
+        assert_eq!(cited["path"], "inside.tfstate.json");
+        assert_eq!(cited["commit_sha"], "workdir");
+        let uncited = observed(&outside);
+        assert_eq!(uncited["repo"], "");
+        assert_eq!(uncited["commit_sha"], "");
+        let reason = |source: &crate::sources::RegisteredSource| {
+            summary
+                .coverage
+                .iter()
+                .find(|coverage| coverage.repo == source.repo_key)
+                .unwrap()
+                .producers
+                .iter()
+                .find(|producer| producer.id == dynamic::EXTRACTOR_ID)
+                .unwrap()
+                .stopping_reason
+                .clone()
+        };
+        assert!(
+            !reason(&inside).contains("unverified"),
+            "{}",
+            reason(&inside)
+        );
+        assert!(
+            reason(&outside).ends_with("unverified (outside the manifest folder or past the capture limits): ../outside.tfstate.json"),
+            "{}",
+            reason(&outside)
+        );
+        // Captured inputs are not source registrations of the system.
+        assert!(
+            super::system_contents_of(&resources)
+                .iter()
+                .all(|entry| !entry.repo.starts_with("input/"))
+        );
     }
 
     #[test]
