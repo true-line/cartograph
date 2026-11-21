@@ -308,6 +308,13 @@ mod tests {
             r#"{}["aws_sqs_queue.orders · T0 Gap"]"#,
             mermaid_id("res:r@aws_sqs_queue.orders")
         )));
+        let mut odd = resource("res:r@e\"v\n/aws_sqs_queue.q", "aws_sqs_queue.q");
+        odd.props["root_module"] = "e\"v\n".into();
+        let mmd = topology_mermaid(&[odd], &[]);
+        assert!(
+            mmd.contains(r#"["e#quot;v : aws_sqs_queue.q · T0 Gap"]"#),
+            "{mmd}"
+        );
     }
 
     #[test]
