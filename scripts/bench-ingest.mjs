@@ -3,7 +3,8 @@
 // binary once, recovers each pinned repository in `bench/repos.toml` through
 // the production ingest path, and writes one JSON result per run: wall time
 // and peak memory as measurements, and graph, endpoint and receipt counts as
-// deterministic facts. Local only: never run in CI. It reports and never
+// deterministic facts. Run locally or by the monthly scale lane of
+// scripts/showcase-watch.mjs (AC-1700), never as a PR gate. It reports and never
 // fails on a threshold; a counts difference between two runs this script built
 // from one clean commit, for the same url, commit and path, is the only finding
 // `--compare` treats as a determinism failure; it also fails when the two
@@ -158,7 +159,7 @@ function run(command, args, options = {}) {
   return result;
 }
 
-function build() {
+export function build() {
   const out = run('cargo', ['test', '--release', '-p', 'app', '--bin', 'app', '--no-run', '--message-format=json'], { cwd: ROOT });
   const executable = out.stdout.split('\n').filter(Boolean).map((line) => JSON.parse(line))
     .find((message) => message.reason === 'compiler-artifact' && message.target?.name === 'app' && message.profile?.test)?.executable;
@@ -193,7 +194,7 @@ export function selectRoot(checkout, relative) {
 }
 
 /** A clean checkout of `repo` at its exact commit, and the selected root in it; existing checkouts are verified, not reset. */
-function checkout(repo, work) {
+export function checkout(repo, work) {
   const dir = path.join(work, 'sources', repo.name);
   if (!existsSync(dir)) {
     run('git', ['clone', '--quiet', '--no-checkout', repo.url, dir]);
