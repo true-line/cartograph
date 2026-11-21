@@ -1,13 +1,12 @@
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useInvestigationStore, type InvestigationDraft } from '../investigationStore';
+import { DESKTOP_DEFAULT_SPECIALIST, useInvestigationStore, type InvestigationDraft } from '../investigationStore';
+import { isCompletionSpecialist } from '../investigationFamilies';
+import { ROLE_LABELS, currentVersion, offeredRoles, offeredVersions, profileFor, roleOf } from '../specialistRoles';
 import { investigationPolicy, obligationEnvelope, validObligationChoices, validObligationEnvelope } from '../investigationObligations';
 import { invokeOr } from '../tauri';
 import type { InvestigationFollowUpContext, InvestigationObligation, InvestigationObligationChoices, InvestigationProviderMode, InvestigationScope, SpecialistId } from '../investigationTypes';
 
-const QUICK_IDS: SpecialistId[] = ['domain-analyst@3', 'evidence-auditor@3', 'domain-analyst@4', 'evidence-auditor@4',
-  'domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2'];
-const QUICK_COMPLETION_IDS = new Set<SpecialistId>(['domain-analyst@7', 'evidence-auditor@7', 'spec-writer@1', 'spec-writer@2', 'gap-triager@1', 'gap-triager@2']);
 
 export interface InvestigationQuickDispatchProps {
   fallbackEnabled: boolean;
@@ -28,7 +27,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   const [inline, setInline] = useState(false);
   const blockedParent = useRef(false);
   const [question, setQuestion] = useState('');
-  const [specialistId, setSpecialistId] = useState<SpecialistId>('domain-analyst@3');
+  const [chosenSpecialistId, setSpecialistId] = useState<SpecialistId>(DESKTOP_DEFAULT_SPECIALIST);
   const [providerMode, setProviderMode] = useState<InvestigationProviderMode>('local');
   const [busy, setBusy] = useState(false);
   const [choices, setChoices] = useState<InvestigationObligationChoices | null>(null);
@@ -44,12 +43,19 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   const dialogRef = useRef<HTMLElement>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const choicesGeneration = useRef(0);
-  const specialists = useMemo(() => state.catalog?.specialists.filter((item) => QUICK_IDS.includes(item.id) &&
-    (!QUICK_COMPLETION_IDS.has(item.id) || Boolean(investigationPolicy(state.catalog, 'investigation-v1', item.id)))) ?? [], [state.catalog]);
-  const specialist = specialists.find((item) => item.id === specialistId);
+  // ADR-0071: quick dispatch offers roles; each runs its current version.
+  const specialists = useMemo(() => offeredRoles(state.catalog).map((role) => currentVersion(state.catalog, role)!), [state.catalog]);
+  // A choice the catalog no longer offers falls back to the same role's current version.
+  const specialistId = dialogParent || !specialists.length || specialists.some((item) => item.id === chosenSpecialistId) ? chosenSpecialistId :
+    (specialists.find((item) => roleOf(item.id) === roleOf(chosenSpecialistId)) ?? specialists[0]).id;
+  const profile = profileFor(state.catalog, specialistId);
+  // A follow-up keeps its saved version while the catalog still offers it (ADR-0071 decision 2).
+  const parentRole = dialogParent ? roleOf(dialogParent.specialist_id) : undefined;
+  const parentOffered = Boolean(dialogParent && parentRole && offeredVersions(state.catalog, parentRole).some((item) => item.id === dialogParent.specialist_id));
+  const specialist = dialogParent ? state.catalog?.specialists.find((item) => item.id === specialistId) : specialists.find((item) => item.id === specialistId);
   const providers = state.catalog?.providers ?? [];
   const provider = providers.find((item) => item.mode === providerMode);
-  const supported = specialists.some((item) => item.id === specialistId);
+  const supported = dialogParent ? parentOffered : specialists.some((item) => item.id === specialistId);
   const composer = state.composer;
   const composerScope: InvestigationScope = useMemo(() => composer.scopeType === 'all' ? { type: 'all' } :
     { type: 'neighborhood', anchor: composer.anchor, hops: composer.hops }, [composer.anchor, composer.hops, composer.scopeType]);
@@ -62,8 +68,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   const hasPendingStart = state.pendingStart !== null;
   const inFlight = busy || state.starting;
   const locked = inFlight || state.pendingStart !== null;
-  const completionRole = QUICK_COMPLETION_IDS.has(specialistId);
-  const policy = completionRole ? investigationPolicy(state.catalog, 'investigation-v1', specialistId) : undefined;
+  const completionRole = isCompletionSpecialist(specialistId);
+  const policy = completionRole ? investigationPolicy(state.catalog, profile, specialistId) : undefined;
   const currentChoices = choicesIdentity === choicesRequestIdentity ? choices : null;
   const choicesLoading = open && completionRole && scopeValid && choicesIdentity !== choicesRequestIdentity && choicesErrorIdentity !== choicesRequestIdentity;
   const currentChoicesError = choicesErrorIdentity === choicesRequestIdentity ? choicesError : null;
@@ -77,7 +83,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   const atCompletionObligationLimit = selectedObligations.length >= maxCompletionObligations;
   const requestBytes = completionRole && policy ? new TextEncoder().encode(JSON.stringify({ schema_version: policy.request_schema_version,
     request_nonce: '0'.repeat(36), specialist_id: specialistId, obligations: completionObligations,
-    question, scope, provider_mode: providerMode, limit_profile: 'investigation-v1',
+    question, scope, provider_mode: providerMode, limit_profile: profile,
     expected_graph_revision: currentChoices?.graph_snapshot_id ?? null, expected_context_id: currentChoices?.context_id ?? '',
     conversation_id: dialogParent?.conversation_id ?? null, parent_id: dialogParent?.parent_id ?? null })).length : 0;
   const valid = supported && Boolean(provider?.available) && question.trim().length > 0 && questionBytes <= 2048 && scopeValid &&
@@ -183,7 +189,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   };
   const refreshAfterStaleCompletion = (requestedSpecialist: SpecialistId | undefined) => {
     const current = useInvestigationStore.getState();
-    if (!requestedSpecialist || !QUICK_COMPLETION_IDS.has(requestedSpecialist) || current.pendingStart ||
+    if (!requestedSpecialist || !isCompletionSpecialist(requestedSpecialist) || current.pendingStart ||
         current.startRejection !== 'refresh_required') return;
     setSpecialistId(requestedSpecialist);
     ++choicesGeneration.current;
@@ -203,7 +209,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
       question,
       scope,
       provider_mode: providerMode,
-      limit_profile: 'investigation-v1',
+      limit_profile: profile,
       ...(dialogParent ? { conversation_id: dialogParent.conversation_id, parent_id: dialogParent.parent_id } : {}),
       ...(completionRole ? { obligations: completionObligations } : {}),
     };
@@ -230,7 +236,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   if (!open) return null;
   const pendingMatchesParent = !dialogParent || Boolean(state.pendingStart &&
     state.pendingStart.conversation_id === dialogParent.conversation_id && state.pendingStart.parent_id === dialogParent.parent_id);
-  const pendingIsQuick = state.pendingStart && QUICK_IDS.includes(state.pendingStart.specialist_id) && pendingMatchesParent;
+  const pendingIsQuick = state.pendingStart && (specialists.some((item) => item.id === state.pendingStart?.specialist_id) ||
+    (parentOffered && state.pendingStart.specialist_id === dialogParent?.specialist_id)) && pendingMatchesParent;
   const content = <div className={inline ? 'quick-dispatch-inline' : 'quick-dispatch-backdrop'} onMouseDown={(event) => { if (!inline && event.target === event.currentTarget && !inFlight) close(); }}>
     <section ref={dialogRef} className="quick-dispatch-dialog" role={inline ? 'region' : 'dialog'} aria-modal={inline ? undefined : true}
       aria-label={inline ? `Reply to ${dialogParent?.parent_id}` : 'Quick investigation dispatch'} onKeyDown={(event) => {
@@ -258,8 +265,8 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
         {!supported && dialogParent && <p className="error-text" role="alert">This saved specialist version is not supported for Quick Dispatch. Continue in Investigations.</p>}
         <label>Specialist<select value={specialistId} disabled={locked || Boolean(dialogParent) || !specialists.length} onChange={(event) => setSpecialistId(event.target.value as SpecialistId)}>
           {dialogParent && !specialists.some((item) => item.id === dialogParent.specialist_id) &&
-            <option value={dialogParent.specialist_id}>{dialogParent.specialist_id} · unsupported version</option>}
-          {specialists.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}
+            <option value={dialogParent.specialist_id}>{parentRole ? `${ROLE_LABELS[parentRole]} · ` : ''}{dialogParent.specialist_id}{parentOffered ? ' · saved version' : ' · unsupported version'}</option>}
+          {specialists.map((item) => <option key={item.id} value={item.id}>{ROLE_LABELS[roleOf(item.id)!]}</option>)}
         </select></label>
         <p className="muted">{specialist?.purpose} T3 · InferredWeak. Advanced evidence and completion work stays in the full composer.</p>
         <p className="muted">Scope: {scope.type === 'all' ? 'Recovered system' : `Fact neighborhood · ${scope.anchor} · ${scope.hops} hop${scope.hops === 1 ? '' : 's'}`}{dialogParent ? ' · captured from the saved parent' : '. Change scope in the full Investigations composer.'}</p>
@@ -276,7 +283,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
           <p>Select at least one recorded inventory from this scope. Only the selections below are included in the start request.</p>
           {choicesLoading && <p role="status">Resolving recorded inventories for this scope…</p>}
           {currentChoicesError && <p role="alert" className="error-text">{currentChoicesError}</p>}
-          {!policy && <p role="status">This specialist has no compatible Standard completion policy in the current catalog.</p>}
+          {!policy && <p role="status">This specialist has no compatible completion policy in the current catalog.</p>}
           {currentChoices && <p role="status">Selected {selectedObligations.length} / {maxCompletionObligations} inventory obligations.</p>}
           {currentChoices && <ul>{currentChoices.inventories.map((item) => {
             const obligation = item.status === 'recorded' ? item.obligation : undefined;

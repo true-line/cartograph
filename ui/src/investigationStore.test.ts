@@ -2134,3 +2134,38 @@ it('preserves explicitly restored analyst19 with typed correction available', ()
     specialist_id: 'domain-analyst@19', limit_profile: 'investigation-v2',
   })).toMatchObject({ specialistId: 'domain-analyst@19', limitProfile: 'investigation-v2' });
 });
+
+// AC-1402 (#1751, ADR-0071): the user picks a role and it runs the role's current version.
+describe('role-based specialist choice (AC-1402)', () => {
+  const withCurrent = { ...desktopAnalystCatalog,
+    specialists: [...desktopAnalystCatalog.specialists, { ...desktopAnalystCatalog.specialists.find((item) => item.id === 'domain-analyst@27')!,
+      id: 'domain-analyst@28' as const, version: 28, prompt_fingerprint: 'fixture-domain-analyst@28' }],
+    policies: desktopAnalystCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@28' as const] })) };
+
+  it('gives a programmatic role selection the profile its version runs under', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return withCurrent; throw new Error('Unexpected command.'); });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer.limitProfile).toBe('investigation-v2');
+    // The Workbench's Draft this section path names only the specialist.
+    useInvestigationStore.getState().updateComposer({ specialistId: 'section-writer@1', question: 'Draft it.' });
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'section-writer@1', limitProfile: 'investigation-v1' });
+  });
+
+  it('defaults to the current analyst when the host advertises it', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return withCurrent; throw new Error('Unexpected command.'); });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'domain-analyst@28', limitProfile: 'investigation-v2' });
+  });
+
+  it('offers each role once, at its current or newest offered version, with the profile that version runs under', async () => {
+    const { currentVersion, offeredRoles, offeredVersions, profileFor } = await import('./specialistRoles');
+    expect(offeredRoles(withCurrent)).toContain('domain-analyst');
+    expect(currentVersion(withCurrent, 'domain-analyst')?.id).toBe('domain-analyst@28');
+    expect(currentVersion(desktopAnalystCatalog, 'domain-analyst')?.id).toBe('domain-analyst@27');
+    expect(offeredVersions(withCurrent, 'domain-analyst').map((item) => item.version)).toEqual(
+      [...offeredVersions(withCurrent, 'domain-analyst').map((item) => item.version)].sort((left, right) => right - left));
+    expect(profileFor(withCurrent, 'domain-analyst@28')).toBe('investigation-v2');
+    expect(profileFor(withCurrent, 'domain-analyst@3')).toBe('investigation-v1');
+    expect(profileFor(withCurrent, 'spec-writer@2')).toBe('investigation-v1');
+  });
+});

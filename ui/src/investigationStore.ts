@@ -4,6 +4,8 @@ import { isCompletionDisclosure, isCompletionSpecialist, isExpandedSpecialist } 
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
 import { investigationPolicy, obligationEnvelope, validObligation, validObligationChoices, validObligationEnvelope } from './investigationObligations';
 import { create } from 'zustand';
+import { SPECIALIST_TABLE } from './generated/specialistTable';
+import { profileFor } from './specialistRoles';
 import { invokeOr } from './tauri';
 import type {
   InvestigationCatalog, InvestigationChanged, InvestigationChat, InvestigationCitationRead,
@@ -42,15 +44,19 @@ const initialComposer: InvestigationComposer = {
   specialistId: 'domain-analyst@3', providerMode: 'local', question: '',
   scopeType: 'all', anchor: '', hops: 1, parent: null,
 };
-/** Desktop default when the host advertises it (#1618): a schema-backed analyst. */
-export const DESKTOP_DEFAULT_SPECIALIST: SpecialistId = 'domain-analyst@27';
+/** Desktop default when the host advertises it (#1618): the domain analyst's current version (ADR-0071,
+ * AC-1402), or schema-backed @27 (AC-0574) from a host that does not advertise the current one yet. */
+const CURRENT_ANALYST = (Object.keys(SPECIALIST_TABLE) as SpecialistId[]).find((id) =>
+  SPECIALIST_TABLE[id].role === 'domain-analyst' && SPECIALIST_TABLE[id].availability === 'current')!;
+const DESKTOP_DEFAULT_CANDIDATES: readonly SpecialistId[] = [CURRENT_ANALYST, 'domain-analyst@27'];
+export const DESKTOP_DEFAULT_SPECIALIST: SpecialistId = CURRENT_ANALYST;
 const DESKTOP_DEFAULT_PROFILE = 'investigation-v2';
 /** An untouched composer adopts the schema-backed default; explicit choices are kept. */
 export function desktopDefaultComposer(composer: InvestigationComposer, catalog: InvestigationCatalog): InvestigationComposer | null {
   if (composer.limitProfile !== undefined || composer.specialistId !== initialComposer.specialistId || composer.parent !== null) return null;
-  if (!catalog.specialists.some((item) => item.id === DESKTOP_DEFAULT_SPECIALIST) ||
-      !investigationPolicy(catalog, DESKTOP_DEFAULT_PROFILE, DESKTOP_DEFAULT_SPECIALIST)) return null;
-  return { ...composer, specialistId: DESKTOP_DEFAULT_SPECIALIST, limitProfile: DESKTOP_DEFAULT_PROFILE };
+  const specialistId = DESKTOP_DEFAULT_CANDIDATES.find((id) => catalog.specialists.some((item) => item.id === id) &&
+    investigationPolicy(catalog, DESKTOP_DEFAULT_PROFILE, id));
+  return specialistId ? { ...composer, specialistId, limitProfile: DESKTOP_DEFAULT_PROFILE } : null;
 }
 /** The user's last explicit budget and specialist, persisted in the app profile (#1636). */
 export interface StoredInvestigationChoice { specialist_id: string; limit_profile: string }
@@ -719,10 +725,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false,
           obligationDraftError: get().draftObligations.length ? 'Scope changed. Select the evidence to inspect in this scope.' : null });
       }
-      // An explicit specialist choice also fixes the current budget (unset means
-      // Standard), so a later catalog refresh treats it as chosen (AC-0559).
-      const pinned = 'specialistId' in patch && !('limitProfile' in patch) && get().composer.limitProfile === undefined
-        ? { limitProfile: 'investigation-v1' } : {};
+      // An explicit specialist choice also fixes the budget, so a later catalog
+      // refresh treats it as chosen (AC-0559). ADR-0071: the version decides its
+      // profile, so every selection path (the composer, Draft this section)
+      // gets the profile that version runs under (AC-1402).
+      const pinned = patch.specialistId !== undefined && !('limitProfile' in patch)
+        ? { limitProfile: profileFor(get().catalog, patch.specialistId) } : {};
       if (!get().starting && !get().pendingStart) {
         set((state) => ({ composer: { ...state.composer, ...structuredClone(patch), ...pinned } }));
         // Remember an explicit budget or specialist choice across restarts (#1636).

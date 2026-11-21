@@ -271,7 +271,7 @@ export const CompletionDispatchUsesOnlyLocalRecordedChoices: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     pressMeta(' ', 'Space');
-    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@2');
     await canvas.findByText('acme/api');
     await expect(canvas.queryByText('example/stale')).toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
@@ -289,7 +289,7 @@ export const CompletionDispatchUsesOnlyLocalRecordedChoices: Story = {
     const state = useInvestigationStore.getState();
     expect(completionRequests).toHaveLength(2);
     expect(completionRequests[1]).toEqual(completionRequests[0]);
-    expect(completionRequests[0]).toMatchObject({ schema_version: 4, specialist_id: 'gap-triager@1',
+    expect(completionRequests[0]).toMatchObject({ schema_version: 4, specialist_id: 'gap-triager@2',
       obligations: { schema_version: 1, obligations: [inventoryObligation] },
       expected_graph_revision: completionChoices.graph_snapshot_id, expected_context_id: completionChoices.context_id,
       conversation_id: null, parent_id: null, question: 'Draft a cited proposal.' });
@@ -481,18 +481,21 @@ export const CompletionChoicesDiscardOlderScopeResponse: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     pressMeta(' ', 'Space');
-    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'spec-writer@1');
+    // The default role's current analyst is a completion role too, so opening reads choices once.
     await waitFor(() => expect(pendingChoiceResolvers).toHaveLength(1));
-    useInvestigationStore.getState().updateComposer({ scopeType: 'neighborhood', anchor: 'rule:new-scope', hops: 1 });
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'spec-writer@2');
     await waitFor(() => expect(pendingChoiceResolvers).toHaveLength(2));
+    useInvestigationStore.getState().updateComposer({ scopeType: 'neighborhood', anchor: 'rule:new-scope', hops: 1 });
+    await waitFor(() => expect(pendingChoiceResolvers).toHaveLength(3));
     const newer = structuredClone(completionChoices);
     newer.context_id = `context-v2:${'9'.repeat(64)}`;
     newer.inventories[0].repo = 'acme/new-scope';
     newer.inventories[0].obligation!.target.context_id = newer.context_id;
     newer.inventories[0].obligation!.target.repo = 'acme/new-scope';
     newer.inventories[0].obligation!.target.inventory_hash = '8'.repeat(64);
-    pendingChoiceResolvers[1](newer);
+    pendingChoiceResolvers[2](newer);
     await canvas.findByText('acme/new-scope');
+    pendingChoiceResolvers[1](completionChoices);
     pendingChoiceResolvers[0](completionChoices);
     await Promise.resolve();
     await waitFor(() => expect(canvas.getByText('acme/new-scope')).toBeVisible());
@@ -511,9 +514,8 @@ export const DefinitiveContextRefreshRequiresNewSelection: Story = {
     refreshedCompletionChoices.inventories[0].obligation = { kind: 'inventory', obligation_id: 'f'.repeat(64), target: {
       context_id: refreshedCompletionChoices.context_id, repo: 'acme/refreshed', inventory_hash: '8'.repeat(64) } };
     completionRequests = [];
-    let choicesRead = 0;
     mockIPC((command, payload) => {
-      if (command === 'investigation_obligation_choices') return choicesRead++ === 0 ? completionChoices : refreshedCompletionChoices;
+      if (command === 'investigation_obligation_choices') return completionRequests.length === 0 ? completionChoices : refreshedCompletionChoices;
       if (command === 'start_investigation') {
         completionRequests.push(structuredClone((payload as { request: Record<string, unknown> }).request));
         if (completionRequests.length === 1) throw { code: 'refresh_required', definitive: true };
@@ -532,7 +534,7 @@ export const DefinitiveContextRefreshRequiresNewSelection: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     pressMeta(' ', 'Space');
-    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@2');
     await canvas.findByText('acme/api');
     await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
     await userEvent.type(canvas.getByLabelText('Question'), 'Recommend the next verification.');
@@ -568,8 +570,9 @@ export const DefinitiveInvalidInputKeepsSelection: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     pressMeta(' ', 'Space');
-    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@2');
     await canvas.findByText('acme/api');
+    const readsBeforeStart = completionChoiceReads;
     await userEvent.click(canvas.getByRole('button', { name: 'Require inventory acme/api' }));
     await userEvent.type(canvas.getByLabelText('Question'), 'Keep my explicit selection.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
@@ -580,7 +583,7 @@ export const DefinitiveInvalidInputKeepsSelection: Story = {
     expect(useInvestigationStore.getState().pendingStart).toBeNull();
     // The stale reason seeded above is cleared by this attempt; generic input
     // refusal does not fetch a replacement context behind the user's back.
-    expect(completionChoiceReads).toBe(1);
+    expect(completionChoiceReads).toBe(readsBeforeStart);
   },
 };
 
@@ -598,7 +601,7 @@ export const CompletionSelectionStopsAtPolicyCount: Story = {
       request_schema_version: 4 as const, envelope_schema_version: 1 as const,
       envelope_contract: 'investigation-completion-obligations@1' as const,
       max_completion_obligations: 12, request_bytes: 8192, envelope_bytes: 8192,
-      specialist_ids: ['gap-triager@1' as const] };
+      specialist_ids: ['gap-triager@2' as const] };
     mockIPC((command) => command === 'investigation_obligation_choices' ? cappedChoices : null);
     useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: {
       ...completionCatalog, policies: [policy],
@@ -608,7 +611,7 @@ export const CompletionSelectionStopsAtPolicyCount: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     pressMeta(' ', 'Space');
-    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@1');
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist'), 'gap-triager@2');
     await canvas.findByText('acme/cap-01');
     await userEvent.type(canvas.getByLabelText('Question'), 'Use exactly the advertised limit.');
     for (let index = 1; index <= 12; index += 1) {
@@ -705,5 +708,25 @@ export const InlineReplyPlacementAndCancellation: Story = {
     await expect(await canvas.findByRole('dialog', { name: 'Quick investigation dispatch' })).toBeVisible();
     await expect(canvas.getAllByRole('dialog')).toHaveLength(1);
     await expect(canvas.queryByRole('region', { name: 'Reply to second-parent' })).not.toBeInTheDocument();
+  },
+};
+
+// AC-1402 (ADR-0071): quick dispatch offers each role once and runs its current version.
+export const QuickDispatchOffersRolesNotVersions: Story = {
+  beforeEach: () => {
+    mockIPC((command) => command === 'investigation_obligation_choices' ? completionChoices : null);
+    useInvestigationStore.setState({ ...useInvestigationStore.getInitialState(), catalog: completionCatalog }, true);
+    return () => { clearMocks(); useInvestigationStore.setState(useInvestigationStore.getInitialState(), true); };
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    pressMeta(' ', 'Space');
+    const select = canvas.getByLabelText('Specialist');
+    const labels = within(select).getAllByRole('option').map((option) => option.textContent);
+    await expect(labels).toEqual([...new Set(labels)]);
+    await expect(labels).toContain('Spec writer');
+    await expect(within(select).queryByRole('option', { name: /@\d/ })).not.toBeInTheDocument();
+    await userEvent.selectOptions(select, 'Spec writer');
+    await expect(select).toHaveValue('spec-writer@2');
   },
 };
