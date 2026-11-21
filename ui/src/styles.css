@@ -5100,3 +5100,75 @@ details.investigation-section { display: block; }
 .legend-line.gap {
   border-top: 2px dashed #c0392b;
 }
+
+/* Agent pool (#252, AC-1701) */
+.agent-pool {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.agent-pool-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.agent-pool-lanes,
+.agent-pool-rows,
+.agent-pool-providers {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.agent-pool-lanes {
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+}
+
+.agent-pool-lane {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 0.5rem 0.75rem;
+}
+
+.agent-pool-count {
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-pool-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+.agent-pool-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin: 0;
+}
+
+.agent-pool-mode {
+  font-size: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 0.45rem;
+}
+
+.agent-pool-providers .provider-unavailable {
+  color: var(--text-muted, inherit);
+}

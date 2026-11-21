@@ -49,6 +49,8 @@ import type { SectionAddress, StoredSectionDraft } from './sectionDocument';
 import { useAreaExpert } from './areaExpert';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
+import { AgentPoolPanel } from './components/AgentPoolPanel';
+import { awaitingCuration } from './agentPool';
 import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
@@ -326,8 +328,10 @@ export default function App() {
     if (view === 'investigations' || view === 'agent-chats') {
       if (view === 'investigations') {
         useSpecialistActivityStore.getState().setVisible(true);
-        void useInvestigationStore.getState().loadCatalog();
       }
+      // Investigations needs the catalog to start work; the agent pool shows its providers.
+      void useInvestigationStore.getState().loadCatalog();
+      if (view === 'agent-chats') void useAppStore.getState().loadStagedProposals();
       void useInvestigationStore.getState().loadHistory();
     }
     return () => useSpecialistActivityStore.getState().setVisible(false);
@@ -783,12 +787,22 @@ export default function App() {
           onRefreshActivity={() => void useSpecialistActivityStore.getState().refresh()}
           anchors={atlas.nodes} canStart={backend === 'up'} />;
       case 'agent-chats':
-        return <AgentChatsSurface state={investigations} onOpenResult={(id) => {
+        return <>
+          <AgentPoolPanel
+            jobs={jobs}
+            providers={investigations.catalog?.providers ?? null}
+            awaitingCuration={stagedError || (stagedLoading && stagedProposals.length === 0) ? null : awaitingCuration(stagedProposals)}
+            onOpenJobs={() => navigate('jobs')}
+            onOpenCuration={() => navigate('gaps')}
+            onViewInvestigation={(id) => { navigate('investigations'); void investigations.open(id); }}
+          />
+          <AgentChatsSurface state={investigations} onOpenResult={(id) => {
           navigate('investigations');
           void useInvestigationStore.getState().open(id);
         }} onFollowUp={prepareParentFollowUp} onReplyHost={registerReplyHost} onCancelFollowUp={cancelFollowUpCapture}
         preparingFollowUpTask={preparingFollowUpTask} followUpError={followUpError} noticeCorner={noticeCorner}
-        onNoticeCornerChange={(corner) => useSavedResultNoticeStore.getState().setCorner(corner)} />;
+        onNoticeCornerChange={(corner) => useSavedResultNoticeStore.getState().setCorner(corner)} />
+        </>;
       case 'atlas':
         return (
           <Suspense fallback={<section className="atlas-card">Loading Atlas graph…</section>}>
