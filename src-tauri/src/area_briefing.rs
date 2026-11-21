@@ -36,8 +36,11 @@ pub(crate) struct AreaBriefingView {
     pub(crate) neighbours: Vec<String>,
 }
 
-/// The briefing of the Subsystem `only`, or of every named Subsystem in id
-/// order, from one compilation of D1.
+/// The briefing of the Subsystem `only`, or of every named Subsystem by
+/// name, from one compilation of D1. Not by id: an area's id hashes its
+/// members' ids, which carry the registration's random key (ADR-0023), so
+/// id order would change from one registration of a source to the next
+/// (AC-1203). Names are unique; the id only breaks a tie.
 pub(crate) fn compile(
     state: &AppState,
     only: Option<&str>,
@@ -68,7 +71,7 @@ pub(crate) fn compile(
     if areas.is_empty() {
         return Err("area_not_found".into());
     }
-    areas.sort_by(|a, b| a.0.cmp(&b.0));
+    areas.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let document = crate::compile_spec_artifact(
         read.inputs(Some(&review)),
         spec::ExportMode::BestEffort,
