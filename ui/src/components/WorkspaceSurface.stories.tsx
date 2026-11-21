@@ -96,6 +96,21 @@ export const OpenInvestigations: Story = {
   },
 };
 
+// #2170: the last ingest's totals and layer breakdown are on Workspace,
+// folded under one line, with the repository named as Workspace labels it.
+export const LastIngestBreakdown: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const details = canvas.getByRole('group', { name: 'Last ingest' });
+    await expect(details).toHaveTextContent('Last ingest: 14 files → 80 nodes, 54 edges');
+    await userEvent.click(within(details).getByText(/^Last ingest:/));
+    await expect(canvas.getByTestId('ts-layer-summary')).toBeVisible();
+    await expect(canvas.getByTestId('ts-layer-summary').textContent).toBe(
+      '14 files · 80 nodes · 54 edges',
+    );
+  },
+};
+
 export const PartialRecovery: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);

@@ -681,6 +681,15 @@ button:disabled {
   gap: 0.55rem;
 }
 
+.ingest-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.ingest-details[open] > summary {
+  margin-bottom: 0.55rem;
+}
+
 .layer-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

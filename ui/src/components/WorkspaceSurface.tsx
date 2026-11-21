@@ -1,6 +1,7 @@
 import { CoverageInventory, RecordedCoverageInventory } from './CoverageInventory';
 import type { RestoredCoverage } from '../coverage';
 import { HelpTip } from './HelpTip';
+import { IngestSummaryDetails } from './IngestSummaryDetails';
 import { createRepositoryLabeler } from '../repositoryLabels';
 import type {
   FindingsSummary,
@@ -137,6 +138,8 @@ export function WorkspaceSurface({
       ) : (
         <RecordedCoverageInventory restored={recordedCoverage} error={recordedCoverageError} />
       )}
+
+      {summary && <IngestSummaryDetails summary={summary} repoLabel={repoLabel} />}
 
       {onInvestigate && <div className="workspace-investigation-entry">
         <div><h3>Investigate this system</h3><p className="muted">Ask the Domain analyst or Evidence auditor a scoped question. Inspect their tools, citations and limitations.</p></div>
