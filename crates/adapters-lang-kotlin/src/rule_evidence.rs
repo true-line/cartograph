@@ -547,6 +547,131 @@ pub(super) struct PendingRule {
     enclosing: Option<String>,
 }
 
+/// A product type's declarations that may rebind a standard-library name.
+#[derive(Debug, Clone, Default)]
+pub(super) struct RebindingType {
+    /// Candidate FQNs of each direct supertype.
+    pub(super) supers: Vec<Vec<String>>,
+    /// Non-private member functions named like a relied-on function.
+    pub(super) members: BTreeSet<String>,
+    /// Private ones, visible inside the type only.
+    pub(super) private_members: BTreeSet<String>,
+}
+
+/// The product declarations of a repository that may rebind a
+/// standard-library name a rule relies on (AC-1108).
+#[derive(Debug, Clone, Default)]
+pub(super) struct Rebinding {
+    /// Non-private top-level functions and properties (extensions
+    /// included), as `package.name`, or `name` in the default package.
+    pub(super) top_level: BTreeSet<String>,
+    /// Types by FQN (`Outer.Inner` in the default package).
+    pub(super) types: BTreeMap<String, RebindingType>,
+}
+
+impl Rebinding {
+    pub(super) fn extend(&mut self, other: Rebinding) {
+        self.top_level.extend(other.top_level);
+        for (fqn, ty) in other.types {
+            self.types.entry(fqn).or_insert(ty);
+        }
+    }
+}
+
+fn relied_on(name: &str) -> bool {
+    SCOPE_FUNCTIONS.contains(&name) || PRECONDITIONS.contains(&name)
+}
+
+fn is_private(source: &[u8], declaration: TsNode<'_>) -> bool {
+    let mut cursor = declaration.walk();
+    declaration
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut cursor = modifiers.walk();
+            modifiers.named_children(&mut cursor).any(|modifier| {
+                modifier.kind() == "visibility_modifier"
+                    && modifier
+                        .utf8_text(source)
+                        .is_ok_and(|text| text == "private")
+            })
+        })
+}
+
+/// The member functions of `declaration`'s own body named like a relied-on
+/// function: (non-private, private).
+pub(super) fn rebinding_members(
+    source: &[u8],
+    declaration: TsNode<'_>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let (mut members, mut private) = (BTreeSet::new(), BTreeSet::new());
+    let mut cursor = declaration.walk();
+    let Some(body) = declaration
+        .named_children(&mut cursor)
+        .find(|part| part.kind() == "class_body")
+    else {
+        return (members, private);
+    };
+    let mut cursor = body.walk();
+    for function in body
+        .named_children(&mut cursor)
+        .filter(|member| member.kind() == "function_declaration")
+    {
+        let Some(name) = function
+            .child_by_field_name("name")
+            .and_then(|name| name.utf8_text(source).ok())
+            .filter(|name| relied_on(name))
+        else {
+            continue;
+        };
+        if is_private(source, function) {
+            private.insert(name.to_owned());
+        } else {
+            members.insert(name.to_owned());
+        }
+    }
+    (members, private)
+}
+
+/// The file's non-private top-level functions (extensions included) and
+/// properties named like a relied-on function.
+pub(super) fn rebinding_top_level(
+    source: &[u8],
+    root: TsNode<'_>,
+    package: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = root.walk();
+    for declaration in root.named_children(&mut cursor) {
+        let name = match declaration.kind() {
+            "function_declaration" => declaration.child_by_field_name("name"),
+            "property_declaration" => {
+                let mut cursor = declaration.walk();
+                declaration
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "variable_declaration")
+                    .and_then(|variable| variable.named_child(0))
+                    .filter(|name| name.kind() == "identifier")
+            }
+            _ => None,
+        };
+        let Some(name) = name
+            .and_then(|name| name.utf8_text(source).ok())
+            .filter(|name| relied_on(name))
+        else {
+            continue;
+        };
+        if is_private(source, declaration) {
+            continue;
+        }
+        out.push(match package {
+            Some(package) => format!("{package}.{name}"),
+            None => name.to_owned(),
+        });
+    }
+    out
+}
+
 /// Repository declarations a pending rule is checked against.
 pub(super) struct Declarations<'a> {
     /// Every declared top-level FQN (types, functions, extensions,
