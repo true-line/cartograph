@@ -109,6 +109,61 @@ pub(crate) enum AskOutcome {
     },
 }
 
+/// The area a question names. Area names follow the code, so a run can name
+/// an area more narrowly than the asker did ("Product variant" for
+/// "Product"): the name itself, any case, else the largest area whose name
+/// holds every word of the one asked, a plural matching its singular.
+#[cfg(test)]
+pub(crate) fn named<'a>(choices: &'a [AreaChoice], wanted: &str) -> Option<&'a AreaChoice> {
+    // Each word with the singulars it may be the plural of; two words are
+    // the same when their forms meet (`aliases` and `alias`, `taxes` and
+    // `tax`, `statuses` and `status`).
+    fn words(name: &str) -> Vec<Vec<String>> {
+        name.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                let word = word.to_lowercase();
+                let mut forms = vec![word.clone()];
+                if let Some(stem) = word.strip_suffix("ies").filter(|s| !s.is_empty()) {
+                    forms.push(format!("{stem}y"));
+                }
+                if let Some(stem) = word.strip_suffix("es").filter(|s| s.len() > 1) {
+                    forms.push(stem.to_owned());
+                }
+                if let Some(stem) = word.strip_suffix('s').filter(|s| s.len() > 1) {
+                    forms.push(stem.to_owned());
+                }
+                forms
+            })
+            .collect()
+    }
+    fn same(a: &[String], b: &[String]) -> bool {
+        a.iter().any(|form| b.contains(form))
+    }
+    if let Some(exact) = choices.iter().find(|choice| choice.name == wanted) {
+        return Some(exact);
+    }
+    let asked = words(wanted);
+    if asked.is_empty() {
+        return None;
+    }
+    let holds = |have: &[Vec<String>]| {
+        asked
+            .iter()
+            .all(|word| have.iter().any(|other| same(word, other)))
+    };
+    if let Some(equal) = choices.iter().find(|choice| {
+        let have = words(&choice.name);
+        have.len() == asked.len() && holds(&have)
+    }) {
+        return Some(equal);
+    }
+    choices
+        .iter()
+        .filter(|choice| holds(&words(&choice.name)))
+        .max_by(|a, b| a.files.cmp(&b.files).then_with(|| b.name.cmp(&a.name)))
+}
+
 /// The areas of the current overlay, by name. Empty when no overlay is
 /// current for the graph.
 pub(crate) fn areas(state: &AppState) -> Result<Vec<AreaChoice>, String> {

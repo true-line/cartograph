@@ -357,13 +357,16 @@ fn showcase_ask_areas() {
     let mut report = String::from("# Topic expert answers\n");
     for AreaQuestion { area, question } in &questions {
         let _ = write!(report, "\n## {area}: {question}\n\n");
-        let Some(choice) = choices.iter().find(|choice| &choice.name == area) else {
+        let Some(choice) = crate::area_expert::named(&choices, area) else {
             report.push_str("No such area in this run.\n");
             records.push(serde_json::json!({
                 "area": area, "question": question, "error": "area_not_found",
             }));
             continue;
         };
+        if &choice.name != area {
+            let _ = writeln!(report, "Asked of the area {}.\n", choice.name);
+        }
         let asked = prepare(&state, &choice.area, question, &[]).and_then(|prepared| {
             let hash = crate::section_compose::firewall(&state)?
                 .prepare_bounded(
