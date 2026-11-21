@@ -6478,6 +6478,96 @@ class FakeTest {
     );
 }
 
+/// AC-1102: an aliased JUnit import proves a test; MockK stub and verify
+/// blocks perform nothing; a verb call on a receiver that is not a
+/// declared test client is no request; a product Java type obscures a star
+/// import even when nothing else in the repository waits on Java sources.
+#[test]
+fn junit_aliases_stubs_receivers_and_java_shadows() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/web/OwnerController.kt",
+        r#"package com.shop.web
+
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class OwnerController {
+    @GetMapping("/owners")
+    fun list(): String = ""
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/shop/star/Test.java",
+        "package com.shop.star;\n\npublic @interface Test {}\n",
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/web/AliasTest.kt",
+        r#"package com.shop.web
+
+import io.mockk.every
+import io.mockk.verify
+import org.junit.jupiter.api.Test as JTest
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.get
+
+class AliasTest {
+    lateinit var mockMvc: MockMvc
+    val cache = mutableMapOf<String, String>()
+
+    @JTest
+    fun aliased() {
+        every { mockMvc.get("/stubbed") } returns null
+        verify { mockMvc.get("/verified") }
+        cache.get("/cached")
+        mockMvc.get("/owners")
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/star/StarTest.kt",
+        r#"package com.shop.star
+
+import org.junit.jupiter.api.*
+
+class StarTest {
+    @Test
+    fun shadowed() {}
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let tests: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "TestCase")
+        .map(|node| node.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tests, ["AliasTest.aliased"]);
+    let links: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS")
+        .map(|edge| edge.dst.as_str())
+        .collect();
+    assert_eq!(links, ["ep:local/demo@GET:/owners"]);
+    assert!(
+        !out.nodes.iter().any(|n| n.id.starts_with("gap:test-call:")),
+        "{:?}",
+        out.nodes
+            .iter()
+            .filter(|n| n.id.starts_with("gap:"))
+            .collect::<Vec<_>>()
+    );
+}
+
 // AC-1028: import-proven JPA `@Entity` classes are `jpa` DataEntities with
 // their stored properties as fields (`@Id`, `@Column` names, `@Transient`
 // skipped), named by `@Entity(name)` or the class and tabled by `@Table`;
