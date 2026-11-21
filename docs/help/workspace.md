@@ -11,4 +11,11 @@ generated artifact set with generation and authority badges.
   same commit under the same registration shows the same hash. A local
   folder's hash is specific to this installation. **Clear system** removes
   all recovered facts; job history and settings survive.
+- **New project…** starts over with a different repository without
+  reinstalling. It removes everything tied to the loaded system: its
+  recovered facts, registered sources, retained source, findings,
+  investigations and chats, section drafts, reviews, decisions and job
+  history. Settings, provider keys, run limits, the local model and
+  installed adapters are kept. Cartograph restarts with an empty project.
+  It is unavailable while a job is queued or running.
 - **Triage gaps** and **Provenance & eval** jump to the register surfaces.
