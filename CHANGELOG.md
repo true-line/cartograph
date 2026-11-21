@@ -1,5 +1,27 @@
 # cartograph
 
+## 0.73.0
+
+### Minor Changes
+
+- 14e0073: Draft the business rules section (D1 1.5) on your local model with "Compose locally, checked": Cartograph drafts ten rule rows at a time, checks every claim against the rows it cites (coverage, quotes, numbers, code names, ordering), retries what fails with the reasons, has an auditor send unsupported claims back once, and stages the drafts for review, one per area plus one for the rules no area owns, so a large system's rules are drafted whole (#2083).
+- 1e444e7: Java JUnit tests are now recovered and linked to the Spring endpoints they call through MockMvc (`mvc.perform(post(ENTITY_API_URL))`), with URL constants resolved across files and the statuses each test expects, so the product specification's acceptance section lists Java test scenarios per capability. On the JHipster sample app: 215 tests, 97 links reaching 37 of 38 endpoints.
+- 5035cf0: Java methods now yield business rules (#2020): a `throw` or a valued `return` under `if`/`else` branches is a guarded exit with its sanitized conditions, owned by its method, like the Python, TypeScript and Go producers, and D1 states a thrown exception by its message or its kind ("it fails with the error “Invalid id”"). On the JHipster sample app this recovers 89 rules across 20 files, such as `userDTO.getId() != null` → `BadRequestAlertException("A new user cannot already have an ID")`.
+- 1e444e7: Java Spring endpoints now carry who may call them, read from their method-security annotations (`@PreAuthorize`/`@PostAuthorize` SpEL role, authority and sign-in checks, `@Secured`, `@RolesAllowed`, `@PermitAll`, `@DenyAll`, on the handler or its class) and from the `HttpSecurity` URL rules that cover them, with string constants resolved across files. `endpoint-permissions.md` now covers Spring, and the product specification's §1.2 lists each caller. On the JHipster sample app all 38 endpoints are read: 6 public (register, activate, sign-in, password reset), 22 for signed-in users and 10 for `ROLE_ADMIN` (via `AuthoritiesConstants.ADMIN`); before, none were.
+- 55ac02d: D1 §1.5 Changes: a record created or deleted on a model class under conditions is now a rule row, e.g. SimpleLogin's "When a hostname is given and no alias used on with this alias ID and hostname exists, a new “alias used on” record is created." (66 new rows on SimpleLogin).
+
+### Patch Changes
+
+- 885fa7d: Curated reads no longer fail at 257 accepted section drafts or findings. Accepted drafts and findings are now bounded by their total size (64 MiB of drafts, 16 MiB of findings, the same worst case as before), so many small ones are all read; past that, `curated.md` states `accepted_too_large`.
+- 14618a9: D1 §1.5 Rule cells no longer say an `elif` branch's value differs from each earlier option before saying the value it takes ("the form name is not “cancel”, and the form name is “change-yearly”" now reads "the form name is “change-yearly”").
+- 489c2d8: Areas: a widely used errors or exceptions module is shared code, not the core of the area that imports it most.
+- 214d665: "Compose locally, checked": a local model can no longer get more claims past a chunk than the workflow allows, claims are never staged when the auditor's reply is unreadable twice, and two claims that differ only in case are both kept.
+- 6c219d9: Go repositories now have their GORM models recovered (#2019): each model is a data entity with its table and columns, and the functions that create, read, update and delete it through GORM read and write it, across packages. GORM models also become domain candidates. On the Gin RealWorld example this recovers 7 models and 28 reads and writes, with 2 gaps where a model arrives as an untyped `interface{}`.
+- 502bb20: D1 §1.5 now states an area's state machines first, before its capabilities' rules, so an area briefing that has to be cut to its size bound keeps the area's lifecycle and the guards of its hooks.
+- d78d3a0: Areas: a large area whose only files without its subject are named for one other subject is split in two, so Vendure's refund entity, resolvers and default refund process get their own Refund area instead of sitting in Event bus.
+- 1327dd6: The Rust adapter now gives files wired in by `#[path = "…"] mod name;` the module they are declared as (so `super::` in a `*_tests.rs` file resolves), and Rust entry points are recovered: `fn main()` binaries (desktop app, gRPC server, HTTP server, command or process), `#[tauri::command]` IPC commands and tonic gRPC service methods.
+- 0a343f5: D4 success responses: a Flask `jsonify(alias=…, **serialize(…))` now states the keyword's keys and the keys the repository helper builds, instead of "body built outside the handler" (SimpleLogin's alias creation now reads "201 with JSON keys alias, email, id, …").
+
 ## 0.72.0
 
 ### Minor Changes
