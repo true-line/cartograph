@@ -2251,7 +2251,7 @@ export const CapturedRangeBecomesExplicitInvestigationRequirement: Story = {
     await expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(0);
     await userEvent.click(canvas.getByRole('button', { name: 'Require this source in an investigation' }));
     await expect(await canvas.findByText('local/src/app.ts')).toBeVisible();
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@3/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@3');
     await expect(investigationRequests[0]).toEqual({ command: 'resolve_investigation_inspection_target', args: {
       fact: { kind: 'node', id: FAKE_ENDPOINT.id }, expectedGraphSnapshotId: 'snapshot:original',
       expectedReceiptId: 'receipt:selection-1', inventoryIndex: 0,
@@ -2259,7 +2259,7 @@ export const CapturedRangeBecomesExplicitInvestigationRequirement: Story = {
     const target = useInvestigationStore.getState().draftInspectionRequirements[0];
     await expect(target.index).toBe(2);
     await expect(target.receipt_inventory_index).toBe(0);
-    await userEvent.click(canvas.getByRole('radio', { name: /domain-analyst@5/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'domain-analyst@5');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this exact captured source.');
     await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
     await waitFor(() => expect(investigationRequests.some((item) => item.command === 'start_investigation')).toBe(true));
@@ -2289,7 +2289,7 @@ export const InspectionFollowUpSurvivesSourceSelectionNavigation: Story = {
     await useInvestigationStore.getState().open(parent.investigation_id);
     await userEvent.click(await canvas.findByRole('button', { name: 'Ask a follow-up' }));
     await expect(useInvestigationStore.getState().draftInspectionRequirements).toHaveLength(0);
-    await userEvent.click(canvas.getByRole('radio', { name: /evidence-auditor@5/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Specialist version'), 'evidence-auditor@5');
     await userEvent.selectOptions(canvas.getByLabelText('Provider'), 'cloud');
     await userEvent.selectOptions(canvas.getByLabelText('Scope'), 'neighborhood');
     await expect(useInvestigationStore.getState().composer.scopeType).toBe('neighborhood');
@@ -2306,7 +2306,7 @@ export const InspectionFollowUpSurvivesSourceSelectionNavigation: Story = {
     await waitFor(() => expect(usePrimarySourceStore.getState().loading).toBe(false));
     await userEvent.click(canvas.getByRole('button', { name: 'Require this source in an investigation' }));
     await expect(await canvas.findByLabelText('Follow-up question')).toHaveValue(question);
-    await expect(canvas.getByRole('radio', { name: /evidence-auditor@5/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('evidence-auditor@5');
     await expect(canvas.getByLabelText('Provider')).toHaveValue('cloud');
     await expect(canvas.getByLabelText(/^Anchor fact ID/)).toHaveValue(FAKE_ENDPOINT.id);
     await expect(canvas.getByLabelText('Hops')).toHaveValue('2');
@@ -2334,8 +2334,8 @@ export const NextPromptCapturedSourceBecomesCompletionObligation: Story = {
     installFakeCore({ capturedDescriptions: true, admissionSelection: true });
     await userEvent.click(canvas.getByRole('button', { name: 'Open investigations' }));
     await useInvestigationStore.getState().loadCatalog();
-    await userEvent.selectOptions(await canvas.findByLabelText('Investigation budget'), 'investigation-v2');
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@10/ })).toBeChecked();
+    await userEvent.selectOptions(await canvas.findByLabelText('Specialist version'), 'domain-analyst@10');
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@10');
     await userEvent.click(canvas.getByRole('button', { name: 'Workspace' }));
     const endpoints = canvas.getByRole('heading', { name: 'Endpoints' }).closest('section') as HTMLElement;
     await userEvent.click(await within(endpoints).findByRole('button', { name: /GET \/users/ }));
@@ -2350,7 +2350,7 @@ export const NextPromptCapturedSourceBecomesCompletionObligation: Story = {
     await expect(investigationRequests.map((item) => item.command)).toEqual([
       'resolve_investigation_inspection_target', 'resolve_investigation_source_obligation' ]);
     await expect(await canvas.findByLabelText('Question')).toBeVisible();
-    await expect(canvas.getByRole('radio', { name: /domain-analyst@10/ })).toBeChecked();
+    await expect(canvas.getByLabelText('Specialist version')).toHaveValue('domain-analyst@10');
     await userEvent.type(canvas.getByLabelText('Question'), 'Inspect this newly selected completion source.');
     await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeEnabled();
   },
