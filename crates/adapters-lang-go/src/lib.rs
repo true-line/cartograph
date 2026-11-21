@@ -187,6 +187,14 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     for pending in &mut extraction.pending_gorm {
         retarget_props_commit(&mut pending.props, commit);
+        // The Gap a write becomes when its type is no model carries its own.
+        for part in ["node", "edge"] {
+            if let Some(props) = pending.props["unresolved"].get_mut(part)
+                && let Some(props) = props.get_mut("props")
+            {
+                retarget_props_commit(props, commit);
+            }
+        }
     }
     for request in &mut extraction.test_requests {
         request.retarget(commit);

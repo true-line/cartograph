@@ -1913,3 +1913,81 @@ func Authors(db *gorm.DB) {
         .collect();
     assert_eq!(gaps, BTreeSet::from(["data", "&x", "&p"]));
 }
+
+/// AC-0963: a GORM table name is pluralized as GORM's inflection library
+/// does it, and a model field's package type is read through its import
+/// whatever name binds it.
+#[test]
+fn gorm_tables_follow_gorm_inflection_and_aliased_types_are_columns() {
+    for (model, table) in [
+        ("Quiz", "quizzes"),
+        ("UserStatus", "user_statuses"),
+        ("Person", "people"),
+        ("Human", "humen"),
+        ("Fish", "fish"),
+        ("Knife", "knives"),
+        ("Category", "categories"),
+        ("Box", "boxes"),
+        ("Mouse", "mice"),
+        ("ComputerMouse", "computer_mouses"),
+        ("Matrix", "matrices"),
+        ("Datum", "data"),
+        ("Analysis", "analyses"),
+        ("Address", "addresses"),
+        ("Day", "days"),
+        ("News", "news"),
+        ("OrderV2", "order_v2"),
+    ] {
+        assert_eq!(super::gorm::table(model), table, "{model}");
+    }
+    let source = br#"package store
+import (
+    gm "gorm.io/gorm"
+    t "time"
+    "github.com/google/uuid"
+    other "example.com/other"
+)
+type Note struct {
+    ID        uuid.UUID `gorm:"primaryKey"`
+    CreatedOn t.Time
+    DeletedAt gm.DeletedAt `gorm:"index"`
+    Owner     other.Time
+}
+"#;
+    let out = extract_source(source, "store/note.go", &id()).unwrap();
+    let note = out
+        .nodes
+        .iter()
+        .find(|n| n.label == "DataEntity" && n.props["name"] == "Note")
+        .unwrap_or_else(|| panic!("{:#?}", out.nodes));
+    let columns: Vec<&str> = note.props["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(columns, ["id", "created_on", "deleted_at"], "{note:#?}");
+}
+
+/// A reused file's GORM write to an unproven model keeps its Gap on the
+/// new commit.
+#[test]
+fn a_reused_files_gorm_gap_carries_the_new_commit() {
+    let source = br#"package store
+import "gorm.io/gorm"
+func Save(db *gorm.DB, v Missing) { db.Create(&v) }
+"#;
+    let mut extraction = extract_source(source, "store/save.go", &id()).unwrap();
+    assert_eq!(
+        extraction.pending_gorm.len(),
+        1,
+        "{:#?}",
+        extraction.pending_gorm
+    );
+    retarget_commit(&mut extraction, "def456");
+    let text = extraction.pending_gorm[0].props["unresolved"].to_string();
+    assert!(
+        text.contains("def456") && !text.contains("abc123"),
+        "{text}"
+    );
+}

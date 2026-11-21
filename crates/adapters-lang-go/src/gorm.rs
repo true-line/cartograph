@@ -84,40 +84,129 @@ pub(super) fn snake(name: &str) -> String {
     out
 }
 
-/// GORM's default table name: the snake-case name, plural.
+/// GORM's default table name: the snake-case name made plural as GORM's
+/// inflection library does (`jinzhu/inflection`): uncountable words, then
+/// irregular endings, then its suffix rules, the last-declared first.
 pub(super) fn table(type_name: &str) -> String {
-    let snake = snake(type_name);
-    let (stem, last) = snake
-        .rsplit_once('_')
-        .map_or(("", snake.as_str()), |(s, l)| (s, l));
-    let irregular = match last {
-        "person" => Some("people"),
-        "child" => Some("children"),
-        "man" => Some("men"),
-        "woman" => Some("women"),
-        "mouse" => Some("mice"),
-        "status" => Some("statuses"),
-        _ => None,
-    };
-    let plural = irregular.map(str::to_string).unwrap_or_else(|| {
-        let consonant_y = last.ends_with('y')
-            && !matches!(last.chars().rev().nth(1), Some('a' | 'e' | 'i' | 'o' | 'u'));
-        if consonant_y {
-            format!("{}ies", &last[..last.len() - 1])
-        } else if ["s", "x", "z", "ch", "sh"]
-            .iter()
-            .any(|end| last.ends_with(end))
-        {
-            format!("{last}es")
-        } else {
-            format!("{last}s")
-        }
-    });
-    if stem.is_empty() {
-        plural
-    } else {
-        format!("{stem}_{plural}")
+    plural(&snake(type_name))
+}
+
+const UNCOUNTABLE: &[&str] = &[
+    "equipment",
+    "information",
+    "rice",
+    "money",
+    "species",
+    "series",
+    "fish",
+    "sheep",
+    "jeans",
+    "police",
+];
+
+const IRREGULAR: &[(&str, &str)] = &[
+    ("person", "people"),
+    ("man", "men"),
+    ("child", "children"),
+    ("sex", "sexes"),
+    ("move", "moves"),
+    ("mombie", "mombies"),
+];
+
+/// `jinzhu/inflection`'s `Plural` on a lower-case word.
+pub(super) fn plural(word: &str) -> String {
+    // Its first rule, `([a-z])$`, needs a final letter.
+    if UNCOUNTABLE.contains(&word) || !word.ends_with(|c: char| c.is_ascii_alphabetic()) {
+        return word.to_string();
     }
+    for (singular, plural) in IRREGULAR {
+        if let Some(stem) = word.strip_suffix(singular) {
+            return format!("{stem}{plural}");
+        }
+    }
+    let ends = |suffix: &str| word.ends_with(suffix);
+    let cut = |n: usize| &word[..word.len() - n];
+    let before = |n: usize| word[..word.len() - n].chars().next_back();
+    // `(drive)$`, `(quiz)$`
+    if ends("drive") {
+        return format!("{word}s");
+    }
+    if ends("quiz") {
+        return format!("{word}zes");
+    }
+    // `^(oxen)$`, `^(ox)$`, `^(m|l)ice$`, `^(m|l)ouse$`
+    match word {
+        "oxen" | "mice" | "lice" => return word.to_string(),
+        "ox" => return "oxen".into(),
+        "mouse" => return "mice".into(),
+        "louse" => return "lice".into(),
+        _ => {}
+    }
+    // `(matr|vert|ind)(?:ix|ex)$`
+    for stem in ["matr", "vert", "ind"] {
+        for end in ["ix", "ex"] {
+            if let Some(rest) = word.strip_suffix(end)
+                && rest.ends_with(stem)
+            {
+                return format!("{rest}ices");
+            }
+        }
+    }
+    // `(x|ch|ss|sh)$`
+    if ["x", "ch", "ss", "sh"].iter().any(|e| ends(e)) {
+        return format!("{word}es");
+    }
+    // `([^aeiouy]|qu)y$`
+    if ends("y") && (ends("quy") || before(1).is_some_and(|c| !"aeiouy".contains(c))) {
+        return format!("{}ies", cut(1));
+    }
+    // `(hive)$`
+    if ends("hive") {
+        return format!("{word}s");
+    }
+    // `(?:([^f])fe|([lr])f)$`
+    if ends("fe") && before(2).is_some_and(|c| c != 'f') {
+        return format!("{}ves", cut(2));
+    }
+    if ends("f") && before(1).is_some_and(|c| c == 'l' || c == 'r') {
+        return format!("{}ves", cut(1));
+    }
+    // `sis$`
+    if ends("sis") {
+        return format!("{}ses", cut(3));
+    }
+    // `([ti])a$`, `([ti])um$`
+    if ends("ta") || ends("ia") {
+        return word.to_string();
+    }
+    if ends("tum") || ends("ium") {
+        return format!("{}a", cut(2));
+    }
+    // `(buffal|tomat)o$`, `(bu)s$`, `(alias|status|campus)$`
+    if ends("buffalo") || ends("tomato") {
+        return format!("{word}es");
+    }
+    if ends("bus") {
+        return format!("{word}es");
+    }
+    if ["alias", "status", "campus"].iter().any(|e| ends(e)) {
+        return format!("{word}es");
+    }
+    // `(octop|vir)i$`, `(octop|vir)us$`, `^(ax|test)is$`
+    if ends("octopi") || ends("viri") {
+        return word.to_string();
+    }
+    if ends("octopus") || ends("virus") {
+        return format!("{}i", cut(2));
+    }
+    if word == "axis" || word == "testis" {
+        return format!("{}es", cut(2));
+    }
+    // `s$`, `$`
+    if ends("s") {
+        return word.to_string();
+    }
+    format!("{word}s")
 }
 
 /// The base type a field or variable type names, with the package
@@ -141,10 +230,11 @@ fn base_type<'t>(cx: &FileCx<'_>, mut ty: TsNode<'t>) -> Option<(Option<String>,
 }
 
 /// Whether a field type is a column: a scalar, a time, or a nullable or
-/// soft-delete wrapper.
-fn scalar(cx: &FileCx<'_>, ty: TsNode<'_>) -> bool {
+/// soft-delete wrapper. A qualified type is read through the file's import
+/// of its package, whatever name it is bound to.
+fn scalar(cx: &FileCx<'_>, ty: TsNode<'_>, bindings: &HashMap<String, ImportBinding>) -> bool {
     let text = cx.text(&ty).trim_start_matches('*');
-    matches!(
+    if matches!(
         text,
         "string"
             | "bool"
@@ -163,12 +253,26 @@ fn scalar(cx: &FileCx<'_>, ty: TsNode<'_>) -> bool {
             | "byte"
             | "rune"
             | "[]byte"
-            | "time.Time"
-            | "gorm.DeletedAt"
-            | "uuid.UUID"
-            | "json.RawMessage"
-    ) || text.starts_with("sql.Null")
-        || text.starts_with("datatypes.")
+    ) {
+        return true;
+    }
+    let Some((qualifier, name)) = text.split_once('.') else {
+        return false;
+    };
+    let Some(binding) = bindings.get(qualifier) else {
+        return false;
+    };
+    match binding.path.as_str() {
+        "time" => name == "Time",
+        "gorm.io/gorm" | "github.com/jinzhu/gorm" => name == "DeletedAt",
+        "github.com/google/uuid" | "github.com/gofrs/uuid" | "github.com/satori/go.uuid" => {
+            name == "UUID"
+        }
+        "encoding/json" => name == "RawMessage",
+        "database/sql" => name.starts_with("Null"),
+        "gorm.io/datatypes" => true,
+        _ => false,
+    }
 }
 
 fn tag_value(tag: &str, key: &str) -> Option<String> {
@@ -208,14 +312,21 @@ pub(super) fn extract(
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
         match node.kind() {
-            "type_spec" => model(cx, node, gorm, &dir, out),
+            "type_spec" => model(cx, node, gorm, bindings, &dir, out),
             "call_expression" => access(cx, node, functions, bindings, &dir, out),
             _ => {}
         }
     }
 }
 
-fn model(cx: &FileCx<'_>, spec: TsNode<'_>, gorm: &str, dir: &str, out: &mut Extraction) {
+fn model(
+    cx: &FileCx<'_>,
+    spec: TsNode<'_>,
+    gorm: &str,
+    bindings: &HashMap<String, ImportBinding>,
+    dir: &str,
+    out: &mut Extraction,
+) {
     let (Some(name), Some(ty)) = (
         spec.child_by_field_name("name"),
         spec.child_by_field_name("type"),
@@ -258,7 +369,7 @@ fn model(cx: &FileCx<'_>, spec: TsNode<'_>, gorm: &str, dir: &str, out: &mut Ext
             }
             continue;
         }
-        if tag_value(&tag, "-").is_some() || !scalar(cx, field_type) {
+        if tag_value(&tag, "-").is_some() || !scalar(cx, field_type, bindings) {
             continue;
         }
         for field_name in names {
