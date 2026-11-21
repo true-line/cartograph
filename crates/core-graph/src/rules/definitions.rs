@@ -722,8 +722,14 @@ fn links(
         }
         Ok(())
     };
+    // A condition's names are followed to their definitions, and so are an
+    // unguarded choice's returned names (AC-0956): an exit value whose
+    // definition the producer did not admit is skipped above.
     for dependency in &rule.dependencies {
-        if dependency.role == DependencyRole::Condition {
+        if matches!(
+            dependency.role,
+            DependencyRole::Condition | DependencyRole::ExitValue
+        ) {
             observe(&dependency.source, &dependency.resolution, None)?;
         }
     }

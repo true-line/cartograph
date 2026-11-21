@@ -580,3 +580,82 @@ fn test_code_yields_no_business_rules() {
         assert!(rules(&at(path)).is_empty(), "{path}");
     }
 }
+
+// AC-0956: an unguarded return that states how a value is chosen is a rule:
+// a predicate's answer, a pick with a fallback, a configured strategy's
+// answer. A plain unguarded return, a constant, or a private helper is not.
+#[test]
+fn an_unguarded_choice_is_a_rule() {
+    let out = recover(
+        "export class TaxRate {
+    test(zone: Zone, taxCategory: TaxCategory): boolean {
+        return idsAreEqual(taxCategory.id, this.categoryId) && idsAreEqual(zone.id, this.zoneId);
+    }
+    isActive() { return this.enabled; }
+    alwaysTrue(): boolean { return true; }
+    private isId(x: unknown): boolean { return typeof x === 'string'; }
+    label() { return this.name; }
+}
+export class TaxRateService {
+    async getApplicableTaxRate(ctx: RequestContext, zone: Zone, taxCategory: TaxCategory): Promise<TaxRate> {
+        const rate = (await this.getActiveTaxRates(ctx)).find(r => r.test(zone, taxCategory));
+        return rate || this.defaultTaxRate;
+    }
+    first(list: Item[]) { return list.find (i => i.ok) ?? null; }
+    other(a: string) { return a || 'none'; }
+    shadowed(list: Item[]) {
+        const rate = this.rate;
+        const pick = () => { const rate = list.find(i => i.ok); return rate; };
+        return rate || pick();
+    }
+    parenthesized(): boolean { return (true); }
+}
+export class Registry implements Store<PaymentHandler> /* SomeStrategy */ {
+    lookup(code: string) { return this.byCode[code]; }
+}
+export class DefaultTaxZoneStrategy implements TaxZoneStrategy {
+    determineTaxZone(ctx: RequestContext, zones: Zone[], channel: Channel): Zone {
+        return channel.defaultTaxZone;
+    }
+    private helper() { return 1; }
+}
+",
+    );
+    let mut owners: Vec<String> = rules(&out)
+        .into_iter()
+        .filter(|(_, rule)| rule.conditions.is_empty())
+        .map(|(_, rule)| {
+            rule.owner_id
+                .rsplit('#')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    owners.sort();
+    assert_eq!(
+        owners,
+        [
+            "DefaultTaxZoneStrategy.determineTaxZone",
+            "TaxRate.isActive",
+            "TaxRate.test",
+            "TaxRateService.first",
+            "TaxRateService.getApplicableTaxRate",
+        ]
+    );
+    let (_, pick) = rules(&out)
+        .into_iter()
+        .find(|(_, rule)| rule.owner_id.ends_with("getApplicableTaxRate"))
+        .unwrap();
+    let LocalExit::Return { value: Some(value) } = &pick.effect else {
+        panic!("{:?}", pick.effect)
+    };
+    assert_eq!(value.display.as_str(), "rate || this.defaultTaxRate");
+    // The pick's definition is kept, with its predicate.
+    let definitions = pick.local_definitions.as_ref().unwrap();
+    assert_eq!(definitions.len(), 1, "{definitions:?}");
+    assert_eq!(
+        definitions[0].initializer.display.as_str(),
+        "(await this.getActiveTaxRates(ctx)).find(r => r.test(zone, taxCategory))"
+    );
+}
