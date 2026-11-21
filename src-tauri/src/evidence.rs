@@ -78,19 +78,41 @@ pub struct SourceWindow {
 /// refusing any path that escapes `root` (`..`, absolute paths, symlinks out
 /// of the tree). Only the window is read from disk, never the whole file.
 pub fn read_source(root: &Path, rel_path: &str, span: &Range<u64>) -> io::Result<SourceWindow> {
+    // An env file is shown as the cited span alone, never a window: its only
+    // spans are the lines of allowlisted values (ADR-0075), and any context
+    // around one would disclose other values. A span over a line break is
+    // refused.
+    let env_file = Path::new(rel_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(ingest::toolchain::is_env_name);
+    if env_file {
+        let text = read_span_exact(root, rel_path, span)?;
+        if text.contains('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("an env-file evidence span is one line: {rel_path}"),
+            ));
+        }
+    }
     let file_path = confined_path(root, rel_path)?;
     let mut file = std::fs::File::open(&file_path)?;
     let len = file.metadata()?.len();
 
     // Center the window on the span so the highlight always fits, however
     // deep in the file it sits (a head-only cap would cut late spans off).
-    let window_start = if len <= MAX_EVIDENCE_BYTES {
-        0
+    let (window_start, window_len) = if env_file {
+        (span.start, span.end - span.start)
     } else {
-        let context = MAX_EVIDENCE_BYTES.saturating_sub(span.end.saturating_sub(span.start)) / 2;
-        span.start.saturating_sub(context).min(len)
+        let window_start = if len <= MAX_EVIDENCE_BYTES {
+            0
+        } else {
+            let context =
+                MAX_EVIDENCE_BYTES.saturating_sub(span.end.saturating_sub(span.start)) / 2;
+            span.start.saturating_sub(context).min(len)
+        };
+        (window_start, MAX_EVIDENCE_BYTES.min(len - window_start))
     };
-    let window_len = MAX_EVIDENCE_BYTES.min(len - window_start);
 
     // True line number of the window's first line: count the newlines
     // before it, streaming so a deep window never loads the whole prefix.
@@ -134,6 +156,24 @@ mod tests {
         assert_eq!(w.text, "const x = 1;");
         assert_eq!(w.window_start, 0);
         assert!(!w.truncated);
+    }
+
+    // AC-1021 (ADR-0075): an env-file span is shown alone, never inside a
+    // window, and a span over a line break is refused.
+    #[test]
+    fn env_file_spans_are_shown_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "A=one\nQUEUE_URL=amqp://mq:5672\nB=two\n";
+        std::fs::write(dir.path().join(".env"), text).unwrap();
+        let start = text.find("QUEUE_URL").unwrap() as u64;
+        let end = start + "QUEUE_URL=amqp://mq:5672".len() as u64;
+        let w = read_source(dir.path(), ".env", &(start..end)).unwrap();
+        assert_eq!(w.text, "QUEUE_URL=amqp://mq:5672");
+        assert_eq!(w.window_start, start);
+        assert_eq!(w.window_start_line, 2);
+        assert!(w.truncated);
+        assert!(read_source(dir.path(), ".env", &(0..end)).is_err());
+        assert!(read_source(dir.path(), ".env", &(start..start)).is_err());
     }
 
     #[test]

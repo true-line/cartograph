@@ -11,9 +11,11 @@
 //! never disagree because they quote the same detection.
 //!
 //! Redaction is fail-closed (AC-0097, same standard as the T1 state-JSON
-//! redaction in AC-0009): `.env*` files contribute **key names only**;
-//! for every other config only allowlisted setting keys are stored, and any
-//! stored string that looks secret-shaped is dropped. JS-authored configs
+//! redaction in AC-0009): `.env*` files contribute **key names only**,
+//! plus the values of the keys an author allowlists (ADR-0075, AC-1021),
+//! each cited by its line; for every other config only allowlisted setting
+//! keys are stored, and any stored string that looks secret-shaped is
+//! dropped. JS-authored configs
 //! (`vite.config.ts`, `webpack.config.js`, …) are detected by presence
 //! only — settings that live behind code surface as an explicit
 //! `config-behind-code` Unsupported finding, never as evaluated facts.
@@ -161,13 +163,16 @@ const LOCKFILES: &[(&str, &str, &str)] = &[
 /// — even a zero-length one — lets the evidence reader open a source window
 /// around it and disclose the file's values, which would break the AC-0097
 /// keys-only guarantee the settings themselves honor. A template is held to
-/// the same rule: placeholder values are often real.
+/// the same rule: placeholder values are often real. The one exception is
+/// the line of an allowlisted value (ADR-0075), and the evidence reader
+/// shows an env-file span alone, never a window around it.
 fn is_env_file(rel: &str) -> bool {
     let base = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
     is_env_name(base)
 }
 
-pub(crate) fn is_env_name(name: &str) -> bool {
+/// True for a dotenv file name (see [`is_env_file`]).
+pub fn is_env_name(name: &str) -> bool {
     name == ".env"
         || name.starts_with(".env.")
         || (name.len() > ".env".len() && name.ends_with(".env"))
@@ -725,24 +730,39 @@ fn detect_workflow(rel: &str, path: &Path, detection: &mut Detection) {
     ));
 }
 
-/// The assigned key names of a dotenv text, in order. A line counts only
-/// as `[export ]KEY=…` with a well-formed key; anything else (a stray
+/// One `KEY=value` assignment of a dotenv text.
+struct EnvAssignment<'a> {
+    key: &'a str,
+    /// The value, unquoted; `None` for a quoted value left open on its
+    /// line (a multiline value is never read).
+    value: Option<&'a str>,
+    /// Byte span of the assignment's line, without its line break.
+    line: (u64, u64),
+}
+
+/// The assignments of a dotenv text, in order. A line counts only as
+/// `[export ]KEY=…` with a well-formed key; anything else (a stray
 /// fragment, a comment) is skipped. A quoted value left open on its line
 /// swallows every following line until it closes, so the lines of a
 /// multiline secret (a PEM body, which may itself contain `=`) are never
 /// read as keys. An unterminated quote skips the rest of the file: fail
 /// closed.
-fn env_keys(text: &str) -> Vec<&str> {
-    let mut keys = Vec::new();
+fn env_assignments(text: &str) -> Vec<EnvAssignment<'_>> {
+    let mut assignments = Vec::new();
     let mut open: Option<char> = None;
-    for line in text.lines() {
+    let mut offset = 0usize;
+    for raw in text.split_inclusive('\n') {
+        let start = offset;
+        offset += raw.len();
+        let raw = raw.strip_suffix('\n').unwrap_or(raw);
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
         if let Some(quote) = open {
-            if closing_quote(line, quote).is_some() {
+            if closing_quote(raw, quote).is_some() {
                 open = None;
             }
             continue;
         }
-        let line = line.trim();
+        let line = raw.trim();
         if line.starts_with('#') {
             continue;
         }
@@ -759,18 +779,64 @@ fn env_keys(text: &str) -> Vec<&str> {
         if !well_formed {
             continue;
         }
-        keys.push(key);
         let value = value.trim_start();
-        if let Some(quote) = value
+        let parsed = match value
             .chars()
             .next()
             .filter(|c| matches!(c, '"' | '\'' | '`'))
-            && closing_quote(&value[1..], quote).is_none()
         {
-            open = Some(quote);
-        }
+            Some(quote) => match closing_quote(&value[1..], quote) {
+                Some(end) => Some(&value[1..1 + end]),
+                None => {
+                    open = Some(quote);
+                    None
+                }
+            },
+            // An unquoted value ends at an inline ` #` comment.
+            None => Some(value.split_once(" #").map_or(value, |(v, _)| v).trim_end()),
+        };
+        assignments.push(EnvAssignment {
+            key,
+            value: parsed,
+            line: (start as u64, (start + raw.len()) as u64),
+        });
     }
-    keys
+    assignments
+}
+
+/// The assigned key names of a dotenv text, in order (see
+/// [`env_assignments`]).
+fn env_keys(text: &str) -> Vec<&str> {
+    env_assignments(text).into_iter().map(|a| a.key).collect()
+}
+
+/// The values a dotenv text assigns to allowlisted keys (ADR-0075,
+/// AC-1021), each with the byte span of its line: the first assignment of a
+/// key wins, as in the events resolver. A multiline value, a secret
+/// (AC-0990's test) or a token-shaped value is never kept, and a URL loses
+/// any `user@`. Key order.
+fn env_values(
+    text: &str,
+    read: &std::collections::BTreeSet<String>,
+) -> BTreeMap<String, (String, (u64, u64))> {
+    let mut values = BTreeMap::new();
+    for assignment in env_assignments(text) {
+        if !read.contains(assignment.key) || values.contains_key(assignment.key) {
+            continue;
+        }
+        let Some(value) = assignment.value else {
+            continue;
+        };
+        if core_redact::env_secret_reason(assignment.key, value).is_some() {
+            continue;
+        }
+        let value = core_redact::without_userinfo(value);
+        if secret_shaped(&value) {
+            continue;
+        }
+        values.insert(assignment.key.to_string(), (value, assignment.line));
+    }
+    values
 }
 
 /// Byte offset of the first `quote` in `text` that a backslash does not
@@ -786,8 +852,9 @@ fn closing_quote(text: &str, quote: char) -> Option<usize> {
     None
 }
 
-/// `.env*`: key names ONLY — values are never read into settings, never
-/// stored, never hashed (AC-0097, fail closed).
+/// `.env*`: key names ONLY (AC-0097, fail closed). Preflight and every
+/// other caller of [`detect_in_file`] see no value; only
+/// [`extract_dir_reading`] adds the values of allowlisted keys.
 fn detect_env(rel: &str, path: &Path, detection: &mut Detection) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
@@ -833,8 +900,25 @@ pub fn extract_dir(
     id: &SourceId,
     on_file: &mut dyn FnMut(&str),
 ) -> std::io::Result<ToolExtraction> {
+    extract_dir_reading(root, id, &std::collections::BTreeSet::new(), on_file)
+}
+
+/// [`extract_dir`], also reading the values of the env keys `env_read`
+/// allowlists (ADR-0075, AC-1021). An env-file `Tool` then carries
+/// `settings.values` (key → value) and cites each value's line, in key
+/// order; a template file's `Tool` carries `settings.template = true`. Every
+/// other env-file fact stays span-free, and an env file with no allowlisted
+/// value is unchanged.
+pub fn extract_dir_reading(
+    root: &Path,
+    id: &SourceId,
+    env_read: &std::collections::BTreeSet<String>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<ToolExtraction> {
     // One declaring proof: (config path, span start, span end).
     type Proof = (String, u64, u64);
+    // Env-file tool name → the line spans of its allowlisted values.
+    let mut value_lines: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
     // name → merged tool (a package manager proven by both `packageManager`
     // and a lockfile is one Tool with two proofs).
     let mut tools: BTreeMap<String, (DetectedTool, Vec<Proof>)> = BTreeMap::new();
@@ -848,9 +932,31 @@ pub fn extract_dir(
         source_walk::Gitignores::Honor,
     )?;
     for source_walk::WalkedFile { rel, path, name } in walked {
-        let detection = detect_in_file(&name, &rel, &path);
+        let mut detection = detect_in_file(&name, &rel, &path);
         if detection.tools.is_empty() {
             continue;
+        }
+        if !env_read.is_empty() && is_env_file(&rel) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let values = env_values(&text, env_read);
+            if let Some(env) = detection
+                .tools
+                .iter_mut()
+                .find(|tool| tool.category == "environment" && !values.is_empty())
+            {
+                let lines = value_lines.entry(env.name.clone()).or_default();
+                let mut map = serde_json::Map::new();
+                for (key, (value, line)) in values {
+                    map.insert(key, serde_json::Value::String(value));
+                    lines.push(line);
+                }
+                env.settings
+                    .insert("values".into(), serde_json::Value::Object(map));
+                if core_redact::is_env_template(&name) {
+                    env.settings
+                        .insert("template".into(), serde_json::Value::Bool(true));
+                }
+            }
         }
         on_file(&rel);
         let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -928,10 +1034,19 @@ pub fn extract_dir(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         );
+        // An env file's only spans are the lines of its allowlisted values
+        // (ADR-0075): the evidence reader shows exactly that line.
         let spans: Vec<EvidenceRef> = proofs
             .iter()
             .filter(|(path, _, _)| !is_env_file(path))
             .map(|(path, start, end)| evidence(path, *start, *end))
+            .chain(
+                value_lines
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .map(|(start, end)| evidence(&detected.path, *start, *end)),
+            )
             .collect();
         let prov = Provenance::new(
             Tier::Deterministic,
@@ -1214,6 +1329,90 @@ mod tests {
         let edge_prov: Provenance =
             serde_json::from_value(defined_in.props["prov"].clone()).unwrap();
         assert!(edge_prov.evidence.is_empty());
+    }
+
+    // AC-1021 (ADR-0075): an allowlisted key's value is a toolchain setting
+    // citing its line; unlisted keys, secrets, multiline values and other
+    // env files stay keys-only and span-free; a template is labelled; a URL
+    // loses `user@`. Preflight's detection never sees a value.
+    #[test]
+    fn allowlisted_env_values_are_settings_citing_their_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = "# local\n\
+            QUEUE_URL=amqp://svc@mq:5672/orders # broker\n\
+            OTHER=hidden\n\
+            API_BASE=\"https://api.example.test\"\n\
+            DB_PASSWORD=s3cr3t-pass\n\
+            NOTE=\"two\nlines\"\n";
+        write(dir.path(), ".env", env);
+        write(dir.path(), ".env.example", "QUEUE_URL=amqp://localhost\n");
+        write(dir.path(), "config/test.env", "OTHER=x\n");
+        let read: std::collections::BTreeSet<String> =
+            ["QUEUE_URL", "API_BASE", "DB_PASSWORD", "NOTE"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let extraction = extract_dir_reading(
+            dir.path(),
+            &SourceId {
+                repo: "local/tools",
+                commit: "c0ffee",
+            },
+            &read,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let real = tool_node(&extraction, "tool:local/tools@.env");
+        assert_eq!(
+            real.props["settings"]["values"],
+            serde_json::json!({
+                "API_BASE": "https://api.example.test",
+                "QUEUE_URL": "amqp://mq:5672/orders",
+            })
+        );
+        assert!(real.props["settings"].get("template").is_none());
+        let prov: Provenance = serde_json::from_value(real.props["prov"].clone()).unwrap();
+        let lines: Vec<&str> = prov
+            .evidence
+            .iter()
+            .map(|span| &env[span.byte_start as usize..span.byte_end as usize])
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "API_BASE=\"https://api.example.test\"",
+                "QUEUE_URL=amqp://svc@mq:5672/orders # broker",
+            ]
+        );
+        assert!(prov.evidence.iter().all(|span| span.path == ".env"));
+
+        let template = tool_node(&extraction, "tool:local/tools@.env.example");
+        assert_eq!(template.props["settings"]["template"], true);
+        assert_eq!(
+            template.props["settings"]["values"]["QUEUE_URL"],
+            "amqp://localhost"
+        );
+
+        // No allowlisted value: unchanged, keys only, no span.
+        let other = tool_node(&extraction, "tool:local/tools@config/test.env");
+        assert!(other.props["settings"].get("values").is_none());
+        let prov: Provenance = serde_json::from_value(other.props["prov"].clone()).unwrap();
+        assert!(prov.evidence.is_empty());
+        // The File node and DEFINED_IN edge of the env file stay span-free.
+        let file = tool_node(&extraction, "file:local/tools@.env");
+        let prov: Provenance = serde_json::from_value(file.props["prov"].clone()).unwrap();
+        assert!(prov.evidence.is_empty());
+
+        // Without an allowlist nothing changes, and Preflight sees no value.
+        let plain = extract(dir.path());
+        assert!(
+            tool_node(&plain, "tool:local/tools@.env").props["settings"]
+                .get("values")
+                .is_none()
+        );
+        let detection = detect_in_file(".env", ".env", &dir.path().join(".env"));
+        assert!(!detection.tools[0].settings.contains_key("values"));
     }
 
     #[test]

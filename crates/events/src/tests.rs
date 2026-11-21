@@ -236,6 +236,42 @@ fn config_index_parses_env_files_deterministically() {
     assert_eq!(cfg.resolve("MISSING"), None);
 }
 
+// AC-1021 (ADR-0075 decision 6): a template's placeholder never outranks a
+// value a real env file sets, whatever the file names sort as.
+#[test]
+fn a_real_env_file_outranks_a_template() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env.example"),
+        "ORDERS_QUEUE=orders-placeholder\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(".env.production"),
+        "ORDERS_QUEUE=orders-prod\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(".env.dist"),
+        "ONLY_TEMPLATE=from-template\n",
+    )
+    .unwrap();
+    let cfg =
+        ConfigIndex::from_dir(dir.path(), &reading(&["ORDERS_QUEUE", "ONLY_TEMPLATE"])).unwrap();
+    assert_eq!(
+        cfg.resolve("ORDERS_QUEUE"),
+        Some(("orders-prod", ".env.production"))
+    );
+    assert_eq!(
+        cfg.resolve("ONLY_TEMPLATE"),
+        Some(("from-template", ".env.dist"))
+    );
+    assert_eq!(
+        env_files(dir.path()).unwrap(),
+        [".env.production", ".env.dist", ".env.example"]
+    );
+}
+
 // AC-1018 (#933, ADR-0075): an env-file value is read only for an
 // allowlisted key. A key an env file sets but no allowlist lists stays
 // unresolved, and its Gap names the key, the file and how to allow it; a

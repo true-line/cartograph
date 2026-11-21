@@ -3,7 +3,7 @@
 - **Status:** Proposed; owner review
 - **Date:** 2026-11-21
 - **Deciders:** Cartograph owner; Claude implements
-- **Related:** #933; US-0004 / AC-0011, AC-0990, AC-1018; US-0014 / AC-0097; ADR-0002; ADR-0070 decision 5
+- **Related:** #933; US-0004 / AC-0011, AC-0990, AC-1018; US-0019 / AC-0097, AC-1021; ADR-0002; ADR-0070 decision 5
 
 ## Context
 
@@ -43,6 +43,18 @@ about disclosure, so it belongs to the author, key by key.
 5. **The manifest's `[env]` table is unchanged.** Author-declared values
    outrank env files and need no allowlist entry: declaring a value is the
    author's choice to share it.
+6. **Templates rank last.** An env file whose name has an `example`,
+   `sample`, `template` or `dist` dot-segment (`.env.example`, `env.sample`,
+   `.env.dist`) holds placeholders. The resolver reads every real env file
+   before any template, so a value a real file sets always wins, and a
+   template's toolchain fact is marked `template = true`.
+7. **Allowlisted values join toolchain facts, citing their line.** An env
+   file's `Tool` carries `values` for the allowlisted keys it assigns, under
+   the same safety as decisions 3 and 4 (a multiline or token-shaped value
+   is never kept), and cites exactly the line of each one. Nothing else of
+   an env file gets a span. The evidence reader shows an env-file span
+   alone, never a window around it, and refuses a span over a line break.
+   Preflight never sees a value.
 
 ## Consequences
 
@@ -50,10 +62,9 @@ about disclosure, so it belongs to the author, key by key.
   `.env` implicitly now gets Gaps naming the keys to allow, until the author
   lists them. Channels and client calls resolved from `[env]` are not
   affected.
-- Toolchain facts still carry key names only (AC-0097). Reading allowlisted
-  values into toolchain facts, with a line citation per value and template
-  files ranked below real ones, is a later increment of #933 under this
-  decision.
+- Toolchain facts carry key names, plus the values of allowlisted keys
+  with one line citation each (decision 7, AC-1021). A repository with no
+  allowlist gets the same toolchain facts as before.
 - The graph content hash changes for repositories whose resolved channels
   or client calls came from implicit `.env` reads.
 

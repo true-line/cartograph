@@ -2221,8 +2221,9 @@ fn extract_tree_packed(
     {
         let tool_id = ingest::toolchain::SourceId { repo, commit };
         let mut tool_progress = |path: &str| on_file(&format!("Reading configuration — {path}"));
-        let tool_facts = ingest::toolchain::extract_dir(root, &tool_id, &mut tool_progress)
-            .map_err(|e| e.to_string())?;
+        let tool_facts =
+            ingest::toolchain::extract_dir_reading(root, &tool_id, &read, &mut tool_progress)
+                .map_err(|e| e.to_string())?;
         layers.tools = LayerSummary {
             files: tool_facts.files,
             nodes: distinct_node_count(&tool_facts.nodes),

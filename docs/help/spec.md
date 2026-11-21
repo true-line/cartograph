@@ -121,7 +121,7 @@ Not covered today:
 Every export includes **configuration.md**. It lists each configuration key
 once, with the environment files that declare it and the source files and
 symbols that read it. No model is involved. Only key names are listed: no
-value, default or fallback is stored or shown.
+value, default or fallback is shown.
 
 A key is the name of an environment variable. Names are compared exactly,
 including case. A key is listed once for each repository, because an
@@ -146,7 +146,8 @@ them.
 
 Every row shows the tier, confidence and source span of its fact. An
 environment file has no span: these files hold secrets, so no part of one is
-stored.
+stored, except the line of a value its author allowlists (see "Env-file
+values" in the ingest help).
 
 A `verified-only` export leaves out InferredWeak rows and states how many
 configuration facts it left out. A `best-effort` export includes them and
@@ -287,7 +288,8 @@ unbroken run of letters and digits in an image or a port is withheld,
 because it has the shape of a token.
 
 Every row shows the tier, confidence and source span of its fact. An
-environment file has no span, because these files hold secrets.
+environment file has no span, because these files hold secrets, except the
+line of a value its author allowlists.
 
 A `verified-only` export leaves out InferredWeak rows and states how many
 environment facts it left out. A `best-effort` export includes them and

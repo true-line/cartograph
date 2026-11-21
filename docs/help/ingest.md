@@ -50,6 +50,12 @@ part. An env file that holds a secret still stops the ingest, whether the
 key is listed or not. A value declared under `[env]` in
 `cartograph.system.toml` needs no listing.
 
+A listed value also appears in the env file's toolchain facts, citing its
+line. Opening that evidence shows the line alone, never the lines around
+it. A value from a template (`.env.example`, `env.sample`, `.env.dist`) is
+marked as a template, and a value a real env file sets always wins over a
+template's.
+
 ## Coverage inventory
 
 After a recovery, the Workspace lists each repo's coverage inventory before
