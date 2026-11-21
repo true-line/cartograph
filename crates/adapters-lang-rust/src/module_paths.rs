@@ -22,10 +22,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, QueryCursor};
 
-/// Whether `source` may hold a path attribute; files without one are not
-/// parsed by this pass.
+/// Whether `source` may hold a path attribute, direct or under `cfg_attr`;
+/// files without one are not parsed by this pass.
 pub(super) fn mentions_path(source: &[u8]) -> bool {
-    source.windows(6).any(|w| w == b"#[path")
+    let has = |needle: &[u8]| source.windows(needle.len()).any(|w| w == needle);
+    has(b"#[path") || (has(b"cfg_attr") && has(b"path"))
 }
 
 /// `(module name, path as written)` of each top-level `mod name;` that has
@@ -218,7 +219,7 @@ pub(super) fn modules(
 }
 
 /// Followed declarations that still do not wire their file in, as
-/// `(declaring file, module name, reason)`: the path leaves the repository
+/// `(declaring file, index into its declarations, reason)`: the path leaves the repository
 /// or is absolute (`outside_repository`), names the declaring file itself
 /// (`declaring_file`) or a file not in `files` (`file_not_found`), names a
 /// file an earlier declaration in path order wires in (`already_declared`),
@@ -227,36 +228,36 @@ pub(super) fn modules(
 pub(super) fn unresolved(
     declared: &BTreeMap<String, Vec<(String, String)>>,
     files: &BTreeSet<String>,
-) -> Vec<(String, String, &'static str)> {
+) -> Vec<(String, usize, &'static str)> {
     let mut out = Vec::new();
-    let mut parent: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut parent: BTreeMap<String, (String, usize)> = BTreeMap::new();
     for (declarer, decls) in declared {
-        for (name, literal) in decls {
+        for (index, (_, literal)) in decls.iter().enumerate() {
             match resolve(declarer, literal) {
-                None => out.push((declarer.clone(), name.clone(), "outside_repository")),
+                None => out.push((declarer.clone(), index, "outside_repository")),
                 Some(target) if target == *declarer => {
-                    out.push((declarer.clone(), name.clone(), "declaring_file"));
+                    out.push((declarer.clone(), index, "declaring_file"));
                 }
                 Some(target) if !files.contains(&target) => {
-                    out.push((declarer.clone(), name.clone(), "file_not_found"));
+                    out.push((declarer.clone(), index, "file_not_found"));
                 }
                 Some(target) => match parent.entry(target) {
                     Entry::Occupied(_) => {
-                        out.push((declarer.clone(), name.clone(), "already_declared"));
+                        out.push((declarer.clone(), index, "already_declared"));
                     }
                     Entry::Vacant(slot) => {
-                        slot.insert((declarer.clone(), name.clone()));
+                        slot.insert((declarer.clone(), index));
                     }
                 },
             }
         }
     }
-    for (target, (declarer, name)) in &parent {
+    for (target, (declarer, index)) in &parent {
         let mut chain = vec![target.clone()];
         let mut at = target.clone();
         while let Some((up, _)) = parent.get(&at) {
             if chain.contains(up) {
-                out.push((declarer.clone(), name.clone(), "cycle"));
+                out.push((declarer.clone(), *index, "cycle"));
                 break;
             }
             chain.push(up.clone());

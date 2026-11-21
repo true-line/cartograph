@@ -1659,14 +1659,13 @@ fn path_gaps(
             }
         }
     }
-    for (declarer, name, reason) in module_paths::unresolved(declared, files) {
+    for (declarer, index, reason) in module_paths::unresolved(declared, files) {
         let Some((path, decls)) = scanned.get_key_value(&declarer) else {
             continue;
         };
-        if let Some(decl) = decls
-            .iter()
-            .find(|decl| decl.name == name && decl.path.is_ok())
-        {
+        // `declared` holds a file's followed declarations in scan order, so
+        // the index names the exact declaration, even under a reused name.
+        if let Some(decl) = decls.iter().filter(|decl| decl.path.is_ok()).nth(index) {
             gaps.push((path, decl, reason));
         }
     }
