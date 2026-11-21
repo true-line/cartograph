@@ -188,3 +188,49 @@ fn rejected_response_stop_keeps_bounded_redacted_record() {
         }
     }
 }
+
+// AC-1403: a record that cannot be stored never vetoes the stop.
+#[test]
+fn unstorable_rejected_response_still_stops() {
+    let mut fixture = Fixture::new();
+    let (id, execution) = fixture.start(
+        "rejected-response-unstorable",
+        InvestigationProviderMode::Local,
+    );
+    fixture.prepare(&id, &execution, false);
+    fixture
+        .store
+        .conn
+        .execute_batch("CREATE TABLE rejected_response_records (unexpected TEXT)")
+        .unwrap();
+    let revision = fixture.store.investigation(&id).unwrap().summary.revision;
+    let reason = InvestigationStopReason::InvalidResponse;
+    let detail = fixture
+        .store
+        .advance_investigation(
+            &execution,
+            revision,
+            InvestigationTransition::StopRejected {
+                reason,
+                active_milliseconds: 0,
+                rejected: RejectedCompletion {
+                    step_id: "step-1".into(),
+                    text: "not an action".into(),
+                },
+            },
+        )
+        .unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(detail.error.as_deref(), Some(reason.test_message()));
+    let count: i64 = fixture
+        .store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM rejected_response_records",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(fixture.store.investigation(&id).unwrap(), detail);
+}

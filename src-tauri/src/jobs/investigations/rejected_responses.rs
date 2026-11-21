@@ -101,7 +101,14 @@ pub(super) fn record_on_stop(
     ) else {
         return Ok(());
     };
-    insert(tx, &task.detail.summary.investigation_id, &record)
+    // A savepoint keeps a failed insert (an unexpected table or row) from
+    // vetoing the stop: the record is dropped and the stop still commits.
+    tx.execute_batch("SAVEPOINT rejected_response_record")?;
+    if insert(tx, &task.detail.summary.investigation_id, &record).is_err() {
+        tx.execute_batch("ROLLBACK TO rejected_response_record")?;
+    }
+    tx.execute_batch("RELEASE rejected_response_record")?;
+    Ok(())
 }
 
 /// The completed response the worker last received, held until the task stops.
