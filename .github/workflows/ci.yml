@@ -298,11 +298,10 @@ jobs:
     timeout-minutes: 89
     # No repo-wide lane group: GitHub keeps one pending job per group, so a
     # third queued PR cancelled the one already waiting (#669). The
-    # workflow-level group supersedes a PR's own older run; across PRs the
-    # self-hosted pool is the backpressure. No lane installs packages per
-    # run; the libraries come with the CI image.
-    # Several runners share one host's memory; cargo's default of one rustc
-    # per CPU exhausts it while compiling the workspace.
+    # workflow-level group supersedes a PR's own older run. No lane installs
+    # packages per run; the libraries come with the CI image.
+    # CARGO_BUILD_JOBS is part of rust-cache's key: changing it empties the
+    # cache once.
     # Tests keep file and line numbers in backtraces but drop full debuginfo,
     # which made every crate slower to compile and link (#1924). CI only: a
     # local `cargo test` keeps the dev profile's full debuginfo.
