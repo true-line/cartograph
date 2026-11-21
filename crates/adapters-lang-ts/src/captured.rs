@@ -22,7 +22,7 @@ use std::sync::Arc;
 mod python;
 pub use python::{
     ReceiptStage, admit_after, mint_go_file_receipts, mint_java_file_receipts,
-    mint_python_file_receipts,
+    mint_python_file_receipts, mint_rust_file_receipts,
 };
 mod receipt;
 pub use receipt::{

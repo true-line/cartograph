@@ -250,3 +250,16 @@ with provenance ranges only, under the same per-file minting, survivor check
 and budget admission as Python and Go. Directory resolution (Spring endpoint
 joins, modules, configuration and build files) still reads the checkout,
 outside closure, so facts it derives or rewrites carry no receipt.
+
+## Rust lane (AC-1033, #385)
+
+A source's `.rs` files (the Rust adapter's own selection) join the same
+capture as the other non-TS lanes'. With a capture, the Rust pass reads each
+file's retained bytes for `#[path]` wiring, `#[cfg(test)]` module discovery and
+extraction, and each fact a captured file emits whose primary provenance lies
+wholly in that file gets a receipt under its own contract: prefix
+`rs-primary-v1:`, producer `t0.adapter-rust/direct-lexical-v1`, grammar `rust`
+(`tree-sitter-rust@0.24.2`, pinned exactly), in the v3 shape with provenance
+ranges only, under the same per-file minting, survivor check and budget
+admission as the other lanes. Crate discovery still reads `Cargo.toml` files
+from the checkout, outside closure.

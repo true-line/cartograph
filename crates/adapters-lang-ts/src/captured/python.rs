@@ -1,9 +1,10 @@
-//! Provenance-only receipts for the captured Python (AC-1024), Go (AC-1026)
-//! and Java (AC-1031) lanes (#385).
+//! Provenance-only receipts for the captured Python (AC-1024), Go (AC-1026),
+//! Java (AC-1031) and Rust (AC-1033) lanes (#385).
 //!
-//! Each adapter parses a captured `.py`, `.go` or `.java` file's retained
-//! bytes; this module binds that file's own facts to the exact captured spans
-//! their primary provenance cites. Rules and facts citing another file get none.
+//! Each adapter parses a captured `.py`, `.go`, `.java` or `.rs` file's
+//! retained bytes; this module binds that file's own facts to the exact
+//! captured spans their primary provenance cites. Rules and facts citing
+//! another file get none.
 //! Receipts are kept only for facts that survive directory resolution
 //! unchanged, and are admitted after every TypeScript receipt within the same
 //! extraction budget.
@@ -46,6 +47,17 @@ pub fn mint_java_file_receipts(
     edges: &[Edge],
 ) -> Result<Vec<MintedReceipt>, CapturedError> {
     mint_lane_file_receipts(Grammar::Java, file, id, nodes, edges)
+}
+
+/// Receipts for the facts one captured Rust file emitted (AC-1033), under
+/// the same provenance-only rules as the Python lane.
+pub fn mint_rust_file_receipts(
+    file: &CapturedFile,
+    id: &SourceId,
+    nodes: &[Node],
+    edges: &[Edge],
+) -> Result<Vec<MintedReceipt>, CapturedError> {
+    mint_lane_file_receipts(Grammar::Rust, file, id, nodes, edges)
 }
 
 fn mint_lane_file_receipts(
@@ -322,7 +334,49 @@ mod tests {
             receipt
         );
         assert_eq!(&JAVA.as_bytes()[19..25], b"handle");
-        assert!(mint_go_file_receipts(file, &id, &[own], &[]).is_err());
+        assert!(mint_go_file_receipts(file, &id, std::slice::from_ref(&own), &[]).is_err());
+        assert!(mint_rust_file_receipts(file, &id, &[own], &[]).is_err());
+    }
+
+    // AC-1033: a Rust fact citing its own captured file gets a Rust receipt
+    // under its own prefix; a rule-bearing fact gets none.
+    #[test]
+    fn rust_receipts_bind_only_provenance_in_the_captured_file() {
+        const RUST: &str = "pub fn handle() {}\n";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), RUST).unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap(),
+            &["lib.rs".to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let file = capture.file("lib.rs").unwrap();
+        let id = SourceId {
+            repo: "local/src_11111111111111111111111111111111",
+            commit: "workdir",
+        };
+        let own = node(
+            "sym:lib.rs#handle",
+            json!({ "prov": prov("lib.rs", (7, 13)) }),
+        );
+        let rule = node(
+            "rule:lib.rs#1",
+            json!({ "prov": prov("lib.rs", (0, 3)), "rule": {} }),
+        );
+        let receipts = mint_rust_file_receipts(file, &id, &[own.clone(), rule], &[]).unwrap();
+        assert_eq!(receipts.len(), 1);
+        let receipt = receipts[0].to_receipt().unwrap();
+        assert!(receipt.id().starts_with("rs-primary-v1:"));
+        assert_eq!(receipt.grammar(), Grammar::Rust);
+        assert!(receipt.matches_node(&own));
+        assert_eq!(
+            Receipt::from_json(&receipt.to_json().unwrap()).unwrap(),
+            receipt
+        );
+        assert_eq!(&RUST.as_bytes()[7..13], b"handle");
+        assert!(mint_java_file_receipts(file, &id, &[own], &[]).is_err());
     }
 
     // AC-1024: Python receipts are admitted after those already held, within

@@ -219,6 +219,7 @@ fn receipt(value: &str) -> bool {
         || prefixed(value, "py-primary-v1:")
         || prefixed(value, "go-primary-v1:")
         || prefixed(value, "java-primary-v1:")
+        || prefixed(value, "rs-primary-v1:")
 }
 impl TaskFactKey {
     fn valid(&self) -> bool {
