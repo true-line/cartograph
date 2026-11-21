@@ -1726,8 +1726,9 @@ fn captured_lane_paths(primary: Option<&source_capture::Capture>, suffix: &str) 
         .unwrap_or_default()
 }
 
-/// Keep a lane's staged receipts only for facts directory resolution left
-/// unchanged, then admit them after those already held. A receipt past the
+/// Keep a lane's staged receipts only for facts graph publication will
+/// materialize as minted (last-value node winners, merged edges), then admit
+/// them after those already held. A receipt past the
 /// budget is left out and its fact stays uncaptured, as for a TS completion
 /// receipt (AC-1019).
 fn admit_surviving_lane_receipts(
@@ -1932,8 +1933,6 @@ fn extract_tree_packed(
         let captured_python = captured_lane_paths(primary, ".py");
         let (python, stats) = if let (Some(capture), false) = (primary, captured_python.is_empty())
         {
-            // Candidates are bounded by the receipt budget as they are minted.
-            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
             let python = adapters_lang_python::extract_dir_from_sources(
                 root,
                 &python_id,
@@ -1945,20 +1944,19 @@ fn extract_tree_packed(
                         .map_err(|_| std::io::Error::other("captured Python file is unavailable"))
                 },
                 &mut python_progress,
-                &mut |path, parsed| {
-                    if let Ok(file) = capture.file(path)
-                        && let Ok(receipts) = adapters_lang_ts::captured::mint_python_file_receipts(
-                            file,
-                            &ts_id,
-                            &parsed.nodes,
-                            &parsed.edges,
-                        )
-                    {
-                        stage.extend(receipts);
-                    }
-                },
+                &mut |_, _| {},
             )
             .map_err(|error| error.to_string())?;
+            // Facts are bound in their final form, after directory resolution,
+            // so those the join builds are covered too (AC-1037).
+            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+                adapters_lang_ts::captured::Grammar::Python,
+                capture,
+                &captured_python,
+                &ts_id,
+                &python.nodes,
+                &python.edges,
+            );
             admit_surviving_lane_receipts(&python.nodes, &python.edges, stage, receipts);
             let stats = adapters_lang_python::IncrementalStats {
                 recomputed_files: captured_python.len() as u64,
@@ -2015,7 +2013,6 @@ fn extract_tree_packed(
         // module layout and Vercel configuration are still read from `root`.
         let captured_go = captured_lane_paths(primary, ".go");
         let (go, stats) = if let (Some(capture), false) = (primary, captured_go.is_empty()) {
-            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
             let go = adapters_lang_go::extract_dir_from_sources(
                 root,
                 &go_id,
@@ -2027,20 +2024,19 @@ fn extract_tree_packed(
                         .map_err(|_| std::io::Error::other("captured Go file is unavailable"))
                 },
                 &mut go_progress,
-                &mut |path, parsed| {
-                    if let Ok(file) = capture.file(path)
-                        && let Ok(receipts) = adapters_lang_ts::captured::mint_go_file_receipts(
-                            file,
-                            &ts_id,
-                            &parsed.nodes,
-                            &parsed.edges,
-                        )
-                    {
-                        stage.extend(receipts);
-                    }
-                },
+                &mut |_, _| {},
             )
             .map_err(|error| error.to_string())?;
+            // Facts are bound in their final form, after directory resolution,
+            // so those the join builds are covered too (AC-1037).
+            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+                adapters_lang_ts::captured::Grammar::Go,
+                capture,
+                &captured_go,
+                &ts_id,
+                &go.nodes,
+                &go.edges,
+            );
             admit_surviving_lane_receipts(&go.nodes, &go.edges, stage, receipts);
             let stats = adapters_lang_go::IncrementalStats {
                 recomputed_files: captured_go.len() as u64,
@@ -2084,7 +2080,6 @@ fn extract_tree_packed(
         // (AC-1033); crate discovery still reads `Cargo.toml` from `root`.
         let captured_rust = captured_lane_paths(primary, ".rs");
         let (rust, stats) = if let (Some(capture), false) = (primary, captured_rust.is_empty()) {
-            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
             let rust = adapters_lang_rust::extract_dir_from_sources(
                 root,
                 &rust_id,
@@ -2096,20 +2091,19 @@ fn extract_tree_packed(
                         .map_err(|_| std::io::Error::other("captured Rust file is unavailable"))
                 },
                 &mut rust_progress,
-                &mut |path, parsed| {
-                    if let Ok(file) = capture.file(path)
-                        && let Ok(receipts) = adapters_lang_ts::captured::mint_rust_file_receipts(
-                            file,
-                            &ts_id,
-                            &parsed.nodes,
-                            &parsed.edges,
-                        )
-                    {
-                        stage.extend(receipts);
-                    }
-                },
+                &mut |_, _| {},
             )
             .map_err(|error| error.to_string())?;
+            // Facts are bound in their final form, after directory resolution,
+            // so those the join builds are covered too (AC-1037).
+            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+                adapters_lang_ts::captured::Grammar::Rust,
+                capture,
+                &captured_rust,
+                &ts_id,
+                &rust.nodes,
+                &rust.edges,
+            );
             admit_surviving_lane_receipts(&rust.nodes, &rust.edges, stage, receipts);
             let stats = adapters_lang_rust::IncrementalStats {
                 recomputed_files: captured_rust.len() as u64,
@@ -2153,7 +2147,6 @@ fn extract_tree_packed(
         // (AC-1031); build and configuration files are still read from `root`.
         let captured_java = captured_lane_paths(primary, ".java");
         let (java, stats) = if let (Some(capture), false) = (primary, captured_java.is_empty()) {
-            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
             let java = adapters_lang_java::extract_dir_from_sources(
                 root,
                 &java_id,
@@ -2165,20 +2158,19 @@ fn extract_tree_packed(
                         .map_err(|_| std::io::Error::other("captured Java file is unavailable"))
                 },
                 &mut java_progress,
-                &mut |path, parsed| {
-                    if let Ok(file) = capture.file(path)
-                        && let Ok(receipts) = adapters_lang_ts::captured::mint_java_file_receipts(
-                            file,
-                            &ts_id,
-                            &parsed.nodes,
-                            &parsed.edges,
-                        )
-                    {
-                        stage.extend(receipts);
-                    }
-                },
+                &mut |_, _| {},
             )
             .map_err(|error| error.to_string())?;
+            // Facts are bound in their final form, after directory resolution,
+            // so those the join builds are covered too (AC-1037).
+            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+                adapters_lang_ts::captured::Grammar::Java,
+                capture,
+                &captured_java,
+                &ts_id,
+                &java.nodes,
+                &java.edges,
+            );
             admit_surviving_lane_receipts(&java.nodes, &java.edges, stage, receipts);
             let stats = adapters_lang_java::IncrementalStats {
                 recomputed_files: captured_java.len() as u64,
@@ -2222,7 +2214,6 @@ fn extract_tree_packed(
         captured_kotlin.sort();
         let (kotlin, stats) = if let (Some(capture), false) = (primary, captured_kotlin.is_empty())
         {
-            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
             let kotlin = adapters_lang_kotlin::extract_dir_from_sources(
                 root,
                 &kotlin_id,
@@ -2234,20 +2225,19 @@ fn extract_tree_packed(
                         .map_err(|_| std::io::Error::other("captured Kotlin file is unavailable"))
                 },
                 &mut kotlin_progress,
-                &mut |path, parsed| {
-                    if let Ok(file) = capture.file(path)
-                        && let Ok(receipts) = adapters_lang_ts::captured::mint_kotlin_file_receipts(
-                            file,
-                            &ts_id,
-                            &parsed.nodes,
-                            &parsed.edges,
-                        )
-                    {
-                        stage.extend(receipts);
-                    }
-                },
+                &mut |_, _| {},
             )
             .map_err(|error| error.to_string())?;
+            // Facts are bound in their final form, after directory resolution,
+            // so those the join builds are covered too (AC-1037).
+            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+                adapters_lang_ts::captured::Grammar::Kotlin,
+                capture,
+                &captured_kotlin,
+                &ts_id,
+                &kotlin.nodes,
+                &kotlin.edges,
+            );
             admit_surviving_lane_receipts(&kotlin.nodes, &kotlin.edges, stage, receipts);
             let stats = adapters_lang_kotlin::IncrementalStats {
                 recomputed_files: captured_kotlin.len() as u64,

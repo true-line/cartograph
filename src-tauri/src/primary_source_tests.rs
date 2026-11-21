@@ -3906,3 +3906,76 @@ fn kotlin_facts_are_parsed_from_the_capture_and_cited() {
         FactKey::Node { id } if id.contains("handler")
     )));
 }
+
+// AC-1037: a fact the Java directory join builds, a Spring endpoint composed
+// from the class and method mappings of one captured file, gets a Java
+// receipt bound to its final form and citing both mapping spans.
+#[test]
+fn directory_built_lane_facts_are_cited_from_the_capture() {
+    const CONTROLLER: &str = "package com.demo.web;\n\nimport org.springframework.web.bind.annotation.*;\n\n@RestController\n@RequestMapping(\"/api/users\")\npublic class UserController {\n    @GetMapping(\"/{id}\")\n    public String get() { return \"u\"; }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("UserController.java"), CONTROLLER).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string(), "server".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let endpoint = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Endpoint" && node.props["path"] == "/api/users/{id}")
+        .expect("the Spring endpoint is recovered");
+    let receipt = receipts
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Node { id } if *id == endpoint.id))
+        .expect("the directory-built endpoint carries a receipt")
+        .to_receipt()
+        .unwrap();
+    assert!(receipt.id().starts_with("java-primary-v1:"));
+    assert!(receipt.matches_node(endpoint));
+    // Both the class base and the method mapping are cited and read back.
+    assert_eq!(receipt.ranges().len(), 2);
+    let file = capture.file("UserController.java").unwrap();
+    for range in receipt.ranges() {
+        assert_eq!(range.captured.file, *file.reference());
+        assert!(
+            file.span(range.evidence.byte_start, range.evidence.byte_end)
+                .is_ok()
+        );
+    }
+    let bound = crate::primary_source::matching_bindings(&extraction, &receipts);
+    assert!(
+        bound
+            .iter()
+            .any(|binding| binding.receipt_id == receipt.id())
+    );
+}
