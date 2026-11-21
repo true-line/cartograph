@@ -249,3 +249,24 @@ fn a_cut_counts_only_the_data_rows_left_out() {
     assert_eq!(fit.text, &block[..block.find("#### ").unwrap()]);
     assert_eq!((fit.left_out, fit.rows_cut), (1, 0));
 }
+
+#[test]
+fn a_section_splits_into_its_area_blocks_and_the_rest() {
+    let section = section_text(DOCUMENT, "1.3").unwrap();
+    let (blocks, rest) = area_blocks(section, &["Mailbox", "Alias", "Billing"]);
+    let names: Vec<&str> = blocks.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, ["Mailbox", "Alias"]);
+    assert!(blocks[1].1.starts_with("### Alias\n"));
+    assert!(blocks[1].1.contains("F-00000000000000a2"));
+    assert!(!blocks[1].1.contains("### Alias (app)"));
+    assert!(rest.starts_with("## 1.3 Capabilities"));
+    assert!(rest.contains("### Alias (app)"));
+    assert!(!rest.contains("F-00000000000000a1"));
+    // Every line is in exactly one part.
+    let total: usize = blocks.iter().map(|(_, block)| block.len()).sum::<usize>() + rest.len();
+    assert_eq!(total, section.len());
+    let rules = section_text(DOCUMENT, "1.5").unwrap();
+    let (blocks, rest) = area_blocks(rules, &["Alias"]);
+    assert_eq!(blocks.len(), 1);
+    assert!(rest.contains("### Shared rejections"));
+}

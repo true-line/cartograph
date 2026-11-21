@@ -161,13 +161,18 @@ fn a_section_is_composed_from_its_compiled_text_and_staged_for_review() {
 }
 
 #[test]
-fn a_composition_is_refused_off_the_system_scope_or_after_the_graph_changed() {
+fn a_composition_is_refused_off_the_system_or_an_area_scope_or_after_the_graph_changed() {
     let (_dir, state) = state();
-    let scoped = prepare(&state, "1.0", "D1", "1.3", &id("cap:checkout"));
+    // A section not arranged by area is composed for the whole system only.
+    let scoped = prepare(&state, "1.0", "D1", "1.2", &id("cap:checkout"));
     assert_eq!(
         scoped.err().as_deref(),
         Some("composition_system_scope_only")
     );
+    // One arranged by area takes an area's scope, never another subject's
+    // (#2083).
+    let scoped = prepare(&state, "1.0", "D1", "1.3", &id("cap:checkout"));
+    assert_eq!(scoped.err().as_deref(), Some("area_not_found"));
 
     let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
     let provider = Scripted {
@@ -203,4 +208,51 @@ fn a_reply_that_is_not_the_schema_stages_nothing() {
     })
     .unwrap();
     assert_eq!(decoded.err(), Some("reply_not_the_schema"));
+}
+
+/// AC-0980 (T-0980): the gated workflow drafts §1.5 only, and only on a
+/// local provider.
+#[test]
+fn a_gated_composition_runs_on_section_1_5_and_a_local_provider_only() {
+    let (_dir, state) = state();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let provider = Scripted {
+        reply: reply(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let continue_ = || CallDirective::Continue;
+    assert_eq!(
+        compose_gated(&state, &provider, &prepared, &continue_, 1),
+        Err("gated_composition_section_unsupported".into())
+    );
+    assert!(provider.prompts.lock().unwrap().is_empty());
+
+    struct Cloud;
+    impl LlmProvider for Cloud {
+        fn id(&self) -> &str {
+            "cloud"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Cloud
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let mut model = HostModel {
+        state: &state,
+        provider: &Cloud,
+        check: &continue_,
+    };
+    assert_eq!(
+        model.complete(&prepared.action),
+        Err("gated_composition_local_only".into())
+    );
 }

@@ -27,6 +27,7 @@ pub mod area_expert;
 pub mod curated;
 pub mod draft_store;
 pub mod finding_curation;
+pub mod gated_compose;
 pub mod investigation;
 pub mod prepared;
 pub mod section_change;

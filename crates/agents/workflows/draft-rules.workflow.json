@@ -1,0 +1,48 @@
+{
+  "workflow": "draft-rules",
+  "version": 1,
+  "role": "draft-rules@1",
+  "section": "1.5",
+  "description": "Draft D1 section 1.5 (business rules) as a gated workflow (#2083). The runtime partitions the compiled section, the model drafts one bounded chunk per call, deterministic gates checked against the cited facts decide whether a chunk advances, and a failing gate's prescriptions become the retry prompt. An auditor then judges each admitted claim against its cited rows and sends unsupported claims back once.",
+  "stages": [
+    {
+      "name": "partition",
+      "kind": "deterministic",
+      "max_rows": 10
+    },
+    {
+      "name": "draft",
+      "kind": "model",
+      "for_each": "chunk",
+      "max_claims": 8,
+      "max_retries": 2,
+      "retry_mode": "fresh",
+      "on_gate_failure": "retry_then_admit_per_claim",
+      "gate": {
+        "checks": [
+          { "type": "reply_matches_schema" },
+          { "type": "citations_resolve" },
+          { "type": "rows_covered" },
+          { "type": "names_source" },
+          { "type": "no_code_identifiers" },
+          { "type": "quotes_verbatim" },
+          { "type": "literals_supported" },
+          { "type": "ordering_supported" }
+        ]
+      }
+    },
+    {
+      "name": "audit",
+      "kind": "model",
+      "for_each": "chunk",
+      "role": "rules-auditor@1",
+      "on_verdict": {
+        "unsupported": { "route_to": "draft", "max_round_trips": 1 }
+      }
+    },
+    {
+      "name": "assemble",
+      "kind": "deterministic"
+    }
+  ]
+}

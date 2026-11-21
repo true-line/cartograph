@@ -15,7 +15,7 @@ pub use catalogue::{
 };
 mod briefing;
 pub use briefing::{
-    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
+    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_blocks, area_briefing,
     area_neighbours, briefing_citation_ids,
 };
 mod configuration;
