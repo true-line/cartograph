@@ -778,17 +778,24 @@ resource "aws_iam_policy" "orders" {
 
     let ex = extract_dir(dir.path(), &id()).unwrap();
     let ids: BTreeSet<_> = ex.nodes.iter().map(|node| node.id.as_str()).collect();
-    assert!(ids.contains("res:qwtm/infra@module.eventbridge"));
-    assert!(ids.contains("res:qwtm/infra@module.eventbridge.aws_sqs_queue.orders"));
-    assert!(ids.contains("res:qwtm/infra@module.eventbridge.aws_lambda_function.fulfill"));
-    assert!(ids.contains("res:qwtm/infra@module.eventbridge.aws_iam_policy.orders"));
+    assert!(ids.contains("res:qwtm/infra@examples/with-pipes/module.eventbridge"));
+    assert!(
+        ids.contains("res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_sqs_queue.orders")
+    );
+    assert!(ids.contains(
+        "res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_lambda_function.fulfill"
+    ));
+    assert!(
+        ids.contains("res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_iam_policy.orders")
+    );
 
     let contains = ex
         .edges
         .iter()
         .find(|edge| {
-            edge.src == "res:qwtm/infra@module.eventbridge"
-                && edge.dst == "res:qwtm/infra@module.eventbridge.aws_sqs_queue.orders"
+            edge.src == "res:qwtm/infra@examples/with-pipes/module.eventbridge"
+                && edge.dst
+                    == "res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_sqs_queue.orders"
                 && edge.label == "REFERENCES"
                 && edge.props["relation"] == "MODULE_CONTAINS"
         })
@@ -800,13 +807,14 @@ resource "aws_iam_policy" "orders" {
         "examples/with-pipes/main.tf"
     );
     assert!(ex.edges.iter().any(|edge| {
-        edge.src == "res:qwtm/infra@module.eventbridge.aws_sqs_queue.orders"
-            && edge.dst == "res:qwtm/infra@module.eventbridge.aws_lambda_function.fulfill"
+        edge.src == "res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_sqs_queue.orders"
+            && edge.dst == "res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_lambda_function.fulfill"
             && edge.label == "TRIGGERS"
     }));
     assert!(ex.edges.iter().any(|edge| {
-        edge.src == "res:qwtm/infra@module.eventbridge.aws_iam_policy.orders"
-            && edge.dst == "res:qwtm/infra@module.eventbridge.aws_sqs_queue.orders"
+        edge.src == "res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_iam_policy.orders"
+            && edge.dst
+                == "res:qwtm/infra@examples/with-pipes/module.eventbridge.aws_sqs_queue.orders"
             && edge.label == "GRANTS"
     }));
 }
@@ -844,9 +852,9 @@ module "outer" { source = "../outer" }
     let first = extract_dir(dir.path(), &id()).unwrap();
     let second = extract_dir(dir.path(), &id()).unwrap();
     let ids: BTreeSet<_> = first.nodes.iter().map(|node| node.id.as_str()).collect();
-    assert!(ids.contains("res:qwtm/infra@module.outer.aws_s3_bucket.outer"));
-    assert!(ids.contains("res:qwtm/infra@module.outer.module.inner.aws_sqs_queue.inner"));
-    assert!(ids.contains("res:qwtm/infra@module.outer.module.inner.module.outer"));
+    assert!(ids.contains("res:qwtm/infra@entry/module.outer.aws_s3_bucket.outer"));
+    assert!(ids.contains("res:qwtm/infra@entry/module.outer.module.inner.aws_sqs_queue.inner"));
+    assert!(ids.contains("res:qwtm/infra@entry/module.outer.module.inner.module.outer"));
     assert!(
         !ids.iter()
             .any(|id| { id.contains("module.outer.module.inner.module.outer.aws_s3_bucket") })
@@ -998,69 +1006,75 @@ fn collision_fixture() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tf-address-collision")
 }
 
-fn collision_gaps(ex: &Extraction) -> Vec<&Node> {
+fn node<'a>(ex: &'a Extraction, id: &str) -> &'a Node {
     ex.nodes
         .iter()
-        .filter(|node| node.id.starts_with("gap:tf-address-collision:"))
-        .collect()
+        .find(|node| node.id == id)
+        .unwrap_or_else(|| panic!("missing node {id}"))
 }
 
 #[test]
-fn same_address_in_two_root_modules_emits_a_gap() {
-    // AC-0689 (T-0689, #1844): ids are not scoped by root module, so
-    // envs/prod and envs/staging both declaring aws_sqs_queue.orders name one
-    // node. The collision is an explicit Gap citing both declarations.
+fn same_address_in_two_root_modules_keeps_both_declarations() {
+    // AC-1500 (T-1500, #1844, ADR-0077): ids are scoped by root module, so
+    // envs/prod and envs/staging both declaring aws_sqs_queue.orders are two
+    // nodes, each with its own span and settings. No collision Gap remains.
     let root = collision_fixture();
     let ex = extract_dir(&root, &id()).unwrap();
-    let gaps = collision_gaps(&ex);
-    assert_eq!(gaps.len(), 1, "only the root-module collision is a Gap");
-    let gap = gaps[0];
-    assert_eq!(
-        gap.id,
-        "gap:tf-address-collision:qwtm/infra@aws_sqs_queue.orders"
-    );
-    assert_eq!(gap.label, "Gap");
-    assert_eq!(gap.props["address"], "aws_sqs_queue.orders");
-    assert_eq!(gap.props["resource"], "res:qwtm/infra@aws_sqs_queue.orders");
-    assert_eq!(
-        gap.props["root_modules"],
-        serde_json::json!(["envs/prod", "envs/staging"])
-    );
-    let prov: Provenance = serde_json::from_value(gap.props["prov"].clone()).unwrap();
-    assert_eq!(prov.tier, Tier::Deterministic);
-    assert_eq!(prov.confidence_tier, ConfidenceTier::Gap);
-    let paths: Vec<&str> = prov.evidence.iter().map(|e| e.path.as_str()).collect();
-    assert_eq!(paths, vec!["envs/prod/main.tf", "envs/staging/main.tf"]);
-    let declarations = gap.props["declarations"].as_array().unwrap();
-    assert_eq!(declarations.len(), 2);
-    for (declaration, evidence) in declarations.iter().zip(&prov.evidence) {
-        assert_eq!(declaration["path"], evidence.path.as_str());
-        assert_eq!(declaration["byte_start"], evidence.byte_start);
-        assert_eq!(declaration["byte_end"], evidence.byte_end);
-        let source = std::fs::read_to_string(root.join(&evidence.path)).unwrap();
-        let span = &source[evidence.byte_start as usize..evidence.byte_end as usize];
-        assert!(span.starts_with(r#"resource "aws_sqs_queue" "orders""#));
+    for env in ["prod", "staging"] {
+        let node = node(
+            &ex,
+            &format!("res:qwtm/infra@envs/{env}/aws_sqs_queue.orders"),
+        );
+        assert_eq!(node.props["logical_id"], "aws_sqs_queue.orders");
+        assert_eq!(node.props["root_module"], format!("envs/{env}"));
+        assert!(node.props.get("child_module").is_none());
+        let prov: Provenance = serde_json::from_value(node.props["prov"].clone()).unwrap();
+        assert_eq!(prov.evidence[0].path, format!("envs/{env}/main.tf"));
+        let source = std::fs::read_to_string(root.join(&prov.evidence[0].path)).unwrap();
+        let span =
+            &source[prov.evidence[0].byte_start as usize..prov.evidence[0].byte_end as usize];
+        assert!(span.contains(&format!("orders-{env}")));
     }
-    // The resource id is unchanged; the Gap sits beside it.
     assert!(
-        ex.nodes
+        !ex.nodes
             .iter()
             .any(|node| node.id == "res:qwtm/infra@aws_sqs_queue.orders")
     );
+    assert!(
+        !ex.nodes
+            .iter()
+            .any(|node| node.id.starts_with("gap:tf-address-collision:"))
+    );
+
+    // Each root module's module call is its own node and instantiates the
+    // child's resources under that root module's scope.
+    for env in ["prod", "staging"] {
+        let module = format!("res:qwtm/infra@envs/{env}/module.{env}_dlq");
+        let child = format!("{module}.aws_sqs_queue.dlq");
+        assert_eq!(
+            node(&ex, &child).props["root_module"],
+            format!("envs/{env}")
+        );
+        assert!(ex.edges.iter().any(|edge| {
+            edge.src == module && edge.dst == child && edge.props["relation"] == "MODULE_CONTAINS"
+        }));
+    }
 }
 
 #[test]
-fn child_module_reads_are_not_root_module_collisions() {
-    // AC-0689: the plain walk also reads local child modules unprefixed, so
-    // modules/prod_dlq and modules/staging_dlq both yield aws_sqs_queue.dlq;
-    // they are module sources, not root modules, and get no Gap. A tree
-    // with a root module and its child sharing an address gets none either.
+fn child_module_reads_are_scoped_by_their_own_directory() {
+    // AC-1500: the walk also reads child-module directories directly; those
+    // nodes are scoped by the child's directory, carry `child_module` and no
+    // `root_module`, and cannot collide with each other or with a root.
     let ex = extract_dir(&collision_fixture(), &id()).unwrap();
-    assert!(
-        !collision_gaps(&ex)
-            .iter()
-            .any(|gap| gap.props["address"] == "aws_sqs_queue.dlq")
-    );
+    for env in ["prod", "staging"] {
+        let direct = node(
+            &ex,
+            &format!("res:qwtm/infra@modules/{env}_dlq/aws_sqs_queue.dlq"),
+        );
+        assert_eq!(direct.props["child_module"], format!("modules/{env}_dlq"));
+        assert!(direct.props.get("root_module").is_none());
+    }
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("modules/queue")).unwrap();
@@ -1077,13 +1091,133 @@ module "orders" { source = "./modules/queue" }
     )
     .unwrap();
     let ex = extract_dir(dir.path(), &id()).unwrap();
-    assert!(collision_gaps(&ex).is_empty());
+    let root_queue = node(&ex, "res:qwtm/infra@aws_sqs_queue.q");
+    assert!(root_queue.props.get("root_module").is_none());
+    assert!(root_queue.props.get("child_module").is_none());
+    assert!(
+        node(&ex, "res:qwtm/infra@module.orders.aws_sqs_queue.q")
+            .props
+            .get("root_module")
+            .is_none()
+    );
+    assert_eq!(
+        node(&ex, "res:qwtm/infra@modules/queue/aws_sqs_queue.q").props["child_module"],
+        "modules/queue"
+    );
     assert!(!ex.nodes.iter().any(|node| node.label == "Gap"));
 }
 
 #[test]
-fn root_module_collision_gap_is_deterministic() {
-    // AC-0689: two runs over the same tree produce identical facts.
+fn repository_root_terraform_keeps_unscoped_ids() {
+    // AC-1500: Terraform only at the repository root keeps
+    // `res:{repo}@{address}` ids and gains no scope prop, so its graph is
+    // unchanged by root-module scoping.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.tf"),
+        r#"resource "aws_sqs_queue" "orders" {}
+resource "aws_lambda_function" "fulfill" { depends_on = [aws_sqs_queue.orders] }
+"#,
+    )
+    .unwrap();
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    let ids: BTreeSet<_> = ex.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        BTreeSet::from([
+            "res:qwtm/infra@aws_lambda_function.fulfill",
+            "res:qwtm/infra@aws_sqs_queue.orders",
+        ])
+    );
+    for node in &ex.nodes {
+        assert!(node.props.get("root_module").is_none());
+        assert!(node.props.get("child_module").is_none());
+    }
+}
+
+#[test]
+fn edges_and_chased_grants_stay_inside_their_root_module() {
+    // AC-1500: every edge target takes the scope of the block that names it,
+    // including GRANTS rebuilt from a policy document and placeholders.
+    let dir = tempfile::tempdir().unwrap();
+    for env in ["prod", "staging"] {
+        std::fs::create_dir_all(dir.path().join(format!("envs/{env}"))).unwrap();
+        std::fs::write(
+            dir.path().join(format!("envs/{env}/main.tf")),
+            r#"
+resource "aws_sqs_queue" "orders" {}
+resource "aws_lambda_function" "fulfill" { depends_on = [aws_sqs_queue.orders] }
+resource "aws_lambda_event_source_mapping" "orders" {
+  event_source_arn = aws_sqs_queue.orders.arn
+  function_name    = aws_lambda_function.fulfill.arn
+}
+data "aws_iam_policy_document" "orders" {
+  statement {
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.orders.arn]
+  }
+}
+resource "aws_iam_policy" "orders" {
+  policy = data.aws_iam_policy_document.orders.json
+}
+resource "aws_sns_topic" "alerts" { kms_master_key_id = aws_kms_key.missing.arn }
+"#,
+        )
+        .unwrap();
+    }
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    for env in ["prod", "staging"] {
+        let scoped = |address: &str| format!("res:qwtm/infra@envs/{env}/{address}");
+        let has = |src: &str, dst: &str, label: &str| {
+            ex.edges.iter().any(|edge| {
+                edge.src == scoped(src) && edge.dst == scoped(dst) && edge.label == label
+            })
+        };
+        assert!(has(
+            "aws_lambda_function.fulfill",
+            "aws_sqs_queue.orders",
+            "DEPENDS_ON"
+        ));
+        assert!(has(
+            "aws_sqs_queue.orders",
+            "aws_lambda_function.fulfill",
+            "TRIGGERS"
+        ));
+        assert!(has(
+            "aws_iam_policy.orders",
+            "aws_sqs_queue.orders",
+            "GRANTS"
+        ));
+        let placeholder = node(&ex, &scoped("aws_kms_key.missing"));
+        assert_eq!(placeholder.props["root_module"], format!("envs/{env}"));
+    }
+    for edge in &ex.edges {
+        let src_scope = terraform_id_scope(&edge.src).unwrap().1;
+        let dst_scope = terraform_id_scope(&edge.dst).unwrap().1;
+        assert_eq!(src_scope, dst_scope, "{} -> {}", edge.src, edge.dst);
+    }
+}
+
+#[test]
+fn resource_id_from_node_keeps_the_source_scope() {
+    // AC-1500: the policy-document chase rebuilds a target from its source's
+    // id and must keep that source's root-module scope.
+    assert_eq!(
+        resource_id_from_node(
+            "res:qwtm/infra@envs/prod/aws_iam_policy.p",
+            "aws_sqs_queue.q"
+        ),
+        "res:qwtm/infra@envs/prod/aws_sqs_queue.q"
+    );
+    assert_eq!(
+        resource_id_from_node("res:qwtm/infra@aws_iam_policy.p", "aws_sqs_queue.q"),
+        "res:qwtm/infra@aws_sqs_queue.q"
+    );
+}
+
+#[test]
+fn root_module_scoping_is_deterministic() {
+    // AC-1500: cold, repeated and warm-cache runs produce identical facts.
     let root = collision_fixture();
     let a = extract_dir(&root, &id()).unwrap();
     let b = extract_dir(&root, &id()).unwrap();
@@ -1095,12 +1229,16 @@ fn root_module_collision_gap_is_deterministic() {
         serde_json::to_string(&a.edges).unwrap(),
         serde_json::to_string(&b.edges).unwrap()
     );
-    // A warm incremental cache yields the same Gap as a cold run.
     let mut cache = IncrementalCache::default();
     let _ = extract_dir_incremental(&root, &id(), &mut cache).unwrap();
-    let (warm, _) = extract_dir_incremental(&root, &id(), &mut cache).unwrap();
+    let (warm, stats) = extract_dir_incremental(&root, &id(), &mut cache).unwrap();
+    assert_eq!(stats.recomputed_files, 0);
     assert_eq!(
         serde_json::to_string(&warm.nodes).unwrap(),
         serde_json::to_string(&a.nodes).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&warm.edges).unwrap(),
+        serde_json::to_string(&a.edges).unwrap()
     );
 }
