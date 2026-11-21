@@ -44,7 +44,7 @@ use core_graph::Edge;
 /// Deterministic recipe grouping source files into named subsystems.
 pub const SUBSYSTEM_RULE: &str = "knowledge.subsystems";
 /// Changed units, signals, clustering or naming require a new recipe version.
-pub const SUBSYSTEM_RULE_VERSION: &str = "5";
+pub const SUBSYSTEM_RULE_VERSION: &str = "6";
 /// Files clustered per repository. Similarity is computed per pair of files
 /// that share a signal, so the bound keeps one run's work and memory fixed.
 pub const MAX_SUBSYSTEM_FILES: usize = 8192;
@@ -139,7 +139,7 @@ const EXCLUDED_DIRECTORIES: &[&str] = &[
 /// subject: they are never a signal and never part of a name.
 const STOP: &str = "add admin and anon api app args assets base command commands common config configuration \
     constructor controller controllers core create current dashboard data default delete dto \
-    entities entity error false flash for form from get handler handlers has helper helpers \
+    entities entity error errors exception exceptions false flash for form from get handler handlers has helper helpers \
     impl index init int integer interface internal java job jobs len lib list main make \
     manager method model models module modules name new none not object plugin plugins post \
     redirect remove render request resolver resolvers schema script scripts self service \
