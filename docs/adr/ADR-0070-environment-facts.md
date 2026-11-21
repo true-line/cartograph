@@ -85,7 +85,7 @@ source does not state.
 
 ## Addendum — Terraform resource ids scoped by root module (#1844)
 
-- **Status:** Proposed; owner decision
+- **Status:** Decided in ADR-0077 (repository-root ids unchanged; `state_json` fallback added)
 - **Date:** 2026-11-18
 - **Related:** #1844; #1791; AC-0007, AC-0009, AC-0048, AC-0051..0052, AC-0225, AC-0316
 
