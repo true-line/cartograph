@@ -327,6 +327,9 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
+        if node.label == "BusinessRule" {
+            rule_evidence::retarget(&mut node.props, commit);
+        }
     }
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
@@ -977,7 +980,8 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     // Methods and constructors, qualified by their enclosing type chain.
     let method_query = crate::queries::query(
         "[(method_declaration name: (identifier) @name) @method
-          (constructor_declaration name: (identifier) @name) @method]",
+          (constructor_declaration name: (identifier) @name) @method
+          (compact_constructor_declaration name: (identifier) @name) @method]",
     );
     let mut methods_by_start: HashMap<usize, String> = HashMap::new();
     let mut local_method_index: LocalMethodIndex = HashMap::new();
@@ -1011,14 +1015,24 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             Some(package) => format!("{package}.{owner_qualified}"),
             None => owner_qualified.clone(),
         };
-        let param_types = param_type_list(&cx, method);
+        // A record's compact constructor takes the record's components.
+        let signature = if method.kind() == "compact_constructor_declaration" {
+            method
+                .parent()
+                .and_then(|body| body.parent())
+                .filter(|record| record.kind() == "record_declaration")
+                .unwrap_or(method)
+        } else {
+            method
+        };
+        let param_types = param_type_list(&cx, signature);
         let variadic = param_types.last().is_some_and(|ty| ty.ends_with("..."));
         let min_arity = if variadic {
             param_types.len() - 1
         } else {
             param_types.len()
         };
-        let params = overload::param_shapes(source, method);
+        let params = overload::param_shapes(source, signature);
         let qualified = format!("{simple_qualified}{}", signature_suffix(&param_types));
         let symbol = symbol_id(id.repo, path, &qualified);
         methods_by_start.insert(method.start_byte(), symbol.clone());
@@ -1054,6 +1068,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         });
         methods.push((method, symbol, chain, name));
     }
+
+    // Guarded returns and throws as business rules (#2020).
+    rule_evidence::extract(&cx, root, &methods_by_start, &mut out);
 
     // Retrofit client calls (#737): interface methods now, base URL at the
     // directory join.
@@ -1386,7 +1403,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                 if let Some(symbol) = methods_by_start.get(&parent.start_byte())
                     && matches!(
                         parent.kind(),
-                        "method_declaration" | "constructor_declaration"
+                        "method_declaration"
+                            | "constructor_declaration"
+                            | "compact_constructor_declaration"
                     )
                 {
                     found = Some(symbol.clone());
@@ -1869,6 +1888,7 @@ mod http_request;
 mod okhttp;
 mod rest_template;
 mod retrofit;
+mod rule_evidence;
 mod spring_kafka;
 mod webclient;
 
