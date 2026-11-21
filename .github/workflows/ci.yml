@@ -383,7 +383,26 @@ jobs:
       # The app unit-test binary runs in the Rust app tests shards (#1924);
       # `app` is a binary-only package, so excluding it drops nothing else.
       - name: Test
-        run: cargo test --workspace --exclude app
+        run: cargo test --workspace --exclude app --timings
+
+      - name: Print compile timings
+        if: ${{ !cancelled() }}
+        run: |
+          node - <<'JS'
+          const fs = require('fs');
+          const dir = 'target/cargo-timings';
+          const files = fs.readdirSync(dir).filter((f) => /^cargo-timing-.*\.html$/.test(f)).map((f) => `${dir}/${f}`);
+          for (const file of files) {
+            const html = fs.readFileSync(file, 'utf8');
+            const units = JSON.parse(html.match(/const UNIT_DATA = (\[[\s\S]*?\n\]);/)[1]);
+            if (units.length < 5) continue;
+            const total = units.reduce((s, u) => s + u.duration, 0);
+            const end = Math.max(...units.map((u) => u.start + u.duration));
+            console.log(`${file}: ${units.length} units, ${total.toFixed(0)}s CPU, ${end.toFixed(0)}s wall`);
+            units.sort((a, b) => b.duration - a.duration);
+            for (const u of units.slice(0, 40)) console.log(u.duration.toFixed(1).padStart(7), u.start.toFixed(1).padStart(7), u.name, u.target, u.mode);
+          }
+          JS
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
@@ -621,7 +640,26 @@ jobs:
       - name: Test
         env:
           SHARD: ${{ matrix.shard }}
-        run: node scripts/rust-test-shard.mjs "$SHARD/4" -- -p app --bin app
+        run: node scripts/rust-test-shard.mjs "$SHARD/4" -- -p app --bin app --timings
+
+      - name: Print compile timings
+        if: ${{ !cancelled() }}
+        run: |
+          node - <<'JS'
+          const fs = require('fs');
+          const dir = 'target/cargo-timings';
+          const files = fs.readdirSync(dir).filter((f) => /^cargo-timing-.*\.html$/.test(f)).map((f) => `${dir}/${f}`);
+          for (const file of files) {
+            const html = fs.readFileSync(file, 'utf8');
+            const units = JSON.parse(html.match(/const UNIT_DATA = (\[[\s\S]*?\n\]);/)[1]);
+            if (units.length < 5) continue;
+            const total = units.reduce((s, u) => s + u.duration, 0);
+            const end = Math.max(...units.map((u) => u.start + u.duration));
+            console.log(`${file}: ${units.length} units, ${total.toFixed(0)}s CPU, ${end.toFixed(0)}s wall`);
+            units.sort((a, b) => b.duration - a.duration);
+            for (const u of units.slice(0, 40)) console.log(u.duration.toFixed(1).padStart(7), u.start.toFixed(1).padStart(7), u.name, u.target, u.mode);
+          }
+          JS
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
