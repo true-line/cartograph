@@ -31,7 +31,24 @@ struct Contract {
     parser_package_legacy: &'static [&'static str],
 }
 
-fn contract(version: u32) -> Result<Contract, CapturedError> {
+/// The producer contract a receipt of `version` and `grammar` was minted
+/// under. Python receipts (AC-1023) exist only in the v3 shape and carry
+/// primary provenance alone; their own prefix and domain keep them distinct
+/// from every TypeScript receipt.
+fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
+    if grammar == Grammar::Python {
+        return match version {
+            3 => Ok(Contract {
+                prefix: "py-primary-v1:",
+                producer: "t0.adapter-python/direct-lexical-v1",
+                domain: b"cartograph:py-primary-receipt:v1\0",
+                grammar_package: PYTHON_GRAMMAR_PACKAGE,
+                parser_package: PARSER_PACKAGE,
+                parser_package_legacy: &[],
+            }),
+            _ => Err(CapturedError::Invalid("receipt contract version")),
+        };
+    }
     match version {
         1 => Ok(Contract {
             prefix: "ts-primary-v1:",
@@ -75,6 +92,8 @@ fn rule_schema_version(version: u32) -> Result<u32, CapturedError> {
 // Exact dependency pins in Cargo.toml keep these producer inputs truthful.
 const GRAMMAR_PACKAGE: &str = "tree-sitter-typescript@0.23.2";
 const PARSER_PACKAGE: &str = "tree-sitter@0.27.0";
+// The Python adapter's exact grammar pin (crates/adapters-lang-python).
+const PYTHON_GRAMMAR_PACKAGE: &str = "tree-sitter-python@0.25.0";
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,12 +104,16 @@ pub enum Grammar {
     TypeScript,
     /// Other supported JS/TS extensions use the JSX-aware grammar.
     Tsx,
+    /// `.py` files, parsed by the Python adapter (AC-1023).
+    Python,
 }
 
 impl Grammar {
-    fn for_path(path: &str) -> Self {
+    pub(super) fn for_path(path: &str) -> Self {
         if path.ends_with(".ts") {
             Self::TypeScript
+        } else if path.ends_with(".py") {
+            Self::Python
         } else {
             Self::Tsx
         }
@@ -551,7 +574,7 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
         || !hash_has_prefix(&file.digest, "")
         || file.byte_len > source_capture::MAX_FILE_BYTES
         || !super::valid_path(&file.path)
-        || !super::supported(&file.path)
+        || !(super::supported(&file.path) || file.path.ends_with(".py"))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
@@ -580,7 +603,7 @@ fn content_id(content: &Content) -> Result<String, CapturedError> {
         .map_err(|_| CapturedError::Invalid("receipt serialization"))?;
     let bytes = serde_json::to_vec(&canonical(value))
         .map_err(|_| CapturedError::Invalid("receipt serialization"))?;
-    let contract = contract(content.schema_version)?;
+    let contract = contract(content.schema_version, content.grammar)?;
     let mut input = contract.domain.to_vec();
     input.extend(bytes);
     Ok(format!(
@@ -593,8 +616,9 @@ fn content_id(content: &Content) -> Result<String, CapturedError> {
 fn inventory(
     props: &serde_json::Value,
     version: u32,
+    grammar: Grammar,
 ) -> Result<Vec<(RangeRole, u32, EvidenceRef)>, CapturedError> {
-    contract(version)?;
+    contract(version, grammar)?;
     let provenance: Provenance = serde_json::from_value(
         props
             .get("prov")
@@ -621,6 +645,10 @@ fn inventory(
         push(RangeRole::Provenance, index, evidence)?;
     }
     if let Some(value) = props.get("rule") {
+        // The Python lane carries primary provenance alone (AC-1023).
+        if grammar == Grammar::Python {
+            return Err(CapturedError::Invalid("rule source inventory"));
+        }
         let rule = GuardedExitEvidence::from_value(value.clone())
             .map_err(|_| CapturedError::Invalid("rule source inventory"))?;
         if rule.schema_version != rule_schema_version(version)? {
@@ -794,7 +822,9 @@ impl Receipt {
         fact_digest: String,
         props: &serde_json::Value,
     ) -> Result<Self, CapturedError> {
-        let ranges = inventory(props, RECEIPT_SCHEMA_VERSION)?
+        let grammar = Grammar::for_path(&file.reference().path);
+        let current = contract(RECEIPT_SCHEMA_VERSION, grammar)?;
+        let ranges = inventory(props, RECEIPT_SCHEMA_VERSION, grammar)?
             .into_iter()
             .map(|(role, index, evidence)| {
                 let captured = file.span(evidence.byte_start, evidence.byte_end)?;
@@ -812,10 +842,10 @@ impl Receipt {
             repo_key: id.repo.into(),
             file: file.reference().clone(),
             commit_sha: (RECEIPT_SCHEMA_VERSION == 3).then(|| id.commit.into()),
-            producer_contract: contract(RECEIPT_SCHEMA_VERSION)?.producer.into(),
-            grammar: Grammar::for_path(&file.reference().path),
-            grammar_package: contract(RECEIPT_SCHEMA_VERSION)?.grammar_package.into(),
-            parser_package: contract(RECEIPT_SCHEMA_VERSION)?.parser_package.into(),
+            producer_contract: current.producer.into(),
+            grammar,
+            grammar_package: current.grammar_package.into(),
+            parser_package: current.parser_package.into(),
             fact_key,
             fact_digest,
             ranges,
@@ -916,7 +946,7 @@ impl Receipt {
     pub fn validate(&self) -> Result<(), CapturedError> {
         let content = &self.content;
         validate_identity(&content.file, &content.repo_key)?;
-        let contract = contract(content.schema_version)?;
+        let contract = contract(content.schema_version, content.grammar)?;
         match (content.schema_version, &content.commit_sha) {
             (1 | 2, None) => {}
             (3, Some(commit_sha)) if bounded_identity(commit_sha, MAX_ID_BYTES) => {}
@@ -955,7 +985,13 @@ impl Receipt {
         if content.ranges.is_empty() || content.ranges.len() > MAX_RECEIPT_RANGES {
             return Err(CapturedError::Limit("receipt ranges"));
         }
-        if !valid_inventory_shape(&content.ranges, content.schema_version) {
+        if !valid_inventory_shape(&content.ranges, content.schema_version)
+            || (content.grammar == Grammar::Python
+                && content
+                    .ranges
+                    .iter()
+                    .any(|range| range.role != RangeRole::Provenance))
+        {
             return Err(CapturedError::Invalid("receipt range inventory order"));
         }
         if let Some(sizes) = &content.source_sizes {
@@ -1008,7 +1044,7 @@ impl Receipt {
     }
 
     fn matches_inventory(&self, props: &serde_json::Value) -> bool {
-        inventory(props, self.content.schema_version).is_ok_and(|ranges| {
+        inventory(props, self.content.schema_version, self.content.grammar).is_ok_and(|ranges| {
             ranges.len() == self.content.ranges.len()
                 && ranges.iter().zip(&self.content.ranges).all(
                     |((role, index, evidence), range)| {
