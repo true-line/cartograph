@@ -78,6 +78,9 @@ pub(crate) use source_validation::{SourceValidationInitialData, captured_source_
 mod finding_reviews;
 #[path = "investigations/refusal_diagnostics.rs"]
 mod refusal_diagnostics;
+#[path = "investigations/rejected_responses.rs"]
+mod rejected_responses;
+pub(crate) use rejected_responses::RejectedCompletion;
 #[path = "investigations/staged.rs"]
 mod staged;
 #[path = "investigations/volatile_patch.rs"]
@@ -383,6 +386,12 @@ pub(crate) enum InvestigationTransition {
     StopWithElapsed {
         reason: InvestigationStopReason,
         active_milliseconds: u64,
+    },
+    /// The same stop, keeping the rejected response that caused it (AC-1403).
+    StopRejected {
+        reason: InvestigationStopReason,
+        active_milliseconds: u64,
+        rejected: RejectedCompletion,
     },
 }
 
