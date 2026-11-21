@@ -247,14 +247,32 @@ pub(super) fn output(
         content.push_str("No documentation file is among the facts of this export.\n")?;
     }
     for ((repo, path), document) in &documents {
+        // A document's role besides documentation (ADR-0065 decision 6,
+        // AC-1600): closed codes, printed only when it has one.
+        let roles = document.node.props["roles"]
+            .as_array()
+            .map(|roles| {
+                roles
+                    .iter()
+                    .filter_map(|role| role.as_str())
+                    .filter(|role| {
+                        [crate::ROLE_API_REFERENCE, crate::ROLE_DECISION_RECORD].contains(role)
+                    })
+                    .map(|role| format!("`{role}`"))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|roles| !roles.is_empty())
+            .map(|roles| format!(" Roles: {}.", roles.join(", ")))
+            .unwrap_or_default();
         writeln!(
             content,
-            "### {}: {}\n\nTitle: {}. Format: `{}`. Citation: `{}`.\n\n\
+            "### {}: {}\n\nTitle: {}. Format: `{}`.{} Citation: `{}`.\n\n\
              | Section | Level | Heading | Citation | Facts mentioned |\n|---|---|---|---|---|",
             Literal(repo),
             Literal(path),
             Literal(document.node.props["title"].as_str().unwrap_or("—")),
             Literal(document.node.props["format"].as_str().unwrap_or("—")),
+            roles,
             node_citation(document.node),
         )?;
         for section in &document.sections {
