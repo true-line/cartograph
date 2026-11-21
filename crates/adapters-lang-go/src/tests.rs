@@ -2088,7 +2088,10 @@ fn middleware_guards_are_endpoint_auth() {
         root.join("auth/auth.go"),
         r#"package auth
 
-import "net/http"
+import (
+    "log"
+    "net/http"
+)
 
 func Require(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2101,6 +2104,18 @@ func Require(next http.Handler) http.Handler {
 }
 
 func Trace(next http.Handler) http.Handler { return next }
+
+type Resp struct{ Status int }
+
+var ErrForbidden = &Resp{Status: http.StatusForbidden}
+
+// Mentions 401 and a 403 value without answering with them.
+func Audit(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        log.Println(http.StatusUnauthorized, ErrForbidden)
+        next.ServeHTTP(w, r)
+    })
+}
 "#,
     )
     .unwrap();
@@ -2131,6 +2146,7 @@ func plainMux() {
     mux := http.NewServeMux()
     mux.Handle("GET /private", auth.Require(http.HandlerFunc(list)))
     mux.Handle("GET /traced", auth.Trace(http.HandlerFunc(list)))
+    mux.Handle("GET /audited", auth.Audit(http.HandlerFunc(list)))
     mux.HandleFunc("GET /open", list)
 }
 
@@ -2159,6 +2175,23 @@ func ginRoutes() {
     e.GET("/after", show)
     e.Use(gin.BasicAuth(nil))
     e.GET("/last", show)
+}
+"#,
+    )
+    .unwrap();
+    // A test registering the same route unguarded does not count.
+    std::fs::write(
+        root.join("main_test.go"),
+        r#"package main
+
+import (
+    "net/http"
+    "testing"
+)
+
+func TestPrivate(t *testing.T) {
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /private", list)
 }
 "#,
     )
@@ -2203,6 +2236,10 @@ func ginRoutes() {
     assert_eq!(
         traced["reasons"],
         serde_json::json!(["no_deny_status:auth.Trace", "no_guard_recovered"])
+    );
+    assert_eq!(
+        auth("GET:/audited")["reasons"],
+        serde_json::json!(["no_deny_status:auth.Audit", "no_guard_recovered"])
     );
     assert_eq!(
         auth("GET:/open")["reasons"],

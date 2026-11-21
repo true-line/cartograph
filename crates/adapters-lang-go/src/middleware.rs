@@ -119,10 +119,8 @@ const CHI_MIDDLEWARE: &[&str] = &[
     "WithValue",
 ];
 
-/// Calls whose status argument answers the request.
-const RESPONSE_CALLS: &[&str] = &[
-    "Error",
-    "WriteHeader",
+/// `*gin.Context` methods whose status argument answers the request.
+const GIN_RESPONSE_CALLS: &[&str] = &[
     "AbortWithStatus",
     "AbortWithStatusJSON",
     "AbortWithError",
@@ -360,9 +358,83 @@ fn value_ref(
     }
 }
 
+/// The parameters in `function` (nested func literals included) that hold
+/// the response, keyed by name: `true` for an `http.ResponseWriter`,
+/// `false` for gin's `*gin.Context`.
+fn response_params(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> HashMap<String, bool> {
+    let mut params = HashMap::new();
+    let mut stack = vec![function];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+        if node.kind() != "parameter_declaration" {
+            continue;
+        }
+        let Some(ty) = node.child_by_field_name("type") else {
+            continue;
+        };
+        let ty = cx.text(&ty).trim_start_matches('*');
+        let Some((alias, name)) = ty.split_once('.') else {
+            continue;
+        };
+        let writer = match (bindings.get(alias).map(|b| b.path.as_str()), name) {
+            (Some("net/http"), "ResponseWriter") => true,
+            (Some("github.com/gin-gonic/gin"), "Context") => false,
+            _ => continue,
+        };
+        let mut walk = node.walk();
+        for name in node.children_by_field_name("name", &mut walk) {
+            params.insert(cx.text(&name).to_string(), writer);
+        }
+    }
+    params
+}
+
+/// Whether `call` answers the request: `http.Error`, `WriteHeader` on a
+/// response writer parameter, a response method on a `*gin.Context`
+/// parameter, or any call handed one of those parameters (a repository
+/// helper or `render.Render(w, r, ...)`). A call that only mentions a
+/// status, such as `log.Println(http.StatusUnauthorized)`, does not.
+fn answers(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    arguments: &[TsNode<'_>],
+    params: &HashMap<String, bool>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> bool {
+    if arguments
+        .iter()
+        .any(|argument| argument.kind() == "identifier" && params.contains_key(cx.text(argument)))
+    {
+        return true;
+    }
+    let Some(callee) = call
+        .child_by_field_name("function")
+        .filter(|callee| callee.kind() == "selector_expression")
+    else {
+        return false;
+    };
+    let (Some(operand), Some(field)) = (
+        callee.child_by_field_name("operand"),
+        callee.child_by_field_name("field"),
+    ) else {
+        return false;
+    };
+    let (base, field) = (cx.text(&operand), cx.text(&field));
+    match params.get(base) {
+        Some(true) => field == "WriteHeader",
+        Some(false) => GIN_RESPONSE_CALLS.contains(&field),
+        None => bindings.get(base).is_some_and(|b| b.path == "net/http") && field == "Error",
+    }
+}
+
 /// What `function`'s body (nested func literals included) says about 401
 /// and 403: its first response call writing one, and the repository values
-/// its calls pass.
+/// its response calls pass.
 pub(super) fn denial(
     cx: &FileCx<'_>,
     function: TsNode<'_>,
@@ -370,6 +442,10 @@ pub(super) fn denial(
     bindings: &HashMap<String, ImportBinding>,
 ) -> Option<Denial> {
     let body = function.child_by_field_name("body")?;
+    let params = response_params(cx, function, bindings);
+    if params.is_empty() {
+        return None;
+    }
     let mut stack = vec![body];
     let mut calls = Vec::new();
     while let Some(node) = stack.pop() {
@@ -384,13 +460,10 @@ pub(super) fn denial(
     let mut refs = Vec::new();
     for call in calls {
         let arguments = call_arguments(call);
-        let member = call
-            .child_by_field_name("function")
-            .filter(|callee| callee.kind() == "selector_expression")
-            .and_then(|callee| callee.child_by_field_name("field"))
-            .map(|field| cx.text(&field));
+        if !answers(cx, call, &arguments, &params, bindings) {
+            continue;
+        }
         if direct.is_none()
-            && member.is_some_and(|member| RESPONSE_CALLS.contains(&member))
             && let Some(status) = arguments
                 .iter()
                 .find_map(|argument| deny_status(cx, *argument, bindings))
@@ -399,6 +472,7 @@ pub(super) fn denial(
         }
         for argument in arguments {
             if refs.len() < MAX_REFS
+                && !params.contains_key(cx.text(&argument))
                 && let Some((dir, name)) = value_ref(cx, argument, bindings)
             {
                 refs.push((dir, name, evidence(cx, call)));
