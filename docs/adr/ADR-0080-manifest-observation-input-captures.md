@@ -46,10 +46,15 @@ stay explicitly unverified.
    names it: "not captured, so unverified (outside the manifest folder or past
    the capture limits)". When the inputs cannot all be captured together, the
    subset that fits the capture limits is kept, path by path in order.
-5. **Receipts come next.** This decision gives observed evidence a capture
-   identity. Retaining input captures and minting receipts for observed facts
-   is a following slice. Until then no observed fact is verified, so curated
-   context cannot activate on it.
+5. **Input captures are retained with their source (AC-1043).** A published
+   recovery retains each repository's input capture in the capture store
+   under `input/<source id>`, beside that source's own captures. The
+   retained-source preview counts it and binds it in its fingerprint, and
+   forgetting the source removes it. A capture that cannot be retained fails
+   the recovery, as the source's own does.
+6. **Receipts come next.** Minting receipts for observed facts, and binding
+   them, is a following decision (ADR-0079). Until then no observed fact is
+   verified, so curated context cannot activate on it.
 
 ## Consequences
 

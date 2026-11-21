@@ -6476,6 +6476,14 @@ fn add_system_blocking<R: tauri::Runtime>(
             .persist(&primary, source, &receipts)
             .map_err(&fail)?
             .keep_retained(&mut receipts);
+        // The captured observation inputs are retained with the source, so
+        // the bytes their evidence cites outlive this recovery (ADR-0080).
+        if let Some(capture) = observed.capture() {
+            state
+                .primary_sources
+                .persist_input(source, capture)
+                .map_err(&fail)?;
+        }
         reads.omitted_stored_receipts = omitted_stored_receipts;
         reads.record_stored_omissions(omitted_stored_facts);
         let bindings =
@@ -14167,6 +14175,51 @@ export function App() {
                 .iter()
                 .all(|entry| !entry.repo.starts_with("input/"))
         );
+    }
+
+    #[test]
+    fn manifest_observation_input_captures_are_retained_and_forgotten_with_their_source() {
+        // AC-1043 (ADR-0080 slice 2a, #385): a recovered system retains each
+        // repo's captured observation inputs beside its own captures; the
+        // retention preview counts them and a forget removes them too.
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        let root = system.join("infra");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.tf"),
+            "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            system.join("state.json"),
+            r#"{"format_version":"1.0","values":{"root_module":{"resources":[]}}}"#,
+        )
+        .unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+            .unwrap();
+        let source = state.sources.lock().unwrap().list().unwrap().remove(0);
+        let retained = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert_eq!(retained.input_capture_ids.len(), 1);
+        assert_eq!(
+            retained.captures,
+            retained.capture_ids.len() + retained.input_capture_ids.len()
+        );
+        assert!(retained.files >= 1);
+        super::primary_source::forget(&state, &source.source_id, &retained.fingerprint).unwrap();
+        let after = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert!(after.input_capture_ids.is_empty());
+        assert_eq!(after.captures, after.capture_ids.len());
     }
 
     #[test]

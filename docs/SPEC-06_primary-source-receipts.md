@@ -322,5 +322,7 @@ bytes, and observed evidence cites that identity, the declared relative path
 and `workdir`. A declared path outside the folder, or one the capture limits
 refuse, is still read from disk, but its evidence keeps the uncaptured form
 (empty repo and commit) and the producer's coverage reason names it as not
-captured, so unverified. Observed facts carry no receipt yet, so none is
+captured, so unverified. A published recovery retains each input capture
+beside its source's captures; the retained-source preview counts it and a
+forget removes it (AC-1043). Observed facts carry no receipt yet, so none is
 verified.
