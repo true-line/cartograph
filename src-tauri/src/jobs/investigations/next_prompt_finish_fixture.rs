@@ -141,7 +141,14 @@ impl Fixture {
     pub(in crate::jobs::investigations) fn publish(
         &mut self,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
-        self.base.f.store.admit_next_prompt_finish(
+        self.publish_keeping(None)
+    }
+    /// Publish as the worker does, handing over the completed response text.
+    pub(in crate::jobs::investigations) fn publish_keeping(
+        &mut self,
+        rejected: Option<&RejectedCompletion>,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.base.f.store.admit_next_prompt_finish_with_patch(
             &self.base.f.execution,
             self.base.f.task.detail.summary.revision,
             &NextPromptFinish {
@@ -151,6 +158,9 @@ impl Fixture {
                 current: &self.input,
                 current_prepared: &self.prepared,
             },
+            None,
+            None,
+            rejected,
         )
     }
     pub(in crate::jobs::investigations) fn next(&mut self) {

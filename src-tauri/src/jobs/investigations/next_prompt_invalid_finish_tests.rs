@@ -120,3 +120,83 @@ fn next_prompt_invalid_finish_is_journaled_with_usage_and_reopens() {
         assert!(legacy.investigation_result(f.base.id()).unwrap().is_none());
     }
 }
+
+// AC-1404 (ADR-0076): a finish refused at admission keeps the bounded
+// redacted record of the response the worker handed over, in the same
+// transaction, without changing the terminal outcome.
+#[test]
+fn refused_finish_keeps_bounded_redacted_rejected_response() {
+    for bound in [false, true] {
+        refused_finish_record_case(bound);
+    }
+}
+
+fn refused_finish_record_case(bound: bool) {
+    let mut f = gated_finish_fixture(false);
+    f.original = serde_json::json!({
+        "schema_version": 1, "outcome": "supported",
+        "action": {"type": "finish", "findings": [{
+            "claim_kind": "inferred_interpretation",
+            "title": "Unadmitted finding sentinel",
+            "statement": "Unadmitted finding content must never be retained.",
+            "citation_ids": [f.input.ledger().coverage_reads[0].request.inventory_hash], "limitations": ["The available material does not establish the endpoint behavior."]
+        }], "knowledge_completeness": "partial", "limitations": ["The available material does not establish the endpoint behavior."]}
+    });
+    f.response.action_hash =
+        core_prov::content_hash(&encode(&f.original, MAX_ACTION_BYTES).unwrap());
+    f.begin();
+    let text = format!(
+        "{} token=AKIA0000000000000000 {}",
+        f.original,
+        "x".repeat(2048)
+    );
+    if bound {
+        f.response.response_hash = core_prov::content_hash(text.as_bytes());
+    }
+    let rejected = RejectedCompletion {
+        step_id: f.response.step_id.clone(),
+        text: text.clone(),
+    };
+    let detail = f.publish_keeping(Some(&rejected)).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.terminal_diagnostic,
+        Some(
+            agents::investigation::InvestigationTerminalDiagnostic::RejectedFinish {
+                reason: agents::investigation::InvestigationFinishRejection::InvalidCitation,
+            }
+        )
+    );
+    let reopened = JobStore::open(f.base.f.directory.path().join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(f.base.id()).unwrap(), detail);
+    let kept = reopened
+        .investigation_rejected_response(f.base.id())
+        .unwrap();
+    // A completion that is not the authenticated response is never kept.
+    if !bound {
+        assert_eq!(kept, None);
+        return;
+    }
+    let kept = kept.unwrap();
+    assert_eq!(
+        kept,
+        agents::investigation::rejected_response::RejectedResponse::capture(
+            &f.response.step_id,
+            &text,
+            detail.terminal_diagnostic.as_ref(),
+        )
+        .unwrap()
+    );
+    let agents::investigation::rejected_response::ExcerptRetention::Excerpt {
+        text: excerpt,
+        truncated,
+        redactions,
+    } = kept.retention
+    else {
+        panic!("expected an excerpt");
+    };
+    assert!(excerpt.contains("Unadmitted finding sentinel"));
+    assert!(!excerpt.contains("AKIA0000000000000000"));
+    assert!(excerpt.len() <= 1024 && truncated && redactions == 1);
+    assert_eq!(kept.response_bytes, text.len() as u64);
+}
