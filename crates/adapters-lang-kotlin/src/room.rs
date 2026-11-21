@@ -83,6 +83,47 @@ impl Pending {
         self.accesses.extend(other.accesses);
     }
 
+    /// A table another persistence reader recovered (Exposed, AC-1027),
+    /// joined with Room's.
+    pub(crate) fn push_entity(
+        &mut self,
+        fqn: String,
+        path: &str,
+        shadows: Vec<String>,
+        node: Node,
+    ) {
+        self.entities.push(Entity {
+            fqn,
+            path: path.to_string(),
+            shadows,
+            node,
+        });
+    }
+
+    /// A read or write of the table declared by one of `candidates`, or
+    /// `gap` when none resolves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_class_access(
+        &mut self,
+        path: &str,
+        shadows: Vec<String>,
+        src: &str,
+        candidates: Vec<String>,
+        label: &'static str,
+        props: serde_json::Value,
+        gap: (Node, Edge),
+    ) {
+        self.accesses.push(Access {
+            path: path.to_string(),
+            shadows,
+            src: src.to_string(),
+            target: Target::Class(candidates),
+            label,
+            props,
+            gap,
+        });
+    }
+
     pub(crate) fn retarget(&mut self, commit: &str) {
         for entity in &mut self.entities {
             retarget_props_commit(&mut entity.node.props, commit);
@@ -223,14 +264,31 @@ fn short(cx: &FileCx<'_>, node: TsNode<'_>) -> String {
 }
 
 fn gap_pair(cx: &FileCx<'_>, at: TsNode<'_>, src: &str, label: &str, reason: &str) -> (Node, Edge) {
-    let gap = format!("gap:room:{}@{}@{}", cx.id.repo, cx.path, at.start_byte());
+    framework_gap(cx, FRAMEWORK, at, src, label, reason)
+}
+
+/// A Gap for `framework` at `at`, and the `label` edge from `src` to it.
+pub(crate) fn framework_gap(
+    cx: &FileCx<'_>,
+    framework: &str,
+    at: TsNode<'_>,
+    src: &str,
+    label: &str,
+    reason: &str,
+) -> (Node, Edge) {
+    let gap = format!(
+        "gap:{framework}:{}@{}@{}",
+        cx.id.repo,
+        cx.path,
+        at.start_byte()
+    );
     (
         Node {
             id: gap.clone(),
             label: "Gap".into(),
             props: serde_json::json!({
                 "reason": reason,
-                "framework": FRAMEWORK,
+                "framework": framework,
                 "language": "kotlin",
                 "expression": short(cx, at),
                 "attempted_tiers": ["T0"],
@@ -368,12 +426,23 @@ fn columns(
 fn uses_field(cx: &FileCx<'_>, accessor: TsNode<'_>) -> bool {
     let mut stack = vec![accessor];
     while let Some(node) = stack.pop() {
-        if node.kind() == "identifier" && cx.text(&node) == "field" {
+        if node.kind() == "identifier" && cx.text(&node) == "field" && !qualified(node) {
             return true;
         }
         stack.extend(named_children(node));
     }
     false
+}
+
+/// Whether an identifier is the member half of `x.name`, which names a
+/// property called `name`, not the accessor's backing `field`.
+fn qualified(node: TsNode<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "navigation_expression"
+            && named_children(parent)
+                .first()
+                .is_some_and(|first| first.id() != node.id())
+    })
 }
 
 /// The entity type a write function's first parameter names, unwrapped
@@ -422,7 +491,7 @@ fn parameter_entity<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> Option<(String
 }
 
 /// The FQNs a type name written in this file can denote.
-fn candidates(name: &str, imports: &Imports, package: Option<&str>) -> Vec<String> {
+pub(crate) fn candidates(name: &str, imports: &Imports, package: Option<&str>) -> Vec<String> {
     let (head, rest) = match name.split_once('.') {
         Some((head, rest)) => (head, Some(rest)),
         None => (name, None),
@@ -741,6 +810,7 @@ pub(crate) fn resolve(
         }
     }
     let mut seen = BTreeSet::new();
+    let mut emitted_edges: HashMap<(String, String, &'static str), usize> = HashMap::new();
     for access in pending.accesses {
         let dst = if obscured(&access.shadows, &access.path) {
             None
@@ -761,13 +831,18 @@ pub(crate) fn resolve(
         };
         match dst {
             Some(dst) => {
-                if seen.insert((access.src.clone(), dst.clone(), access.label)) {
-                    edges.push(Edge {
-                        src: access.src,
-                        dst,
-                        label: access.label.into(),
-                        props: access.props,
-                    });
+                let key = (access.src.clone(), dst.clone(), access.label);
+                match emitted_edges.get(&key) {
+                    Some(&at) => merge_access_props(&mut edges[at].props, &access.props),
+                    None => {
+                        emitted_edges.insert(key, edges.len());
+                        edges.push(Edge {
+                            src: access.src,
+                            dst,
+                            label: access.label.into(),
+                            props: access.props,
+                        });
+                    }
                 }
             }
             None => {
@@ -778,5 +853,42 @@ pub(crate) fn resolve(
                 }
             }
         }
+    }
+}
+
+/// Folds a second access of the same table by the same function into the
+/// edge already emitted, keeping the union of their operations and
+/// statements, so an `insert` then an `update` keep both.
+fn merge_access_props(kept: &mut serde_json::Value, other: &serde_json::Value) {
+    union(kept, other, "operations", "operation");
+    union(kept, other, "statements", "statement");
+}
+
+/// `kept[plural]` becomes the distinct values of both sides' `plural`
+/// lists, or their `singular` value where a side has no list, sorted;
+/// written only when it holds more than `kept` already says.
+fn union(kept: &mut serde_json::Value, other: &serde_json::Value, plural: &str, singular: &str) {
+    let values = |side: &serde_json::Value| match side[plural].as_array() {
+        Some(list) => list.clone(),
+        None => side
+            .get(singular)
+            .filter(|v| v.is_string())
+            .cloned()
+            .into_iter()
+            .collect(),
+    };
+    let mut merged = values(kept);
+    let before = merged.len();
+    for value in values(other) {
+        if !merged.contains(&value) {
+            merged.push(value);
+        }
+    }
+    if merged.len() > before || (kept[plural].is_null() && merged.len() > 1) {
+        merged.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        if kept.get(singular).is_none_or(serde_json::Value::is_null) {
+            kept[singular] = merged[0].clone();
+        }
+        kept[plural] = merged.into();
     }
 }

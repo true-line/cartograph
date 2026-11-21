@@ -5903,6 +5903,8 @@ data class User(
         get() = field.trim()
     val display: String
         get() = name.uppercase()
+    val shadow: String
+        get() = meta.field
 }
 
 @Entity(tableName = "")
@@ -6089,4 +6091,165 @@ interface UserDao {
     assert!(!out.nodes.iter().any(|node| node.label == "DataEntity"));
     assert!(out.nodes.iter().any(|node| node.label == "Gap"
         && node.props["reason"] == "Room write type `User` is not a recovered @Entity"));
+}
+
+// AC-1027: import-proven Exposed table objects are SQL tables with their
+// columns, named by the constructor literal or the object name less
+// `Table`, and DSL statements on them are reads and writes of the
+// enclosing function across files. A computed table name and a statement
+// on an unrecovered receiver are Gaps; a lookalike `Table` base and a file
+// without an Exposed import assert nothing.
+#[test]
+fn exposed_tables_and_dsl_statements_join_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/db/Tables.kt",
+        r#"package com.demo.db
+
+import org.jetbrains.exposed.dao.id.IntIdTable
+import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.Table as ExposedTable
+
+object Users : Table("users") {
+    val id = integer("id").autoIncrement()
+    val name = varchar("name", 50).nullable()
+    val roles = listOf("admin")
+    override val primaryKey = PrimaryKey(id)
+}
+
+object CityTable : IntIdTable() {
+    val title = text("title")
+}
+
+object Tags : ExposedTable("tags")
+
+object Computed : Table(TABLE_NAME)
+
+const val TABLE_NAME = "computed"
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/repo/UserRepo.kt",
+        r#"package com.demo.repo
+
+import com.demo.db.CityTable
+import com.demo.db.Users
+import org.jetbrains.exposed.sql.*
+
+class UserRepo {
+    fun all() = Users.selectAll().toList()
+    fun add(value: String) {
+        Users.insert { it[name] = value }
+        CityTable.deleteWhere { title eq value }
+    }
+    fun rename() = Users.update({ Users.id eq 1 }) { it[name] = "x" }
+    fun save(value: String) {
+        Users.insert { it[name] = value }
+        Users.update { it[name] = value }
+    }
+    fun orphan() = Orders.selectAll()
+    fun local(list: List<String>) = list.select()
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/fake/Fake.kt",
+        r#"package com.demo.fake
+
+open class Table(val name: String)
+
+object Lookalike : Table("lookalike")
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut entities: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    entities.sort();
+    assert_eq!(
+        entities,
+        [
+            "data:local/demo@sql:city",
+            "data:local/demo@sql:tags",
+            "data:local/demo@sql:users"
+        ]
+    );
+    let users = node(&out.nodes, "data:local/demo@sql:users");
+    assert_eq!(users.props["framework"], "exposed");
+    assert_eq!(
+        users.props["columns"],
+        serde_json::json!([{"name": "id"}, {"name": "name"}])
+    );
+    assert_eq!(
+        node(&out.nodes, "data:local/demo@sql:city").props["columns"],
+        serde_json::json!([{"name": "id"}, {"name": "title"}])
+    );
+
+    let repo = "sym:local/demo@src/main/kotlin/com/demo/repo/UserRepo.kt#UserRepo";
+    edge(
+        &out.edges,
+        &format!("{repo}.all"),
+        "data:local/demo@sql:users",
+        "READS",
+    );
+    let insert = edge(
+        &out.edges,
+        &format!("{repo}.add"),
+        "data:local/demo@sql:users",
+        "WRITES",
+    );
+    assert_eq!(insert.props["operation"], "insert");
+    assert_eq!(insert.props["resolution"], "exposed-dsl");
+    let delete = edge(
+        &out.edges,
+        &format!("{repo}.add"),
+        "data:local/demo@sql:city",
+        "WRITES",
+    );
+    assert_eq!(delete.props["operation"], "delete");
+    assert_eq!(
+        edge(
+            &out.edges,
+            &format!("{repo}.rename"),
+            "data:local/demo@sql:users",
+            "WRITES",
+        )
+        .props["operation"],
+        "update"
+    );
+    let save = edge(
+        &out.edges,
+        &format!("{repo}.save"),
+        "data:local/demo@sql:users",
+        "WRITES",
+    );
+    assert_eq!(
+        save.props["operations"],
+        serde_json::json!(["insert", "update"])
+    );
+    assert_eq!(
+        save.props["statements"],
+        serde_json::json!(["insert", "update"])
+    );
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "exposed")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "Exposed statement receiver `Orders` is not a recovered table",
+            "computed Exposed table name",
+        ]
+    );
 }

@@ -91,7 +91,8 @@ pub struct Extraction {
     system_rebound: bool,
     /// Ktor routing DSL routes and mounts, composed at the join (AC-1023).
     ktor_routes: ktor_routes::Pending,
-    /// Room entities and DAO accesses, joined repo-wide (AC-1025).
+    /// Room entities and DAO accesses, and Exposed tables and statements,
+    /// joined repo-wide (AC-1025, AC-1027).
     room: room::Pending,
 }
 
@@ -2097,6 +2098,17 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             &mut out.nodes,
             &mut out.edges,
         );
+        // Exposed tables and DSL statements join with Room's (AC-1027).
+        exposed::extract(
+            &cx,
+            root,
+            package.as_deref(),
+            &imports,
+            &functions_by_start,
+            &mut out.room,
+            &mut out.nodes,
+            &mut out.edges,
+        );
     }
 
     // Calls: same-scope unqualified/this calls resolve locally; calls
@@ -2855,6 +2867,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 
 mod apache_http;
 mod config_read;
+mod exposed;
 mod hilt_binds;
 mod ktor_client;
 mod ktor_routes;
