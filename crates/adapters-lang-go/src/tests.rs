@@ -2076,3 +2076,196 @@ func (Missing) TableName() string { return "missing" }
     );
     assert_eq!(extraction.gorm_table_names[0].evidence.commit_sha, "def456");
 }
+
+// AC-1304 (#2163): middleware applied to a route is its endpoint's auth.
+#[test]
+fn middleware_guards_are_endpoint_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("go.mod"), "module example.com/service\n").unwrap();
+    std::fs::create_dir_all(root.join("auth")).unwrap();
+    std::fs::write(
+        root.join("auth/auth.go"),
+        r#"package auth
+
+import "net/http"
+
+func Require(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Header.Get("Authorization") == "" {
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+func Trace(next http.Handler) http.Handler { return next }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.go"),
+        r#"package main
+
+import (
+    "net/http"
+
+    "example.com/service/auth"
+    "github.com/gin-gonic/gin"
+    "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
+    "github.com/go-chi/jwtauth/v5"
+)
+
+func list(w http.ResponseWriter, r *http.Request) {}
+func show(c *gin.Context) {}
+
+func adminOnly() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        c.AbortWithStatus(403)
+    }
+}
+
+func plainMux() {
+    mux := http.NewServeMux()
+    mux.Handle("GET /private", auth.Require(http.HandlerFunc(list)))
+    mux.Handle("GET /traced", auth.Trace(http.HandlerFunc(list)))
+    mux.HandleFunc("GET /open", list)
+}
+
+func chiRoutes() {
+    r := chi.NewRouter()
+    r.Use(middleware.Logger)
+    r.Use(jwtauth.Verifier(nil))
+    r.Get("/feed", list)
+    r.With(jwtauth.Authenticator).Get("/me", list)
+    r.Group(func(g chi.Router) {
+        g.Use(auth.Require)
+        g.Get("/settings", list)
+    })
+    r.Group(func(g chi.Router) {
+        g.Use(guards["admin"])
+        g.Get("/weird", list)
+    })
+}
+
+var guards map[string]func(http.Handler) http.Handler
+
+func ginRoutes() {
+    e := gin.New()
+    e.GET("/before", show)
+    e.Use(gin.Recovery(), adminOnly())
+    e.GET("/after", show)
+    e.Use(gin.BasicAuth(nil))
+    e.GET("/last", show)
+}
+"#,
+    )
+    .unwrap();
+    let x = extract_dir(root, &id()).unwrap();
+    let auth = |endpoint: &str| {
+        x.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.id == format!("ep:local/go-service@{endpoint}"))
+            .unwrap_or_else(|| panic!("{endpoint}"))
+            .props["auth"]
+            .clone()
+    };
+    let state = |endpoint: &str| auth(endpoint)["state"].as_str().unwrap().to_string();
+
+    // A wrapper whose body answers 401 guards the route.
+    let private = auth("GET:/private");
+    assert_eq!(private["state"], "required", "{private}");
+    assert_eq!(private["authenticated"], true);
+    assert_eq!(
+        private["guards"],
+        serde_json::json!(["sym:local/go-service@auth/auth.go#Require"])
+    );
+    assert_eq!(
+        private["basis"],
+        serde_json::json!(["responds 401 in Require"])
+    );
+    assert_eq!(private["prov"]["confidence_tier"], "InferredStrong");
+    // The wrapper site and the 401 call are cited.
+    let paths: Vec<&str> = private["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["auth/auth.go", "main.go"]);
+
+    // A repository wrapper with no deny status, and no middleware at all,
+    // stay unknown, never public.
+    let traced = auth("GET:/traced");
+    assert_eq!(traced["state"], "unknown");
+    assert_eq!(
+        traced["reasons"],
+        serde_json::json!(["no_deny_status:auth.Trace", "no_guard_recovered"])
+    );
+    assert_eq!(
+        auth("GET:/open")["reasons"],
+        serde_json::json!(["no_guard_recovered"])
+    );
+
+    // chi: Use applies to every route on the router; With to one route;
+    // a Group's Use to its own routes.
+    let feed = auth("GET:/feed");
+    assert_eq!(feed["state"], "unknown");
+    assert_eq!(
+        feed["non_auth_middleware"],
+        serde_json::json!(["jwtauth.Verifier", "middleware.Logger"])
+    );
+    let me = auth("GET:/me");
+    assert_eq!(me["state"], "required", "{me}");
+    assert_eq!(me["guards"], serde_json::json!(["jwtauth.Authenticator"]));
+    assert_eq!(
+        me["basis"],
+        serde_json::json!(["library guard github.com/go-chi/jwtauth/v5.Authenticator"])
+    );
+    assert_eq!(me["prov"]["confidence_tier"], "Confirmed");
+    assert_eq!(state("GET:/settings"), "required");
+
+    // A middleware this pass cannot resolve is a Gap the endpoint depends on.
+    let weird = auth("GET:/weird");
+    assert_eq!(weird["state"], "unknown");
+    assert_eq!(
+        weird["reasons"],
+        serde_json::json!([
+            "no_guard_recovered",
+            "unreadable_middleware:guards[\"admin\"]"
+        ])
+    );
+    let gap = x
+        .nodes
+        .iter()
+        .find(|n| n.label == "Gap" && n.props["middleware"] == "guards[\"admin\"]")
+        .expect("middleware Gap");
+    assert_eq!(gap.props["prov"]["confidence_tier"], "Gap");
+    assert!(
+        edge_pairs(&x, "DEPENDS_ON").contains(&("ep:local/go-service@GET:/weird", gap.id.as_str()))
+    );
+
+    // gin: Use applies only to routes registered after it.
+    assert_eq!(state("GET:/before"), "unknown");
+    let after = auth("GET:/after");
+    assert_eq!(after["state"], "required", "{after}");
+    assert_eq!(
+        after["guards"],
+        serde_json::json!(["sym:local/go-service@main.go#adminOnly"])
+    );
+    assert_eq!(
+        after["non_auth_middleware"],
+        serde_json::json!(["gin.Recovery"])
+    );
+    let last = auth("GET:/last");
+    assert_eq!(last["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(
+        last["basis"],
+        serde_json::json!([
+            "library guard github.com/gin-gonic/gin.BasicAuth",
+            "responds 403 in adminOnly"
+        ])
+    );
+}
