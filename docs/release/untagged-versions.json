@@ -1,0 +1,27 @@
+{
+  "decision": "Recorded as never released (#1762). These versions have changelog entries but no tag, no GitHub Release and no published build. They are not tagged retroactively: a tag now would name a commit whose exact-commit CI and packaging were never verified for release, and existing tags are never moved. The next tagged version after each one contains its changes.",
+  "causes": {
+    "pending-changesets": "Changesets remained pending in the cut commit's tree (a feature PR's changeset landed on main after the Version packages branch was cut, and the squash merge carried it), so the tag job logged 'Changesets remain pending; nothing to tag' and exited successfully. Since #1762 that case fails the tag job.",
+    "polled-before-1436": "Cut before the tag job moved to the CI workflow_run trigger (#1436, 2026-10-30). The tag job then polled the cut commit's CI for at most 70 minutes while holding a runner and was not retried when it timed out or saw a non-success conclusion (#1378). The run history for this cut is no longer retained, so which of the two cannot be shown.",
+    "after-1436-unknown": "Cut after #1436 with no pending changesets. The only remaining refusals are a non-success CI conclusion on the cut commit or a missing stable CI gate, and the run history for this period is no longer retained, so which one cannot be shown."
+  },
+  "versions": [
+    {"version": "0.15.4", "cut_commit": "4c98caf3775d81d51c93d1a49047e831ece40c99", "cause": "polled-before-1436"},
+    {"version": "0.16.0", "cut_commit": "b82c8d410709714962f3c9a5839bfd2c1f04f05f", "cause": "polled-before-1436"},
+    {"version": "0.22.0", "cut_commit": "21dc4fb819439adeae7db19140517f4ac844fcea", "cause": "polled-before-1436"},
+    {"version": "0.23.1", "cut_commit": "2508c5a49195f00e59ed2325ac525e291a66f577", "cause": "pending-changesets"},
+    {"version": "0.27.0", "cut_commit": "6f7688dc45b7d29b2ccb556663a9496fc41bc1a3", "cause": "pending-changesets"},
+    {"version": "0.33.0", "cut_commit": "54d33758d8a87f8aa369d9cbcb12193ca54cf766", "cause": "polled-before-1436"},
+    {"version": "0.37.0", "cut_commit": "a348d2fe0a5e28d076c5cfac76a2ed8235ea8c8d", "cause": "pending-changesets"},
+    {"version": "0.40.0", "cut_commit": "b9709f17117964642243f6e41f189d07db43c4db", "cause": "pending-changesets"},
+    {"version": "0.42.0", "cut_commit": "5c9d151f31bcbe13a3e7fb87d6b0fd4d69e2657d", "cause": "polled-before-1436"},
+    {"version": "0.43.0", "cut_commit": "6e87ae22b0efb966e6e879d8f6cf32e5ab53d3d8", "cause": "polled-before-1436"},
+    {"version": "0.44.0", "cut_commit": "44613dd2aa4796b03cb46f97eac3d613629ef2fb", "cause": "pending-changesets"},
+    {"version": "0.45.0", "cut_commit": "05ac63ad6cb8aa9df5d16dc94418eb23fdb91b56", "cause": "polled-before-1436"},
+    {"version": "0.49.0", "cut_commit": "0b0b20f9f36e9cb2d0cc38c83f030e399995cafa", "cause": "polled-before-1436"},
+    {"version": "0.50.0", "cut_commit": "991575a2ad5deca0006d3b4b4f409b92c1856a87", "cause": "polled-before-1436"},
+    {"version": "0.52.0", "cut_commit": "e92a2efd4e46c793ede97a509c7f73bb553031e0", "cause": "after-1436-unknown"},
+    {"version": "0.53.1", "cut_commit": "f96cbdb0920e17cbec15e31e3d2515bc328a74a2", "cause": "after-1436-unknown"},
+    {"version": "0.69.0", "cut_commit": "b0a139c2bb11a0d1310f3e214e5fadc90b5702d1", "cause": "after-1436-unknown"}
+  ]
+}
