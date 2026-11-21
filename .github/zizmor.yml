@@ -15,3 +15,7 @@ rules:
       # exact head SHA, asserts it is the cut commit and runs no code from a
       # pull request; `version-pr` never runs on it.
       - version-cut.yml:5
+      # privacy-guard.yml's `workflow_run` trigger scans a same-repo PR's
+      # commits as data with PRIVACY_DENYLIST: it checks out main, never runs
+      # code from the pull request, and only writes a commit status.
+      - privacy-guard.yml:14

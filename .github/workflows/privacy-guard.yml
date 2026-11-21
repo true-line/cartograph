@@ -1,0 +1,126 @@
+name: Privacy guard
+
+# Flags a PR or a push to main whose title, body, commit metadata, commit
+# messages, changed paths or added lines contain a denied term. The terms live
+# only in the PRIVACY_DENYLIST repository secret (one term per line, matched
+# case-insensitively as whole words), so they never appear in the repository.
+# Failures name the surface that matched, never the matching text.
+#
+# The repository is public and secrets never meet pull-request code (#631), so
+# PRs are scanned from a workflow_run after CI: this workflow runs from main,
+# reads the PR's commits as data (nothing from the PR is executed), and reports
+# the result as the `privacy-guard` commit status on the PR head.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: privacy-guard-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  privacy-guard:
+    name: Privacy guard
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan for denied terms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          status() {
+            [ "$EVENT_NAME" = "workflow_run" ] || return 0
+            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state="$1" -f context=privacy-guard -f description="$2" \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
+          }
+
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            HEAD_SHA="$RUN_HEAD_SHA"
+            pr_json="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" \
+              --jq "[.[] | select(.state == \"open\" and .head.ref == env.RUN_HEAD_BRANCH)][0] // empty")"
+            if [ -z "$pr_json" ]; then
+              echo "No open PR for $RUN_HEAD_BRANCH at $HEAD_SHA; nothing to scan."
+              exit 0
+            fi
+            PR_NUMBER="$(jq -r .number <<<"$pr_json")"
+            PR_TITLE="$(jq -r '.title // ""' <<<"$pr_json")"
+            PR_BODY="$(jq -r '.body // ""' <<<"$pr_json")"
+            BASE_SHA="$(jq -r .base.sha <<<"$pr_json")"
+            git fetch --no-tags --quiet origin "+refs/pull/$PR_NUMBER/head:refs/privacy-guard/head"
+          else
+            HEAD_SHA="$PUSH_AFTER"
+            BASE_SHA="$PUSH_BEFORE"
+          fi
+
+          if [ -z "${DENYLIST//[[:space:]]/}" ]; then
+            echo "::warning::PRIVACY_DENYLIST secret is not set; privacy guard skipped."
+            status success "Skipped: PRIVACY_DENYLIST is not set"
+            exit 0
+          fi
+          status pending "Scanning"
+          terms="$RUNNER_TEMP/privacy-terms"
+          printf '%s\n' "$DENYLIST" | sed 's/\r$//' | grep -v '^[[:space:]]*$' > "$terms"
+          # No -q: grep must read its whole input, or an early match SIGPIPEs the
+          # producer and pipefail turns the match into a miss.
+          hit() { grep -iwFf "$terms" >/dev/null; }
+          failed=0
+          report() { echo "::error::Denied term found in $1."; failed=1; }
+
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            printf '%s' "$PR_TITLE" | hit && report "the PR title"
+            printf '%s' "$PR_BODY" | hit && report "the PR body"
+          fi
+
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            range="$HEAD_SHA^!"
+            diff_base="$HEAD_SHA^"
+          else
+            range="$BASE_SHA..$HEAD_SHA"
+            diff_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          fi
+
+          for sha in $(git rev-list "$range"); do
+            git show -s --format='%an%n%ae%n%cn%n%ce' "$sha" | hit && report "the author or committer of $sha"
+            git show -s --format='%B' "$sha" | hit && report "the message of $sha"
+          done
+
+          git diff -z --name-only "$diff_base" "$HEAD_SHA" | tr '\0' '\n' | hit && report "a changed file path"
+          while IFS= read -r -d '' file; do
+            git diff --no-color --unified=0 "$diff_base" "$HEAD_SHA" -- "$file" \
+              | grep -a '^+' | grep -av '^+++' | hit && report "added lines of $file"
+          done < <(git diff -z --name-only --diff-filter=AMR "$diff_base" "$HEAD_SHA")
+
+          if [ "$failed" -ne 0 ]; then
+            status failure "Denied term found; see the run log"
+            echo "Remove the denied term (refer to the person by role, e.g. \"the owner\") and push again."
+            exit 1
+          fi
+          status success "No denied terms found"
+          echo "No denied terms found."

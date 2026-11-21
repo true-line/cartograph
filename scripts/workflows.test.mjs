@@ -709,3 +709,16 @@ test('macOS release packaging runs on the owner\'s self-hosted Mac', () => {
   assert.match(job, /^ {4}timeout-minutes: 90$/mu);
   assert.doesNotMatch(triggers(workflow), /pull_request|issue_comment/u);
 });
+
+test('the privacy guard keeps its terms in a secret and never runs PR code with it', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/privacy-guard.yml'), 'utf8');
+  assert.match(workflow, /DENYLIST: \$\{\{ secrets\.PRIVACY_DENYLIST \}\}/u);
+  assert.match(triggers(workflow), /^\s{2}workflow_run:\n\s{4}workflows: \[CI\]/mu);
+  assert.match(workflow, /github\.event\.workflow_run\.head_repository\.full_name == github\.repository/u);
+  assert.match(workflow, /ref: main\n/u);
+  assert.match(workflow, /persist-credentials: false/u);
+  assert.match(workflow, /grep -iwFf "\$terms" >\/dev\/null/u);
+  assert.doesNotMatch(workflow, /grep -q/u);
+  assert.match(workflow, /read -r -d '' file/u);
+  assert.match(workflow, /context=privacy-guard/u);
+});
