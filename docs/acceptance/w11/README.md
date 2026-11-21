@@ -7,11 +7,16 @@ Cartograph output:
 
 - **H1**: `docs/api.md` in [simple-login/app](https://github.com/simple-login/app),
   the public API documentation. It was read at `master`, because the pinned
-  commit page could not be fetched. The scored run still ingests the commit
-  pinned in `bench/repos.toml`.
+  commit page could not be fetched.
 - **H2**: `DEVELOPMENT.md` in
   [simple-login/browser-extension](https://github.com/simple-login/browser-extension),
   which names the extension's screens.
+
+The scored run ingests the revisions the SimpleLogin showcase pins
+([`docs/showcases/simplelogin.md`](../../showcases/simplelogin.md)): the app at
+`4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798` and the browser extension at
+`d18b40fc774a3b477468bc608c3589a24f04c3ed`. A run at any other revision is
+not scored against this set.
 
 Keep this directory outside every model input. Recovery never reads it.
 
@@ -31,7 +36,7 @@ here, whatever the result.
 | J2 | screen | Main screen: recommendation, alias creation, existing alias | documented intent | yes |
 | J3 | client call | `GET /api/v5/alias/options?hostname=` | documented intent | yes |
 | J4 | client call | `GET /api/v2/mailboxes` for `mailbox_ids` | inferred | no |
-| J5 | client call | `POST /api/v3/alias/custom/new` with prefix, signed suffix, mailboxes | inferred | yes |
+| J5 | client call | `POST /api/v3/alias/custom/new` or `/api/v2/alias/custom/new` with prefix, signed suffix, mailboxes | inferred | yes |
 | J5a | client call | `POST /api/alias/random/new`, the alternate of J5 | inferred | no |
 | J6 | screen | New alias screen, where the user copies the alias | documented intent | yes |
 
@@ -47,6 +52,9 @@ The required order is J1 → J2 → J3 → J5 → J6.
 Score the `journeys` artifact of one exported showcase run at the pinned
 commit. Each candidate step is matched to an expected step by screen or by
 method and path, and the candidate step's own tier is recorded beside it.
+J5 matches either custom-alias version in `endpoint_any`, because public
+help does not say which one the pinned extension calls. The score records
+the version found.
 
 | Measure | Definition | Pass (proposal) |
 |---|---|---|

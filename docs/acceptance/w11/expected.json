@@ -4,7 +4,10 @@
   "target": {
     "repository": "https://github.com/simple-login/app",
     "commit": "4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798",
-    "client": "https://github.com/simple-login/browser-extension"
+    "client": {
+      "repository": "https://github.com/simple-login/browser-extension",
+      "commit": "d18b40fc774a3b477468bc608c3589a24f04c3ed"
+    }
   },
   "sources": {
     "H1": "simple-login/app docs/api.md (public API documentation, read at master)",
@@ -66,6 +69,7 @@
       "kind": "client_call",
       "name": "Create a custom alias",
       "endpoint": "POST /api/v3/alias/custom/new",
+      "endpoint_any": ["POST /api/v3/alias/custom/new", "POST /api/v2/alias/custom/new"],
       "inputs": ["Authentication header", "hostname query (optional, recommended)", "alias_prefix", "signed_suffix from J3", "mailbox_ids", "note (optional)", "name (optional)"],
       "statement": "Creating an alias with a chosen prefix posts the prefix, one signed suffix from the options and the owning mailboxes. Success is 201 with the new alias.",
       "label": "inferred",
@@ -98,7 +102,7 @@
   "unknown": [
     "The extension's route or screen names in code. Public help names the screens only in prose.",
     "Whether the extension calls GET /api/user_info or GET /api/v2/mailboxes during this journey.",
-    "Which custom-alias endpoint version the extension at the pinned period calls. Public help documents v3; ADR-0050's example label shows v2.",
+    "Which custom-alias endpoint version the pinned extension calls. Public help documents v3; ADR-0050's example label shows v2. J5 therefore matches either, and the run records which.",
     "The error screens for a refused creation (can_create false, quota, validation)."
   ]
 }
