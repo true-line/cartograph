@@ -1797,6 +1797,9 @@ func SavePlain(db *gorm.DB, p Plain) {
 func Rename(db *gorm.DB, u UserModel) {
     db.Updates(&u)
 }
+func Upsert(db *gorm.DB, c Category) {
+    db.Save(&c)
+}
 func Dynamic(db *gorm.DB, value any) {
     db.Model(value).Create(&Category{})
 }
@@ -1902,6 +1905,7 @@ func Authors(db *gorm.DB) {
         access,
         BTreeSet::from([
             row("FindUser", "READS", "UserModel", "read"),
+            row("UserModel.Follow", "READS", "FollowModel", "read"),
             row("UserModel.Follow", "WRITES", "FollowModel", "insert"),
             row("UserModel.Follow", "WRITES", "UserModel", "update"),
             row("Unfollow", "WRITES", "FollowModel", "delete"),
@@ -1911,6 +1915,7 @@ func Authors(db *gorm.DB) {
             row("Authors", "READS", "UserModel", "read"),
             row("Authors", "WRITES", "UserModel", "insert"),
             row("Rename", "WRITES", "UserModel", "update"),
+            row("Upsert", "WRITES", "Category", "update,insert"),
         ])
     );
     // An explicit table is cited from its `TableName()` method as well.

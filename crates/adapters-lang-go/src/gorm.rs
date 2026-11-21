@@ -26,9 +26,11 @@
 //! The methods map to operations as follows:
 //!
 //! - `Create` inserts.
-//! - `Save`, `Update`, `Updates`, `UpdateColumn` and `UpdateColumns` update.
+//! - `Save` updates, or inserts a row without a primary key or that no row
+//!   matches.
+//! - `Update`, `Updates`, `UpdateColumn` and `UpdateColumns` update.
 //! - `Delete` deletes.
-//! - `FirstOrCreate` reads and inserts.
+//! - `FirstOrCreate` reads (a `READS` edge) and inserts (a `WRITES` edge).
 //! - `First`, `Find`, `Take`, `Last`, `Count`, `Pluck`, `Scan`,
 //!   `FirstOrInit` read.
 //!
@@ -491,7 +493,8 @@ fn table_name(cx: &FileCx<'_>, method: TsNode<'_>, dir: &str, out: &mut Extracti
 fn operation(method: &str) -> Option<(&'static [&'static str], bool)> {
     Some(match method {
         "Create" => (&["insert"], true),
-        "Save" | "Update" | "Updates" | "UpdateColumn" | "UpdateColumns" => (&["update"], true),
+        "Save" => (&["update", "insert"], true),
+        "Update" | "Updates" | "UpdateColumn" | "UpdateColumns" => (&["update"], true),
         "Delete" => (&["delete"], true),
         "FirstOrCreate" => (&["read", "insert"], true),
         "First" | "Find" | "Take" | "Last" | "Count" | "Pluck" | "Scan" | "FirstOrInit" => {
@@ -562,6 +565,22 @@ fn access(
     let dst = key(&package, &type_name);
     // A write whose type is no recovered model is a Gap at the join.
     let unresolved = write.then(|| gap_facts(cx, call, argument, &src, label));
+    // `FirstOrCreate` looks the row up before it inserts one.
+    if write && operations.contains(&"read") {
+        out.pending_gorm.push(Edge {
+            props: serde_json::json!({
+                "unresolved": null,
+                "operation": "read",
+                "operations": ["read"],
+                "method": method,
+                "resolution": "gorm-model",
+                "prov": cx.prov_with_confidence(&call, ConfidenceTier::InferredStrong, &format!("READS {src} -> {type_name}")),
+            }),
+            src: src.clone(),
+            dst: dst.clone(),
+            label: "READS".into(),
+        });
+    }
     out.pending_gorm.push(Edge {
         props: serde_json::json!({
             "unresolved": unresolved,
