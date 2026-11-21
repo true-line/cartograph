@@ -141,6 +141,14 @@ relinking, toolchain, IaC state, traces or plugin inputs. Human acceptance still
 cannot certify freshness or upgrade producing tier. Full H3 additionally requires
 directed-slot proof, conflict handling and a shared curated projection.
 
+Managed clones (AC-1022, #385): direct clone and remote manifest recovery
+capture the selected TS/JS files from the cloned commit's Git objects with
+`capture_git`, so EOL conversion, checkout filters and later checkout edits
+cannot change parsed or cited bytes. A selected path that is not a blob of that
+commit fails the recovery closed; there is no working-tree fallback. Local
+folders keep a working-tree capture, and a clean local checkout is not
+automatically treated as blob-verified.
+
 Tests exercise canonical membership, raw changes outside AST spans, distinct source
 identities, bounded and symlink-safe acquisition, exact Git objects versus checkout
 bytes, missing objects, strict encoding/ranges, atomic capacity failures, corrupt
