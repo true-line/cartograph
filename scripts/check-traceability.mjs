@@ -198,12 +198,17 @@ const expandTestRange = (cell) => {
 // so the expected T -> AC pairing is derivable and enforced below.
 const reservedTestIds = new Set();
 const expectedAcForTest = new Map();
-for (const line of matrixSrc.split('\n')) {
+const matrixRows = [
+  ...baseMatrixSrc.split('\n').map((line) => ({ line, fragment: false })),
+  ...fragmentSrcs.flatMap((src) => src.split('\n').map((line) => ({ line, fragment: true }))),
+];
+for (const { line, fragment } of matrixRows) {
   const row = line.match(/^\|\s*(US-\d{4})\s*\|([^|]*)\|/u);
   if (!row) continue;
   const acs = [...expandAcRange(row[2])];
   const tids = [...expandTestRange(line)];
-  if (tids.length > 0 && tids.length !== acs.length) {
+  // A fragment row is new, so it reserves a test id for every AC it maps.
+  if ((fragment || tids.length > 0) && tids.length !== acs.length) {
     fail(
       `${row[1]}: US-TM reserves ${tids.length} test ids for ${acs.length} ACs — ranges must pair 1:1`,
     );
