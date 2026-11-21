@@ -852,3 +852,150 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
         .collect();
     assert_eq!(entries.len(), 9, "{entries:?}");
 }
+
+/// AC-1104: Kotlin mains (Spring Boot and Ktor), listeners, `@Scheduled`
+/// functions and runners are starts by kind, proven by imports; lookalikes,
+/// class members named `main` and test sources start nothing.
+#[test]
+fn kotlin_mains_listeners_schedules_and_runners_are_starts() {
+    let app = "src/main/kotlin/com/acme/App.kt";
+    let orders = "src/main/kotlin/com/acme/Orders.kt";
+    let symbols = BTreeSet::from([
+        format!("sym:{REPO}@{app}#main"),
+        format!("sym:{REPO}@{orders}#Orders.onOrder"),
+    ]);
+    let out = extract_with(
+        &[
+            (
+                app,
+                "package com.acme\n\nimport org.springframework.boot.autoconfigure.SpringBootApplication\nimport org.springframework.boot.runApplication\n\n@SpringBootApplication\nclass App\n\nfun main(args: Array<String>) {\n    runApplication<App>(*args)\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/web/Hello.kt",
+                "package com.acme.web\n\nimport org.springframework.web.bind.annotation.RestController\n\n@RestController\nclass Hello\n",
+            ),
+            (
+                orders,
+                "package com.acme\n\nimport org.springframework.kafka.annotation.KafkaListener\nimport org.springframework.amqp.rabbit.annotation.*\n\nclass Orders {\n    @KafkaListener(topics = [\"orders\", \"refunds\"], groupId = \"g\")\n    fun onOrder(m: String) {}\n\n    @RabbitListener(queues = [\"mail\"])\n    fun onMail(m: String) {}\n\n    @JmsListener(destination = \"q\")\n    fun notProven(m: String) {}\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/Jobs.kt",
+                "package com.acme\n\nimport org.springframework.scheduling.annotation.Scheduled\nimport org.springframework.boot.CommandLineRunner\nimport org.springframework.boot.ApplicationRunner\nimport org.springframework.context.annotation.Bean\n\nclass Jobs : CommandLineRunner {\n    @Scheduled(cron = \"0 0 * * * *\")\n    fun purge() {}\n\n    override fun run(vararg args: String?) {}\n\n    fun run(times: Int) {}\n\n    @Bean\n    fun seed(): ApplicationRunner = ApplicationRunner { }\n\n    fun main(args: Array<String>) {}\n\n    companion object {\n        @JvmStatic\n        fun main(args: Array<String>) {}\n    }\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/api/Server.kt",
+                "package com.acme.api\n\nimport io.ktor.server.engine.embeddedServer\nimport io.ktor.server.netty.Netty\n\nobject Server {\n    @JvmStatic\n    fun main(vararg args: String) {\n        embeddedServer(Netty, port = 8080) { }.start(wait = true)\n    }\n}\n",
+            ),
+            (
+                "tools/Migrate.kt",
+                "fun main() {\n    println(\"migrate\")\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/Fake.kt",
+                "package com.acme.fake\n\nfun embeddedServer() {}\n\nfun main(args: Array<Int>) { embeddedServer() }\n",
+            ),
+            ("src/test/kotlin/com/acme/AppTest.kt", "fun main() {}\n"),
+        ],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let main = entry(&out, app, "main");
+    assert_eq!(main.props["kind"], "http-server");
+    assert_eq!(main.props["how"], "fun main");
+    assert_eq!(
+        main.props["kind_evidence"],
+        "src/main/kotlin/com/acme/web/Hello.kt"
+    );
+    assert_eq!(
+        entry_edge(&out, app, "main").dst,
+        format!("sym:{REPO}@{app}#main")
+    );
+    let server = "src/main/kotlin/com/acme/api/Server.kt";
+    let ktor = entry(&out, server, "Server.main");
+    assert_eq!(ktor.props["kind"], "http-server");
+    assert_eq!(ktor.props["kind_evidence"], server);
+    let kafka = entry(&out, orders, "Orders.onOrder");
+    assert_eq!(kafka.props["kind"], "queue-consumer");
+    assert_eq!(kafka.props["how"], "@KafkaListener");
+    assert_eq!(
+        kafka.props["sources"],
+        serde_json::json!(["orders", "refunds"])
+    );
+    assert_eq!(
+        entry_edge(&out, orders, "Orders.onOrder").dst,
+        format!("sym:{REPO}@{orders}#Orders.onOrder")
+    );
+    assert_eq!(
+        entry(&out, orders, "Orders.onMail").props["sources"],
+        serde_json::json!(["mail"])
+    );
+    assert_eq!(
+        entry_edge(&out, orders, "Orders.onMail").dst,
+        format!("file:{REPO}@{orders}")
+    );
+    let jobs = "src/main/kotlin/com/acme/Jobs.kt";
+    let purge = entry(&out, jobs, "Jobs.purge");
+    assert_eq!(purge.props["kind"], "scheduled-job");
+    assert_eq!(purge.props["schedule"], "cron = \"0 0 * * * *\"");
+    assert_eq!(
+        entry(&out, jobs, "Jobs.run").props["how"],
+        "CommandLineRunner"
+    );
+    assert_eq!(entry(&out, jobs, "Jobs.seed").props["kind"], "startup-task");
+    assert_eq!(entry(&out, jobs, "Jobs.main").props["kind"], "process");
+    assert_eq!(
+        entry(&out, "tools/Migrate.kt", "main").props["kind"],
+        "command"
+    );
+    let entries: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 9, "{entries:?}");
+}
+
+/// AC-1104: a Kotlin main is a server only when it calls the server start;
+/// a commented-out or longer-package import is no Spring web evidence; an
+/// extension `main` is no JVM main.
+#[test]
+fn kotlin_mains_need_a_start_call_and_a_parsed_web_import() {
+    let app = "src/main/kotlin/com/acme/App.kt";
+    let tool = "src/main/kotlin/com/acme/Tool.kt";
+    let out = extract_with(
+        &[
+            (
+                app,
+                "package com.acme\n\nimport org.springframework.boot.runApplication\n\nclass App\n\nfun main(args: Array<String>) {\n    runApplication<App>(*args)\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/web/Old.kt",
+                "package com.acme.web\n\n/*\nimport org.springframework.web.bind.annotation.RestController\n*/\nimport org.springframework.web.bind.annotationx.Thing\n",
+            ),
+            (
+                "src/main/java/com/acme/Legacy.java",
+                "package com.acme;\n// import org.springframework.web.bind.annotation.GetMapping;\nclass Legacy {}\n",
+            ),
+            (
+                tool,
+                "package com.acme\n\nimport io.ktor.server.engine.embeddedServer\nimport org.springframework.boot.SpringApplication\n\nfun main() {\n    println(SpringApplication::class)\n    val start = ::embeddedServer\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/Ext.kt",
+                "package com.acme\n\nclass Service\n\nfun Service.main() {}\n",
+            ),
+        ],
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(entry(&out, app, "main").props["kind"], "process");
+    assert_eq!(entry(&out, tool, "main").props["kind"], "process");
+    let entries: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 2, "{entries:?}");
+}
