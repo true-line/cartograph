@@ -6681,6 +6681,36 @@ interface CrudRepository<T, ID>
 interface ShadowRepository : CrudRepository<Customer, Long>
 "#,
     );
+    // Kotlin precedence: a same-package declaration hides a star-imported
+    // entity or repository of the same name (Codex review on #2171).
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/hidden/Hidden.kt",
+        r#"package com.shop.hidden
+
+import com.shop.model.*
+import com.shop.repo.*
+import org.springframework.data.repository.CrudRepository
+
+interface HiddenRepository : CrudRepository<Customer, Long>
+
+class Caller(private val repo: CustomerRepository) {
+    fun list() = repo.findAll()
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/hidden/Types.kt",
+        r#"package com.shop.hidden
+
+class Customer(val id: Long)
+
+class CustomerRepository {
+    fun findAll(): List<Customer> = emptyList()
+}
+"#,
+    );
     let out = extract_dir(dir.path(), &id()).unwrap();
     let customer = "data:local/demo@jpa:Customer";
     let mut repository: Vec<(&str, &str)> = out
@@ -6755,6 +6785,7 @@ interface ShadowRepository : CrudRepository<Customer, Long>
     assert_eq!(
         gaps,
         [
+            "Spring Data repository entity `Customer` is not a recovered JPA entity",
             "Spring Data repository entity `Customer` is not a recovered JPA entity",
             "Spring Data repository entity `Plain` is not a recovered JPA entity",
         ]

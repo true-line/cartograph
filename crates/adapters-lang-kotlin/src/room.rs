@@ -101,6 +101,8 @@ pub(crate) struct Repository {
 #[derive(Debug, Clone)]
 pub(crate) struct RepositoryCall {
     src: String,
+    /// The calling file, for which same-package declarations are visible.
+    path: String,
     /// The FQNs the receiver's declared type can denote.
     candidates: Vec<String>,
     label: &'static str,
@@ -153,6 +155,7 @@ impl Pending {
     /// resolves.
     pub(crate) fn push_repository_call(
         &mut self,
+        path: &str,
         src: String,
         candidates: Vec<String>,
         writes: bool,
@@ -160,6 +163,7 @@ impl Pending {
     ) {
         self.repository_calls.push(RepositoryCall {
             src,
+            path: path.to_string(),
             candidates,
             label: if writes { "WRITES" } else { "READS" },
             props,
@@ -1025,15 +1029,19 @@ pub(crate) fn resolve(
             }
         }
     }
-    let unique_jpa = |candidates: &[String]| -> Option<String> {
-        let found: BTreeSet<&String> = candidates
-            .iter()
-            .filter_map(|fqn| by_class.get(&("jpa", fqn.clone())).and_then(Option::as_ref))
-            .collect();
-        match found.into_iter().collect::<Vec<_>>()[..] {
-            [id] => Some(id.clone()),
-            _ => None,
-        }
+    // A type name resolves in Kotlin's precedence (the order `candidates`
+    // lists): the first candidate the repository declares at all decides,
+    // so a same-package non-entity hides a star-imported entity of that
+    // name rather than falling through to it.
+    let declared = |fqn: &str, path: &str| {
+        shadowed.iter().any(|shadow| shadow.obscures(fqn, path))
+            || ["jpa", "sql"]
+                .iter()
+                .any(|storage| by_class.contains_key(&(*storage, fqn.to_string())))
+    };
+    let unique_jpa = |candidates: &[String], path: &str| -> Option<String> {
+        let first = candidates.iter().find(|fqn| declared(fqn, path))?;
+        by_class.get(&("jpa", first.clone())).cloned().flatten()
     };
     // Spring Data repositories (AC-1100): each interface binds the JPA
     // entity its type argument names. An interface FQN declared twice binds
@@ -1043,7 +1051,7 @@ pub(crate) fn resolve(
         let entity = if obscured(&repository.shadows, &repository.path) {
             None
         } else {
-            unique_jpa(&repository.entity)
+            unique_jpa(&repository.entity, &repository.path)
         };
         match entity {
             Some(entity) => {
@@ -1067,13 +1075,17 @@ pub(crate) fn resolve(
     }
     // Every call site is its own occurrence: the reconciler unions repeated
     // `(src, dst, label)` evidence, so each keeps its citation.
+    // The receiver's type resolves the same way: the first declared
+    // candidate must itself be a repository.
     for call in pending.repository_calls {
-        let matched: Vec<&Option<String>> = call
+        let Some(first) = call
             .candidates
             .iter()
-            .filter_map(|fqn| repository_entity.get(fqn))
-            .collect();
-        let [Some(entity)] = matched.as_slice() else {
+            .find(|fqn| repository_entity.contains_key(*fqn) || declared(fqn, &call.path))
+        else {
+            continue;
+        };
+        let Some(Some(entity)) = repository_entity.get(first) else {
             continue;
         };
         edges.push(Edge {

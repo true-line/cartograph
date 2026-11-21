@@ -2280,6 +2280,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         {
             let label = if writes { "WRITES" } else { "READS" };
             out.room.push_repository_call(
+                path,
                 src.clone(),
                 type_candidates(&cx, &imports, package.as_deref(), &local_types, call, ty),
                 writes,
