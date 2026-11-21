@@ -7,15 +7,18 @@
 //! `@Table(name = …)` or else the entity name, and its `fields` the stored
 //! properties (`val`/`var` constructor parameters and body properties with
 //! a backing field) with their spelled type, `@Id`/`@EmbeddedId` and a
-//! literal `@Column(name = …)`. `@Transient` properties are not fields.
+//! literal `@Column(name = …)`. `@Transient` properties are not fields:
+//! JPA's, or Kotlin's default-imported one unless a same-package
+//! `Transient` obscures it.
 //!
 //! A relation property (`@OneToOne`, `@ManyToOne`, `@OneToMany`,
 //! `@ManyToMany`) is a `REFERENCES` edge to the target entity: the
 //! property's type, the element type of a collection for a to-many, or a
 //! `targetEntity = X::class`. Targets resolve at the directory join through
 //! the shared persistence join ([`super::room`]) by the file's imports or
-//! package. A computed entity or table name, an unprovable target and a
-//! target that is no recovered entity are Gaps. Spring Data repositories
+//! package, among JPA entities only. A computed entity or table name, an
+//! unprovable target, a target that is no recovered entity and an entity
+//! name two classes declare are Gaps. Spring Data repositories
 //! are not read here.
 
 use core_graph::{Edge, Node};
@@ -74,19 +77,42 @@ fn literal_argument(
     }
 }
 
-/// Whether a property is `@Transient`: JPA's, or Kotlin's own
-/// (`kotlin.jvm.Transient`, imported by default).
-fn transient(annotations: &[AnnotationUse<'_>], imports: &Imports, package: Option<&str>) -> bool {
-    annotations.iter().any(|annotation| {
-        annotation.simple == "Transient"
-            && (proof_in(PACKAGES, annotation, imports, package, "Transient").is_some()
-                || annotation.spelled == "kotlin.jvm.Transient"
-                || (annotation.spelled == "Transient"
-                    && imports
-                        .bindings
-                        .get("Transient")
-                        .is_none_or(|bound| bound == "kotlin.jvm.Transient")))
-    })
+/// How a property's `@Transient` reads.
+enum Transience {
+    /// No `@Transient`: a field.
+    Persistent,
+    /// JPA's or an explicit `kotlin.jvm.Transient`: not a field.
+    Transient,
+    /// An unqualified, unimported `@Transient`: Kotlin's default-imported
+    /// one, unless a same-package `Transient` (this FQN) obscures it.
+    UnlessObscured(String),
+}
+
+fn transience(
+    annotations: &[AnnotationUse<'_>],
+    imports: &Imports,
+    package: Option<&str>,
+) -> Transience {
+    let mut found = Transience::Persistent;
+    for annotation in annotations {
+        if annotation.simple != "Transient" {
+            continue;
+        }
+        if proof_in(PACKAGES, annotation, imports, package, "Transient")
+            .is_some_and(|shadows| shadows.is_empty())
+            || annotation.spelled == "kotlin.jvm.Transient"
+            || imports.bindings.get("Transient").map(String::as_str) == Some("kotlin.jvm.Transient")
+        {
+            return Transience::Transient;
+        }
+        if annotation.spelled == "Transient" && !imports.bindings.contains_key("Transient") {
+            found = Transience::UnlessObscured(match package {
+                Some(package) => format!("{package}.Transient"),
+                None => "Transient".to_string(),
+            });
+        }
+    }
+    found
 }
 
 /// A property's declared type node.
@@ -231,7 +257,8 @@ fn entity(
     let mut fields = Vec::new();
     for (declaration, field_name) in stored_properties(cx, class) {
         let field_annotations = declaration_annotations(cx, declaration);
-        if transient(&field_annotations, imports, package) {
+        let transience = transience(&field_annotations, imports, package);
+        if matches!(transience, Transience::Transient) {
             continue;
         }
         let field_name = cx.text(&field_name).to_string();
@@ -251,7 +278,11 @@ fn entity(
         let relation = ["OneToOne", "ManyToOne", "OneToMany", "ManyToMany"]
             .iter()
             .find_map(|marker| find(&field_annotations, imports, package, marker));
-        if let Some((annotation, relation_shadows)) = relation {
+        if let Transience::UnlessObscured(shadow) = transience {
+            // Kept only if the join finds a same-package `Transient`; a
+            // property that is probably transient asserts no relation.
+            field["unless_obscured"] = shadow.into();
+        } else if let Some((annotation, relation_shadows)) = relation {
             field["relation"] = annotation.simple.clone().into();
             relate(
                 cx,
@@ -291,7 +322,12 @@ fn entity(
     if let Some(schema) = schema {
         props["schema"] = schema.into();
     }
-    pending.push_entity(
+    let duplicate_prov = cx.prov_with_confidence(
+        &class,
+        core_prov::ConfidenceTier::Gap,
+        &format!("Gap duplicate {id}"),
+    );
+    pending.push_jpa_entity(
         fqn,
         cx.path,
         shadows,
@@ -300,6 +336,7 @@ fn entity(
             label: "DataEntity".into(),
             props,
         },
+        duplicate_prov,
     );
 }
 
@@ -369,12 +406,11 @@ fn relate(
         "REFERENCES",
         &format!("JPA relation target `{target}` is not a recovered entity"),
     );
-    pending.push_class_access(
+    pending.push_jpa_reference(
         cx.path,
         shadows,
         id,
         candidates(&target, imports, package),
-        "REFERENCES",
         props,
         gap,
     );

@@ -26,7 +26,7 @@
 
 use adapters_fw::sql::{entity_id, parse_with_gaps};
 use core_graph::{Edge, Node};
-use core_prov::ConfidenceTier;
+use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tree_sitter::Node as TsNode;
 
@@ -48,6 +48,13 @@ pub(crate) struct Entity {
     /// Same-package names that would obscure the star-imported proof.
     shadows: Vec<String>,
     node: Node,
+    /// The join index this entity lives in: `sql` (Room and Exposed tables)
+    /// or `jpa`. A lookup never crosses indexes.
+    storage: &'static str,
+    /// A JPA entity's provenance for the Gap that replaces it when another
+    /// class declares the same entity name (built here: the join cannot
+    /// recompute a span).
+    duplicate_prov: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +75,8 @@ pub(crate) struct Access {
     label: &'static str,
     props: serde_json::Value,
     gap: (Node, Edge),
+    /// The entity index the target is looked up in.
+    storage: &'static str,
 }
 
 /// One file's Room facts awaiting the directory join.
@@ -97,6 +106,50 @@ impl Pending {
             path: path.to_string(),
             shadows,
             node,
+            storage: "sql",
+            duplicate_prov: None,
+        });
+    }
+
+    /// A JPA entity (AC-1028), joined only with JPA entities.
+    pub(crate) fn push_jpa_entity(
+        &mut self,
+        fqn: String,
+        path: &str,
+        shadows: Vec<String>,
+        node: Node,
+        duplicate_prov: serde_json::Value,
+    ) {
+        self.entities.push(Entity {
+            fqn,
+            path: path.to_string(),
+            shadows,
+            node,
+            storage: "jpa",
+            duplicate_prov: Some(duplicate_prov),
+        });
+    }
+
+    /// A JPA relation from entity `src` to the JPA entity one of
+    /// `candidates` declares, or `gap` when none resolves.
+    pub(crate) fn push_jpa_reference(
+        &mut self,
+        path: &str,
+        shadows: Vec<String>,
+        src: &str,
+        candidates: Vec<String>,
+        props: serde_json::Value,
+        gap: (Node, Edge),
+    ) {
+        self.accesses.push(Access {
+            path: path.to_string(),
+            shadows,
+            src: src.to_string(),
+            target: Target::Class(candidates),
+            label: "REFERENCES",
+            props,
+            gap,
+            storage: "jpa",
         });
     }
 
@@ -121,6 +174,7 @@ impl Pending {
             label,
             props,
             gap,
+            storage: "sql",
         });
     }
 
@@ -623,6 +677,8 @@ pub(crate) fn extract(
                         "prov": cx.prov(&node, &format!("DataEntity {id}")),
                     }),
                 },
+                storage: "sql",
+                duplicate_prov: None,
             });
         }
         let Some((_, dao_shadows)) = find(&annotations, imports, package, "Dao") else {
@@ -704,6 +760,7 @@ pub(crate) fn extract(
                         target: Target::Table(table.clone()),
                         label,
                         props,
+                        storage: "sql",
                         gap: gap_pair(
                             cx,
                             query.node,
@@ -768,6 +825,7 @@ pub(crate) fn extract(
                 target: Target::Class(candidates(&ty, imports, package)),
                 label: "WRITES",
                 props,
+                storage: "sql",
                 gap: gap_pair(
                     cx,
                     at,
@@ -794,21 +852,74 @@ pub(crate) fn resolve(
             .iter()
             .any(|name| shadowed.iter().any(|shadow| shadow.obscures(name, path)))
     };
+    // A JPA entity name two classes declare names no single class: both
+    // become one Gap and the id resolves to nothing (as in Java).
+    let mut claims: BTreeMap<String, Vec<(String, serde_json::Value)>> = BTreeMap::new();
+    for entity in &pending.entities {
+        if let Some(prov) = &entity.duplicate_prov
+            && !obscured(&entity.shadows, &entity.path)
+        {
+            claims
+                .entry(entity.node.id.clone())
+                .or_default()
+                .push((entity.fqn.clone(), prov.clone()));
+        }
+    }
+    let mut collided: BTreeSet<String> = BTreeSet::new();
+    for (id, mut declared) in claims {
+        if declared.len() < 2 {
+            continue;
+        }
+        declared.sort_by(|a, b| a.0.cmp(&b.0));
+        let fqns: Vec<&String> = declared.iter().map(|(fqn, _)| fqn).collect();
+        nodes.push(Node {
+            id: format!("gap:jpa:duplicate:{id}"),
+            label: "Gap".into(),
+            props: serde_json::json!({
+                "reason": "JPA entity name is declared by more than one class",
+                "attempted_tiers": ["T0"],
+                "framework": "jpa",
+                "language": "kotlin",
+                "fqns": fqns,
+                "prov": declared[0].1,
+            }),
+        });
+        collided.insert(id);
+    }
     let mut by_table: BTreeMap<String, String> = BTreeMap::new();
-    let mut by_class: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut by_class: BTreeMap<(&'static str, String), Option<String>> = BTreeMap::new();
     let mut emitted: BTreeMap<String, usize> = BTreeMap::new();
-    for entity in pending.entities {
+    for mut entity in pending.entities {
         if obscured(&entity.shadows, &entity.path) {
             continue;
         }
         let id = entity.node.id.clone();
-        let table = entity.node.props["table"]
-            .as_str()
-            .unwrap_or_default()
-            .to_lowercase();
-        by_table.insert(table, id.clone());
+        if collided.contains(&id) {
+            by_class.insert((entity.storage, entity.fqn), None);
+            continue;
+        }
+        if let Some(fields) = entity.node.props["fields"].as_array_mut() {
+            // A default-imported `@Transient` holds unless a same-package
+            // `Transient` obscures it (AC-1028).
+            fields.retain_mut(|field| match field["unless_obscured"].take() {
+                serde_json::Value::String(shadow) => obscured(&[shadow], &entity.path),
+                _ => true,
+            });
+            for field in fields.iter_mut() {
+                if let Some(object) = field.as_object_mut() {
+                    object.remove("unless_obscured");
+                }
+            }
+        }
+        if entity.storage == "sql" {
+            let table = entity.node.props["table"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase();
+            by_table.insert(table, id.clone());
+        }
         by_class
-            .entry(entity.fqn.clone())
+            .entry((entity.storage, entity.fqn.clone()))
             .and_modify(|unique| *unique = None)
             .or_insert(Some(id.clone()));
         match emitted.get(&id) {
@@ -835,7 +946,7 @@ pub(crate) fn resolve(
     let mut seen = BTreeSet::new();
     let mut emitted_edges: HashMap<(String, String, &'static str), usize> = HashMap::new();
     for access in pending.accesses {
-        let dst = if obscured(&access.shadows, &access.path) {
+        let dst = if obscured(&access.shadows, &access.path) || collided.contains(&access.src) {
             None
         } else {
             match &access.target {
@@ -843,7 +954,11 @@ pub(crate) fn resolve(
                 Target::Class(candidates) => {
                     let found: BTreeSet<&String> = candidates
                         .iter()
-                        .filter_map(|fqn| by_class.get(fqn).and_then(Option::as_ref))
+                        .filter_map(|fqn| {
+                            by_class
+                                .get(&(access.storage, fqn.clone()))
+                                .and_then(Option::as_ref)
+                        })
                         .collect();
                     match found.into_iter().collect::<Vec<_>>()[..] {
                         [id] => Some(id.clone()),
@@ -855,15 +970,21 @@ pub(crate) fn resolve(
         match dst {
             Some(dst) => {
                 let key = (access.src.clone(), dst.clone(), access.label);
+                let relation = access.storage == "jpa";
                 match emitted_edges.get(&key) {
+                    Some(&at) if relation => merge_relations(&mut edges[at].props, &access.props),
                     Some(&at) => merge_access_props(&mut edges[at].props, &access.props),
                     None => {
                         emitted_edges.insert(key, edges.len());
+                        let mut props = access.props;
+                        if relation {
+                            props["relations"] = serde_json::json!([relation_props(&props)]);
+                        }
                         edges.push(Edge {
                             src: access.src,
                             dst,
                             label: access.label.into(),
-                            props: access.props,
+                            props,
                         });
                     }
                 }
@@ -880,13 +1001,61 @@ pub(crate) fn resolve(
 }
 
 /// Folds a second access of the same table by the same function into the
-/// edge already emitted, keeping the union of their operations,
-/// statements and relation fields, so an `insert` then an `update` keep both.
+/// edge already emitted, keeping the union of their operations and
+/// statements, so an `insert` then an `update` keep both.
 fn merge_access_props(kept: &mut serde_json::Value, other: &serde_json::Value) {
     union(kept, other, "operations", "operation");
     union(kept, other, "statements", "statement");
-    // Two JPA relation properties to one entity (AC-1028).
-    union(kept, other, "fields", "field");
+}
+
+/// One JPA relation field's metadata, as the Java reader's `relations`
+/// entries carry it.
+fn relation_props(props: &serde_json::Value) -> serde_json::Value {
+    let mut relation = serde_json::Map::new();
+    for key in [
+        "field",
+        "relation",
+        "cardinality",
+        "owning",
+        "mapped_by",
+        "join_column",
+        "join_table",
+    ] {
+        if let Some(value) = props.get(key) {
+            relation.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(relation)
+}
+
+/// Folds a second JPA relation field to the same target into the emitted
+/// edge, as the Java reader does: the per-field metadata in `relations`,
+/// sorted by field, and provenance citing every field (AC-1028).
+fn merge_relations(kept: &mut serde_json::Value, other: &serde_json::Value) {
+    let mut relations = kept["relations"].as_array().cloned().unwrap_or_default();
+    relations.push(relation_props(other));
+    relations.sort_by(|a, b| a["field"].as_str().cmp(&b["field"].as_str()));
+    let mut evidence: Vec<EvidenceRef> = Vec::new();
+    for side in [&*kept, other] {
+        if let Ok(prov) = serde_json::from_value::<Provenance>(side["prov"].clone()) {
+            evidence.extend(prov.evidence);
+        }
+    }
+    let fact = serde_json::to_vec(&serde_json::json!({ "relations": relations }))
+        .expect("relations serialize");
+    let prov = Provenance::new(
+        Tier::Deterministic,
+        ConfidenceTier::Confirmed,
+        evidence,
+        super::EXTRACTOR_ID,
+        &fact,
+    )
+    .expect("Deterministic confidence is within its ceiling");
+    *kept = serde_json::json!({
+        "framework": "jpa",
+        "relations": relations,
+        "prov": serde_json::to_value(prov).expect("provenance serializes"),
+    });
 }
 
 /// `kept[plural]` becomes the distinct values of both sides' `plural`
