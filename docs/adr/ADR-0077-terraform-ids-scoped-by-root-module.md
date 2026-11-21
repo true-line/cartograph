@@ -50,8 +50,10 @@ picks one, chosen to be the safest for projects that already hold a graph.
    matches nodes with neither prop, exactly as before. When it matches none
    of those and the repository has exactly one root module elsewhere (a lone
    `infra/` or `terraform/` directory, the common layout), it is that
-   module's state, so existing projects keep their observed values. With two
-   or more such root modules nothing says which one it belongs to: nothing
+   module's state, so existing projects keep their observed values. Every
+   directory the walk reads Terraform from counts as a root module unless it
+   is a local module's source, including one that declares no resource. With
+   two or more such root modules nothing says which one it belongs to: nothing
    is applied and a T1 Gap `gap:tf-state-root:{repo}@` names the root
    modules and cites the state file. Declaring one state per root module in
    the manifest is a later increment.

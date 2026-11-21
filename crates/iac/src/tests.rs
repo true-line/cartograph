@@ -1199,6 +1199,42 @@ resource "aws_sns_topic" "alerts" { kms_master_key_id = aws_kms_key.missing.arn 
 }
 
 #[test]
+fn every_root_module_directory_is_reported_even_without_resources() {
+    // AC-1501: a root module that declares no resource is still a root
+    // module, so observed state is not tied to the other one by default;
+    // child-module directories and the repository root are not listed.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("envs/prod")).unwrap();
+    std::fs::create_dir_all(dir.path().join("envs/staging")).unwrap();
+    std::fs::create_dir_all(dir.path().join("modules/q")).unwrap();
+    std::fs::write(
+        dir.path().join("main.tf"),
+        r#"resource "aws_sqs_queue" "r" {}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("envs/prod/main.tf"),
+        r#"module "q" { source = "../../modules/q" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("envs/staging/variables.tf"),
+        r#"variable "region" {}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("modules/q/main.tf"),
+        r#"resource "aws_sqs_queue" "q" {}"#,
+    )
+    .unwrap();
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(
+        ex.root_modules,
+        BTreeSet::from(["envs/prod".to_string(), "envs/staging".to_string()])
+    );
+}
+
+#[test]
 fn resource_id_from_node_keeps_the_source_scope() {
     // AC-1500: the policy-document chase rebuilds a target from its source's
     // id and must keep that source's root-module scope.
