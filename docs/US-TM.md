@@ -34,7 +34,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0027 | AC-0140..0147 | app, ingest, core-graph, ui | H3 | — | ADR-0019, ADR-0023 | T-0140..0147 |
 
-| US-0028 | AC-0148..0155, AC-0280, AC-1019, AC-1022, AC-1024, AC-1026, AC-1029, AC-1031, AC-1033, AC-1035, AC-1037, AC-1039, AC-0282, AC-0283, AC-0292, AC-0299, AC-0301, AC-0314, AC-0319, AC-0373, AC-0497, AC-0503, AC-0838, AC-0839, AC-0822, AC-0836, AC-0837 | adapters-lang-ts, source-capture, core-graph, ingest, app (retained path identity and no-follow revalidation), ui | H3 | — | ADR-0024, ADR-0030, ADR-0039, ADR-0046 | T-0148..0155, T-0280, T-1019, T-1022, T-1024, T-1026, T-1029, T-1031, T-1033, T-1035, T-1037, T-1039, T-0282, T-0283, T-0292, T-0299, T-0301, T-0314, T-0319, T-0373, T-0497, T-0503, T-0838, T-0839, T-0822, T-0836, T-0837 |
+| US-0028 | AC-0148..0155, AC-0280, AC-1019, AC-1022, AC-1024, AC-1026, AC-1029, AC-1031, AC-1033, AC-1035, AC-1037, AC-1039, AC-1041, AC-0282, AC-0283, AC-0292, AC-0299, AC-0301, AC-0314, AC-0319, AC-0373, AC-0497, AC-0503, AC-0838, AC-0839, AC-0822, AC-0836, AC-0837 | adapters-lang-ts, source-capture, core-graph, ingest, app (retained path identity and no-follow revalidation), ui | H3 | — | ADR-0024, ADR-0030, ADR-0039, ADR-0046, ADR-0080 | T-0148..0155, T-0280, T-1019, T-1022, T-1024, T-1026, T-1029, T-1031, T-1033, T-1035, T-1037, T-1039, T-1041, T-0282, T-0283, T-0292, T-0299, T-0301, T-0314, T-0319, T-0373, T-0497, T-0503, T-0838, T-0839, T-0822, T-0836, T-0837 |
 | US-0029 | AC-0156..0163, AC-0823 | app (durable Windows NTFS job storage), ui | post-M10 | — | ADR-0025 | T-0156..0163, T-0823 |
 
 | US-0030 | AC-0164..0171 | adapters-lang-ts, core-graph, spec, context-hub, app, ui | H2 | — | ADR-0020, ADR-0024, ADR-0026 | T-0164..0171 |
@@ -155,6 +155,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 | ADR-0073 | Authority and grants for MCP-started investigation tasks: host-assigned durable principal, runtime-only owner grant checked at every durable operation, own-task visibility, no consent over MCP (proposed; #1761, owner review) |
 | ADR-0074 | Findings accepted as curated: a curation review separate from follow-up, a finding as one cited statement, a third record kind in the curated projection with states from the digests the run recorded, one v3 revision (proposed; #1746, owner review) |
 | ADR-0075 | Env-file values are read only for allowlisted keys: `env_read` in the system manifest and `read` in `.cartograph/env.toml`, exact names; an unlisted key is a Gap that says how to list it; URL userinfo never kept; the secret refusal stands; allowlisted values join toolchain facts citing their line alone, templates rank below real env files (proposed; #933, owner review) |
+| ADR-0080 | Manifest observation inputs (Terraform state, Pulumi, OTLP traces) inside the manifest folder are captured under `input/<source id>`, never the repo's capture; parsers read the captured bytes and observed evidence cites that identity and the relative path; inputs outside the folder or past the limits stay uncaptured and coverage names them unverified; receipts follow (accepted by delegate; #385) |
 
 Decision #1688 extends US-0032 / AC-0287 with analyst @21 capacity-refusal
 exclusion, exhaustion and successful-publication reset. The focused regression

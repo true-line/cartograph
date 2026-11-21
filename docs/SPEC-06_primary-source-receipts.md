@@ -310,3 +310,17 @@ validated and read back against its own file. A fact citing a file outside the
 capture or of another lane, or a rule, still carries no receipt; single-file
 receipts are unchanged on the wire. As before, the receipt binds the cited
 captured spans only and input closure is not established.
+
+## Manifest observation inputs (AC-1041, ADR-0080, #385)
+
+Terraform `state_json`, Pulumi `pulumi_json` and OTLP `otel_jsonl` inputs a
+system manifest declares for a repository are input artifacts, not repository
+source. Those inside the manifest folder are captured together, as a
+working-tree capture of that folder selecting only the declared paths, under
+the identity `input/<registered source id>`. The T1 parsers read the captured
+bytes, and observed evidence cites that identity, the declared relative path
+and `workdir`. A declared path outside the folder, or one the capture limits
+refuse, is still read from disk, but its evidence keeps the uncaptured form
+(empty repo and commit) and the producer's coverage reason names it as not
+captured, so unverified. Observed facts carry no receipt yet, so none is
+verified.
