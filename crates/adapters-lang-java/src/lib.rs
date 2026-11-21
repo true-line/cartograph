@@ -88,6 +88,13 @@ pub struct Extraction {
     pending_endpoints: Vec<jaxrs::Pending>,
     /// OpenFeign sites awaiting same-package shadowing of wildcard proofs.
     pending_feign: Vec<feign::Pending>,
+    /// `static final String` constants, for method-security values that
+    /// name them (#2020).
+    string_constants: Vec<method_security::Constant>,
+    /// `HttpSecurity` URL rule chains (#2020), applied repo-wide.
+    http_chains: Vec<http_security::Chain>,
+    /// MockMvc requests JUnit tests perform (#2020), joined repo-wide.
+    test_requests: Vec<target_tests::Request>,
     /// Fully qualified names of every top-level type a file declares,
     /// annotation types included: the package members that can shadow a
     /// wildcard import.
@@ -327,7 +334,18 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
+        if let Some(auth) = node.props.get_mut("auth")
+            && auth.is_object()
+        {
+            retarget_props_commit(auth, commit);
+        }
     }
+    for request in &mut extraction.test_requests {
+        request.retarget(commit);
+    }
+    http_security::retarget(&mut extraction.http_chains, |props| {
+        retarget_props_commit(props, commit)
+    });
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
     }
@@ -826,6 +844,18 @@ pub fn extract_source(
     let feign_sites = feign::resolve(std::mem::take(&mut out.pending_feign), |fqn| {
         package_types.contains(fqn)
     });
+    let settled = method_security::Settled::new(&std::mem::take(&mut out.string_constants));
+    method_security::resolve(
+        &mut out.nodes,
+        &settled,
+        &std::mem::take(&mut out.http_chains),
+    );
+    target_tests::resolve(
+        std::mem::take(&mut out.test_requests),
+        (&mut out.nodes, &mut out.edges),
+        id.repo,
+        &|parts| settled.text(parts),
+    );
     out.fetch_sites.extend(feign_sites);
     config_read::resolve(
         id,
@@ -914,6 +944,18 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     let package = java_package(&cx, root);
     out.packages.extend(package.clone());
     let imports = parse_imports(&cx, root, &mut out);
+    out.string_constants.extend(method_security::constants(
+        &cx,
+        root,
+        &imports,
+        package.as_deref(),
+    ));
+    out.http_chains.extend(http_security::chains(
+        &cx,
+        root,
+        &imports,
+        package.as_deref(),
+    ));
 
     // Types: classes, interfaces, enums, records — nested chains included.
     // Built from TYPE_KINDS, so compiled once here rather than through the
@@ -1055,6 +1097,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         methods.push((method, symbol, chain, name));
     }
 
+    // JUnit tests and their MockMvc requests (#2020).
+    target_tests::extract(&cx, root, &imports, package.as_deref(), &methods, &mut out);
+
     // Retrofit client calls (#737): interface methods now, base URL at the
     // directory join.
     out.fetch_sites
@@ -1176,7 +1221,16 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             None => Some(vec![String::new()]),
             Some(node) => annotation_path(&cx, node).segments(),
         };
-        for (name, annotation) in declaration_annotations(&cx, *method) {
+        let method_annotations = declaration_annotations(&cx, *method);
+        // Spring method security on the handler or its class (#2020).
+        let auth = method_security::auth(
+            &cx,
+            &imports,
+            package.as_deref(),
+            &method_annotations,
+            &class_annotations,
+        );
+        for (name, annotation) in method_annotations.iter().map(|(n, a)| (n.clone(), *a)) {
             // A method-level `@RequestMapping` binds a handler as much as the
             // verb shorthands do (#1598); its verbs come from `method =`.
             let request_mapping = name == "RequestMapping";
@@ -1308,6 +1362,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
                         "handler_sym": handler,
                         "framework": "spring",
                         "language": "java",
+                        "auth": auth,
                         "prov": cx.prov_spanning(
                             &evidence,
                             ConfidenceTier::Confirmed,
@@ -1698,6 +1753,9 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_repo_calls.extend(extraction.pending_repo_calls);
             out.pending_endpoints.extend(extraction.pending_endpoints);
             out.pending_feign.extend(extraction.pending_feign);
+            out.string_constants.extend(extraction.string_constants);
+            out.http_chains.extend(extraction.http_chains);
+            out.test_requests.extend(extraction.test_requests);
             out.package_types.extend(extraction.package_types);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
@@ -1761,6 +1819,18 @@ pub fn extract_dir_incremental_with_progress(
     let feign_sites = feign::resolve(std::mem::take(&mut out.pending_feign), |fqn| {
         package_types.contains(fqn)
     });
+    let settled = method_security::Settled::new(&std::mem::take(&mut out.string_constants));
+    method_security::resolve(
+        &mut out.nodes,
+        &settled,
+        &std::mem::take(&mut out.http_chains),
+    );
+    target_tests::resolve(
+        std::mem::take(&mut out.test_requests),
+        (&mut out.nodes, &mut out.edges),
+        id.repo,
+        &|parts| settled.text(parts),
+    );
     out.fetch_sites.extend(feign_sites);
     config_read::resolve(
         id,
@@ -1866,10 +1936,13 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
 mod config_read;
 mod feign;
 mod http_request;
+mod http_security;
+mod method_security;
 mod okhttp;
 mod rest_template;
 mod retrofit;
 mod spring_kafka;
+mod target_tests;
 mod webclient;
 
 #[cfg(test)]
