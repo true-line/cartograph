@@ -679,3 +679,485 @@ pub(super) fn retarget(props: &mut serde_json::Value, commit: &str) {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// Sanitized capture (SPEC-02, AC-0124): decoded string literals are inspected
+// with the shared `core-redact` recognizers, comments are removed, and a
+// form outside the supported set (a string template, a lambda) withholds the
+// whole display.
+
+struct Replacement {
+    start: usize,
+    end: usize,
+    text: &'static str,
+}
+
+fn capture(cx: &FileCx<'_>, node: TsNode<'_>) -> (SourceExpression, Vec<SourceRedaction>) {
+    let evidence = source(cx, node);
+    let mut result = SourceExpression {
+        source: evidence.clone(),
+        syntax_kind: node.kind().into(),
+        display: SanitizedDisplay::from_sanitized(UNSUPPORTED.into()),
+        capture: ExpressionCapture::Unsupported,
+        literal: None,
+    };
+    if node.byte_range().len() > MAX_EXPRESSION_BYTES {
+        result.display =
+            SanitizedDisplay::from_sanitized("[expression omitted: analysis limit]".into());
+        return (
+            result,
+            vec![SourceRedaction {
+                source: evidence,
+                reason: RedactionReason::UnsupportedSyntax,
+            }],
+        );
+    }
+    let Some(bytes) = cx.source.get(node.byte_range()) else {
+        return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+    };
+    let Ok(raw) = std::str::from_utf8(bytes) else {
+        return withheld(result, evidence, RedactionReason::UnsupportedDecoding);
+    };
+    if node.has_error() || node.is_missing() {
+        return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+    }
+    let mut replacements = vec![];
+    let mut redactions = vec![];
+    let mut stack = vec![node];
+    let mut visited = 0;
+    while let Some(current) = stack.pop() {
+        visited += 1;
+        if visited > MAX_EXPRESSION_NODES {
+            return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+        }
+        match current.kind() {
+            "line_comment" | "block_comment" => {
+                replacements.push(Replacement {
+                    start: current.start_byte(),
+                    end: current.end_byte(),
+                    text: " ",
+                });
+                redactions.push(SourceRedaction {
+                    source: source(cx, current),
+                    reason: RedactionReason::RemovedComment,
+                });
+                continue;
+            }
+            "number_literal" | "float_literal" => {
+                if current == node
+                    && let Ok(value) = decode_number(cx.text(&current))
+                {
+                    result.literal = Some(LiteralEvidence::Known {
+                        value: KnownLiteral::Number(value),
+                    });
+                }
+                continue;
+            }
+            "character_literal" | "this_expression" | "super_expression" => continue,
+            "string_literal" => {
+                let Ok(context) = sensitive_context(cx, current) else {
+                    return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+                };
+                let decoded = match string_value(cx, current) {
+                    Ok(decoded) => decoded,
+                    Err(reason) => {
+                        if current == node {
+                            result.literal = Some(LiteralEvidence::Withheld {
+                                kind: LiteralKind::String,
+                                reasons: vec![reason],
+                            });
+                        }
+                        return withheld(result, evidence, reason);
+                    }
+                };
+                let mut reasons = secret_reasons(&decoded);
+                if context && !reasons.contains(&RedactionReason::CredentialValue) {
+                    reasons.push(RedactionReason::CredentialValue);
+                }
+                if reasons.is_empty() {
+                    if current == node {
+                        result.literal = Some(LiteralEvidence::Known {
+                            value: KnownLiteral::String(decoded),
+                        });
+                    }
+                } else {
+                    replacements.push(Replacement {
+                        start: current.start_byte(),
+                        end: current.end_byte(),
+                        text: WITHHELD,
+                    });
+                    for reason in &reasons {
+                        redactions.push(SourceRedaction {
+                            source: source(cx, current),
+                            reason: *reason,
+                        });
+                    }
+                    if current == node {
+                        result.literal = Some(LiteralEvidence::Withheld {
+                            kind: LiteralKind::String,
+                            reasons,
+                        });
+                    }
+                }
+                continue;
+            }
+            "identifier" => {
+                let text = cx.text(&current);
+                if text.is_empty() || !text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+                }
+                // The grammar reads `true`, `false` and `null` as names.
+                if current == node {
+                    result.literal = match text {
+                        "true" => Some(KnownLiteral::Boolean(true)),
+                        "false" => Some(KnownLiteral::Boolean(false)),
+                        "null" => Some(KnownLiteral::Null),
+                        _ => None,
+                    }
+                    .map(|value| LiteralEvidence::Known { value });
+                }
+                let reasons = recognized_secrets(text);
+                if !reasons.is_empty() {
+                    replacements.push(Replacement {
+                        start: current.start_byte(),
+                        end: current.end_byte(),
+                        text: WITHHELD,
+                    });
+                    for reason in reasons {
+                        redactions.push(SourceRedaction {
+                            source: source(cx, current),
+                            reason: redaction_reason(reason),
+                        });
+                    }
+                }
+                continue;
+            }
+            kind if current.is_named() && supported_container(kind) => {}
+            kind if !current.is_named() && supported_token(kind) => continue,
+            _ => return withheld(result, evidence, RedactionReason::UnsupportedSyntax),
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.children(&mut cursor));
+    }
+    replacements.sort_by_key(|replacement| replacement.start);
+    redactions.sort_by_key(|redaction| (redaction.source.byte_start, redaction.source.byte_end));
+    let mut display = String::new();
+    let mut copied_to = 0;
+    for replacement in replacements {
+        let start = replacement.start.saturating_sub(node.start_byte());
+        let end = replacement.end.saturating_sub(node.start_byte());
+        let Some(prefix) = raw.get(copied_to..start) else {
+            return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+        };
+        display.push_str(prefix);
+        display.push_str(replacement.text);
+        copied_to = end;
+    }
+    let Some(tail) = raw.get(copied_to..) else {
+        return withheld(result, evidence, RedactionReason::UnsupportedSyntax);
+    };
+    display.push_str(tail);
+    result.display = SanitizedDisplay::from_sanitized(display);
+    result.capture = if redactions.is_empty() {
+        ExpressionCapture::CompleteSyntax
+    } else {
+        ExpressionCapture::Redacted
+    };
+    (result, redactions)
+}
+
+fn withheld(
+    mut expression: SourceExpression,
+    source: EvidenceRef,
+    reason: RedactionReason,
+) -> (SourceExpression, Vec<SourceRedaction>) {
+    expression.display = SanitizedDisplay::from_sanitized(UNSUPPORTED.into());
+    expression.capture = ExpressionCapture::Unsupported;
+    (expression, vec![SourceRedaction { source, reason }])
+}
+
+fn redaction_reason(kind: SecretKind) -> RedactionReason {
+    match kind {
+        SecretKind::PrivateKey => RedactionReason::PrivateKey,
+        SecretKind::BearerToken => RedactionReason::BearerToken,
+        SecretKind::ProviderToken => RedactionReason::ProviderToken,
+        SecretKind::AwsAccessKey => RedactionReason::AwsAccessKey,
+        SecretKind::CredentialAssignment => RedactionReason::CredentialValue,
+    }
+}
+
+fn secret_reasons(value: &str) -> Vec<RedactionReason> {
+    let mut reasons: Vec<_> = recognized_secrets(value)
+        .into_iter()
+        .map(redaction_reason)
+        .collect();
+    if is_token_shaped(value) {
+        reasons.push(RedactionReason::TokenShaped);
+    }
+    reasons
+}
+
+fn supported_container(kind: &str) -> bool {
+    matches!(
+        kind,
+        "parenthesized_expression"
+            | "binary_expression"
+            | "unary_expression"
+            | "navigation_expression"
+            | "index_expression"
+            | "call_expression"
+            | "value_arguments"
+            | "value_argument"
+            | "as_expression"
+            | "is_expression"
+            | "in_expression"
+            | "range_expression"
+            | "callable_reference"
+            | "user_type"
+            | "nullable_type"
+            | "type_arguments"
+            | "type_projection"
+            | "string_content"
+            | "escape_sequence"
+    )
+}
+
+fn supported_token(kind: &str) -> bool {
+    matches!(
+        kind,
+        "(" | ")"
+            | "["
+            | "]"
+            | "."
+            | "?."
+            | "::"
+            | ","
+            | ":"
+            | "?"
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "=="
+            | "!="
+            | "==="
+            | "!=="
+            | "&&"
+            | "||"
+            | "!"
+            | "!!"
+            | "?:"
+            | "is"
+            | "!is"
+            | "in"
+            | "!in"
+            | "as"
+            | "as?"
+            | ".."
+            | "..<"
+            | "="
+            | "\""
+    )
+}
+
+/// The decoded value of a Kotlin string literal; a raw string or a
+/// template is not read.
+fn string_value(cx: &FileCx<'_>, literal: TsNode<'_>) -> Result<String, RedactionReason> {
+    let mut cursor = literal.walk();
+    if literal
+        .named_children(&mut cursor)
+        .any(|part| part.kind() == "interpolation")
+    {
+        return Err(RedactionReason::UnsupportedSyntax);
+    }
+    let text = cx.text(&literal);
+    let inner = text
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .ok_or(RedactionReason::UnsupportedSyntax)?;
+    decode_escapes(inner)
+}
+
+fn decode_escapes(text: &str) -> Result<String, RedactionReason> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // A `$name` template.
+            '$' if chars
+                .peek()
+                .is_some_and(|n| n.is_alphabetic() || *n == '_' || *n == '{' || *n == '`') =>
+            {
+                return Err(RedactionReason::UnsupportedSyntax);
+            }
+            '\\' => {}
+            c => {
+                out.push(c);
+                continue;
+            }
+        }
+        let decoding = RedactionReason::UnsupportedDecoding;
+        match chars.next().ok_or(decoding)? {
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '"' => out.push('"'),
+            '$' => out.push('$'),
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'b' => out.push('\u{8}'),
+            'u' => {
+                let mut value = 0u32;
+                for _ in 0..4 {
+                    value =
+                        value * 16 + chars.next().and_then(|c| c.to_digit(16)).ok_or(decoding)?;
+                }
+                out.push(char::from_u32(value).ok_or(decoding)?);
+            }
+            _ => return Err(decoding),
+        }
+    }
+    Ok(out)
+}
+
+fn decode_number(raw: &str) -> Result<serde_json::Number, ()> {
+    if (raw.starts_with('0') && raw.len() > 1 && !raw.starts_with("0."))
+        || raw.contains('_')
+        || !raw
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+    {
+        return Err(());
+    }
+    if raw.chars().all(|c| c.is_ascii_digit()) {
+        return raw
+            .parse::<u64>()
+            .map(serde_json::Number::from)
+            .map_err(|_| ());
+    }
+    serde_json::Number::from_f64(raw.parse::<f64>().map_err(|_| ())?).ok_or(())
+}
+
+/// A call's callee name and receiver: `f(…)` or `x.f(…)`.
+fn callee<'t>(cx: &FileCx<'_>, call: TsNode<'t>) -> Option<(Option<TsNode<'t>>, String)> {
+    let head = call.named_child(0)?;
+    match head.kind() {
+        "identifier" => Some((None, cx.text(&head).to_string())),
+        "navigation_expression" => {
+            let mut cursor = head.walk();
+            let parts: Vec<_> = head.named_children(&mut cursor).collect();
+            let [receiver, name] = parts.as_slice() else {
+                return None;
+            };
+            (name.kind() == "identifier").then(|| (Some(*receiver), cx.text(name).to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a string literal is the value of a sensitive name: compared with
+/// it (`==`, `!=`, `.equals`) or passed beside it (`put("password", …)`).
+fn sensitive_context(cx: &FileCx<'_>, mut child: TsNode<'_>) -> Result<bool, ()> {
+    for _ in 0..MAX_CONTEXT_ANCESTORS {
+        let Some(parent) = child.parent() else {
+            return Ok(false);
+        };
+        match parent.kind() {
+            kind if BOUNDARIES.contains(&kind) || kind == "block" => return Ok(false),
+            "binary_expression" => {
+                let mut cursor = parent.walk();
+                let equality = parent
+                    .children(&mut cursor)
+                    .any(|c| !c.is_named() && matches!(c.kind(), "==" | "!=" | "===" | "!=="));
+                if equality {
+                    let mut cursor = parent.walk();
+                    for operand in parent.named_children(&mut cursor) {
+                        if operand != child && sensitive_key(cx, operand)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            // `secret.equals("…")`, `"…".equals(secret)`, `put("token", "…")`.
+            "value_argument" => {}
+            "value_arguments" => {
+                let mut cursor = parent.walk();
+                for argument in parent.named_children(&mut cursor) {
+                    let mut walk = argument.walk();
+                    let value = argument.named_children(&mut walk).last();
+                    if argument != child
+                        && let Some(value) = value
+                        && sensitive_key(cx, value)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                if let Some(call) = parent.parent()
+                    && call.kind() == "call_expression"
+                    && let Some((Some(receiver), name)) = callee(cx, call)
+                    && name.starts_with("equals")
+                    && sensitive_key(cx, receiver)?
+                {
+                    return Ok(true);
+                }
+            }
+            "navigation_expression" => {
+                // `"…".equals(secret)`
+                if parent.named_child(0) == Some(child)
+                    && let Some(call) = parent.parent()
+                    && call.kind() == "call_expression"
+                    && let Some((_, name)) = callee(cx, call)
+                    && name.starts_with("equals")
+                {
+                    let mut cursor = call.walk();
+                    for arguments in call
+                        .named_children(&mut cursor)
+                        .filter(|c| c.kind() == "value_arguments")
+                    {
+                        let mut walk = arguments.walk();
+                        for argument in arguments.named_children(&mut walk) {
+                            let mut walk = argument.walk();
+                            if let Some(value) = argument.named_children(&mut walk).last()
+                                && sensitive_key(cx, value)?
+                            {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        child = parent;
+    }
+    Err(())
+}
+
+fn sensitive_key(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Result<bool, ()> {
+    for _ in 0..MAX_CONTEXT_ANCESTORS {
+        match node.kind() {
+            "identifier" => return Ok(is_sensitive_name(cx.text(&node))),
+            "string_literal" => {
+                return Ok(string_value(cx, node).is_ok_and(|value| is_sensitive_name(&value)));
+            }
+            "navigation_expression" => node = node.named_child(1).ok_or(())?,
+            "call_expression" => {
+                // A getter names its value: `getPassword()`.
+                let (_, name) = callee(cx, node).ok_or(())?;
+                let property = name.strip_prefix("get").unwrap_or(&name);
+                return Ok(is_sensitive_name(property)
+                    || is_sensitive_name(&property.to_ascii_lowercase()));
+            }
+            "parenthesized_expression" => node = node.named_child(0).ok_or(())?,
+            _ => return Ok(false),
+        }
+    }
+    Err(())
+}
+
+#[cfg(test)]
+mod tests;
