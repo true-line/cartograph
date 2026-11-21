@@ -86,7 +86,9 @@ jobs:
           status pending "Scanning"
           terms="$RUNNER_TEMP/privacy-terms"
           printf '%s\n' "$DENYLIST" | sed 's/\r$//' | grep -v '^[[:space:]]*$' > "$terms"
-          hit() { grep -qiwFf "$terms"; }
+          # No -q: grep must read its whole input, or an early match SIGPIPEs the
+          # producer and pipefail turns the match into a miss.
+          hit() { grep -iwFf "$terms" >/dev/null; }
           failed=0
           report() { echo "::error::Denied term found in $1."; failed=1; }
 
@@ -109,11 +111,11 @@ jobs:
             git show -s --format='%B' "$sha" | hit && report "the message of $sha"
           done
 
-          git diff --name-only "$diff_base" "$HEAD_SHA" | hit && report "a changed file path"
-          while IFS= read -r file; do
+          git diff -z --name-only "$diff_base" "$HEAD_SHA" | tr '\0' '\n' | hit && report "a changed file path"
+          while IFS= read -r -d '' file; do
             git diff --no-color --unified=0 "$diff_base" "$HEAD_SHA" -- "$file" \
               | grep -a '^+' | grep -av '^+++' | hit && report "added lines of $file"
-          done < <(git diff --name-only --diff-filter=AMR "$diff_base" "$HEAD_SHA")
+          done < <(git diff -z --name-only --diff-filter=AMR "$diff_base" "$HEAD_SHA")
 
           if [ "$failed" -ne 0 ]; then
             status failure "Denied term found; see the run log"

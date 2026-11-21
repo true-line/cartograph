@@ -717,6 +717,8 @@ test('the privacy guard keeps its terms in a secret and never runs PR code with 
   assert.match(workflow, /github\.event\.workflow_run\.head_repository\.full_name == github\.repository/u);
   assert.match(workflow, /ref: main\n/u);
   assert.match(workflow, /persist-credentials: false/u);
-  assert.match(workflow, /grep -qiwFf "\$terms"/u);
+  assert.match(workflow, /grep -iwFf "\$terms" >\/dev\/null/u);
+  assert.doesNotMatch(workflow, /grep -q/u);
+  assert.match(workflow, /read -r -d '' file/u);
   assert.match(workflow, /context=privacy-guard/u);
 });
