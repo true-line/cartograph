@@ -270,3 +270,59 @@ fn a_section_splits_into_its_area_blocks_and_the_rest() {
     assert_eq!(blocks.len(), 1);
     assert!(rest.contains("### Shared rejections"));
 }
+
+// AC-1032 (T-1032): a briefing carries the state machines other areas
+// declare, each heading naming its area, the area's neighbours first, and
+// none of the area's own machines twice.
+#[test]
+fn a_briefing_carries_other_areas_state_machines() {
+    let document = "# Product specification\n\n\
+## 1.5 Business rules (P+A)\n\n\
+### Order\n\n#### State machine: orderProcess\n\n| State | May move to | Citation |\n|---|---|---|\n| Created | Paid | F-00000000000000a1 |\n\n#### Manage orders\n\nrow F-00000000000000a2\n\n\
+### Payment\n\n#### State machine: paymentProcess\n\n| State | May move to | Citation |\n|---|---|---|\n| Authorized | Settled | F-00000000000000b1 |\n\nGuards in `onTransitionStart`:\n\n| onTransitionStart | When the to state is “Settled”, the move is refused. | F-00000000000000b2 |\n\n#### Manage payments\n\nrow F-00000000000000b3\n\n\
+### Refund\n\n#### State machine: refundProcess\n\n| State | May move to | Citation |\n|---|---|---|\n| Pending | Settled | F-00000000000000c1 |\n\n\
+### Shared rejections\n\nrow\n";
+    let neighbours = AreaNeighbours {
+        calls: vec!["Payment".into()],
+        called_by: vec![],
+    };
+    let briefing = area_briefing(document, "Order", 4, &neighbours, AREA_BRIEFING_BYTES);
+    let text = &briefing.text;
+    assert_eq!(briefing.sections, ["1.5"], "{text}");
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("missing {needle}\n{text}"))
+    };
+    assert!(
+        at("## 1.5 Business rules (P+A): other areas\n\n### State machines of other areas")
+            > at("#### Manage orders")
+    );
+    // The neighbour first, with its guards, then the rest; not their
+    // capabilities.
+    assert!(
+        at("#### State machine: paymentProcess (area Payment)\n")
+            < at(
+                "| onTransitionStart | When the to state is “Settled”, the move is refused. | F-00000000000000b2 |"
+            )
+    );
+    assert!(at("F-00000000000000b2") < at("#### State machine: refundProcess (area Refund)\n"));
+    assert!(text.contains("| Pending | Settled | F-00000000000000c1 |"));
+    assert!(!text.contains("Manage payments"), "{text}");
+    assert_eq!(text.matches("#### State machine: orderProcess").count(), 1);
+    // What an answer may cite includes the other areas' machines.
+    assert!(briefing_citation_ids(text).contains("F-00000000000000c1"));
+
+    // An area with no block of its own gets no other areas' machines.
+    let none = area_briefing(
+        document,
+        "Customer",
+        0,
+        &AreaNeighbours::default(),
+        AREA_BRIEFING_BYTES,
+    );
+    assert!(
+        !none.text.contains("State machines of other areas"),
+        "{}",
+        none.text
+    );
+}

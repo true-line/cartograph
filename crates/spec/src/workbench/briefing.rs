@@ -39,6 +39,13 @@ pub const AREA_SECTIONS: &[&str] = &["1.3", "1.4", "1.5", "1.6"];
 /// The section whose block is fitted last, taking what the others leave.
 const RULES_SECTION: &str = "1.5";
 
+/// The block of other areas' state machines (AC-1032), which is not one of
+/// the area's own sections.
+const MACHINES_BLOCK: &str = "1.5 state machines";
+
+/// The heading a state machine subsection of §1.5 starts with (#2067).
+const MACHINE_HEADING: &str = "#### State machine: ";
+
 /// The bound a host compiles a briefing under.
 pub const AREA_BRIEFING_BYTES: usize = 96 * 1024;
 
@@ -125,6 +132,65 @@ pub fn area_neighbours(
         calls: calls.into_iter().collect(),
         called_by: called_by.into_iter().collect(),
     })
+}
+
+/// The state machines other areas declare (AC-1032): each `#### State
+/// machine:` subsection of their §1.5 blocks, its heading naming the area,
+/// the areas `neighbours` names first (in name order), then the rest in
+/// document order. Empty when no other area declares one. A process like
+/// Vendure's payment, fulfillment or refund one moves the area's own
+/// records, so an Order expert needs its states and guards beside the
+/// order's.
+fn other_machines(section: &str, name: &str, neighbours: &AreaNeighbours) -> String {
+    // Names as the headings print them.
+    let near: BTreeSet<String> = neighbours
+        .calls
+        .iter()
+        .chain(&neighbours.called_by)
+        .map(|n| Literal(n).to_string())
+        .collect();
+    let own = Literal(name).to_string();
+    let mut found: Vec<(bool, usize, String)> = Vec::new();
+    let mut at = 0;
+    for block in section.split_inclusive("\n### ").skip(1) {
+        let start = at;
+        at += block.len();
+        let Some((area, body)) = block.split_once('\n') else {
+            continue;
+        };
+        let area = area.trim();
+        if area == own {
+            continue;
+        }
+        let body = body.strip_suffix("\n### ").unwrap_or(body);
+        let mut rest = body;
+        while let Some(begin) = rest.find(MACHINE_HEADING) {
+            let tail = &rest[begin..];
+            let end = tail[MACHINE_HEADING.len()..]
+                .find("\n#### ")
+                .map_or(tail.len(), |e| e + MACHINE_HEADING.len() + 1);
+            let machine = &tail[..end];
+            let (heading, text) = machine.split_once('\n').unwrap_or((machine, ""));
+            found.push((
+                !near.contains(area),
+                start,
+                format!("{heading} (area {area})\n{}\n", text.trim_end()),
+            ));
+            rest = &tail[end..];
+        }
+    }
+    if found.is_empty() {
+        return String::new();
+    }
+    found.sort_by_key(|(far, start, _)| (*far, *start));
+    let mut out = String::from(
+        "### State machines of other areas\n\nThe states, moves and guards of the processes other areas declare, as their own blocks print them; the areas this one calls or is called from come first.\n",
+    );
+    for (_, _, machine) in found {
+        out.push('\n');
+        out.push_str(&machine);
+    }
+    out
 }
 
 /// The block of the area named `name` in one compiled section: from its
@@ -284,7 +350,7 @@ pub fn area_briefing(
     max_bytes: usize,
 ) -> AreaBriefing {
     // Each area section with the area's block in it, in document order.
-    let blocks: Vec<(&'static str, &str, &str)> = AREA_SECTIONS
+    let mut blocks: Vec<(&'static str, &str, &str)> = AREA_SECTIONS
         .iter()
         .filter_map(|number| {
             let section = section_text(document, number)?;
@@ -292,6 +358,17 @@ pub fn area_briefing(
             Some((*number, section.lines().next().unwrap_or_default(), block))
         })
         .collect();
+    // Other areas' state machines (AC-1032), fitted before the rules.
+    let machines = section_text(document, RULES_SECTION)
+        .map(|section| other_machines(section, name, neighbours))
+        .unwrap_or_default();
+    let machines_heading = section_text(document, RULES_SECTION)
+        .and_then(|section| section.lines().next())
+        .map(|heading| format!("{heading}: other areas"))
+        .unwrap_or_default();
+    if !machines.is_empty() && !blocks.is_empty() {
+        blocks.push((MACHINES_BLOCK, machines_heading.as_str(), machines.as_str()));
+    }
     // Smallest first, so what a short block does not use goes to the rest;
     // the rules (§1.5) last, so they take what every other block leaves
     // (#2068): a topic expert needs the rules first.
@@ -359,7 +436,11 @@ pub fn area_briefing(
     }
     AreaBriefing {
         text,
-        sections: blocks.iter().map(|(number, ..)| *number).collect(),
+        sections: blocks
+            .iter()
+            .map(|(number, ..)| *number)
+            .filter(|number| *number != MACHINES_BLOCK)
+            .collect(),
         left_out,
     }
 }
