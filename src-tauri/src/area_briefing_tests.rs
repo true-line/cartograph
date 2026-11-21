@@ -34,6 +34,11 @@ fn subsystem(id: &str, name: &str, file: &str) -> OverlayFact {
 /// Two files with one symbol each and a call from the first to the second,
 /// and an overlay current for them with one area per file.
 pub(crate) fn state() -> (tempfile::TempDir, AppState) {
+    state_with_ids("subsystem:cluster:alias", "subsystem:cluster:mailbox")
+}
+
+/// [`state`] with the area ids given: the Alias area's, then the Mailbox one's.
+fn state_with_ids(alias: &str, mailbox: &str) -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let mut state = crate::registered_source_tests::app_state(dir.path());
     let base = {
@@ -83,8 +88,8 @@ pub(crate) fn state() -> (tempfile::TempDir, AppState) {
                 provider_ran: false,
             },
             vec![
-                subsystem("subsystem:cluster:alias", "Alias", "file:alias"),
-                subsystem("subsystem:cluster:mailbox", "Mailbox", "file:mailbox"),
+                subsystem(alias, "Alias", "file:alias"),
+                subsystem(mailbox, "Mailbox", "file:mailbox"),
             ],
         )
         .unwrap();
@@ -116,6 +121,24 @@ fn an_areas_briefing_is_compiled_from_the_current_overlay() {
     );
     assert_eq!(all[0], one[0]);
     assert!(all[1].text.contains("- Called from: Alias.\n"));
+}
+
+// AC-1203/T-1203: an area's id hashes its members' ids, which carry the
+// registration's random key, so briefings follow area names, never ids: the
+// same areas under ids in the other order come out in the same order.
+#[test]
+fn briefings_follow_area_names_not_ids() {
+    let names = |state: &AppState| {
+        compile(state, None)
+            .unwrap()
+            .into_iter()
+            .map(|view| view.name)
+            .collect::<Vec<_>>()
+    };
+    let (_dir, ordered) = state_with_ids("subsystem:cluster:a", "subsystem:cluster:b");
+    let (_other, reversed) = state_with_ids("subsystem:cluster:b", "subsystem:cluster:a");
+    assert_eq!(names(&ordered), ["Alias", "Mailbox"]);
+    assert_eq!(names(&reversed), names(&ordered));
 }
 
 #[test]
