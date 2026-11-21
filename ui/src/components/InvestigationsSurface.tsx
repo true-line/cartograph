@@ -1,4 +1,6 @@
 import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFamilies';
+import { SPECIALIST_TABLE } from '../generated/specialistTable';
+import { ROLE_LABELS, currentVersion, offeredRoles, offeredVersions, profileFor, roleOf } from '../specialistRoles';
 import { useRef, useState } from 'react';
 import { RunLimitFooter } from './RunLimitFooter';
 import type { InvestigationState } from '../investigationStore';
@@ -37,7 +39,8 @@ const EMPTY_ACTIVITY: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'
 export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefreshActivity, anchors, canStart }: InvestigationsSurfaceProps) {
   const [historySearchText, setHistorySearchText] = useState(state.historySearch);
   const { specialistId, providerMode, question, scopeType, anchor, hops, parent } = state.composer;
-  const setSpecialistId = (specialistId: SpecialistId) => state.updateComposer({ specialistId });
+  // ADR-0071: one choice; the version fixes its profile, so no separate budget picker.
+  const chooseSpecialist = (id: SpecialistId) => state.updateComposer({ specialistId: id, limitProfile: profileFor(state.catalog, id) });
   const setProviderMode = (providerMode: InvestigationProviderMode) => state.updateComposer({ providerMode });
   const setQuestion = (question: string) => state.updateComposer({ question });
   const setScopeType = (scopeType: 'all' | 'neighborhood') => state.updateComposer({ scopeType });
@@ -86,6 +89,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
     ? matchedActivityTasks.length > 0 ? 'Activity incomplete · refreshing; last observed matching tasks are shown.' : 'Activity incomplete · refreshing; no idle status is inferred.'
     : matchedActivityTasks.length > 0 ? 'Refreshing activity; last observed tasks are shown.' : 'Checking for active tasks…';
   const completionVersion = isCompletionSpecialist(specialistId);
+  const roles = offeredRoles(state.catalog);
+  const selectedRole = roleOf(specialistId);
   const profile = state.composer.limitProfile ?? 'investigation-v1';
   const policy = investigationPolicy(state.catalog, profile, specialistId);
   const selectedSpecialistAvailable = Boolean(policy && state.catalog?.specialists.some((item) => item.id === specialistId));
@@ -125,34 +130,29 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
         scope, provider_mode: providerMode, limit_profile: profile, ...parent,
         ...(completionVersion ? { obligations } : supportsRequirements && requirements.length ? { inspection_requirements: requirements } : {}) });
     }}>
-      {(state.catalog || state.pendingStart) && <label>Investigation budget<select value={profile} disabled={locked} onChange={(event) => {
-        const limitProfile = event.target.value;
-        const family = specialistId.split('@')[0];
-        // Preserve older catalog selection behavior. Explicitly entering the
-        // newly advertised family is the only additional automatic choice.
-        const enteringAdmission = limitProfile === 'investigation-v2' && state.catalog?.policies?.some((entry) =>
-          entry.limits.profile === limitProfile && entry.request_schema_version === 7);
-        const next = isCompletionSpecialist(specialistId) || enteringAdmission ? state.catalog?.specialists.find((item) =>
-          item.id.startsWith(`${family}@`) && (limitProfile === 'investigation-v1' ? item.id.endsWith('@7') : isExpandedSpecialist(item.id)) && investigationPolicy(state.catalog, limitProfile, item.id))?.id ?? specialistId : specialistId;
-        state.updateComposer({ limitProfile, specialistId: next });
-      }}>
-        <option value="investigation-v1">Standard · {state.catalog?.limits.tool_actions ?? 8} tool actions, {state.catalog?.limits.model_invocations ?? 8} model calls</option>
-        {state.catalog?.policies?.filter((entry) => entry.limits.profile !== 'investigation-v1' &&
-          entry.specialist_ids.some((id) => investigationPolicy(state.catalog, entry.limits.profile, id))).map((entry) =>
-          <option key={entry.limits.profile} value={entry.limits.profile}>Expanded · {entry.limits.tool_actions} tool actions, {entry.limits.model_invocations} model calls</option>)}
-        {profile !== 'investigation-v1' && !state.catalog?.policies?.some((entry) => entry.limits.profile === profile) &&
-          <option value={profile}>Expanded · saved selection, unavailable for new starts</option>}
-      </select></label>}
-      {profile !== 'investigation-v1' && <p>Expanded investigations allow more evidence and model calls, which can increase runtime and provider cost. Completion is not guaranteed.</p>}
       <fieldset disabled={locked}><legend>Specialist</legend>
-        <div className="investigation-specialists">{state.catalog?.specialists.filter((specialist) => profile === 'investigation-v2' ? isExpandedSpecialist(specialist.id) && Boolean(investigationPolicy(state.catalog, profile, specialist.id)) : !isExpandedSpecialist(specialist.id)).map((specialist) =>
-          <label key={specialist.id} className={`investigation-specialist${specialistId === specialist.id ? ' selected' : ''}`}>
-            <input type="radio" name="specialist" checked={specialistId === specialist.id}
-              onChange={() => setSpecialistId(specialist.id)} />
-            <span><strong>{specialist.name}</strong><span className="muted">{specialist.purpose}</span>
-              <code>{specialist.id} · T3 / InferredWeak</code></span>
-          </label>)}</div>
+        <div className="investigation-specialists">{roles.map((role) => {
+          const current = currentVersion(state.catalog, role)!;
+          return <label key={role} className={`investigation-specialist${selectedRole === role ? ' selected' : ''}`}>
+            <input type="radio" name="specialist" checked={selectedRole === role && selectedSpecialistAvailable}
+              onChange={() => chooseSpecialist(current.id)} />
+            <span><strong>{ROLE_LABELS[role]}</strong><span className="muted">{current.purpose}</span>
+              <code>T3 / InferredWeak</code></span>
+          </label>;
+        })}</div>
+        {(state.catalog || state.pendingStart) && <div className="investigation-version">
+          <label>Specialist version<select value={specialistId} onChange={(event) => chooseSpecialist(event.target.value as SpecialistId)}>
+            {!selectedSpecialistAvailable && <option value={specialistId}>{specialistId} · saved selection, unavailable for new starts</option>}
+            {roles.map((role) => <optgroup key={role} label={ROLE_LABELS[role]}>
+              {offeredVersions(state.catalog, role).map((item) => <option key={item.id} value={item.id}>
+                {item.id}{SPECIALIST_TABLE[item.id].availability === 'current' ? ' · current' : ''}{isExpandedSpecialist(item.id) ? ' · Expanded budget' : ''}</option>)}
+            </optgroup>)}
+          </select></label>
+          <p className="muted">Each role runs its current version by default. Choose another version only to compare with earlier runs.</p>
+        </div>}
       </fieldset>
+      {limits && <p className="muted">{profile === 'investigation-v1' ? 'Standard' : 'Expanded'} budget · {limits.tool_actions} tool actions, {limits.model_invocations} model calls</p>}
+      {profile !== 'investigation-v1' && <p>Expanded investigations allow more evidence and model calls, which can increase runtime and provider cost. Completion is not guaranteed.</p>}
       {state.catalog && <section className="specialist-activity-list" aria-label="Active specialist tasks">
         {activityCountMessage && <p className="specialist-activity-counts">{activityCountMessage}</p>}
         {showActivityRows && activityGroups.map(({ specialist, tasks }) => <section key={specialist.id} className="specialist-activity-group">
