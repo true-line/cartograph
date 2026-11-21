@@ -476,9 +476,11 @@ fn scoped_real_store_capacity_omission_is_guarded_and_stale_safe() {
     std::fs::create_dir_all(&private).unwrap();
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("rules.ts"), "export function alpha(ok: boolean) { if (!ok) return false; return true; }\nexport function beta() { return 2; }\n").unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(crate::registered_source_tests::app_state(&private));
     app.manage(crate::PreflightRuns::default());
     let state = app.state::<AppState>();

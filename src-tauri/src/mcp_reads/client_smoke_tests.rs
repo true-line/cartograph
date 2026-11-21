@@ -99,7 +99,8 @@ fn mcp_scripted_stdio_client_smoke_against_isolated_app_service() {
             "test.cartograph.scripted.{}",
             stores.path().file_name().unwrap().to_string_lossy()
         );
-        let app = tauri::test::mock_builder().build(context).unwrap();
+        let app =
+            crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
         let state = crate::registered_source_tests::app_state(stores.path());
         publish_synthetic_source(&state, &root);
         let rejected_fact = "rule:curation-rejected-fixture";

@@ -32,7 +32,7 @@ fn scoped_scripted_client_partition_and_retained_span_after_checkout_removal() {
         "test.cartograph.scoped-scripted.{}",
         stores.path().file_name().unwrap().to_string_lossy()
     );
-    let app = tauri::test::mock_builder().build(context).unwrap();
+    let app = crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
     app.manage(state);
     let service = Service::default();
     let mut worker = crate::mcp_reads::worker::tests::limits();

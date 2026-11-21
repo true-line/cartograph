@@ -88,7 +88,7 @@ fn scoped_mcp_synthetic_measurement() {
         "test.cartograph.{}",
         dir.path().file_name().unwrap().to_string_lossy()
     );
-    let app = tauri::test::mock_builder().build(context).unwrap();
+    let app = crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
     let state = crate::registered_source_tests::app_state(&app_data);
     let setup = Instant::now();
     let patch = GraphPatch {
