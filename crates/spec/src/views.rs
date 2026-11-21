@@ -542,6 +542,30 @@ pub fn try_compile_spec_with_views_supplied(
     rejected_hashes: &BTreeSet<String>,
     supplied: crate::Supplied<'_>,
 ) -> Result<(SpecBundle, SpecViewBundle), crate::FactIndexError> {
+    try_compile_spec_with_views_supplied_kept(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        supplied,
+        |artifact| artifact,
+    )
+}
+
+/// [`try_compile_spec_with_views_supplied`] keeping `keep(artifact)` of each
+/// artifact as it is compiled, as [`crate::try_compile_spec_supplied_kept`]
+/// does (#2215). The views bind to each artifact's id, schema and content
+/// id, which are read before `keep` takes it, so they are the same.
+pub fn try_compile_spec_with_views_supplied_kept<A>(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    supplied: crate::Supplied<'_>,
+    mut keep: impl FnMut(SpecArtifact) -> A,
+) -> Result<(SpecBundle<A>, SpecViewBundle), crate::FactIndexError> {
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .expect("unbounded ADR derivation");
     let beside = selected::Beside::new(nodes, edges, mode, rejected_hashes, supplied);
@@ -557,18 +581,33 @@ pub fn try_compile_spec_with_views_supplied(
             mode,
         },
     );
-    let bundle = selected::try_bundle_from_filtered(
+    // What the views bind to of each artifact: its identity, without its
+    // content or assertions.
+    let mut headers = Vec::new();
+    let bundle = selected::try_bundle_from_filtered_kept(
         &filtered_nodes,
         &filtered_edges,
         &projection.flows,
         mode,
         rejected_hashes,
         beside,
+        |artifact| {
+            headers.push(SpecArtifact {
+                id: artifact.id.clone(),
+                file_name: String::new(),
+                title: String::new(),
+                format: String::new(),
+                schema: artifact.schema.clone(),
+                content_id: artifact.content_id.clone(),
+                content: String::new(),
+                assertions: Vec::new(),
+            });
+            keep(artifact)
+        },
     )?;
 
     let artifact_for = |id: &str| -> &SpecArtifact {
-        bundle
-            .artifacts
+        headers
             .iter()
             .find(|artifact| artifact.id == id)
             .expect("known official artifact id")

@@ -1277,7 +1277,7 @@ fn unmatched_decision_costs_one_compile_for_a_revision_and_decision_set() {
         // (#2049), so `architecture.md` names them the same way.
         inputs.repo_names = crate::repo_names_of(&state, &inputs.base.graph.0).unwrap();
         let (bundle, views, curated) =
-            crate::compile_spec_with_views_and_curated(inputs, mode).unwrap();
+            crate::compile_spec_with_views_and_curated(inputs, mode, |a| a).unwrap();
         serde_json::to_value(crate::SpecWithViewsPreview {
             bundle: crate::preview_spec_bundle(bundle),
             views,
