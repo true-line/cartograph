@@ -154,7 +154,7 @@ test('heavy Rust jobs hold one of two shared-host slots and release it (#1242)',
   // budget beyond the longest wait (#1373).
   assert.match(rust, /^ {4}timeout-minutes: 89$/mu);
   assert.ok(89 * 60 - Number(rustWait) >= 45 * 60);
-  assert.ok(rust.indexOf('Take a host heavy-build slot') < rust.indexOf('cargo clippy'));
+  assert.ok(rust.indexOf('Take a host heavy-build slot') < rust.indexOf('cargo test --workspace'));
   assert.ok(rust.indexOf('cargo test --workspace') < rust.search(release));
   const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
   const [, when, codeqlWait] = codeql.match(take) ?? [];
@@ -266,7 +266,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 13);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 14);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -363,6 +363,13 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.match(complete, /needs: \[.*\brust-heavy-tests\b.*\]/u);
   assert.match(complete, /RUST_HEAVY_TESTS: \$\{\{ needs\.rust-heavy-tests\.result \}\}/u);
   assert.match(complete, /test "\$RUST_HEAVY_TESTS" = success/u);
+  // Clippy runs in its own required lane, on the same condition.
+  const clippy = job('rust-clippy');
+  assert.equal(condition(clippy), condition(rust));
+  assert.match(clippy, /run: cargo clippy --workspace --all-targets -- -D warnings\n/u);
+  assert.doesNotMatch(rust, /cargo clippy/u);
+  assert.match(complete, /needs: \[.*\brust-clippy\b.*\]/u);
+  assert.match(complete, /test "\$RUST_CLIPPY" = success/u);
   // `app` has no library, integration-test or doc-test target the exclusion
   // could drop: its tests are the binary's unit tests.
   const manifest = readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8');
@@ -634,7 +641,7 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
   // A concurrent main run may already have removed a listed version.
   assert.match(image, /- name: Prune old CI images\n +if: [^\n]+\n +continue-on-error: true\n/u);
   assert.match(image, /gh api -X DELETE "\$PACKAGE\/versions\/\$id" \|\| echo/u);
-  for (const name of ['rust', 'rust-app-tests', 'rust-heavy-tests', 'compliance']) {
+  for (const name of ['rust', 'rust-app-tests', 'rust-heavy-tests', 'rust-clippy', 'compliance']) {
     const lane = job(name);
     assert.match(lane, /needs: \[[^\]]*\bci-image\b[^\]]*\]/u, name);
     assert.match(lane, /container:\n(?: +#.*\n)* +image: \$\{\{ needs\.ci-image\.outputs\.image \}\} # zizmor: ignore\[unpinned-images\]\n/u, name);
