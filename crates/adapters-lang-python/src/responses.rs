@@ -44,7 +44,9 @@
 //!   are read from `jsonify(ret)` / `return ret`, and from
 //!   `jsonify(helper(…))` / `jsonify(**helper(…))` when every return of the
 //!   repository `helper` is such a dict or a dict literal; an unproven helper
-//!   is `response_built_elsewhere`.
+//!   is `response_built_elsewhere`. Keyword names beside such splats
+//!   (`jsonify(alias=…, **helper(…))`, or `**{…}` with literal keys) are
+//!   read with them (#1998).
 use crate::request_inputs::{
     binding_sites, handler_bindings, is_write_target, parameter_name, visit_scope,
 };
@@ -541,7 +543,7 @@ impl<'t> Reader<'_, '_, 't> {
         };
         let mut recorded = false;
         let mut json_keys = None;
-        let mut built = None;
+        let mut built = Vec::new();
         let default = match self.classify(body) {
             Body::Json(keys, evidence) => {
                 responses.keys.extend(keys.iter().cloned());
@@ -555,8 +557,10 @@ impl<'t> Reader<'_, '_, 't> {
                 responses.partial.insert("response_built_elsewhere");
                 Some(("json", Some(200)))
             }
-            Body::Built(helper) => {
-                built = Some(helper);
+            Body::Built(keys, helpers) => {
+                responses.keys.extend(keys.iter().cloned());
+                json_keys = (!keys.is_empty()).then_some(keys);
+                built = helpers;
                 Some(("json", Some(200)))
             }
             Body::Html => Some(("html", Some(200))),
@@ -603,7 +607,7 @@ impl<'t> Reader<'_, '_, 't> {
                 .or_default()
                 .extend(keys);
         }
-        if let Some(helper) = built {
+        for helper in built {
             facts.follows.push(Follow::Built(helper, code));
         }
         if recorded {
@@ -871,11 +875,17 @@ impl<'t> Reader<'_, '_, 't> {
                 "call" => dict
                     .child_by_field_name("function")
                     .and_then(|function| self.resolver.target(cx, function, &self.bound))
-                    .map_or(Body::JsonElsewhere, Body::Built),
+                    .map_or(Body::JsonElsewhere, |helper| {
+                        Body::Built(Vec::new(), vec![helper])
+                    }),
                 _ => Body::JsonElsewhere,
             };
         }
+        // Keyword names beside `**helper(…)` or `**{…}` splats (#1998):
+        // `jsonify(alias=…, **serialize(…))` is the keyword's keys and the
+        // keys the repository helper builds.
         let mut keys = Vec::new();
+        let mut helpers = Vec::new();
         for argument in arguments {
             match argument.kind() {
                 "keyword_argument" => {
@@ -883,10 +893,33 @@ impl<'t> Reader<'_, '_, 't> {
                         keys.push(cx.text(&name).to_string());
                     }
                 }
+                "dictionary_splat" => {
+                    let Some(splat) = argument.named_child(0).map(unparenthesize) else {
+                        return Body::JsonElsewhere;
+                    };
+                    match splat.kind() {
+                        "dictionary" => match dict_keys(cx, splat) {
+                            Body::Json(literal, _) => keys.extend(literal),
+                            _ => return Body::JsonElsewhere,
+                        },
+                        "call" => match splat
+                            .child_by_field_name("function")
+                            .and_then(|function| self.resolver.target(cx, function, &self.bound))
+                        {
+                            Some(helper) => helpers.push(helper),
+                            None => return Body::JsonElsewhere,
+                        },
+                        _ => return Body::JsonElsewhere,
+                    }
+                }
                 _ => return Body::JsonElsewhere,
             }
         }
-        Body::Json(keys, Vec::new())
+        if helpers.is_empty() {
+            Body::Json(keys, Vec::new())
+        } else {
+            Body::Built(keys, helpers)
+        }
     }
 }
 
@@ -896,8 +929,9 @@ enum Body {
     Json(Vec<String>, Vec<EvidenceRef>),
     /// JSON whose keys are built outside the expression.
     JsonElsewhere,
-    /// JSON a repository helper builds.
-    Built(FnKey),
+    /// JSON with these literal top-level keys and the keys the repository
+    /// helpers build.
+    Built(Vec<String>, Vec<FnKey>),
     Html,
     /// A returned `str`.
     Text,

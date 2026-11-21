@@ -3221,6 +3221,14 @@ def alias():
     other = ret
     other[key] = 2
     return jsonify(ret)
+
+@api_bp.route("/mixed")
+def mixed():
+    return jsonify(alias="x", **payload(user), **{"extra": 1}), 201
+
+@api_bp.route("/mixed_loose")
+def mixed_loose():
+    return jsonify(a=1, **loose())
 "#;
     let serial = r#"
 def payload(user):
@@ -3343,6 +3351,19 @@ def loose():
         serde_json::json!(["response_built_elsewhere"])
     );
     assert!(alias.get("keys").is_none());
+    // #1998: keywords beside `**helper(…)` and `**{…}` splats are read with
+    // the helper's built keys; an unproven helper splat is built elsewhere.
+    let (mixed, _) = responses(&first, "/api/mixed");
+    assert_eq!(
+        mixed["keys_by_status"],
+        serde_json::json!({"201": ["alias", "extra", "mfa_key", "name"]})
+    );
+    assert!(mixed.get("partial").is_none());
+    let (loose, _) = responses(&first, "/api/mixed_loose");
+    assert_eq!(
+        loose["partial"],
+        serde_json::json!(["response_built_elsewhere"])
+    );
     let next_id = SourceId {
         repo: "local/python-service",
         commit: "def456",
