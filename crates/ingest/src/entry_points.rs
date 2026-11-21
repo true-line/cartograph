@@ -24,6 +24,11 @@
 //!   function is a process start (an HTTP server when it starts Ktor or
 //!   Spring Boot with web endpoints), queue consumer, scheduled job or
 //!   startup task (`kotlin.rs`).
+//! - an Android `<activity>`, `<service>`, `<receiver>` or `<provider>`
+//!   an `AndroidManifest.xml` declares is a screen, service, broadcast
+//!   receiver or content provider start entering its class's lifecycle
+//!   function (`android.rs`), and a Kotlin WorkManager worker's `doWork`
+//!   a background job (`kotlin.rs`).
 //! - a Rust `fn main()` in a binary root is a process start, a
 //!   `#[tauri::command]` function an IPC command and a tonic service method
 //!   a gRPC method (`rust.rs`).
@@ -154,6 +159,7 @@ pub fn extract_dir(
     let mut starts: Vec<Start> = Vec::new();
     let mut java_files: Vec<(String, String)> = Vec::new();
     let mut kotlin_files: Vec<(String, String)> = Vec::new();
+    let mut manifests: Vec<(String, String)> = Vec::new();
     for file in &walked {
         let rel = file.rel.as_str();
         if rel.ends_with(".py") {
@@ -180,6 +186,9 @@ pub fn extract_dir(
                 }
                 starts.push(start);
             }
+        } else if android::candidate(rel) {
+            let Some(text) = read(rel) else { continue };
+            manifests.push((rel.to_string(), text));
         } else if file.name == "pyproject.toml" {
             let Some(text) = read(rel) else { continue };
             starts.extend(console_scripts(rel, &text, &files, id, symbols));
@@ -211,6 +220,24 @@ pub fn extract_dir(
     let web = kotlin::spring_web(&kotlin_files, &java_files);
     starts.extend(kotlin::starts(id.repo, &kotlin_files, web, symbols));
     starts.extend(java::starts(id.repo, &java_files, symbols));
+    // Android components enter the class their manifest names (AC-1110).
+    if !manifests.is_empty() {
+        let classes = android::declared_classes(&kotlin_files, &java_files);
+        for (rel, text) in &manifests {
+            let namespace = android::build_files(rel)
+                .iter()
+                .filter(|build| files.contains(build.as_str()))
+                .find_map(|build| read(build).and_then(|t| android::gradle_namespace(&t)));
+            starts.extend(android::starts(
+                id.repo,
+                rel,
+                text,
+                namespace.as_deref(),
+                &classes,
+                symbols,
+            ));
+        }
+    }
     let mut out = EntryPointExtraction::default();
     let declaring: BTreeSet<&str> = starts.iter().map(|s| s.declared_in.as_str()).collect();
     out.files = declaring.len() as u64;
@@ -1086,6 +1113,11 @@ fn started_by(kind: &str) -> &'static str {
         "desktop-app" => "a person opens the application",
         "grpc-server" | "grpc-method" => "a gRPC call",
         "ipc-command" => "the desktop front end invoking the command",
+        "android-activity" => "a person opening the screen, or an intent starting it",
+        "android-service" => "an intent starting or binding the service",
+        "android-receiver" => "a broadcast intent",
+        "android-provider" => "a content query, or the app process starting",
+        "background-job" => "WorkManager running enqueued work",
         _ => "the process is started",
     }
 }
@@ -1106,12 +1138,26 @@ fn display(start: &Start) -> String {
         "grpc-server" => "gRPC server",
         "grpc-method" => "gRPC method",
         "ipc-command" => "IPC command",
+        "android-activity" if start.extra.iter().any(|(k, _)| *k == "launcher") => {
+            "App launch screen"
+        }
+        "android-activity" => "Screen",
+        "android-service" => "Android service",
+        "android-receiver" => "Broadcast receiver",
+        "android-provider" => "Content provider",
+        "background-job" => "Background job",
         _ => "Process",
     };
     let handler = start
         .extra
         .iter()
-        .find_map(|(key, value)| (*key == "handler").then(|| value.as_str()).flatten());
+        .find_map(|(key, value)| (*key == "handler").then(|| value.as_str()).flatten())
+        .or_else(|| {
+            start
+                .extra
+                .iter()
+                .find_map(|(key, value)| (*key == "component").then(|| value.as_str()).flatten())
+        });
     let at = match (&start.command, handler) {
         (Some(command), _) => format!("{}: {command}", start.declared_in),
         (None, Some(handler)) => format!("{}: {handler}", start.declared_in),
@@ -1257,6 +1303,7 @@ fn emit(
     }
 }
 
+mod android;
 mod go;
 mod java;
 mod kotlin;

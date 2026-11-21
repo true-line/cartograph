@@ -20,7 +20,11 @@
 //!   its annotation states as written;
 //! - the `run` of a class implementing `CommandLineRunner` or
 //!   `ApplicationRunner`, and a `@Bean` function declared to return one, is
-//!   a startup task.
+//!   a startup task;
+//! - the `doWork` of a class extending WorkManager's `Worker` or
+//!   `CoroutineWorker`, the `createWork` of an `RxWorker` and the
+//!   `startWork` of a `ListenableWorker` (imported from `androidx.work`) is
+//!   a background job (AC-1110).
 //!
 //! Each enters the function's Symbol when the Kotlin adapter emitted it,
 //! else the file. Test sources (`src/test/`, `src/it/`) and test, example
@@ -73,6 +77,17 @@ const KTOR_ENGINE_MAINS: &[&str] = &[
     "io.ktor.server.tomcat.jakarta",
 ];
 const SPRING_WEB: &str = "org.springframework.web.bind.annotation";
+/// WorkManager worker base classes and the function that does their work.
+const WORKERS: &[(&str, &str, &[&str])] = &[
+    ("Worker", "doWork", &["androidx.work"]),
+    ("CoroutineWorker", "doWork", &["androidx.work"]),
+    ("ListenableWorker", "startWork", &["androidx.work"]),
+    (
+        "RxWorker",
+        "createWork",
+        &["androidx.work", "androidx.work.rxjava3"],
+    ),
+];
 
 /// Whether `rel` is a Kotlin source this reader considers.
 pub(super) fn candidate(rel: &str) -> bool {
@@ -324,6 +339,79 @@ impl Cx<'_> {
         };
         let runner = self.runner_interface(node);
         self.body(node, &path, scope, runner, out);
+        if node.kind() == "class_declaration" {
+            self.worker(node, &path, out);
+        }
+    }
+
+    /// A WorkManager worker's work function, when the class extends a
+    /// worker base class proven by import (AC-1110).
+    fn worker(&self, class: TsNode, path: &[String], out: &mut Vec<Start>) {
+        let Some(specifiers) = named_children(class)
+            .into_iter()
+            .find(|c| c.kind() == "delegation_specifiers")
+        else {
+            return;
+        };
+        let Some((base, work)) = named_children(specifiers)
+            .into_iter()
+            .find_map(|specifier| {
+                let first = specifier.named_child(0)?;
+                let ty = match first.kind() {
+                    "constructor_invocation" => named_children(first)
+                        .into_iter()
+                        .find(|c| c.kind() == "user_type")?,
+                    "user_type" => first,
+                    _ => return None,
+                };
+                let spelled: String = self.text(ty).split_whitespace().collect();
+                WORKERS
+                    .iter()
+                    .find(|(simple, _, packages)| self.proves(&spelled, simple, packages))
+                    .map(|(simple, work, _)| (*simple, *work))
+            })
+        else {
+            return;
+        };
+        let Some(body) = named_children(class)
+            .into_iter()
+            .find(|c| c.kind() == "class_body")
+        else {
+            return;
+        };
+        let Some(function) = named_children(body).into_iter().find(|member| {
+            member.kind() == "function_declaration"
+                && member
+                    .child_by_field_name("name")
+                    .is_some_and(|name| self.text(name) == work)
+                && self.params(*member).is_empty()
+        }) else {
+            return;
+        };
+        let key = path
+            .iter()
+            .map(String::as_str)
+            .chain([work])
+            .collect::<Vec<_>>()
+            .join(".");
+        out.push(Start {
+            declared_in: self.rel.to_string(),
+            span: (function.start_byte() as u64, header_end(function)),
+            key: key.clone(),
+            how: base.to_string(),
+            command: None,
+            kind: Kind {
+                kind: "background-job",
+                evidence: None,
+            },
+            port: None,
+            extra: vec![
+                ("handler", serde_json::Value::from(key.clone())),
+                ("component", serde_json::Value::from(path.join("."))),
+            ],
+            extra_spans: Vec::new(),
+            target: self.target(&key),
+        });
     }
 
     fn body(

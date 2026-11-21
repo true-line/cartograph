@@ -999,3 +999,169 @@ fn kotlin_mains_need_a_start_call_and_a_parsed_web_import() {
         .collect();
     assert_eq!(entries.len(), 2, "{entries:?}");
 }
+
+/// AC-1110: Android components a manifest declares enter their class's
+/// lifecycle function (else its file), resolved against the manifest's
+/// package or the module's Gradle namespace; a library or unresolvable
+/// component is a Gap; commented-out, removed and test-manifest components
+/// declare nothing; a WorkManager worker's `doWork` is a background job.
+#[test]
+fn android_components_and_workers_are_starts() {
+    let manifest = "app/src/main/AndroidManifest.xml";
+    let main = "app/src/main/java/com/acme/app/MainActivity.kt";
+    let sync = "app/src/main/java/com/acme/app/sync/SyncService.java";
+    let boot = "app/src/main/java/com/acme/app/BootReceiver.kt";
+    let worker = "app/src/main/java/com/acme/app/SyncWorker.kt";
+    let symbols = BTreeSet::from([
+        format!("sym:{REPO}@{main}#MainActivity.onCreate"),
+        format!("sym:{REPO}@{sync}#SyncService.onStartCommand(Intent,int,int)"),
+        format!("sym:{REPO}@{worker}#SyncWorker.doWork"),
+    ]);
+    let out = extract_with(
+        &[
+            (
+                manifest,
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- <activity android:name=".Old" /> -->
+    <application android:name=".App">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity-alias android:name=".Alias" android:targetActivity=".MainActivity" />
+        <service android:name=".sync.SyncService" android:exported="false" />
+        <receiver android:name="BootReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="x" />
+        <service android:name="com.lib.Tracker" tools:node="remove" />
+    </application>
+</manifest>
+"#,
+            ),
+            (
+                "app/build.gradle.kts",
+                "android {\n    namespace = \"com.acme.app\"\n}\n",
+            ),
+            (
+                main,
+                "package com.acme.app\n\nclass MainActivity : ComponentActivity() {\n    override fun onCreate(state: Bundle?) {}\n}\n",
+            ),
+            (
+                sync,
+                "package com.acme.app.sync;\n\npublic class SyncService extends Service {\n    public int onStartCommand(Intent i, int f, int id) { return 0; }\n}\n",
+            ),
+            (
+                boot,
+                "package com.acme.app\n\nclass BootReceiver : BroadcastReceiver() {\n    override fun onReceive(c: Context, i: Intent) {}\n}\n",
+            ),
+            (
+                worker,
+                "package com.acme.app\n\nimport androidx.work.CoroutineWorker\n\nclass SyncWorker(c: Context, p: WorkerParameters) : CoroutineWorker(c, p) {\n    override suspend fun doWork(): Result = Result.success()\n}\n\nclass Fake : Worker() {\n    fun doWork() {}\n}\n",
+            ),
+            (
+                "app/src/androidTest/AndroidManifest.xml",
+                "<manifest package=\"com.acme.test\"><application><activity android:name=\".T\"/></application></manifest>\n",
+            ),
+            (
+                "lib/AndroidManifest.xml",
+                "<manifest><application><service android:name=\".Orphan\"/></application></manifest>\n",
+            ),
+        ],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let activity = entry(&out, manifest, "activity:com.acme.app.MainActivity");
+    assert_eq!(activity.props["kind"], "android-activity");
+    assert_eq!(activity.props["launcher"], true);
+    assert_eq!(activity.props["exported"], true);
+    assert_eq!(activity.props["how"], "<activity>");
+    assert_eq!(
+        activity.props["name"],
+        format!("App launch screen ({manifest}: com.acme.app.MainActivity)")
+    );
+    assert_eq!(
+        entry_edge(&out, manifest, "activity:com.acme.app.MainActivity").dst,
+        format!("sym:{REPO}@{main}#MainActivity.onCreate")
+    );
+    assert_eq!(
+        entry_edge(&out, manifest, "service:com.acme.app.sync.SyncService").dst,
+        format!("sym:{REPO}@{sync}#SyncService.onStartCommand(Intent,int,int)")
+    );
+    let receiver = entry(&out, manifest, "receiver:com.acme.app.BootReceiver");
+    assert_eq!(receiver.props["kind"], "android-receiver");
+    assert_eq!(
+        receiver.props["actions"],
+        serde_json::json!(["android.intent.action.BOOT_COMPLETED"])
+    );
+    assert_eq!(
+        entry_edge(&out, manifest, "receiver:com.acme.app.BootReceiver").dst,
+        format!("file:{REPO}@{boot}")
+    );
+    let provider = entry_edge(
+        &out,
+        manifest,
+        "provider:androidx.core.content.FileProvider",
+    );
+    assert!(
+        provider.dst.starts_with("gap:entry-point:"),
+        "{}",
+        provider.dst
+    );
+    assert!(
+        provider.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("androidx.core.content.FileProvider is not declared")
+    );
+    let orphan = entry_edge(&out, "lib/AndroidManifest.xml", "service:.Orphan");
+    assert!(
+        orphan.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("relative")
+    );
+    let job = entry(&out, worker, "SyncWorker.doWork");
+    assert_eq!(job.props["kind"], "background-job");
+    assert_eq!(job.props["how"], "CoroutineWorker");
+    assert_eq!(
+        entry_edge(&out, worker, "SyncWorker.doWork").dst,
+        format!("sym:{REPO}@{worker}#SyncWorker.doWork")
+    );
+    let entries: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 6, "{entries:#?}");
+}
+
+/// AC-1110: a module's namespace is read from its own build file, stated
+/// either Gradle way, and build output holds no system manifest.
+#[test]
+fn manifest_scanner_and_gradle_namespace_read_as_written() {
+    assert_eq!(
+        android::gradle_namespace("android {\n  namespace 'com.a.b'\n}"),
+        Some("com.a.b".to_owned())
+    );
+    assert_eq!(android::gradle_namespace("namespace = libs.x"), None);
+    assert_eq!(
+        android::build_files("feature/src/main/AndroidManifest.xml"),
+        ["feature/build.gradle.kts", "feature/build.gradle"]
+    );
+    assert_eq!(
+        android::build_files("AndroidManifest.xml"),
+        ["build.gradle.kts", "build.gradle"]
+    );
+    assert!(!android::candidate(
+        "app/build/intermediates/AndroidManifest.xml"
+    ));
+    assert!(android::candidate("app/src/debug/AndroidManifest.xml"));
+}
