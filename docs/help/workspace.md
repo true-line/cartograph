@@ -12,10 +12,15 @@ generated artifact set with generation and authority badges.
   folder's hash is specific to this installation. **Clear system** removes
   all recovered facts; job history and settings survive.
 - **New project…** starts over with a different repository without
-  reinstalling. It removes everything tied to the loaded system: its
-  recovered facts, registered sources, retained source, findings,
-  investigations and chats, section drafts, reviews, decisions and job
-  history. Settings, provider keys, run limits, the local model and
-  installed adapters are kept. Cartograph restarts with an empty project.
-  It is unavailable while a job is queued or running.
+  reinstalling. It sets the loaded system aside as a project: its recovered
+  facts, registered sources, retained source, findings, investigations and
+  chats, section drafts, reviews, decisions and job history. Settings,
+  provider keys, run limits, the local model and installed adapters are
+  shared by every project. Cartograph restarts with an empty project. It is
+  unavailable while a job is queued or running.
+- **Projects** lists every project, the loaded one first. **Switch** sets
+  the loaded project aside and restarts with the chosen one loaded as you
+  left it, with no re-ingest; it is unavailable while a job is queued or
+  running. **Rename** gives a project a short name; without one it is named
+  by its repos. **Delete** removes a parked project for good.
 - **Triage gaps** and **Provenance & eval** jump to the register surfaces.

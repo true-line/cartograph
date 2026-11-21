@@ -97,16 +97,17 @@ export function GraphStatsCard({
         ) : (
           <div className="clear-confirmation" role="alert">
             <p>
-              Start a new project? This removes
+              Start a new project? This sets aside
               {systemContents && systemContents.length > 0
                 ? ` ${systemContents.map((entry) => repoLabel(entry.repo)).join(', ')}`
                 : ' the loaded system'}{' '}
               with its recovered facts, findings, investigations and chats, section drafts,
-              reviews, decisions, job history and retained source.
+              reviews, decisions, job history and retained source. Switch back to it from
+              Projects at any time.
             </p>
             <p>
               Settings, provider keys, run limits, the local model and installed adapters are
-              kept. Cartograph restarts with an empty project.
+              shared by every project. Cartograph restarts with an empty project.
             </p>
             <div className="clear-confirmation-actions">
               <button
@@ -118,7 +119,7 @@ export function GraphStatsCard({
               </button>
               <button
                 type="button"
-                className="danger-button"
+                className="secondary-button"
                 disabled={newProject.starting}
                 onClick={() => {
                   setConfirmingNew(false);

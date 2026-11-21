@@ -13,6 +13,7 @@ import { invokeOr } from './tauri';
 import type { CuratedDraftCounts, CuratedDraftRow } from './sectionDocument';
 import type { SurfaceView } from './views';
 import type { EgressPreview } from './components/EgressConsentDialog';
+import type { ProjectEntry } from './components/ProjectsCard';
 
 export interface GraphStats {
   nodes: number;
@@ -1178,6 +1179,10 @@ export interface AppStore {
   /** New project (#1994): the host is restarting into an empty project. */
   newProjectBusy: boolean;
   newProjectError: string | null;
+  /** Every project, the loaded one first (#1994); null with no backend. */
+  projects: ProjectEntry[] | null;
+  projectsBusy: boolean;
+  projectsError: string | null;
   /** Register headline counts; null with no backend. */
   findings: FindingsSummary | null;
   /** Persisted unsupported/no-evidence rows for the register surface. */
@@ -1233,8 +1238,13 @@ export interface AppStore {
     options?: { exactPath?: boolean },
   ) => Promise<void>;
   clearGraph: () => Promise<void>;
-  /** Remove everything tied to the loaded system and restart (#1994). */
+  /** Set the loaded system aside and restart into an empty project (#1994). */
   startNewProject: () => Promise<void>;
+  loadProjects: () => Promise<void>;
+  /** Set the loaded project aside and restart into another (#1994). */
+  switchProject: (id: string) => Promise<void>;
+  renameProject: (id: string, name: string) => Promise<void>;
+  deleteProject: (id: string) => Promise<void>;
   setSpecMode: (mode: SpecExportMode) => Promise<void>;
   /** Recompile the bundle, with its views and curated projection, for the
    *  active mode: after a proposal review, or on request from the Workbench. */
@@ -1427,6 +1437,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   clearError: null,
   newProjectBusy: false,
   newProjectError: null,
+  projects: null,
+  projectsBusy: false,
+  projectsError: null,
   findings: null,
   registerFindings: [],
   ingestHistory: [],
@@ -1543,7 +1556,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       disclosures: { T2: disclosureT2 ?? undefined, T3: disclosureT3 ?? undefined },
       escalationEdgeLabels,
     });
-    await Promise.all([get().loadStagedProposals(), get().loadRecordedCoverage(coverageSince)]);
+    await Promise.all([
+      get().loadStagedProposals(),
+      get().loadRecordedCoverage(coverageSince),
+      get().loadProjects(),
+    ]);
   },
 
   loadRecordedCoverage: async (since = coverageEpoch) => {
@@ -1672,6 +1689,50 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ newProjectError: String(e) });
     } finally {
       set({ newProjectBusy: false });
+    }
+  },
+
+  loadProjects: async () => {
+    try {
+      set({ projects: await invokeOr<ProjectEntry[] | null>('list_projects', null) });
+    } catch (e) {
+      set({ projectsError: String(e) });
+    }
+  },
+
+  switchProject: async (id: string) => {
+    set({ projectsBusy: true, projectsError: null });
+    try {
+      // On success the host restarts and this page is replaced.
+      await invokeOr<null>('switch_project', null, { id });
+    } catch (e) {
+      set({ projectsError: String(e) });
+    } finally {
+      set({ projectsBusy: false });
+    }
+  },
+
+  renameProject: async (id: string, name: string) => {
+    set({ projectsBusy: true, projectsError: null });
+    try {
+      await invokeOr<null>('rename_project', null, { id, name });
+      await get().loadProjects();
+    } catch (e) {
+      set({ projectsError: String(e) });
+    } finally {
+      set({ projectsBusy: false });
+    }
+  },
+
+  deleteProject: async (id: string) => {
+    set({ projectsBusy: true, projectsError: null });
+    try {
+      await invokeOr<null>('delete_project', null, { id });
+      await get().loadProjects();
+    } catch (e) {
+      set({ projectsError: String(e) });
+    } finally {
+      set({ projectsBusy: false });
     }
   },
 
