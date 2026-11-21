@@ -2109,6 +2109,22 @@ type Resp struct{ Status int }
 
 var ErrForbidden = &Resp{Status: http.StatusForbidden}
 
+// Answers with the 403 value through a helper handed the writer.
+func Deny(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        respond(w, ErrForbidden)
+    })
+}
+
+func respond(w http.ResponseWriter, v *Resp) {}
+
+// A handler factory: its handler checks the caller itself.
+func MakeHandler(db *int) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        http.Error(w, "no", http.StatusUnauthorized)
+    })
+}
+
 // Mentions 401 and a 403 value without answering with them.
 func Audit(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2147,6 +2163,8 @@ func plainMux() {
     mux.Handle("GET /private", auth.Require(http.HandlerFunc(list)))
     mux.Handle("GET /traced", auth.Trace(http.HandlerFunc(list)))
     mux.Handle("GET /audited", auth.Audit(http.HandlerFunc(list)))
+    mux.Handle("GET /denied", auth.Deny(http.HandlerFunc(list)))
+    mux.Handle("GET /factory", auth.MakeHandler(nil))
     mux.HandleFunc("GET /open", list)
 }
 
@@ -2176,6 +2194,20 @@ func ginRoutes() {
     e.Use(gin.BasicAuth(nil))
     e.GET("/last", show)
 }
+
+func ginBranch() {
+    b := gin.New()
+    if true {
+        b.Use(adminOnly())
+    }
+    b.GET("/branch", show)
+}
+
+var shared = gin.New()
+
+func installAuth() { shared.Use(gin.BasicAuth(nil)) }
+
+func installRoutes() { shared.GET("/elsewhere", show) }
 "#,
     )
     .unwrap();
@@ -2241,6 +2273,17 @@ func TestPrivate(t *testing.T) {
         auth("GET:/audited")["reasons"],
         serde_json::json!(["no_deny_status:auth.Audit", "no_guard_recovered"])
     );
+    // A 403 value passed to a helper handed the writer guards the route,
+    // citing the wrapper, the call and the value's declaration.
+    let denied = auth("GET:/denied");
+    assert_eq!(denied["state"], "required", "{denied}");
+    assert_eq!(denied["basis"], serde_json::json!(["responds 403 in Deny"]));
+    assert_eq!(denied["prov"]["evidence"].as_array().unwrap().len(), 3);
+    // A handler factory is not middleware.
+    assert_eq!(
+        auth("GET:/factory")["reasons"],
+        serde_json::json!(["no_guard_recovered"])
+    );
     assert_eq!(
         auth("GET:/open")["reasons"],
         serde_json::json!(["no_guard_recovered"])
@@ -2295,6 +2338,17 @@ func TestPrivate(t *testing.T) {
     assert_eq!(
         after["non_auth_middleware"],
         serde_json::json!(["gin.Recovery"])
+    );
+    // A conditional `Use`, or one in another function, is not ordered.
+    let branch = auth("GET:/branch");
+    assert_eq!(branch["state"], "unknown", "{branch}");
+    assert_eq!(
+        branch["reasons"],
+        serde_json::json!(["no_guard_recovered", "unordered_middleware:adminOnly"])
+    );
+    assert_eq!(
+        auth("GET:/elsewhere")["reasons"],
+        serde_json::json!(["no_guard_recovered", "unordered_middleware:gin.BasicAuth"])
     );
     let last = auth("GET:/last");
     assert_eq!(last["prov"]["confidence_tier"], "InferredStrong");
