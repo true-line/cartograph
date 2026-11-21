@@ -14,7 +14,7 @@ use context_hub::{
 };
 use core_graph::coverage::CoverageReadLimits;
 use core_graph::source::{FactKey, FactSourceSelection, FactSourceState};
-use core_graph::{Edge, Node, SnapshotReadLimits};
+use core_graph::{Edge, IdentityPassLimits, Node, SnapshotReadLimits, StoreRevision};
 use core_prov::content_hash;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,6 +87,11 @@ pub(super) struct FrozenContext {
     /// The complete-graph ceiling this context was prepared under; later
     /// evidence selection rereads under the same bound (#1602).
     graph_limits: SnapshotReadLimits,
+    /// The store revision a scope-aware preparation pinned (#1602,
+    /// AC-1302). `graph` then holds only the task's scope, and later
+    /// selection rereads exactly the selected facts at this revision instead
+    /// of the whole graph. `None` for a complete-graph preparation.
+    scoped_revision: Option<StoreRevision>,
 }
 
 /// Owned local preparation, never a deserialized or cloneable publication token.
@@ -500,6 +505,9 @@ impl FrozenContext {
         if request.specialist_id.uses_coverage_qualification() {
             return Err(HostError::InvalidInput);
         }
+        if let Some(prepared) = Self::prepare_scoped(state, &request, history, graph_limits)? {
+            return Ok(prepared);
+        }
         let base = state
             .graph
             .lock()
@@ -510,6 +518,106 @@ impl FrozenContext {
         let mut prepared = Self::from_graph_in(base.graph, &request, history, area.as_ref())?;
         prepared.graph_limits = graph_limits;
         Ok(prepared)
+    }
+
+    /// Scope-aware preparation (#1602 option A, AC-1301): a neighborhood or
+    /// area task reads only its scope, through one pinned scoped reader, and
+    /// streams the complete-graph `context-v1` identity inside the same
+    /// transaction under the ADR-0052 identity-pass caps, so
+    /// `graph_snapshot_id` is unchanged while memory tracks the scope. `None`
+    /// for any other scope, which keeps the complete-graph read.
+    fn prepare_scoped(
+        state: &AppState,
+        request: &AcquisitionRequest,
+        history: &[String],
+        graph_limits: SnapshotReadLimits,
+    ) -> Result<Option<Self>, HostError> {
+        if !scope_aware(&request.scope)? {
+            return Ok(None);
+        }
+        let revision = state
+            .graph
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .read_revision()
+            .map_err(scoped_graph_error)?;
+        Self::prepare_scoped_at(state, request, history, graph_limits, revision).map(Some)
+    }
+
+    /// [`Self::prepare_scoped`] at a revision the caller already read (with
+    /// coverage, for a qualified task). A store that moved past it refuses
+    /// with [`HostError::InputChanged`].
+    fn prepare_scoped_at(
+        state: &AppState,
+        request: &AcquisitionRequest,
+        history: &[String],
+        graph_limits: SnapshotReadLimits,
+        revision: StoreRevision,
+    ) -> Result<Self, HostError> {
+        // The overlay is read without the graph lock, at this revision.
+        let area = super::area::files(state, &revision, &request.scope)?;
+        let (graph_id, graph) = state
+            .graph
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            // The store's own errors pass through `E: From<GraphError>`;
+            // a refusal decided inside the read rides out as the inner result.
+            .with_scoped_reader(&revision, graph_limits, |reader| {
+                Ok::<_, core_graph::GraphError>((|| {
+                    let graph_id = ContextSnapshot::complete_id_in(
+                        reader,
+                        IdentityPassLimits::for_retained(graph_limits),
+                    )
+                    .map_err(|error| match error {
+                        context_hub::CompleteIdentityError::Graph(error) => {
+                            scoped_graph_error(error)
+                        }
+                        context_hub::CompleteIdentityError::Context(error) => context_error(error),
+                    })?;
+                    let graph = match &request.scope {
+                        InvestigationScope::Neighborhood { anchor, hops } => reader
+                            .neighborhood(anchor, *hops as usize)
+                            .map_err(scoped_graph_error)?
+                            .ok_or(HostError::InvalidInput)?,
+                        _ => super::area::scoped_members(
+                            reader,
+                            area.as_ref().ok_or(HostError::InvalidInput)?,
+                        )
+                        .map_err(scoped_graph_error)?,
+                    };
+                    Ok::<_, HostError>((graph_id, graph))
+                })())
+            })
+            .map_err(scoped_graph_error)??;
+        let mut prepared = Self::from_scoped(graph, graph_id, request, history)?;
+        prepared.graph_limits = graph_limits;
+        prepared.scoped_revision = Some(revision);
+        Ok(prepared)
+    }
+
+    /// A context whose graph is already the task's scope, with the
+    /// complete-graph identity computed separately.
+    fn from_scoped(
+        graph: (Vec<Node>, Vec<Edge>),
+        graph_id: String,
+        request: &AcquisitionRequest,
+        history: &[String],
+    ) -> Result<Self, HostError> {
+        if request
+            .expected_graph_revision
+            .as_ref()
+            .is_some_and(|expected| expected != &graph_id)
+        {
+            return Err(HostError::InputChanged);
+        }
+        let snapshot = projection(graph.0.clone(), graph.1.clone())?;
+        Self::assemble(
+            graph,
+            graph_id,
+            Arc::new(snapshot),
+            request.clone(),
+            history,
+        )
     }
 
     /// The app-backed path brackets registration/plugin discovery around one
@@ -589,18 +697,32 @@ impl FrozenContext {
         }
         let coverage_limits = coverage_preparation_limits(archive_capacity)?;
         let before = scope()?;
-        let (base, recorded) = state
-            .graph
-            .lock()
-            .map_err(|_| HostError::Operational)?
-            .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
-            .map_err(graph_error)?;
-        let area = super::area::files(state, &base.revision, &request.scope)?;
-        let graph = base.graph;
+        let (mut prepared, recorded) = if scope_aware(&request.scope)? {
+            // Coverage and the scoped facts describe one revision: the
+            // scoped reader refuses if the store moved after this read.
+            let (revision, recorded) = state
+                .graph
+                .lock()
+                .map_err(|_| HostError::Operational)?
+                .read_coverage_records_with_revision_bounded(coverage_limits)
+                .map_err(graph_error)?;
+            let prepared =
+                Self::prepare_scoped_at(state, &request, history, graph_limits, revision)?;
+            (prepared, recorded)
+        } else {
+            let (base, recorded) = state
+                .graph
+                .lock()
+                .map_err(|_| HostError::Operational)?
+                .read_snapshot_with_coverage_and_revision_bounded(graph_limits, coverage_limits)
+                .map_err(graph_error)?;
+            let area = super::area::files(state, &base.revision, &request.scope)?;
+            let prepared = Self::from_graph_in(base.graph, &request, history, area.as_ref())?;
+            (prepared, recorded)
+        };
         let stable = crate::context::stable_scope(&before, scope()?);
         let qualification =
             CoverageQualification::new(&stable, &recorded).map_err(context_error)?;
-        let mut prepared = Self::from_graph_in(graph, &request, history, area.as_ref())?;
         prepared.graph_limits = graph_limits;
         // Both paths retain the one already-authorized immutable scoped
         // projection from this same bounded graph read.
@@ -671,6 +793,16 @@ impl FrozenContext {
             area,
             complete,
         )?);
+        Self::assemble(graph, graph_id, snapshot, request, history)
+    }
+
+    fn assemble(
+        graph: (Vec<Node>, Vec<Edge>),
+        graph_id: String,
+        snapshot: Arc<ContextSnapshot>,
+        request: AcquisitionRequest,
+        history: &[String],
+    ) -> Result<Self, HostError> {
         let history_bytes = if history.is_empty() {
             Vec::new()
         } else {
@@ -704,6 +836,7 @@ impl FrozenContext {
             policy: Arc::clone(&request.policy),
             specialist: request.specialist_id,
             graph_limits: SnapshotReadLimits::investigation(),
+            scoped_revision: None,
         })
     }
 
@@ -1203,17 +1336,38 @@ impl FrozenContext {
         state: &AppState,
         keys: &[FactKey],
     ) -> Result<BTreeMap<FactKey, TaskFactSelection>, HostError> {
-        let read = state
-            .graph
-            .lock()
-            .map_err(|_| HostError::Operational)?
-            .read_source_selection_snapshot_bounded(keys, self.graph_limits)
-            .map_err(graph_error)?;
-        if read.graph != self.graph {
-            return Err(HostError::InputChanged);
-        }
-        let selected = read
-            .selections
+        let selections = match &self.scoped_revision {
+            // A scope-aware context rereads only the selected facts, at the
+            // revision it pinned: a store that moved on is a changed input,
+            // and every selected fact must still equal its frozen copy.
+            Some(revision) => {
+                let read = state
+                    .graph
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .read_selected_facts_at_revision(keys, revision, self.graph_limits)
+                    .map_err(scoped_graph_error)?;
+                if read.nodes.iter().any(|node| !self.graph.0.contains(node))
+                    || read.edges.iter().any(|edge| !self.graph.1.contains(edge))
+                {
+                    return Err(HostError::InputChanged);
+                }
+                read.selections
+            }
+            None => {
+                let read = state
+                    .graph
+                    .lock()
+                    .map_err(|_| HostError::Operational)?
+                    .read_source_selection_snapshot_bounded(keys, self.graph_limits)
+                    .map_err(graph_error)?;
+                if read.graph != self.graph {
+                    return Err(HostError::InputChanged);
+                }
+                read.selections
+            }
+        };
+        let selected = selections
             .iter()
             .map(|s| Ok((s.fact.clone(), selection(s)?)))
             .collect::<Result<BTreeMap<_, _>, HostError>>()?;
@@ -1302,6 +1456,30 @@ fn graph_error(error: core_graph::GraphError) -> HostError {
         ) => HostError::InvalidInput,
         core_graph::GraphError::SnapshotBounds(_) => HostError::LimitExceeded,
         _ => HostError::Operational,
+    }
+}
+/// Whether a task scope is prepared scope-aware (#1602): a neighborhood
+/// (with a valid radius) or an area. `All` keeps the complete-graph read.
+fn scope_aware(scope: &InvestigationScope) -> Result<bool, HostError> {
+    match scope {
+        InvestigationScope::Neighborhood { hops, .. } => {
+            if *hops == 0 || *hops as usize > context_hub::MAX_NEIGHBORHOOD_HOPS {
+                return Err(HostError::InvalidInput);
+            }
+            Ok(true)
+        }
+        InvestigationScope::Area { .. } => Ok(true),
+        _ => Ok(false),
+    }
+}
+/// [`graph_error`], with a pinned revision that is no longer current read as
+/// a changed input rather than an operational failure.
+fn scoped_graph_error(error: core_graph::GraphError) -> HostError {
+    match error {
+        core_graph::GraphError::Generation(core_graph::GenerationError::Changed) => {
+            HostError::InputChanged
+        }
+        error => graph_error(error),
     }
 }
 fn context_error(error: context_hub::ContextError) -> HostError {
