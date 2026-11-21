@@ -8,6 +8,7 @@ pub mod config_read;
 pub mod events;
 pub mod observed;
 pub mod tsconfig;
+pub mod vercel;
 pub mod vue;
 
 /// HTTP framework registry for factory-created routers (Express/Fastify).
