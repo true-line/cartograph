@@ -450,6 +450,23 @@ fn assemble_keeps_one_claim_per_exact_statement_citing_every_row() {
     assert_eq!(claims[0].citations, vec![id(1), id(2)]);
     assert_eq!(outcome.left_out, 0);
     assert_eq!(outcome.stats.rows_covered, 3);
+
+    // Rows past one claim's citation bound keep the repeat as its own claim.
+    let mut replies = Vec::new();
+    for chunk in 0..3 {
+        let ids: Vec<usize> = (chunk * 10 + 1..=chunk * 10 + 10).collect();
+        replies.push(reply(vec![claim(text, &ids)]));
+    }
+    let workflow = Workflow {
+        max_rows: 10,
+        ..no_audit()
+    };
+    let mut model = Fake::new(replies);
+    let outcome = run_with(&workflow, 30, &mut model);
+    let claims = outcome.finish.expect("kept").claims;
+    assert_eq!(claims.len(), 3);
+    assert!(claims.iter().all(|claim| claim.citations.len() == 10));
+    assert_eq!(outcome.stats.rows_covered, 30);
 }
 
 #[test]

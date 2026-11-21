@@ -1264,7 +1264,8 @@ pub fn run(
         claims.extend(chunk_claims);
     }
     // Assemble: chunk order. A statement drafted again word for word (only
-    // spacing may differ) is one claim citing the rows of both.
+    // spacing may differ) is one claim citing the rows of both, while they
+    // fit its citation bound.
     let mut assembled: Vec<Claim> = Vec::with_capacity(claims.len());
     let mut slot: BTreeMap<String, usize> = BTreeMap::new();
     for claim in claims {
@@ -1273,19 +1274,24 @@ pub fn run(
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        match slot.get(&key) {
-            Some(&kept) => {
-                let kept = &mut assembled[kept];
-                for id in claim.citations {
-                    if kept.citations.len() < MAX_CITATIONS && !kept.citations.contains(&id) {
-                        kept.citations.push(id);
-                    }
-                }
+        // When the rows of both would not fit one claim's citation bound,
+        // the later claim stays its own so no row loses its evidence.
+        let merged = slot.get(&key).is_some_and(|&kept| {
+            let kept = &mut assembled[kept];
+            let new: Vec<&String> = claim
+                .citations
+                .iter()
+                .filter(|id| !kept.citations.contains(id))
+                .collect();
+            let fits = kept.citations.len() + new.len() <= MAX_CITATIONS;
+            if fits {
+                kept.citations.extend(new.into_iter().cloned());
             }
-            None => {
-                slot.insert(key, assembled.len());
-                assembled.push(claim);
-            }
+            fits
+        });
+        if !merged {
+            slot.insert(key, assembled.len());
+            assembled.push(claim);
         }
     }
     let mut claims = assembled;
