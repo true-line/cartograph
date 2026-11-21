@@ -219,7 +219,7 @@ fn captured_definition_receipt_v2_covers_every_source_occurrence() {
     // pin, not a stale frozen value, so 0.26- and 0.27-produced receipts are
     // genuinely distinguishable in hashed content.
     assert_eq!(receipt.content.parser_package, PARSER_PACKAGE);
-    assert_eq!(PARSER_PACKAGE, "tree-sitter@0.27.0");
+    assert_eq!(PARSER_PACKAGE, "tree-sitter@0.27.2");
     assert!(receipt.matches_node(node));
     let rule = GuardedExitEvidence::from_value(node.props["rule"].clone()).unwrap();
     let definitions = rule.local_definitions.as_ref().unwrap();
@@ -322,7 +322,7 @@ fn receipt_v2_accepts_frozen_pre_upgrade_parser_pin_but_rejects_arbitrary_value(
     // must not.
     let (_dir, _capture, facts, receipts) = captured(CODE);
     let (_, original) = rule_receipt(&facts, &receipts);
-    assert_eq!(original.content.parser_package, "tree-sitter@0.27.0");
+    assert_eq!(original.content.parser_package, "tree-sitter@0.27.2");
 
     let mut legacy = original.clone();
     legacy.content.schema_version = 2;
@@ -338,6 +338,28 @@ fn receipt_v2_accepts_frozen_pre_upgrade_parser_pin_but_rejects_arbitrary_value(
     v3_legacy_pin.receipt_id = content_id(&v3_legacy_pin.content).unwrap();
     assert!(v3_legacy_pin.validate().is_err());
     assert!(Receipt::from_json(&serde_json::to_string(&v3_legacy_pin).unwrap()).is_err());
+
+    // AC-1029: v2 and v3 receipts persisted while the recorded pin read
+    // 0.27.0 (the linked parser was 0.27.2) keep validating under their own
+    // contracts; the Python and Go lanes, which never shipped it, do not.
+    let mut v3_lagging = original.clone();
+    v3_lagging.content.parser_package = "tree-sitter@0.27.0".into();
+    v3_lagging.receipt_id = content_id(&v3_lagging.content).unwrap();
+    v3_lagging.validate().unwrap();
+    assert!(Receipt::from_json(&serde_json::to_string(&v3_lagging).unwrap()).is_ok());
+    assert_ne!(v3_lagging.receipt_id, original.receipt_id);
+    let mut v2_lagging = legacy.clone();
+    v2_lagging.content.parser_package = "tree-sitter@0.27.0".into();
+    v2_lagging.receipt_id = content_id(&v2_lagging.content).unwrap();
+    v2_lagging.validate().unwrap();
+    for grammar in [Grammar::Python, Grammar::Go] {
+        assert!(
+            !contract(3, grammar)
+                .unwrap()
+                .parser_package_legacy
+                .contains(&"tree-sitter@0.27.0")
+        );
+    }
 
     let mut arbitrary = original.clone();
     arbitrary.content.parser_package = "tree-sitter@9.9.9".into();
