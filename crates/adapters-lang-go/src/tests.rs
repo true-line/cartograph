@@ -1773,6 +1773,25 @@ func List(db *gorm.DB) {
     var n int64
     db.Model(&Category{}).Count(&n)
 }
+func Shadow(db *gorm.DB, x Plain) {
+    {
+        x := Category{}
+        db.Create(&x)
+    }
+    for _, x := range load() {
+        db.Save(&x)
+    }
+}
+func Summary(db *gorm.DB) {
+    var result Plain
+    db.Model(&UserModel{}).Scan(&result)
+}
+func SaveAny(db *gorm.DB, data any) {
+    db.Save(data)
+}
+func SavePlain(db *gorm.DB, p Plain) {
+    db.Save(&p)
+}
 "#,
     )
     .unwrap();
@@ -1878,17 +1897,21 @@ func Authors(db *gorm.DB) {
             row("UserModel.Follow", "WRITES", "UserModel", "update"),
             row("Unfollow", "WRITES", "FollowModel", "delete"),
             row("List", "READS", "Category", "read"),
+            row("Shadow", "WRITES", "Category", "insert"),
+            row("Summary", "READS", "UserModel", "read"),
             row("Authors", "READS", "UserModel", "read"),
             row("Authors", "WRITES", "UserModel", "insert"),
         ])
     );
     // A write through an unproven type is a Gap; a struct with no GORM
     // marker is no model.
-    let gaps: Vec<&str> = x
+    // A write through an unproven type, or a type that is no recovered
+    // model, is a Gap; a struct with no GORM marker is no model.
+    let gaps: BTreeSet<&str> = x
         .nodes
         .iter()
         .filter(|n| n.id.starts_with("gap:gorm:"))
         .map(|n| n.props["expression"].as_str().unwrap())
         .collect();
-    assert_eq!(gaps, ["data"]);
+    assert_eq!(gaps, BTreeSet::from(["data", "&x", "&p"]));
 }

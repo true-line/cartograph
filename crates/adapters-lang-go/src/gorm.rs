@@ -402,13 +402,15 @@ fn access(
     }
     let own = model_argument(method).and_then(|index| call_arguments(call).get(index).copied());
     let chained = chain_model(cx, operand);
-    let argument = own.or(chained);
-    let Some(argument) = argument else {
+    // GORM takes the table from `Model(…)` when the chain sets one, and from
+    // the destination otherwise (`Model(&User{}).Scan(&summary)` reads users).
+    let Some(argument) = chained.or(own) else {
         return;
     };
     let src = enclosing_function(call, functions).unwrap_or_else(|| file_id(cx.id.repo, cx.path));
-    let resolved = model_type(cx, argument, call, bindings, dir)
-        .or_else(|| chained.and_then(|m| model_type(cx, m, call, bindings, dir)));
+    let resolved = chained
+        .and_then(|m| model_type(cx, m, call, bindings, dir))
+        .or_else(|| own.and_then(|a| model_type(cx, a, call, bindings, dir)));
     let label = if write { "WRITES" } else { "READS" };
     let Some((package, type_name)) = resolved else {
         if write {
@@ -417,8 +419,11 @@ fn access(
         return;
     };
     let dst = key(&package, &type_name);
+    // A write whose type is no recovered model is a Gap at the join.
+    let unresolved = write.then(|| gap_facts(cx, call, argument, &src, label));
     out.pending_gorm.push(Edge {
         props: serde_json::json!({
+            "unresolved": unresolved,
             "operation": operations[0],
             "operations": operations,
             "method": method,
@@ -476,6 +481,10 @@ fn model_type(
         _ => return None,
     };
     let (package, name) = base_type(cx, ty)?;
+    // `any` is `interface{}`: no model.
+    if package.is_none() && name == "any" {
+        return None;
+    }
     let package_dir = match package {
         None => dir.to_string(),
         Some(package) => bindings.get(&package)?.package_dir.clone()?,
@@ -483,78 +492,77 @@ fn model_type(
     Some((package_dir, name))
 }
 
-/// The type node a function declares `name` with, before `at`: a parameter
-/// or receiver, `var name T`, or `name := T{…}` / `&T{…}` / `make([]T…)` /
-/// `new(T)`.
+/// The type node of the declaration of `name` visible at `at`: the nearest
+/// enclosing scope that declares it before `at` (a parameter or receiver,
+/// `var name T`, or `name := T{…}` / `&T{…}` / `make([]T…)` / `new(T)`),
+/// its latest declaration there. A visible declaration whose type is not
+/// stated (`name := load()`, a range variable) shadows any outer one and
+/// gives no type.
 fn variable_type<'t>(cx: &FileCx<'_>, at: TsNode<'t>, name: &str) -> Option<TsNode<'t>> {
-    let mut scope = at;
-    let mut found = None;
-    while let Some(parent) = scope.parent() {
-        scope = parent;
-        if !matches!(
-            scope.kind(),
-            "function_declaration" | "method_declaration" | "func_literal"
-        ) {
-            continue;
-        }
-        let mut stack = vec![scope];
-        while let Some(node) = stack.pop() {
+    let mut child = at;
+    while let Some(scope) = child.parent() {
+        let mut found: Option<Option<TsNode<'t>>> = None;
+        let mut cursor = scope.walk();
+        for node in scope.named_children(&mut cursor) {
             if node.start_byte() >= at.start_byte() {
+                break;
+            }
+            // The statement holding `at` declares after its right side.
+            if node == child && node.kind() != "for_clause" {
                 continue;
             }
-            // A nested function's declarations are its own.
-            if node != scope
-                && matches!(
-                    node.kind(),
-                    "func_literal" | "function_declaration" | "method_declaration"
-                )
-            {
-                continue;
-            }
-            let mut cursor = node.walk();
-            stack.extend(node.named_children(&mut cursor));
-            let declared = match node.kind() {
-                "parameter_declaration" | "var_spec" => {
-                    let mut cursor = node.walk();
-                    let names = node
-                        .children_by_field_name("name", &mut cursor)
-                        .any(|n| cx.text(&n) == name);
-                    if !names {
-                        continue;
-                    }
-                    node.child_by_field_name("type").or_else(|| {
-                        let value = node.child_by_field_name("value")?;
-                        value_type(cx, value.named_child(0)?)
-                    })
-                }
-                "short_var_declaration" => {
-                    let (Some(left), Some(right)) = (
-                        node.child_by_field_name("left"),
-                        node.child_by_field_name("right"),
-                    ) else {
-                        continue;
-                    };
-                    let mut cursor = left.walk();
-                    let lefts: Vec<_> = left.named_children(&mut cursor).collect();
-                    let mut cursor = right.walk();
-                    let rights: Vec<_> = right.named_children(&mut cursor).collect();
-                    lefts
-                        .iter()
-                        .position(|l| cx.text(l) == name)
-                        .and_then(|i| rights.get(i).copied())
-                        .and_then(|value| value_type(cx, value))
-                }
-                _ => continue,
-            };
-            if let Some(declared) = declared {
+            if let Some(declared) = declaration(cx, node, name) {
                 found = Some(declared);
             }
         }
-        if found.is_some() {
+        if let Some(found) = found {
             return found;
         }
+        child = scope;
     }
-    found
+    None
+}
+
+/// Whether `node` declares `name`, and with which stated type.
+fn declaration<'t>(cx: &FileCx<'_>, node: TsNode<'t>, name: &str) -> Option<Option<TsNode<'t>>> {
+    let named = |node: TsNode<'t>| {
+        let mut cursor = node.walk();
+        node.children_by_field_name("name", &mut cursor)
+            .any(|n| cx.text(&n) == name)
+    };
+    match node.kind() {
+        "parameter_list" | "var_declaration" | "var_spec_list" => {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter_map(|c| declaration(cx, c, name))
+                .last()
+        }
+        "parameter_declaration" | "variadic_parameter_declaration" if named(node) => {
+            Some(node.child_by_field_name("type"))
+        }
+        "var_spec" if named(node) => Some(node.child_by_field_name("type").or_else(|| {
+            let value = node.child_by_field_name("value")?;
+            value_type(cx, value.named_child(0)?)
+        })),
+        "for_clause" => declaration(cx, node.child_by_field_name("initializer")?, name),
+        "short_var_declaration" | "range_clause" => {
+            let left = node.child_by_field_name("left")?;
+            let mut cursor = left.walk();
+            let lefts: Vec<_> = left.named_children(&mut cursor).collect();
+            let position = lefts.iter().position(|l| cx.text(l) == name)?;
+            if node.kind() == "range_clause" {
+                return Some(None);
+            }
+            let right = node.child_by_field_name("right")?;
+            let mut cursor = right.walk();
+            let rights: Vec<_> = right.named_children(&mut cursor).collect();
+            if rights.len() != lefts.len() {
+                return Some(None);
+            }
+            Some(value_type(cx, rights[position]))
+        }
+        _ => None,
+    }
 }
 
 /// The type a value expression has when it states it: `T{…}`, `&T{…}`,
@@ -584,26 +592,54 @@ fn gap(
     label: &str,
     out: &mut Extraction,
 ) {
+    push_gap(gap_facts(cx, call, argument, src, label), out);
+}
+
+/// The Gap node and edge of an unproven write, as JSON a pending access can
+/// carry to the join.
+fn gap_facts(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    argument: TsNode<'_>,
+    src: &str,
+    label: &str,
+) -> serde_json::Value {
     let reason = "GORM model type is not proven";
     let gap = format!("gap:gorm:{}@{}@{}", cx.id.repo, cx.path, call.start_byte());
+    serde_json::json!({
+        "node": {
+            "id": gap,
+            "props": {
+                "reason": reason,
+                "expression": cx.text(&argument).chars().take(160).collect::<String>(),
+                "attempted_tiers": ["T0"],
+                "prov": cx.prov_with_confidence(&call, ConfidenceTier::Gap, &format!("Gap {gap}")),
+            },
+        },
+        "edge": {
+            "src": src,
+            "label": label,
+            "props": {
+                "reason": reason,
+                "prov": cx.prov_with_confidence(&call, ConfidenceTier::Gap, &format!("{label} {src} -> GORM")),
+            },
+        },
+    })
+}
+
+fn push_gap(facts: serde_json::Value, out: &mut Extraction) {
+    let text = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let id = text(&facts["node"]["id"]);
     out.nodes.push(Node {
-        id: gap.clone(),
+        id: id.clone(),
         label: "Gap".into(),
-        props: serde_json::json!({
-            "reason": reason,
-            "expression": cx.text(&argument).chars().take(160).collect::<String>(),
-            "attempted_tiers": ["T0"],
-            "prov": cx.prov_with_confidence(&call, ConfidenceTier::Gap, &format!("Gap {gap}")),
-        }),
+        props: facts["node"]["props"].clone(),
     });
     out.edges.push(Edge {
-        src: src.to_string(),
-        dst: gap,
-        label: label.into(),
-        props: serde_json::json!({
-            "reason": reason,
-            "prov": cx.prov_with_confidence(&call, ConfidenceTier::Gap, &format!("{label} {src} -> GORM")),
-        }),
+        src: text(&facts["edge"]["src"]),
+        dst: id,
+        label: text(&facts["edge"]["label"]),
+        props: facts["edge"]["props"].clone(),
     });
 }
 
@@ -633,7 +669,15 @@ pub(super) fn resolve(out: &mut Extraction) {
     }
     let mut merged: BTreeMap<(String, String, String), Edge> = BTreeMap::new();
     for mut edge in std::mem::take(&mut out.pending_gorm) {
+        let unresolved = edge
+            .props
+            .as_object_mut()
+            .and_then(|props| props.remove("unresolved"))
+            .filter(|facts| !facts.is_null());
         let Some(dst) = models.get(&edge.dst) else {
+            if let Some(facts) = unresolved {
+                push_gap(facts, out);
+            }
             continue;
         };
         edge.dst = dst.clone();
