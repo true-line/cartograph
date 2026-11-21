@@ -201,6 +201,43 @@ ORDERS_QUEUE = "https://sqs.example/orders"
     );
 }
 
+// AC-1018 (ADR-0075): `env_read` in the manifest and `read` in a
+// repository's `.cartograph/env.toml` list exact env keys; a glob or other
+// shape is refused, and no file is an empty allowlist.
+#[test]
+fn env_read_allowlists_are_exact_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join(manifest::MANIFEST_NAME);
+    std::fs::write(&f, "env_read = [\"QUEUE_URL\", \"SETTINGS.apiUrl\"]\n").unwrap();
+    let m = manifest::SystemManifest::load(&f).unwrap();
+    assert_eq!(
+        m.env_read_keys().into_iter().collect::<Vec<_>>(),
+        ["QUEUE_URL", "SETTINGS.apiUrl"]
+    );
+    std::fs::write(&f, "env_read = [\"QUEUE_*\"]\n").unwrap();
+    assert!(matches!(
+        manifest::SystemManifest::load(&f),
+        Err(manifest::ManifestError::InvalidEnvReadKey(key)) if key == "QUEUE_*"
+    ));
+
+    let repo = tempfile::tempdir().unwrap();
+    assert!(manifest::repo_env_read(repo.path()).unwrap().is_empty());
+    std::fs::create_dir(repo.path().join(".cartograph")).unwrap();
+    let env = repo.path().join(manifest::REPO_ENV_REL_PATH);
+    std::fs::write(&env, "read = [\"ORDERS_QUEUE\"]\n").unwrap();
+    assert_eq!(
+        manifest::repo_env_read(repo.path())
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["ORDERS_QUEUE"]
+    );
+    std::fs::write(&env, "read = [\"1BAD\"]\n").unwrap();
+    assert!(manifest::repo_env_read(repo.path()).is_err());
+    std::fs::write(&env, "reads = [\"ORDERS_QUEUE\"]\n").unwrap();
+    assert!(manifest::repo_env_read(repo.path()).is_err());
+}
+
 // AC-0240 (#589): services and gateway routes are author-declared binding
 // evidence; references and base URLs are validated at load.
 #[test]
