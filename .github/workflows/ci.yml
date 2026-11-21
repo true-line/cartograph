@@ -355,12 +355,16 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
 
+      # Workspace crates only: rust-cache already holds the dependencies, and
+      # sending their ~4,800 rustc calls through sccache too made a cold run
+      # write thousands of cache entries, which the Actions cache throttled
+      # (3,019 write errors) so the workspace crates were often not stored.
       - name: Compile through sccache
         run: |
           wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
 
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
@@ -387,7 +391,7 @@ jobs:
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
-        run: '"$RUSTC_WRAPPER" --show-stats'
+        run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
 
       # A cancelled job frees its slot when the runner reaps its processes.
       - name: Release the host heavy-build slot
@@ -605,12 +609,16 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
 
+      # Workspace crates only: rust-cache already holds the dependencies, and
+      # sending their ~4,800 rustc calls through sccache too made a cold run
+      # write thousands of cache entries, which the Actions cache throttled
+      # (3,019 write errors) so the workspace crates were often not stored.
       - name: Compile through sccache
         run: |
           wrapper=$(command -v sccache || echo "$CARGO_HOME/bin/sccache")
           "$wrapper" --version
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=$wrapper" >> "$GITHUB_ENV"
 
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
@@ -625,7 +633,7 @@ jobs:
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
-        run: '"$RUSTC_WRAPPER" --show-stats'
+        run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
 
   compliance:
     name: License & supply-chain
