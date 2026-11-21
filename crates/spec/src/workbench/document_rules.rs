@@ -2445,9 +2445,18 @@ def verify_prefix_suffix(user, alias_prefix, alias_suffix):
         return False
     return True
 
+def found_alias(missing, result):
+    if missing:
+        return False
+    return result
+
 def update_alias(alias_id, user):
     if not user.can_create_new_alias():
         return jsonify(error="quota"), 400
+    if not user.can_create_num_aliases(2):
+        return jsonify(error="quota"), 400
+    if not found_alias(alias_id, user):
+        return jsonify(error="no"), 400
     if not verify_prefix_suffix(user, 1, 2):
         return jsonify(error="no"), 400
     return jsonify(ok=True)
@@ -2465,6 +2474,14 @@ def update_alias(alias_id, user):
         ] {
             assert!(text.contains(line), "{line}\n{text}");
         }
+        // A named receiver's predicate keeps its number.
+        assert!(
+            text.contains("the user cannot create num aliases (2)"),
+            "{text}"
+        );
+        // A free function's last answer after a guard is no unconditional
+        // rule.
+        assert!(!text.contains("returns the result"), "{text}");
         // A constant last answer with no exit before it is still no rule.
         assert!(
             !text.contains("verify\\_prefix\\_suffix | Otherwise"),
@@ -3111,6 +3128,9 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             if (toState === 'Shipped') {
                 return true;
             }
+            if (toState === 'Delivered') {
+                throw new IllegalOperationError('message.cannot-deliver');
+            }
         },
     };
     return orderProcess;
@@ -3154,6 +3174,13 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             assert!(text.contains(line), "{line}\n{text}");
         }
         assert!(!text.contains(NOT_STATED), "{text}");
+        // A throw refuses the move too.
+        assert!(
+            text.contains(
+                "| onTransitionStart | When the to state is “Delivered”, the move is refused with an error. |"
+            ),
+            "{text}"
+        );
         // `true` lets the move happen.
         assert!(
             text.contains(

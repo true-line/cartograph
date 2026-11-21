@@ -600,10 +600,13 @@ pub(super) fn extract(
         };
         // A method that answers `True` or `False` somewhere is a predicate
         // whatever its name (`lifetime_or_active_subscription`, AC-1030).
-        let answers_bool = owner_exits.iter().any(|exit| {
-            exit.kind() == "return_statement"
-                && exit_value(*exit).is_some_and(|v| matches!(v.kind(), "true" | "false"))
-        });
+        // Only a method: its rows state the earlier exits as "otherwise",
+        // which a free function's rows do not.
+        let answers_bool = qualified_function_name(cx, function).is_some_and(|n| n.contains('.'))
+            && owner_exits.iter().any(|exit| {
+                exit.kind() == "return_statement"
+                    && exit_value(*exit).is_some_and(|v| matches!(v.kind(), "true" | "false"))
+            });
         for (order, exit) in owner_exits.iter().copied().enumerate() {
             let (ancestors, limited) = branches(exit);
             let value = exit_value(exit);

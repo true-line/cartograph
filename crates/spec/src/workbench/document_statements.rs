@@ -757,6 +757,17 @@ fn applied(path: &[String], args: &[Arg], negated: bool, cx: &Context<'_>) -> Op
         }
         return Some(format!("{} {verb} {}", noun(value, cx)?, words(rest)));
     }
+    // A named receiver's predicate given a number keeps it (AC-1030):
+    // `user.can_create_num_aliases(1)` is "the user can create num aliases
+    // (1)", not the same rule without its quota.
+    if let (Some((verb, rest)), [receiver], [Arg::Pos(Expr::Lit(lit @ Lit::Num(_)))]) =
+        (predicate_verb(last), owner, args)
+        && !is_class(receiver)
+    {
+        let verb = if negated { negated_verb(verb) } else { verb };
+        let who = subject(&path[..1], cx)?;
+        return Some(format!("{who} {verb} {} ({})", words(rest), literal(lit)));
+    }
     if predicate_verb(last).is_some() {
         return flag(path, negated, cx);
     }
@@ -2192,6 +2203,10 @@ fn rendered(
     }
     let value = match &evidence.effect {
         LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
+        // A throw in a transition guard refuses the move (AC-1032).
+        LocalExit::Throw { .. } if method == "onTransitionStart" => {
+            return Some(sentence("the move is refused with an error".to_owned()));
+        }
         LocalExit::Throw { value } => {
             // A Java or Kotlin exception names the error it raises (#2020,
             // #2021).
