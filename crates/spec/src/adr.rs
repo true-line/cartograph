@@ -12,7 +12,7 @@ use bounded::{
     canonical_hash, text_hash,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Deterministic extractor id for Markdown ADR/RFC files.
 pub const FOUND_ADR_EXTRACTOR_ID: &str = "t0.adr-markdown";
@@ -62,28 +62,21 @@ pub struct FoundAdrRead {
     pub unread: Vec<UnreadAdr>,
 }
 
-fn collect_adr_files(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let skip = |name: &str| {
-        let name = name.to_ascii_lowercase();
-        name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "dist")
-    };
-    for file in source_walk::files(root, &skip, source_walk::Gitignores::Honor)? {
-        let name = file.name.to_ascii_lowercase();
-        if !name.ends_with(".md") {
-            continue;
-        }
-        let in_decision_dir = file.rel.split('/').any(|component| {
-            matches!(
-                component.to_ascii_lowercase().as_str(),
-                "adr" | "adrs" | "decision" | "decisions" | "rfc" | "rfcs"
-            )
-        });
-        let named_decision = name.starts_with("adr-") || name.starts_with("rfc-");
-        if in_decision_dir || named_decision {
-            out.push(file.path);
-        }
+/// Whether a Markdown file at `rel` (named `name`) is a decision record: it
+/// sits under a decision directory or is named like one. The documentation
+/// walk asks this of every Markdown file it reads (ADR-0065 decision 6).
+pub(crate) fn is_decision_record(rel: &str, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if !name.ends_with(".md") {
+        return false;
     }
-    Ok(())
+    let in_decision_dir = rel.split('/').any(|component| {
+        matches!(
+            component.to_ascii_lowercase().as_str(),
+            "adr" | "adrs" | "decision" | "decisions" | "rfc" | "rfcs"
+        )
+    });
+    in_decision_dir || name.starts_with("adr-") || name.starts_with("rfc-")
 }
 
 fn heading(markdown: &str, fallback: &str) -> String {
@@ -214,123 +207,129 @@ pub fn read_found_adrs_among(
     commit: &str,
     is_candidate: impl Fn(&str) -> bool,
 ) -> std::io::Result<FoundAdrRead> {
-    let mut files = Vec::new();
-    collect_adr_files(root, &mut files)?;
-    files.sort();
-    let mut read = FoundAdrRead::default();
+    let cases = crate::DocumentationCases {
+        documents: false,
+        api_references: &[],
+        decisions: Some(&is_candidate),
+    };
+    crate::read_documentation(root, repo, commit, &cases).map(|read| read.decisions)
+}
+
+/// Record a found decision file the documentation walk could not read.
+pub(crate) fn skip_found_adr(read: &mut FoundAdrRead, path: &str, reason: UnreadAdrReason) {
+    read.unread.push(UnreadAdr {
+        path: path.to_string(),
+        reason,
+    });
+}
+
+/// Read one found ADR/RFC file the documentation walk has read as
+/// `markdown`: its `ADR` node and the `DECIDES` edges of the ids it governs.
+pub(crate) fn read_found_adr(
+    read: &mut FoundAdrRead,
+    repo: &str,
+    commit: &str,
+    relative: &str,
+    markdown: &str,
+    is_candidate: &dyn Fn(&str) -> bool,
+) {
     let facts = &mut read.facts;
-    for file in files {
-        let relative = file
-            .strip_prefix(root)
-            .expect("ADR file remains under root")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let mut skip = |reason| {
-            read.unread.push(UnreadAdr {
-                path: relative.clone(),
-                reason,
-            })
-        };
-        if file.metadata()?.len() > MAX_FOUND_ADR_BYTES {
-            skip(UnreadAdrReason::TooLarge);
-            continue;
+    read.files += 1;
+    // Stored text is redacted; identity, spans and governed ids are read
+    // from the file as written.
+    let (body, mut redactions) = core_redact::redact_text(markdown);
+    let file_name = relative.rsplit('/').next().unwrap_or(relative);
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Untitled decision");
+    let (title, title_redactions) = core_redact::redact_text(&heading(markdown, stem));
+    let (status, status_redactions) =
+        core_redact::redact_text(&field(markdown, "Status").unwrap_or_else(|| "Found".into()));
+    redactions += title_redactions + status_redactions;
+    let adr_id = format!("adr:{repo}@{relative}");
+    let file_evidence = evidence(repo, relative, commit, 0, markdown.len());
+    let provenance = Provenance::new(
+        Tier::Deterministic,
+        ConfidenceTier::Confirmed,
+        vec![file_evidence.clone()],
+        FOUND_ADR_EXTRACTOR_ID,
+        serde_json::to_vec(&(&adr_id, markdown))
+            .expect("ADR identity serializes")
+            .as_slice(),
+    )
+    .expect("Confirmed is within the deterministic confidence ceiling")
+    .with_method(crate::spec_rule(FOUND_ADR_EXTRACTOR_ID));
+    let forbids = list_field(markdown, "Forbids")
+        .into_iter()
+        .filter(|label| {
+            label
+                .chars()
+                .all(|character| character.is_ascii_uppercase() || character == '_')
+        })
+        .collect::<Vec<_>>();
+    let mut props = serde_json::json!({
+        "title": title,
+        "status": status,
+        "body": body,
+        "path": relative,
+        "origin": "found",
+        "recovered": false,
+        "forbids": forbids,
+        "prov": provenance,
+    });
+    // Present only when something was replaced, so an ADR without a
+    // recognized secret keeps the fact it had before #1847.
+    if redactions > 0 {
+        props["redactions"] = redactions.into();
+    }
+    facts.nodes.push(Node {
+        id: adr_id.clone(),
+        label: "ADR".into(),
+        props,
+    });
+
+    let mut mentions: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for target in list_field(markdown, "Governs") {
+        if is_candidate(target.as_str())
+            && let Some(span) = field_target_span(markdown, "Governs", &target)
+        {
+            mentions.insert(target, span);
         }
-        let Ok(markdown) = String::from_utf8(std::fs::read(&file)?) else {
-            skip(UnreadAdrReason::NotUtf8);
-            continue;
-        };
-        read.files += 1;
-        // Stored text is redacted; identity, spans and governed ids are read
-        // from the file as written.
-        let (body, mut redactions) = core_redact::redact_text(&markdown);
-        let (title, title_redactions) = core_redact::redact_text(&heading(
-            &markdown,
-            file.file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("Untitled decision"),
-        ));
-        let (status, status_redactions) =
-            core_redact::redact_text(&field(&markdown, "Status").unwrap_or_else(|| "Found".into()));
-        redactions += title_redactions + status_redactions;
-        let adr_id = format!("adr:{repo}@{relative}");
-        let file_evidence = evidence(repo, &relative, commit, 0, markdown.len());
-        let provenance = Provenance::new(
+    }
+    for (target, start, end) in inline_code(markdown) {
+        if is_candidate(target.as_str()) {
+            mentions.entry(target).or_insert((start, end));
+        }
+    }
+    for (target, (start, end)) in mentions {
+        let edge_provenance = Provenance::new(
             Tier::Deterministic,
             ConfidenceTier::Confirmed,
-            vec![file_evidence.clone()],
+            vec![evidence(repo, relative, commit, start, end)],
             FOUND_ADR_EXTRACTOR_ID,
-            serde_json::to_vec(&(&adr_id, &markdown))
-                .expect("ADR identity serializes")
-                .as_slice(),
+            format!("{adr_id} DECIDES {target}").as_bytes(),
         )
         .expect("Confirmed is within the deterministic confidence ceiling")
         .with_method(crate::spec_rule(FOUND_ADR_EXTRACTOR_ID));
-        let forbids = list_field(&markdown, "Forbids")
-            .into_iter()
-            .filter(|label| {
-                label
-                    .chars()
-                    .all(|character| character.is_ascii_uppercase() || character == '_')
-            })
-            .collect::<Vec<_>>();
-        let mut props = serde_json::json!({
-            "title": title,
-            "status": status,
-            "body": body,
-            "path": relative,
-            "origin": "found",
-            "recovered": false,
-            "forbids": forbids,
-            "prov": provenance,
+        facts.edges.push(Edge {
+            src: adr_id.clone(),
+            dst: target,
+            label: "DECIDES".into(),
+            props: serde_json::json!({"prov": edge_provenance}),
         });
-        // Present only when something was replaced, so an ADR without a
-        // recognized secret keeps the fact it had before #1847.
-        if redactions > 0 {
-            props["redactions"] = redactions.into();
-        }
-        facts.nodes.push(Node {
-            id: adr_id.clone(),
-            label: "ADR".into(),
-            props,
-        });
-
-        let mut mentions: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-        for target in list_field(&markdown, "Governs") {
-            if is_candidate(target.as_str())
-                && let Some(span) = field_target_span(&markdown, "Governs", &target)
-            {
-                mentions.insert(target, span);
-            }
-        }
-        for (target, start, end) in inline_code(&markdown) {
-            if is_candidate(target.as_str()) {
-                mentions.entry(target).or_insert((start, end));
-            }
-        }
-        for (target, (start, end)) in mentions {
-            let edge_provenance = Provenance::new(
-                Tier::Deterministic,
-                ConfidenceTier::Confirmed,
-                vec![evidence(repo, &relative, commit, start, end)],
-                FOUND_ADR_EXTRACTOR_ID,
-                format!("{adr_id} DECIDES {target}").as_bytes(),
-            )
-            .expect("Confirmed is within the deterministic confidence ceiling")
-            .with_method(crate::spec_rule(FOUND_ADR_EXTRACTOR_ID));
-            facts.edges.push(Edge {
-                src: adr_id.clone(),
-                dst: target,
-                label: "DECIDES".into(),
-                props: serde_json::json!({"prov": edge_provenance}),
-            });
-        }
     }
-    facts.nodes.sort_by(|left, right| left.id.cmp(&right.id));
-    facts.edges.sort_by(|left, right| {
+}
+
+/// Put a found-ADR read in its stored order.
+pub(crate) fn finish_found_adrs(read: &mut FoundAdrRead) {
+    read.facts
+        .nodes
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    read.facts.edges.sort_by(|left, right| {
         (&left.src, &left.dst, &left.label).cmp(&(&right.src, &right.dst, &right.label))
     });
     read.unread.sort();
-    Ok(read)
 }
 
 fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {

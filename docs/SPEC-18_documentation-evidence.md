@@ -1,8 +1,8 @@
 # SPEC-18 — Target documentation as evidence
 
-- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). All six slices are implemented.
+- **Status:** Proposed for [#1750](https://github.com/true-line/cartograph/issues/1750). All six slices are implemented, and the two earlier readers are cases of this one (AC-1600, AC-1601).
 - **Date:** 2026-11-17
-- **Scope:** US-0049 / AC-0676..0681; ROADMAP W16; v1.0.0 criterion 8.
+- **Scope:** US-0049 / AC-0676..0681, AC-1600..1601; ROADMAP W16; v1.0.0 criterion 8.
 - **Decision:** [ADR-0065](adr/ADR-0065-target-documentation-as-evidence.md).
 - **Extends:** ADR-0036 (coverage inventory), ADR-0058 (citation ids), the drift register.
 
@@ -29,17 +29,26 @@ target file is written (NG1).
 - Skips, each counted with one reason: `too_large`, `not_utf8`,
   `over_file_limit`. A file past the section bound is read to the bound and
   counted as `sections_truncated`.
+- One walk (ADR-0065 decision 6, AC-1600, AC-1601). The same walk finds
+  the found decision records (Markdown under `adr`, `adrs`, `decision`,
+  `decisions`, `rfc` or `rfcs`, or named `adr-*` or `rfc-*`) and reads each
+  file once for both readers. A decision record is still read as a decision
+  when it is past the file bound or under `build` or `vendor`. Each declared
+  API reference (`.cartograph/api-docs.toml` and the system manifest) is a
+  document too: when the walk does not reach it, it is read from the
+  contents its loader validated and counted once.
 
 ## Facts
 
 | Fact | Identity | Properties |
 |---|---|---|
-| `Document` node | `doc:{repo}@{path}` | `path`, `format` (`markdown` or `text`), `title` (the first level-1 heading, else the file name), `sections`, `bytes` |
+| `Document` node | `doc:{repo}@{path}` | `path`, `format` (`markdown`, `text`, or `openapi` for a declared `.json` reference, which has no sections), `title` (the first level-1 heading, else the file name), `sections`, `bytes`, and `roles` only when it has one: `api_reference`, `decision_record` |
 | `DocSection` node | `docsec:{repo}@{path}#{ordinal}` | `ordinal` (from 0, in file order), `level` (0 for text before the first heading and for a plain-text file), `heading`, `path` |
 | `HAS_SECTION` edge | document to section | none |
 | `MENTIONS` edge | section to the fact a reference resolves to | `reference` (the first text as written), `rule`, `occurrences` |
+| `RECORDS` edge | the document of a found decision record to its `ADR` | none |
 
-All four are Deterministic and Confirmed. A document cites the whole file;
+All five are Deterministic and Confirmed. A document cites the whole file;
 a section cites its byte span, from its heading line to the next heading of
 the same or a higher level; a `MENTIONS` edge cites the span of the
 reference. The content hash of a section covers its bytes, so an edit
@@ -100,8 +109,9 @@ A re-ingest removes the entry of a reference that matches again.
 ## Stated intent
 
 Documentation is what the target says about itself, not what it does. The
-pass yields `Document`, `DocSection` and `Drift` facts and the four edge
-kinds above, each starting at one of them. It writes no other fact and
+pass yields `Document`, `DocSection` and `Drift` facts and the edge kinds
+above, each starting at one of them; the `ADR` facts of the same walk are
+the found-decision reader's own, as before. It writes no other fact and
 changes none: a document that restates or contradicts recovered code
 leaves every other fact's tier, confidence, content and content hash as
 they were, and the contradiction is at most a drift entry, which is below
@@ -131,7 +141,7 @@ are made by the system-wide pass that follows. They are counted in
 - **Graph and fact index.** Documents and sections are listed like any
   fact; a citation of one resolves.
 - **`documentation-evidence.md`** (new compiled artifact). Per repository:
-  each document with its sections, and under a section the facts it
+  each document with its roles and its sections, and under a section the facts it
   mentions with the rule and citation ids. Both export modes; it holds
   headings and ids, never section text.
 - **`drift_register.md`.** The three kinds above.
@@ -162,6 +172,4 @@ No slice uses a model.
 ## Open items
 
 - reStructuredText and AsciiDoc are read as plain text.
-- The two existing readers are not yet cases of this one (ADR-0065
-  decision 6).
 - External documentation systems are out of scope.

@@ -1335,6 +1335,9 @@ struct ProducerReads {
     adr_not_utf8: Vec<String>,
     /// What the declared API contract reader read and published (#1847).
     contracts: ingest::coverage::ProducerCount,
+    /// What the documentation reader found, from the walk that also read
+    /// the found ADRs (AC-0677, AC-1600).
+    documents: ingest::coverage::DocumentCoverage,
 }
 
 impl Default for ProducerReads {
@@ -1353,6 +1356,7 @@ impl Default for ProducerReads {
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
             contracts: ingest::coverage::ProducerCount::default(),
+            documents: ingest::coverage::DocumentCoverage::default(),
         }
     }
 }
@@ -2419,11 +2423,29 @@ fn extract_tree_packed(
     // layers so explicit `Governs:` ids can link to existing graph targets.
     // A file too large or not UTF-8 is skipped and named in coverage, never
     // fatal to the other decisions (#1847).
+    //
+    // The same walk reads the documentation files for the coverage inventory
+    // and the declared API references as documents, so each file is read
+    // once (ADR-0065 decision 6, AC-1600).
+    let api_docs = ingest::api_docs::load_api_docs(root, api_docs);
+    let declared_api_docs = declared_api_docs(&api_docs);
     let adr_read = {
         let ids: std::collections::BTreeSet<&str> =
             facts.nodes().iter().map(|node| node.id.as_str()).collect();
-        spec::read_found_adrs_among(root, repo, commit, |id| ids.contains(id))
-            .map_err(|error| error.to_string())?
+        let is_candidate = |id: &str| ids.contains(id);
+        let read = spec::read_documentation(
+            root,
+            repo,
+            commit,
+            &spec::DocumentationCases {
+                documents: true,
+                api_references: &declared_api_docs,
+                decisions: Some(&is_candidate),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        reads.documents = document_coverage(read.documents.counts);
+        read.decisions
     };
     reads.adrs = ingest::coverage::ProducerCount {
         files: adr_read.files,
@@ -2440,7 +2462,7 @@ fn extract_tree_packed(
         .extend(adr_read.facts.nodes, adr_read.facts.edges)
         .map_err(pack_err)?;
     let (contract_facts, contract_files) =
-        extract_repo_contracts(root, repo, commit, api_docs, &facts)?;
+        extract_repo_contracts(repo, commit, api_docs, declared_api_docs, &facts)?;
     reads.contracts = ingest::coverage::ProducerCount {
         files: contract_files,
         nodes: distinct_node_count(&contract_facts.nodes),
@@ -2712,14 +2734,29 @@ fn fact_owned_by_repo(props: &serde_json::Value, repo: &str) -> bool {
         })
 }
 
+/// The validated API reference documents of a load, as the spec crate's
+/// declared documents.
+fn declared_api_docs(loaded: &ingest::api_docs::LoadedApiDocs) -> Vec<spec::DeclaredApiDoc> {
+    loaded
+        .docs
+        .iter()
+        .map(|doc| spec::DeclaredApiDoc {
+            path: doc.path.clone(),
+            prefix: doc.prefix.clone(),
+            contents: doc.contents.clone(),
+        })
+        .collect()
+}
+
+/// Contract facts of the API references `loaded` declared; `docs` are its
+/// validated documents, read once for these and for the documentation walk.
 fn extract_repo_contracts(
-    root: &std::path::Path,
     repo: &str,
     commit: &str,
-    manifest_api_docs: &[ingest::api_docs::ApiDocDeclaration],
+    loaded: ingest::api_docs::LoadedApiDocs,
+    docs: Vec<spec::DeclaredApiDoc>,
     facts: &FactStore,
 ) -> Result<(spec::ContractFacts, u64), String> {
-    let loaded = ingest::api_docs::load_api_docs(root, manifest_api_docs);
     if !loaded.declared {
         return Ok((spec::ContractFacts::default(), 0));
     }
@@ -2729,15 +2766,6 @@ fn extract_repo_contracts(
     let endpoints = facts.nodes_labeled(&["Endpoint"]).map_err(pack_err)?;
     let ids: std::collections::BTreeSet<&str> =
         facts.nodes().iter().map(|node| node.id.as_str()).collect();
-    let docs: Vec<spec::DeclaredApiDoc> = loaded
-        .docs
-        .into_iter()
-        .map(|doc| spec::DeclaredApiDoc {
-            path: doc.path,
-            prefix: doc.prefix,
-            contents: doc.contents,
-        })
-        .collect();
     let gaps: Vec<spec::ContractValidationGap> = loaded
         .gaps
         .into_iter()
@@ -3461,7 +3489,7 @@ fn relink_found_adrs(
     execution: &JobExecution,
     facts: &mut OperationFacts,
     recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
-    documented: &std::collections::BTreeSet<String>,
+    documented: &Documented,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
     // The graph is read packed and each step decodes only the labels it
@@ -3499,34 +3527,12 @@ fn relink_found_adrs(
         .filter(|node| node.label != "ADR")
         .map(|node| node.id.as_str())
         .collect();
-    let updates = collect_found_adrs_among(
-        &repos,
-        |id| candidates.contains(id),
-        |repo| {
-            ensure_running_job(state, execution)?;
-            operation.root(repo)
-        },
-    )?;
-    drop(candidates);
-    let (mut patch, linked) = found_adr_patch(
-        &nodes_where(&|label| label == "ADR")?,
-        &edges_where(&|label| label == "DECIDES")?,
-        updates,
-    );
-    // The same pass reads each repository's documentation files as
-    // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1). A
+    // One walk per repository reads its found ADRs and, for the
+    // repositories this operation publishes, its documentation files as
+    // `Document` and `DocSection` facts (ADR-0065 decision 6, AC-1600). A
     // reference may name any fact of the system, so the index covers the
     // whole graph while documents are read only for the published
     // repositories (#2004).
-    let published_repos = repos
-        .iter()
-        .filter(|node| {
-            node.id
-                .strip_prefix("repo:")
-                .is_some_and(|repo| documented.contains(repo))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
     let detailed = nodes_where(&spec::ReferenceIndex::reads_props)?;
     let index = spec::ReferenceIndex::from_parts(
         snapshot
@@ -3535,19 +3541,26 @@ fn relink_found_adrs(
             .map(|node| (node.id.as_str(), node.label.as_str())),
         &detailed,
     );
-    let documents = collect_documents_indexed(&index, &published_repos, |repo| {
-        ensure_running_job(state, execution)?;
-        operation.root(repo)
-    })?;
+    let (updates, documents) = collect_documentation(
+        &index,
+        &repos,
+        &|id| candidates.contains(id),
+        documented,
+        |repo| {
+            ensure_running_job(state, execution)?;
+            operation.root(repo)
+        },
+    )?;
     drop(index);
+    drop(candidates);
+    let (mut patch, linked) = found_adr_patch(
+        &nodes_where(&|label| label == "ADR")?,
+        &edges_where(&|label| label == "DECIDES")?,
+        updates,
+    );
     document_patch(
         &nodes_where(&|label| matches!(label, "Document" | "DocSection" | "Drift"))?,
-        &edges_where(&|label| {
-            matches!(
-                label,
-                "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
-            )
-        })?,
+        &edges_where(&|label| DOCUMENT_EDGE_LABELS.contains(&label))?,
         documents,
         &mut patch,
     );
@@ -3612,26 +3625,96 @@ fn collect_found_adrs<'a>(
 /// Found ADRs of every `Repo` node in `nodes`. A governed target is matched
 /// by id alone, so `is_candidate` answers for the graph's non-ADR facts and
 /// no fact is decoded for it (#2003).
+#[cfg(test)]
 fn collect_found_adrs_among<'a>(
     nodes: &[Node],
     is_candidate: impl Fn(&str) -> bool,
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::AdrFacts)>, String> {
-    nodes
-        .iter()
-        .filter(|node| node.label == "Repo")
-        .map(|node| {
-            let repo = node
-                .id
-                .strip_prefix("repo:")
-                .ok_or("invalid repository fact identity")?;
-            let root = root_for(repo)?;
-            let commit = node.props["commit"].as_str().unwrap_or("workdir");
-            let facts = spec::extract_found_adrs_among(root, repo, commit, &is_candidate)
-                .map_err(|e| e.to_string())?;
-            Ok((repo.to_owned(), facts))
-        })
-        .collect()
+    let (adrs, _) = collect_documentation(
+        &spec::ReferenceIndex::default(),
+        nodes,
+        &is_candidate,
+        &Documented::new(),
+        root_for,
+    )?;
+    Ok(adrs)
+}
+
+/// The repositories whose documentation a pass reads, each with the API
+/// references its system manifest declares (the repository's own
+/// `.cartograph/api-docs.toml` is read with them).
+type Documented = std::collections::BTreeMap<String, Vec<ingest::api_docs::ApiDocDeclaration>>;
+
+/// Edge labels that start at a documentation fact and that a re-read of the
+/// repository restates.
+const DOCUMENT_EDGE_LABELS: [&str; 5] = [
+    "HAS_SECTION",
+    "MENTIONS",
+    "DOCUMENTED_AS",
+    "SERVED_AS",
+    "RECORDS",
+];
+
+/// One documentation walk per `Repo` node in `repos` (ADR-0065 decision 6):
+/// the found ADRs of every repository, and, for those in `documented`, the
+/// documents with their references linked against `index` and their drift
+/// (AC-0678, AC-0679, AC-1600).
+#[allow(clippy::type_complexity)]
+fn collect_documentation<'a>(
+    index: &spec::ReferenceIndex<'_>,
+    repos: &[Node],
+    is_candidate: &dyn Fn(&str) -> bool,
+    documented: &Documented,
+    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
+) -> Result<
+    (
+        Vec<(String, spec::AdrFacts)>,
+        Vec<(String, spec::DocumentFacts)>,
+    ),
+    String,
+> {
+    let mut adrs = Vec::new();
+    let mut documents = Vec::new();
+    for node in repos.iter().filter(|node| node.label == "Repo") {
+        let repo = node
+            .id
+            .strip_prefix("repo:")
+            .ok_or("invalid repository fact identity")?;
+        let commit = node.props["commit"].as_str().unwrap_or("workdir");
+        let root = root_for(repo)?;
+        let declared = documented.get(repo);
+        let api_references = declared
+            .map(|declared| declared_api_docs(&ingest::api_docs::load_api_docs(root, declared)))
+            .unwrap_or_default();
+        let read = spec::read_documentation(
+            root,
+            repo,
+            commit,
+            &spec::DocumentationCases {
+                documents: declared.is_some(),
+                api_references: &api_references,
+                decisions: Some(is_candidate),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        adrs.push((repo.to_owned(), read.decisions.facts));
+        if declared.is_none() {
+            continue;
+        }
+        let mut facts = read.documents;
+        let mentions = spec::link_references(repo, commit, &facts.references, index);
+        facts.edges.extend(mentions);
+        // Whether a repo-relative path is in the tree: an existence
+        // check only, and a link is never followed out of it.
+        let exists = |path: &str| tree_has_path(root, path);
+        let (drift, compared) =
+            spec::documentation_drift(repo, commit, &facts.references, index, &exists);
+        facts.nodes.extend(drift);
+        facts.edges.extend(compared);
+        documents.push((repo.to_owned(), facts));
+    }
+    Ok((adrs, documents))
 }
 
 fn found_adr_patch(
@@ -3676,19 +3759,12 @@ fn found_adr_patch(
     (patch, linked)
 }
 
-/// What the documentation reader finds in one repository, for the coverage
+/// What the documentation reader found in one repository, for the coverage
 /// inventory published with that repository's facts (AC-0677). It is the
-/// read [`collect_documents`] makes once the system is in, over the same
-/// guarded tree.
-fn document_coverage(
-    root: &std::path::Path,
-    repo: &str,
-    commit: &str,
-) -> Result<ingest::coverage::DocumentCoverage, String> {
-    let counts = spec::extract_documents(root, repo, commit)
-        .map_err(|e| e.to_string())?
-        .counts;
-    Ok(ingest::coverage::DocumentCoverage {
+/// read [`collect_documentation`] makes once the system is in, over the same
+/// guarded tree and declared API references.
+fn document_coverage(counts: spec::DocumentCounts) -> ingest::coverage::DocumentCoverage {
+    ingest::coverage::DocumentCoverage {
         found: counts.found,
         read: counts.read,
         skipped: counts
@@ -3698,7 +3774,7 @@ fn document_coverage(
             .collect(),
         sections: counts.sections,
         sections_truncated: counts.sections_truncated,
-    })
+    }
 }
 
 /// Read the documentation files of every repository in the graph, and link
@@ -3708,41 +3784,19 @@ fn collect_documents<'a>(
     nodes: &[Node],
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
-    collect_documents_indexed(&spec::ReferenceIndex::new(nodes), nodes, root_for)
-}
-
-/// [`collect_documents`] for the `Repo` nodes in `repos`, resolving references
-/// against `index`, which covers the whole system whichever repositories are
-/// read (#2004).
-fn collect_documents_indexed<'a>(
-    index: &spec::ReferenceIndex<'_>,
-    repos: &[Node],
-    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
-) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
-    repos
+    let documented = nodes
         .iter()
-        .filter(|node| node.label == "Repo")
-        .map(|node| {
-            let repo = node
-                .id
-                .strip_prefix("repo:")
-                .ok_or("invalid repository fact identity")?;
-            let commit = node.props["commit"].as_str().unwrap_or("workdir");
-            let root = root_for(repo)?;
-            let mut facts =
-                spec::extract_documents(root, repo, commit).map_err(|e| e.to_string())?;
-            let mentions = spec::link_references(repo, commit, &facts.references, index);
-            facts.edges.extend(mentions);
-            // Whether a repo-relative path is in the tree: an existence
-            // check only, and a link is never followed out of it.
-            let exists = |path: &str| tree_has_path(root, path);
-            let (drift, compared) =
-                spec::documentation_drift(repo, commit, &facts.references, index, &exists);
-            facts.nodes.extend(drift);
-            facts.edges.extend(compared);
-            Ok((repo.to_owned(), facts))
-        })
-        .collect()
+        .filter_map(|node| node.id.strip_prefix("repo:"))
+        .map(|repo| (repo.to_owned(), Vec::new()))
+        .collect();
+    let (_, documents) = collect_documentation(
+        &spec::ReferenceIndex::new(nodes),
+        nodes,
+        &|_| false,
+        &documented,
+        root_for,
+    )?;
+    Ok(documents)
 }
 
 /// Whether `path` names an entry of the tree under `root`, read component
@@ -3807,10 +3861,7 @@ fn document_patch(
             edges
                 .iter()
                 .filter(|edge| {
-                    matches!(
-                        edge.label.as_str(),
-                        "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
-                    ) && owned(&edge.src)
+                    DOCUMENT_EDGE_LABELS.contains(&edge.label.as_str()) && owned(&edge.src)
                 })
                 .map(edge_key)
                 .filter(|key| !current_edges.contains(key)),
@@ -5618,7 +5669,7 @@ fn run_ingest<R: tauri::Runtime>(
     )
     .with_unfollowed_links(&reads.unfollowed_links)
     .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8)
-    .with_documents(document_coverage(root, &repo, commit).map_err(&fail)?);
+    .with_documents(reads.documents.clone());
     let record =
         coverage_record(&coverage, source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -5666,7 +5717,7 @@ fn run_ingest<R: tauri::Runtime>(
         execution,
         &mut published,
         &mut Default::default(),
-        &std::collections::BTreeSet::from([repo.clone()]),
+        &Documented::from([(repo.clone(), Vec::new())]),
     )
     .map_err(&fail)?;
 
@@ -6076,7 +6127,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     )
     .with_unfollowed_links(&reads.unfollowed_links)
     .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8)
-    .with_documents(document_coverage(root, &source.repo_key, &cloned.commit_sha).map_err(&fail)?);
+    .with_documents(reads.documents.clone());
     let record =
         coverage_record(&coverage, &source, job_id, &active_plugins, &registries).map_err(&fail)?;
     let omission_records = reads.source_omissions();
@@ -6118,7 +6169,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &execution,
         &mut published,
         &mut Default::default(),
-        &std::collections::BTreeSet::from([source.repo_key.clone()]),
+        &Documented::from([(source.repo_key.clone(), Vec::new())]),
     )
     .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -6404,7 +6455,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         )
         .with_unfollowed_links(&reads.unfollowed_links)
         .with_unread_adrs(&reads.adr_too_large, &reads.adr_not_utf8)
-        .with_documents(document_coverage(root, &repo, &commit).map_err(&fail)?);
+        .with_documents(reads.documents.clone());
         let record = coverage_record(&coverage, source, job_id, &active_plugins, &registries)
             .map_err(&fail)?;
         let omission_records = reads.source_omissions();
@@ -6471,7 +6522,25 @@ fn add_system_blocking<R: tauri::Runtime>(
         // fetches to the owning repo's endpoints.
         stitch_http_bindings(&mut graph, &http_bindings, &mut published).map_err(&fail)?;
     }
-    let documented = recorded.keys().cloned().collect();
+    // Each published repository with the API references its manifest entry
+    // declares, so the documentation pass reads them as it did at ingest.
+    let declared_by_repo: std::collections::BTreeMap<&str, &[ingest::api_docs::ApiDocDeclaration]> =
+        manifest
+            .repos
+            .iter()
+            .zip(&admitted)
+            .map(|(entry, (source, _))| (source.repo_key.as_str(), entry.api_docs.as_slice()))
+            .collect();
+    let documented: Documented = recorded
+        .keys()
+        .map(|repo| {
+            let declared = declared_by_repo
+                .get(repo.as_str())
+                .copied()
+                .unwrap_or_default();
+            (repo.clone(), declared.to_vec())
+        })
+        .collect();
     let relinked = relink_found_adrs(
         &state,
         &operation,
@@ -9661,7 +9730,20 @@ resource "aws_sqs_queue" "orders" {
         let root = dir.path();
         std::fs::write(root.join("README.md"), "# Shop\n\n## Routes\n").unwrap();
         std::fs::write(root.join("binary.txt"), [0xff, 0xfe]).unwrap();
-        let counted = crate::document_coverage(root, "local/shop", "workdir").unwrap();
+        // The ingest read: documents and found decisions in one walk.
+        let is_candidate = |_: &str| false;
+        let read = spec::read_documentation(
+            root,
+            "local/shop",
+            "workdir",
+            &spec::DocumentationCases {
+                documents: true,
+                api_references: &[],
+                decisions: Some(&is_candidate),
+            },
+        )
+        .unwrap();
+        let counted = crate::document_coverage(read.documents.counts);
         assert_eq!(
             counted,
             ingest::coverage::DocumentCoverage {

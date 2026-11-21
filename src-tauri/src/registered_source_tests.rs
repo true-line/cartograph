@@ -80,7 +80,7 @@ fn recover(state: &AppState, source: &RegisteredSource) -> (DeltaSummary, Reconc
         &execution,
         &mut crate::OperationFacts::default(),
         &mut Default::default(),
-        &BTreeSet::from([source.repo_key.clone()]),
+        &crate::Documented::from([(source.repo_key.clone(), Vec::new())]),
     )
     .unwrap();
     record_ingest_metrics(
