@@ -1128,10 +1128,10 @@ fn clear_graph(state: State<'_, AppState>) -> Result<GraphStats, String> {
 /// settings, then restart. Refused while a job is queued or running.
 #[tauri::command]
 fn start_new_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let busy = state
-        .jobs
-        .lock()
-        .map_err(|e| e.to_string())?
+    // Held through the restart, so no job can be enqueued between the check
+    // and the marker.
+    let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+    let busy = jobs
         .list()
         .map_err(|e| e.to_string())?
         .iter()
@@ -1143,6 +1143,7 @@ fn start_new_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
     }
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     project_reset::request(&data_dir).map_err(|e| e.to_string())?;
+    let _held = jobs;
     app.restart()
 }
 

@@ -102,6 +102,10 @@ pub(crate) fn apply(
     create_state: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<bool, String> {
     if !pending(data_dir) {
+        // A launch that stopped after finishing but before tidying up left
+        // the old state; the new one already holds what was kept.
+        remove(&data_dir.join(OLD_STATE))
+            .map_err(|e| format!("Starting a new project could not remove the old state: {e}"))?;
         return Ok(false);
     }
     let failed = |what: &str, error: &dyn std::fmt::Display| {
@@ -127,9 +131,12 @@ pub(crate) fn apply(
     create_state(&state).map_err(|e| failed("create the new state", &e))?;
     if old.exists() {
         carry_kept_tables(&state, &old).map_err(|e| failed("keep the settings", &e))?;
-        std::fs::remove_file(&old).map_err(|e| failed("remove the old state", &e))?;
     }
+    // The new state is complete: removing the marker makes it the one the
+    // next launch keeps. Only then is the old state removed, so a launch
+    // that stops between the two still has every kept row.
     std::fs::remove_file(data_dir.join(MARKER)).map_err(|e| failed("finish", &e))?;
+    remove(&old).map_err(|e| failed("remove the old state", &e))?;
     Ok(true)
 }
 

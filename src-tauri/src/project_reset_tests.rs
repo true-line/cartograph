@@ -117,3 +117,29 @@ fn a_new_project_interrupted_part_way_is_finished_by_the_next_launch() {
         chosen
     );
 }
+
+// A launch that stopped after the new state was complete but before the old
+// one was removed keeps the new state and removes the old.
+#[test]
+fn a_new_project_interrupted_after_finishing_keeps_the_new_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = open(dir.path());
+    let chosen = state
+        .settings
+        .lock()
+        .unwrap()
+        .set_local_model("qwen3:8b")
+        .unwrap();
+    drop(state);
+    request(dir.path()).unwrap();
+    drop(open(dir.path()));
+    // As if the old state's removal had not happened.
+    std::fs::write(dir.path().join(OLD_STATE), b"stale").unwrap();
+
+    let state = open(dir.path());
+    assert!(!dir.path().join(OLD_STATE).exists());
+    assert_eq!(
+        state.settings.lock().unwrap().local_model().unwrap(),
+        chosen
+    );
+}
