@@ -3267,3 +3267,107 @@ fn ac0838_forget_and_supersession_free_room_for_omitted_receipts() {
     assert_eq!((total, kept), (4, 4));
     assert!(omitted.is_empty());
 }
+
+fn git(args: &[&str], cwd: &Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+// AC-1022: given a commit, the selected files are read from that commit's
+// Git objects, not the checkout, and the parser cites those blob bytes; a
+// selected file that is no blob of the commit fails without a fallback.
+#[test]
+fn a_commit_capture_reads_git_blobs_not_the_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "clone");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    git(&["init", "-q", "-b", "main"], &root);
+    git(&["add", "."], &root);
+    git(&["commit", "-q", "-m", "init"], &root);
+    let commit = git(&["rev-parse", "HEAD"], &root);
+    // The checkout no longer matches the commit.
+    std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare_at(&source, source.root(), &layers, Some(&commit))
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    assert_eq!(
+        capture.manifest().kind,
+        source_capture::CaptureKind::Git {
+            commit: commit.clone(),
+            tree: git(&["rev-parse", "HEAD^{tree}"], &root),
+        }
+    );
+    let file = capture.file("source.ts").unwrap();
+    assert_eq!(file.bytes(), STABLE_A.as_bytes());
+    assert!(capture.manifest().files[0].git.is_some());
+    let mut receipts = Vec::new();
+    {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            &commit,
+            &layers,
+            &BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap();
+    }
+    assert!(!receipts.is_empty());
+    for receipt in &receipts {
+        assert_eq!(receipt.file().capture_id, capture.id());
+        assert_eq!(receipt.file().digest, file.reference().digest);
+    }
+    drop(input);
+    // Infrastructure alone still runs the TS pass for Pulumi, so a commit is
+    // captured for it; a local folder's infra-only recovery stays uncaptured.
+    let infra = vec!["infra".to_string()];
+    let input = state
+        .primary_sources
+        .prepare_at(&source, source.root(), &infra, Some(&commit))
+        .unwrap();
+    assert!(matches!(
+        input.capture.as_ref().unwrap().manifest().kind,
+        source_capture::CaptureKind::Git { .. }
+    ));
+    drop(input);
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &infra)
+        .unwrap();
+    assert!(input.capture.is_none());
+    drop(input);
+    // An untracked selected file is no blob of the commit.
+    std::fs::write(root.join("extra.ts"), STABLE_B).unwrap();
+    let error = state
+        .primary_sources
+        .prepare_at(&source, source.root(), &layers, Some(&commit))
+        .err()
+        .unwrap();
+    assert!(error.contains("cloned commit's Git objects"), "{error}");
+}

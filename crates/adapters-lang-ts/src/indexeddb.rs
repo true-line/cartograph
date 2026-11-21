@@ -290,7 +290,31 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Extraction, ExtractErro
         let source = std::fs::read(root.join(rel))?;
         extract_file(&source, rel, id, &mut index)?;
     }
+    Ok(model_from(index, id))
+}
 
+/// [`extract_dir`] over a retained capture's TS/JS files: exactly the bytes
+/// the captured TS pass parsed, never a reread of the checkout (AC-1022).
+pub fn extract_captured(
+    capture: &source_capture::Capture,
+    id: &SourceId,
+) -> Result<Extraction, crate::captured::CapturedError> {
+    let mut files: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| crate::is_ts_source(path))
+        .collect();
+    files.sort(); // deterministic order (US-0014)
+    let mut index = RepoIndex::default();
+    for rel in files {
+        extract_file(capture.file(rel)?.bytes(), rel, id, &mut index)?;
+    }
+    Ok(model_from(index, id))
+}
+
+fn model_from(index: RepoIndex, id: &SourceId) -> Extraction {
     let mut out = Extraction::default();
     let mut entities: BTreeMap<String, Node> = BTreeMap::new();
     let entity =
@@ -417,7 +441,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Extraction, ExtractErro
     }
 
     out.nodes.extend(entities.into_values());
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -436,6 +460,50 @@ mod tests {
             commit: "abc123",
         };
         extract_dir(dir.path(), &id).unwrap()
+    }
+
+    // AC-1022: the captured lane reads the capture's bytes, not the checkout.
+    #[test]
+    fn captured_model_reads_the_capture_not_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = "src/migrations.ts";
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join(path),
+            "export function migrate(db: IDBDatabase) { db.createObjectStore('settings'); }\n",
+        )
+        .unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new(format!("src_{}", "a".repeat(32))).unwrap(),
+            &[path.to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(path),
+            "export function migrate(db: IDBDatabase) { db.createObjectStore('later'); }\n",
+        )
+        .unwrap();
+        let id = SourceId {
+            repo: "local/ext",
+            commit: "abc123",
+        };
+        let ids = |out: Extraction| -> Vec<String> {
+            out.nodes
+                .into_iter()
+                .filter(|node| node.label == "DataEntity")
+                .map(|node| node.id)
+                .collect()
+        };
+        assert_eq!(
+            ids(extract_captured(&capture, &id).unwrap()),
+            ["data:local/ext@idb:settings"]
+        );
+        assert_eq!(
+            ids(extract_dir(dir.path(), &id).unwrap()),
+            ["data:local/ext@idb:later"]
+        );
     }
 
     #[test]
