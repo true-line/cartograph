@@ -81,6 +81,14 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
+        Grammar::ObservedInput => Some(Contract {
+            prefix: "obs-input-v1:",
+            producer: "t1.dynamic/observed-span-v1",
+            domain: b"cartograph:obs-input-receipt:v1\0",
+            grammar_package: OBSERVED_INPUT_FORMAT,
+            parser_package: OBSERVED_INPUT_PARSER,
+            parser_package_legacy: &[],
+        }),
         Grammar::TypeScript | Grammar::Tsx => None,
     };
     if let Some(lane) = lane {
@@ -149,6 +157,32 @@ const JAVA_GRAMMAR_PACKAGE: &str = "tree-sitter-java@0.23.5";
 const RUST_GRAMMAR_PACKAGE: &str = "tree-sitter-rust@0.24.2";
 // The Kotlin adapter's exact grammar pin (crates/adapters-lang-kotlin).
 const KOTLIN_GRAMMAR_PACKAGE: &str = "tree-sitter-kotlin-ng@1.1.0";
+// Observation inputs are JSON documents (state, Pulumi) or JSON lines
+// (OTLP), cited by the byte spans the T1 producers record (ADR-0079).
+const OBSERVED_INPUT_FORMAT: &str = "json/jsonl";
+// The parser the T1 producers read them with.
+const OBSERVED_INPUT_PARSER: &str = "serde_json@1";
+
+/// The capture identity prefix of manifest observation inputs (ADR-0080).
+const INPUT_SOURCE_PREFIX: &str = "input/";
+
+/// Whether `source` is a registered source's observation input identity,
+/// `input/src_<32 hex>`.
+pub fn is_input_source(source: &source_capture::SourceId) -> bool {
+    source
+        .as_str()
+        .strip_prefix(INPUT_SOURCE_PREFIX)
+        .is_some_and(registered_source_id)
+}
+
+fn registered_source_id(id: &str) -> bool {
+    id.strip_prefix("src_").is_some_and(|value| {
+        value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +203,10 @@ pub enum Grammar {
     Rust,
     /// `.kt` and `.kts` files, parsed by the Kotlin adapter (AC-1035).
     Kotlin,
+    /// A manifest observation input (Terraform state, Pulumi export, OTLP
+    /// trace) captured under `input/<source id>`, read by the T1 producers
+    /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
+    ObservedInput,
 }
 
 impl Grammar {
@@ -176,8 +214,18 @@ impl Grammar {
     pub(super) fn provenance_only(self) -> bool {
         matches!(
             self,
-            Self::Python | Self::Go | Self::Java | Self::Rust | Self::Kotlin
+            Self::Python | Self::Go | Self::Java | Self::Rust | Self::Kotlin | Self::ObservedInput
         )
+    }
+
+    /// The grammar a receipt citing `file` is minted under: an observation
+    /// input capture's, else the one its path selects.
+    pub(super) fn for_file(file: &CaptureFileRef) -> Self {
+        if is_input_source(&file.source_id) {
+            Self::ObservedInput
+        } else {
+            Self::for_path(&file.path)
+        }
     }
 
     pub(super) fn for_path(path: &str) -> Self {
@@ -726,13 +774,14 @@ pub(super) fn validate_source_repo(
     repo: &str,
 ) -> Result<(), CapturedError> {
     let id = source.as_str();
-    if !id.strip_prefix("src_").is_some_and(|value| {
-        value.len() == 32
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    }) || !bounded_identity(repo, MAX_REPO_BYTES)
+    // An observation input's receipts live in its own namespace: the input
+    // identity is both its source and its repo (ADR-0079).
+    let input = is_input_source(source);
+    if !(registered_source_id(id) || input)
+        || !bounded_identity(repo, MAX_REPO_BYTES)
         || repo.strip_prefix("local/").is_some_and(|local| local != id)
+        || (input && repo != id)
+        || (!input && repo.starts_with(INPUT_SOURCE_PREFIX))
     {
         return Err(CapturedError::Invalid("registered source identity"));
     }
@@ -747,7 +796,8 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
         || !hash_has_prefix(&file.digest, "")
         || file.byte_len > source_capture::MAX_FILE_BYTES
         || !super::valid_path(&file.path)
-        || !(super::supported(&file.path)
+        || !(is_input_source(&file.source_id)
+            || super::supported(&file.path)
             || file.path.ends_with(".py")
             || file.path.ends_with(".go")
             || file.path.ends_with(".java")
@@ -785,7 +835,7 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
         if file.source_id != content.file.source_id
             || file.capture_id != content.file.capture_id
             || file.path == content.file.path
-            || Grammar::for_path(&file.path) != content.grammar
+            || Grammar::for_file(file) != content.grammar
             || previous.is_some_and(|previous| previous >= file.path.as_str())
             || !content
                 .ranges
@@ -837,9 +887,16 @@ fn inventory(
     grammar: Grammar,
 ) -> Result<Vec<(RangeRole, u32, EvidenceRef)>, CapturedError> {
     contract(version, grammar)?;
+    // An observed receipt cites the observation a T1 producer recorded beside
+    // the fact's own provenance; a fact the observation created (a resolved
+    // placeholder, a filled channel) carries it as its provenance (ADR-0079).
+    let key = match grammar {
+        Grammar::ObservedInput if props.get("observed_prov").is_some() => "observed_prov",
+        _ => "prov",
+    };
     let provenance: Provenance = serde_json::from_value(
         props
-            .get("prov")
+            .get(key)
             .cloned()
             .ok_or(CapturedError::Invalid("missing provenance"))?,
     )
@@ -861,6 +918,9 @@ fn inventory(
     };
     for (index, evidence) in provenance.evidence.iter().enumerate() {
         push(RangeRole::Provenance, index, evidence)?;
+    }
+    if grammar == Grammar::ObservedInput {
+        return Ok(ranges);
     }
     if let Some(value) = props.get("rule") {
         // The non-TS lanes carry primary provenance alone.
@@ -1044,7 +1104,7 @@ impl Receipt {
         fact_digest: String,
         props: &serde_json::Value,
     ) -> Result<Self, CapturedError> {
-        let grammar = Grammar::for_path(&file.reference().path);
+        let grammar = Grammar::for_file(file.reference());
         let current = contract(RECEIPT_SCHEMA_VERSION, grammar)?;
         let mut other_files = BTreeMap::new();
         let ranges = inventory(props, RECEIPT_SCHEMA_VERSION, grammar)?
@@ -1218,7 +1278,7 @@ impl Receipt {
                 && !contract
                     .parser_package_legacy
                     .contains(&content.parser_package.as_str()))
-            || content.grammar != Grammar::for_path(&content.file.path)
+            || content.grammar != Grammar::for_file(&content.file)
         {
             return Err(CapturedError::Invalid("receipt contract"));
         }

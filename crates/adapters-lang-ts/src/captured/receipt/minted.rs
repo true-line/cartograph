@@ -72,7 +72,7 @@ impl MintedReceipt {
         };
         if content.source_id != content.file.source_id
             || content.producer_contract != current.producer
-            || content.grammar != Grammar::for_path(&content.file.path)
+            || content.grammar != Grammar::for_file(&content.file)
             || content.grammar_package != current.grammar_package
             || content.parser_package != current.parser_package
         {
@@ -152,7 +152,7 @@ impl MintedReceipt {
     /// The complete receipt this carrier stands for.
     pub fn to_receipt(&self) -> Result<Receipt, CapturedError> {
         let header = &*self.header;
-        let current = contract(RECEIPT_SCHEMA_VERSION, Grammar::for_path(&header.file.path))?;
+        let current = contract(RECEIPT_SCHEMA_VERSION, Grammar::for_file(&header.file))?;
         Ok(Receipt {
             receipt_id: self.receipt_id.clone(),
             content: Content {
@@ -162,7 +162,7 @@ impl MintedReceipt {
                 file: header.file.clone(),
                 commit_sha: Some(header.commit_sha.clone()),
                 producer_contract: current.producer.into(),
-                grammar: Grammar::for_path(&header.file.path),
+                grammar: Grammar::for_file(&header.file),
                 grammar_package: current.grammar_package.into(),
                 parser_package: current.parser_package.into(),
                 fact_key: self.fact_key.clone(),
@@ -280,7 +280,7 @@ impl MintedReceipt {
         inventory(
             props,
             RECEIPT_SCHEMA_VERSION,
-            Grammar::for_path(&self.header.file.path),
+            Grammar::for_file(&self.header.file),
         )
         .is_ok_and(|ranges| {
             ranges.len() == self.spans.len()
