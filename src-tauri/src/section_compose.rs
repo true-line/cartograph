@@ -23,10 +23,11 @@
 use crate::investigations::section_drafts::{DraftingOutcome, drafting_address, predecessor};
 use crate::{AppState, JobExecution};
 use agents::draft_store::{DraftOrigin, DraftStoreError};
+use agents::gated_compose::{self, GatedInput, GatedStats, StageModel, Workflow};
 use agents::section_compose::{
     self, ComposeFact, ComposeGroup, ComposeInput, Composed, SECTION_COMPOSER_ROLE,
 };
-use agents::section_draft::{SectionAddress, admit};
+use agents::section_draft::{Claim, SectionAddress, admit};
 use core_graph::{Edge, Node};
 use llm::bounded::{
     BoundedCompletion, CallDirective, CompletionControl, CompletionLimitValues, CompletionLimits,
@@ -46,6 +47,11 @@ pub(crate) struct Prepared {
     citable: BTreeSet<String>,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
+    /// The section's catalogue title, the compiled text and the citable
+    /// facts, for a gated composition (#2083).
+    title: &'static str,
+    text: String,
+    facts: Vec<ComposeFact>,
 }
 
 /// What a composition produced.
@@ -59,6 +65,9 @@ pub(crate) struct ComposeOutcome {
     /// Claims left out: a per-claim bound, or a statement naming a source
     /// identifier it cites.
     pub(crate) left_out: usize,
+    /// What a gated composition did (#2083, AC-0970).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) gated: Option<GatedStats>,
 }
 
 impl ComposeOutcome {
@@ -67,6 +76,7 @@ impl ComposeOutcome {
             outcome: DraftingOutcome::NoDraft { reason },
             claims: 0,
             left_out: 0,
+            gated: None,
         }
     }
 }
@@ -174,6 +184,9 @@ pub(crate) fn prepare(
         citable: picked.citable(),
         nodes,
         edges,
+        title,
+        text: text.to_owned(),
+        facts,
     })
 }
 
@@ -284,6 +297,26 @@ pub(crate) fn stage(
     composed: Composed,
     job_id: i64,
 ) -> Result<ComposeOutcome, String> {
+    stage_as(
+        state,
+        prepared,
+        composed,
+        job_id,
+        (
+            SECTION_COMPOSER_ROLE,
+            section_compose::definition_fingerprint(),
+        ),
+    )
+}
+
+/// [`stage`] recording `role`, its definition fingerprint, as the author.
+fn stage_as(
+    state: &AppState,
+    prepared: &Prepared,
+    composed: Composed,
+    job_id: i64,
+    role: (&str, String),
+) -> Result<ComposeOutcome, String> {
     let Composed {
         mut finish,
         mut left_out,
@@ -346,8 +379,8 @@ pub(crate) fn stage(
         }
     };
     let origin = DraftOrigin {
-        role: SECTION_COMPOSER_ROLE.to_owned(),
-        role_definition: section_compose::definition_fingerprint(),
+        role: role.0.to_owned(),
+        role_definition: role.1,
         job_id,
         graph_content_hash,
     };
@@ -361,6 +394,7 @@ pub(crate) fn stage(
             },
             claims,
             left_out,
+            gated: None,
         }),
         Err(DraftStoreError::Storage(error)) => Err(error.to_string()),
         Err(_) => Ok(ComposeOutcome {
@@ -441,7 +475,150 @@ pub(crate) async fn run_section_compose(
         )
     })
     .await;
-    match &result {
+    finish_job(&app, &state, &execution, &result)?;
+    result
+}
+
+/// The local provider a gated composition runs on: the configured local
+/// completion model (#1643) on the loopback endpoint.
+fn gated_provider(state: &AppState) -> Result<Box<dyn LlmProvider>, String> {
+    let model = state
+        .settings
+        .lock()
+        .map_err(|e| e.to_string())?
+        .local_model()
+        .map_err(|e| e.to_string())?
+        .model;
+    Ok(Box::new(
+        llm::OllamaProvider::with_models(
+            llm::OllamaProvider::DEFAULT_URL,
+            llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+            model,
+            std::time::Duration::from_secs(MAX_REQUEST_TIMEOUT_MS / 1000),
+        )
+        .map_err(|e| e.to_string())?,
+    ))
+}
+
+/// The host's [`StageModel`]: each stage call is one bounded local call
+/// through the egress firewall, stopped by `check`.
+struct HostModel<'a> {
+    state: &'a AppState,
+    provider: &'a dyn LlmProvider,
+    check: &'a dyn Fn() -> CallDirective,
+}
+
+impl StageModel for HostModel<'_> {
+    fn complete(&mut self, action: &CompletionAction) -> Result<String, String> {
+        if self.provider.locality() != Locality::Local {
+            // A gated run makes many calls; one-action cloud consent covers
+            // one exact payload, so this slice runs locally only.
+            return Err("gated_composition_local_only".into());
+        }
+        Ok(complete(self.state, self.provider, action, None, self.check)?.text)
+    }
+}
+
+/// Compose one section through `draft-rules@1` (#2083, AC-0970) on
+/// `provider` and stage the assembled draft.
+pub(crate) fn compose_gated(
+    state: &AppState,
+    provider: &dyn LlmProvider,
+    prepared: &Prepared,
+    check: &dyn Fn() -> CallDirective,
+    job_id: i64,
+) -> Result<ComposeOutcome, String> {
+    let workflow = Workflow::shipped()?;
+    if prepared.address.section != workflow.section {
+        return Err("gated_composition_section_unsupported".into());
+    }
+    let names_source = |claim: &Claim| {
+        let cited: BTreeSet<String> = claim.citations.iter().cloned().collect();
+        spec::SourceIdentifiers::of(&prepared.nodes, &prepared.edges, &cited)
+            .named_in(&claim.statement, &claim.citations)
+    };
+    let mut model = HostModel {
+        state,
+        provider,
+        check,
+    };
+    let outcome = gated_compose::run(
+        &workflow,
+        &GatedInput {
+            address: &prepared.address,
+            title: prepared.title,
+            section: &prepared.text,
+            facts: &prepared.facts,
+        },
+        &mut model,
+        &names_source,
+    )?;
+    let stats = outcome.stats;
+    let Some(finish) = outcome.finish else {
+        return Ok(ComposeOutcome {
+            left_out: outcome.left_out,
+            gated: Some(stats),
+            ..ComposeOutcome::none("no_claim_admitted")
+        });
+    };
+    let staged = stage_as(
+        state,
+        prepared,
+        Composed {
+            finish,
+            left_out: outcome.left_out,
+        },
+        job_id,
+        (
+            gated_compose::DRAFT_RULES_ROLE,
+            gated_compose::definition_fingerprint(),
+        ),
+    )?;
+    Ok(ComposeOutcome {
+        gated: Some(stats),
+        ..staged
+    })
+}
+
+/// Compose §1.5 through the gated `draft-rules@1` workflow on the
+/// configured local model, as a durable job, and stage the draft (#2083,
+/// AC-0970). Nothing leaves the machine, so no consent is asked.
+#[tauri::command]
+pub(crate) async fn run_section_compose_gated(
+    catalogue_version: String,
+    document: String,
+    section: String,
+    scope: String,
+    app: tauri::AppHandle,
+) -> Result<ComposeOutcome, String> {
+    let state = app.state::<AppState>();
+    let kind = format!("section-compose-gated:{document}:{section}:{scope}:local");
+    let (running, execution) = crate::start_job(&state, &kind)?;
+    crate::emit_job(&app, &running);
+    let worker = app.clone();
+    let result = crate::off_ui_thread_for_job(execution.clone(), move |execution| {
+        let state = worker.state::<AppState>();
+        let provider = gated_provider(&state)?;
+        let prepared = prepare(&state, &catalogue_version, &document, &section, &scope)?;
+        let check = || match crate::job_cancelled(&state, execution) {
+            Ok(false) => CallDirective::Continue,
+            Ok(true) => CallDirective::Cancelled,
+            Err(_) => CallDirective::OwnershipLost,
+        };
+        compose_gated(&state, provider.as_ref(), &prepared, &check, execution.id())
+    })
+    .await;
+    finish_job(&app, &state, &execution, &result)?;
+    result
+}
+
+fn finish_job(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    execution: &JobExecution,
+    result: &Result<ComposeOutcome, String>,
+) -> Result<(), String> {
+    match result {
         Ok(outcome) => {
             let artifacts = match &outcome.outcome {
                 DraftingOutcome::Staged { draft_id } => vec![draft_id.clone()],
@@ -449,14 +626,14 @@ pub(crate) async fn run_section_compose(
             };
             let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
             let update = jobs
-                .finish_execution(&execution, &artifacts)
+                .finish_execution(execution, &artifacts)
                 .map_err(|e| e.to_string())?;
             drop(jobs);
-            crate::emit_job(&app, &crate::updated_job(update));
+            crate::emit_job(app, &crate::updated_job(update));
         }
-        Err(error) => crate::report_failure(&app, &state, &execution, error),
+        Err(error) => crate::report_failure(app, state, execution, error),
     }
-    result
+    Ok(())
 }
 
 #[cfg(test)]
