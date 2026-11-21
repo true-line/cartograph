@@ -886,6 +886,8 @@ fn extract_source_inner(
         .map(|(function, symbol)| (function.start_byte(), symbol.clone()))
         .collect();
     config_read::extract(&cx, root, &bindings, &functions_by_start, &mut out);
+    // SQL statements as table reads and writes (#2041, AC-1015).
+    sql::extract(&cx, root, &bindings, &functions_by_start, &mut out);
 
     let client_fields = reqwest::client_fields(&cx, root, &bindings);
     let consumer_fields = rdkafka::consumer_fields(&cx, root, &bindings);
@@ -1209,6 +1211,7 @@ fn finalize_single(out: &mut Extraction) {
     }
     http::finalize_endpoints(out, &index);
     close_imports(out, &index);
+    adapters_fw::sql::merge(&mut out.nodes);
 }
 
 #[derive(Debug, Default)]
@@ -1520,6 +1523,7 @@ pub fn extract_dir_incremental_with_progress(
     }
     http::finalize_endpoints(&mut out, &index);
     close_imports(&mut out, &index);
+    adapters_fw::sql::merge(&mut out.nodes);
     Ok((out, stats))
 }
 
@@ -1534,6 +1538,7 @@ mod http;
 mod module_paths;
 mod rdkafka;
 mod reqwest;
+mod sql;
 
 #[cfg(test)]
 mod tests;
