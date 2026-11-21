@@ -477,8 +477,13 @@ impl JobStore {
                             },
                         );
                         // AC-1404 (ADR-0076): keep the refused response's
-                        // bounded redacted record; never decisive.
-                        if let Some(rejected) = rejected {
+                        // bounded redacted record; never decisive. Only the
+                        // response this admission authenticated is kept.
+                        if let Some(rejected) = rejected
+                            && rejected.step_id == input.response.step_id
+                            && core_prov::content_hash(rejected.text.as_bytes())
+                                == input.response.response_hash
+                        {
                             super::rejected_responses::record_rejected(&tx, &task, rejected)?;
                         }
                         if error == InvestigationError::InvalidCitation {

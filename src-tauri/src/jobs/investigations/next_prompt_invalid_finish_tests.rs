@@ -126,6 +126,12 @@ fn next_prompt_invalid_finish_is_journaled_with_usage_and_reopens() {
 // transaction, without changing the terminal outcome.
 #[test]
 fn refused_finish_keeps_bounded_redacted_rejected_response() {
+    for bound in [false, true] {
+        refused_finish_record_case(bound);
+    }
+}
+
+fn refused_finish_record_case(bound: bool) {
     let mut f = gated_finish_fixture(false);
     f.original = serde_json::json!({
         "schema_version": 1, "outcome": "supported",
@@ -144,6 +150,9 @@ fn refused_finish_keeps_bounded_redacted_rejected_response() {
         f.original,
         "x".repeat(2048)
     );
+    if bound {
+        f.response.response_hash = core_prov::content_hash(text.as_bytes());
+    }
     let rejected = RejectedCompletion {
         step_id: f.response.step_id.clone(),
         text: text.clone(),
@@ -162,8 +171,13 @@ fn refused_finish_keeps_bounded_redacted_rejected_response() {
     assert_eq!(reopened.investigation(f.base.id()).unwrap(), detail);
     let kept = reopened
         .investigation_rejected_response(f.base.id())
-        .unwrap()
         .unwrap();
+    // A completion that is not the authenticated response is never kept.
+    if !bound {
+        assert_eq!(kept, None);
+        return;
+    }
+    let kept = kept.unwrap();
     assert_eq!(
         kept,
         agents::investigation::rejected_response::RejectedResponse::capture(
