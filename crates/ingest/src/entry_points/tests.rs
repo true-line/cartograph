@@ -748,3 +748,98 @@ fn java_overloads_have_their_own_entries_and_it_packages_are_read() {
     let entries = out.nodes.iter().filter(|n| n.label == "EntryPoint").count();
     assert_eq!(entries, 3, "{:#?}", out.nodes);
 }
+
+/// AC-1009: Rust binary roots, `#[tauri::command]` functions and tonic
+/// service methods are starts by kind; comments, strings, tests, examples
+/// and `build.rs` start nothing.
+#[test]
+fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
+    let symbols = BTreeSet::from([
+        format!("sym:{REPO}@src-tauri/src/main.rs#main"),
+        format!("sym:{REPO}@src-tauri/src/commands.rs#ipc::open_project"),
+        format!("sym:{REPO}@grpc/src/main.rs#MyGreeter.Greeter.say_hello"),
+    ]);
+    let out = extract_with(
+        &[
+            (
+                "src-tauri/src/main.rs",
+                "fn main() {\n    tauri::Builder::default()\n        .invoke_handler(tauri::generate_handler![commands::ipc::open_project])\n        .run(tauri::generate_context!())\n        .unwrap();\n}\n",
+            ),
+            (
+                "src-tauri/src/commands.rs",
+                "pub mod ipc {\n    #[tauri::command]\n    pub fn open_project(path: String) -> String { path }\n}\n\n// #[tauri::command] fn commented() {}\npub fn plain() {}\n",
+            ),
+            (
+                "src-tauri/src/more.rs",
+                "use tauri::command;\n\n/// Lists.\n#[command(rename_all = \"snake_case\")]\nasync fn list_items() -> Vec<String> { vec![] }\n",
+            ),
+            (
+                "grpc/src/main.rs",
+                "use tonic::{transport::Server, Request, Response, Status};\n\npub struct MyGreeter;\n\n#[tonic::async_trait]\nimpl Greeter for MyGreeter {\n    async fn say_hello(&self, request: Request<HelloRequest>) -> Result<Response<HelloReply>, Status> { todo!() }\n    fn helper(&self) -> u8 { 0 }\n}\n\n#[tokio::main]\nasync fn main() {\n    Server::builder().add_service(GreeterServer::new(MyGreeter)).serve(addr).await.unwrap();\n}\n",
+            ),
+            (
+                "web/src/main.rs",
+                "#[tokio::main]\nasync fn main() {\n    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await.unwrap();\n    axum::serve(listener, app()).await.unwrap();\n}\n",
+            ),
+            ("cli/src/bin/migrate.rs", "fn main() { run(); }\n"),
+            (
+                "worker/src/main.rs",
+                "// axum::serve(listener, app) is for later.\nfn main() { let s = \"HttpServer::new(\"; work(s); }\n",
+            ),
+            ("lib/src/lib.rs", "pub fn main() {}\n"),
+            ("cli/examples/demo.rs", "fn main() {}\n"),
+            ("cli/tests/it/main.rs", "fn main() {}\n"),
+            ("cli/build.rs", "fn main() {}\n"),
+        ],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let desktop = entry(&out, "src-tauri/src/main.rs", "main");
+    assert_eq!(desktop.props["kind"], "desktop-app");
+    assert_eq!(desktop.props["how"], "fn main");
+    assert_eq!(
+        entry_edge(&out, "src-tauri/src/main.rs", "main").dst,
+        format!("sym:{REPO}@src-tauri/src/main.rs#main")
+    );
+    let open = entry(&out, "src-tauri/src/commands.rs", "ipc:ipc::open_project");
+    assert_eq!(open.props["kind"], "ipc-command");
+    assert_eq!(open.props["command_name"], "open_project");
+    assert_eq!(
+        entry_edge(&out, "src-tauri/src/commands.rs", "ipc:ipc::open_project").dst,
+        format!("sym:{REPO}@src-tauri/src/commands.rs#ipc::open_project")
+    );
+    assert_eq!(
+        entry(&out, "src-tauri/src/more.rs", "ipc:list_items").props["kind"],
+        "ipc-command"
+    );
+    let hello = entry(&out, "grpc/src/main.rs", "grpc:MyGreeter.Greeter.say_hello");
+    assert_eq!(hello.props["kind"], "grpc-method");
+    assert_eq!(hello.props["service"], "Greeter");
+    assert_eq!(
+        entry_edge(&out, "grpc/src/main.rs", "grpc:MyGreeter.Greeter.say_hello").dst,
+        format!("sym:{REPO}@grpc/src/main.rs#MyGreeter.Greeter.say_hello")
+    );
+    assert_eq!(
+        entry(&out, "grpc/src/main.rs", "main").props["kind"],
+        "grpc-server"
+    );
+    assert_eq!(
+        entry(&out, "web/src/main.rs", "main").props["kind"],
+        "http-server"
+    );
+    assert_eq!(
+        entry(&out, "cli/src/bin/migrate.rs", "main").props["kind"],
+        "command"
+    );
+    assert_eq!(
+        entry(&out, "worker/src/main.rs", "main").props["kind"],
+        "process"
+    );
+    let entries: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 8, "{entries:?}");
+}
