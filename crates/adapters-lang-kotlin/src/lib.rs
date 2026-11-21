@@ -95,6 +95,9 @@ pub struct Extraction {
     /// JPA entities and relations, joined repo-wide (AC-1025, AC-1027,
     /// AC-1028).
     room: room::Pending,
+    /// Requests JUnit tests perform, joined to endpoints repo-wide
+    /// (AC-1102).
+    test_requests: Vec<target_tests::Request>,
 }
 
 /// A top-level class, interface, object, enum, annotation class or type
@@ -334,6 +337,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     extraction.navigation3.retarget(commit);
     extraction.ktor_routes.retarget(commit);
     extraction.room.retarget(commit);
+    for request in &mut extraction.test_requests {
+        request.retarget(commit);
+    }
     hilt_binds::retarget(&mut extraction.hilt_binds, commit);
 }
 
@@ -1552,6 +1558,13 @@ pub fn extract_source(
         &mut out.nodes,
         &mut out.edges,
     );
+    target_tests::resolve(
+        std::mem::take(&mut out.test_requests),
+        id.repo,
+        |fqn, path| names.iter().any(|name| name.obscures(fqn, path)),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     Ok(out)
 }
 
@@ -1805,6 +1818,17 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
 
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
+
+    // JUnit tests and the requests they perform (AC-1102).
+    target_tests::extract(
+        &cx,
+        &imports,
+        package.as_deref(),
+        &functions,
+        &mut out.nodes,
+        &mut out.edges,
+        &mut out.test_requests,
+    );
 
     // Spring Web endpoints: annotation-proven controllers, class-level
     // @RequestMapping base path, function-level @{Get,Post,...}Mapping.
@@ -2580,6 +2604,7 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_endpoints.extend(extraction.pending_endpoints);
             out.ktor_routes.extend(extraction.ktor_routes);
             out.room.extend(extraction.room);
+            out.test_requests.extend(extraction.test_requests);
             out.shadow_names.extend(extraction.shadow_names);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
@@ -2676,6 +2701,17 @@ pub fn extract_dir_incremental_with_progress(
             &mut out.edges,
         );
     }
+    // JUnit tests and their requests, joined to every endpoint the
+    // repository serves (AC-1102).
+    target_tests::resolve(
+        std::mem::take(&mut out.test_requests),
+        id.repo,
+        |fqn, path| {
+            java_types.contains(fqn) || out.shadow_names.iter().any(|name| name.obscures(fqn, path))
+        },
+        &mut out.nodes,
+        &mut out.edges,
+    );
     // Every package this repository declares — Java sources included, so a
     // mixed JVM tree never mistakes its own Java package for external.
     let mut repo_packages: BTreeSet<String> = out.packages.iter().cloned().collect();
@@ -2891,6 +2927,7 @@ mod rest_template;
 mod retrofit;
 mod room;
 mod spring_kafka;
+mod target_tests;
 mod webclient;
 
 #[cfg(test)]
