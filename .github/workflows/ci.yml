@@ -752,7 +752,8 @@ jobs:
     name: App incremental cache
     needs: [policy, ci-image]
     # Main only: a pull request's cache is visible to that pull request alone.
-    if: github.event_name == 'push' && needs.ci-image.result == 'success'
+    # !cancelled(): ci-image's skipped evidence needs would otherwise skip it.
+    if: "!cancelled() && github.event_name == 'push' && needs.ci-image.result == 'success'"
     runs-on: ubuntu-latest
     container:
       # A digest reference: ci-image resolves the hashed tag to its digest.
