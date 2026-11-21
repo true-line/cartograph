@@ -416,7 +416,31 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Vec<EventSite>, Extract
         let source = std::fs::read(root.join(rel))?;
         extract_file(&source, rel, id, &mut index)?;
     }
+    Ok(sites_from(index))
+}
 
+/// [`extract_dir`] over a retained capture's TS/JS files: exactly the bytes
+/// the captured TS pass parsed, never a reread of the checkout (AC-1022).
+pub fn extract_captured(
+    capture: &source_capture::Capture,
+    id: &SourceId,
+) -> Result<Vec<EventSite>, crate::captured::CapturedError> {
+    let mut files: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| crate::is_ts_source(path))
+        .collect();
+    files.sort(); // deterministic order (US-0014)
+    let mut index = RepoIndex::default();
+    for rel in files {
+        extract_file(capture.file(rel)?.bytes(), rel, id, &mut index)?;
+    }
+    Ok(sites_from(index))
+}
+
+fn sites_from(mut index: RepoIndex) -> Vec<EventSite> {
     let mut out = Vec::new();
     let sites = std::mem::take(&mut index.sites);
     for pending in sites {
@@ -447,7 +471,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Vec<EventSite>, Extract
             }
         }
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -466,6 +490,42 @@ mod tests {
             commit: "abc123",
         };
         extract_dir(dir.path(), &id).unwrap()
+    }
+
+    // AC-1022: the captured lane reads the capture's bytes, not the checkout.
+    #[test]
+    fn captured_sites_read_the_capture_not_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = "content.ts";
+        let send = |kind: &str| {
+            format!(
+                "export function ping() {{ void chrome.runtime.sendMessage({{ type: '{kind}' }}); }}\n"
+            )
+        };
+        std::fs::write(dir.path().join(path), send("ext.captured")).unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new(format!("src_{}", "a".repeat(32))).unwrap(),
+            &[path.to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(path), send("ext.later")).unwrap();
+        let id = SourceId {
+            repo: "local/ext",
+            commit: "abc123",
+        };
+        let identities = |sites: Vec<EventSite>| -> Vec<IdentityExpr> {
+            sites.into_iter().map(|site| site.identity).collect()
+        };
+        assert_eq!(
+            identities(extract_captured(&capture, &id).unwrap()),
+            [IdentityExpr::Literal("ext.captured".into())]
+        );
+        assert_eq!(
+            identities(extract_dir(dir.path(), &id).unwrap()),
+            [IdentityExpr::Literal("ext.later".into())]
+        );
     }
 
     #[test]
