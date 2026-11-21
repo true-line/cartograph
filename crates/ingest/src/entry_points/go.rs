@@ -36,14 +36,19 @@ pub(super) fn go_start(
     text: &str,
     symbols: &BTreeSet<String>,
 ) -> Option<Start> {
+    if text.lines().any(|line| {
+        let line = line.trim_end();
+        line.starts_with("//go:build") && line.contains("ignore")
+    }) {
+        return None;
+    }
+    // Comments and string literals state no declarations.
+    let code = code_only(text);
     let mut package_main = false;
     let mut main_at = None;
     let mut offset = 0u64;
-    for line in text.split_inclusive('\n') {
+    for line in code.split_inclusive('\n') {
         let trimmed = line.trim_end();
-        if trimmed.starts_with("//go:build") && trimmed.contains("ignore") {
-            return None;
-        }
         if trimmed == "package main" || trimmed.starts_with("package main ") {
             package_main = true;
         }
@@ -55,7 +60,7 @@ pub(super) fn go_start(
     let span = main_at.filter(|_| package_main)?;
     let serves = ["ListenAndServe(", "ListenAndServeTLS(", "http.Serve("]
         .iter()
-        .any(|call| text.contains(call));
+        .any(|call| code.contains(call));
     let dirs: Vec<&str> = rel.split('/').collect();
     let dirs = &dirs[..dirs.len().saturating_sub(1)];
     let operator = dirs
@@ -89,4 +94,60 @@ pub(super) fn go_start(
             marker: None,
         },
     })
+}
+
+/// `text` with every comment and string or rune literal blanked to spaces
+/// (newlines kept), so byte offsets stay the source's.
+fn code_only(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b'`' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'`' {
+                    i += 1;
+                }
+                i = (i + 1).min(bytes.len());
+            }
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(bytes.len());
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        blank(&mut out, start, i);
+    }
+    // Only ASCII bytes were replaced, so the text stays UTF-8.
+    String::from_utf8(out).unwrap_or_default()
 }

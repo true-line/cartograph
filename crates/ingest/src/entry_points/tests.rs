@@ -561,6 +561,10 @@ fn a_go_main_package_is_a_start_by_kind() {
                 "//go:build ignore\n\npackage main\n\nfunc main() {}\n",
             ),
             ("pkg/lib/lib.go", "package lib\n\nfunc main() {}\n"),
+            (
+                "old/main.go",
+                "package main\n\n/*\nfunc main() {}\n*/\nvar doc = `\nfunc main() {\n\thttp.ListenAndServe(\":1\", nil)\n}`\n",
+            ),
             ("cmd/api/main_test.go", "package main\n\nfunc main() {}\n"),
         ],
         &symbols,

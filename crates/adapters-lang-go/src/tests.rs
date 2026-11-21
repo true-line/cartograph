@@ -1553,6 +1553,11 @@ func (s *Store) Feeds(tagged bool) {
     s.db.Exec("DECLARE c CURSOR FOR SELECT 1")
     s.db.QueryRow("FETCH NEXT FROM c")
 }
+func (s *Store) Joined(table string) {
+    s.db.Query("SELECT * FROM users JOIN " + table + " ON true")
+    s.db.Query("SELECT * FROM accou" + "nts")
+    s.db.Query(`WITH recent(id) AS (SELECT id FROM users), top AS MATERIALIZED (SELECT 1 FROM ranks) SELECT * FROM recent, top`)
+}
 "#,
     )
     .unwrap();
@@ -1587,9 +1592,11 @@ func (s *Store) Feeds(tagged bool) {
         entities,
         BTreeMap::from([
             ("Orgs", vec![]),
+            ("accounts", vec![]),
             ("audit.logins", vec![]),
             ("feeds", vec![]),
             ("icons", vec![]),
+            ("ranks", vec![]),
             ("sessions", vec![]),
             ("tags", vec![]),
             (
@@ -1601,7 +1608,11 @@ func (s *Store) Feeds(tagged bool) {
     let access = |src: &str| -> BTreeSet<(String, String, String)> {
         x.edges
             .iter()
-            .filter(|e| e.src.ends_with(src) && matches!(e.label.as_str(), "READS" | "WRITES"))
+            .filter(|e| {
+                e.src.ends_with(src)
+                    && e.dst.starts_with("data:")
+                    && matches!(e.label.as_str(), "READS" | "WRITES")
+            })
             .map(|e| {
                 (
                     e.label.clone(),
@@ -1646,7 +1657,19 @@ func (s *Store) Feeds(tagged bool) {
             t("READS", "icons", ""),
         ])
     );
+    // Go concatenation joins exactly; CTE names, with column lists or
+    // MATERIALIZED, are the statement's own.
+    assert_eq!(
+        access("#Store.Joined"),
+        BTreeSet::from([
+            t("READS", "users", ""),
+            t("READS", "accounts", ""),
+            t("READS", "ranks", ""),
+        ])
+    );
     for edge in x.edges.iter().filter(|e| e.dst.starts_with("data:")) {
+        // `Joined` reads `users` through a literal too, and the literal's
+        // citation wins.
         let expected = if edge.src.ends_with("#Store.Feeds") {
             "sql-fragments"
         } else {
@@ -1657,7 +1680,7 @@ func (s *Store) Feeds(tagged bool) {
     }
     // A computed statement is a Gap; a file without a database/sql import
     // states nothing.
-    let gaps: Vec<(&str, &str)> = x
+    let gaps: BTreeSet<(&str, &str)> = x
         .nodes
         .iter()
         .filter(|n| n.id.starts_with("gap:sql:"))
@@ -1670,10 +1693,16 @@ func (s *Store) Feeds(tagged bool) {
         .collect();
     assert_eq!(
         gaps,
-        [(
-            "SQL statement is computed",
-            r#"fmt.Sprintf("SELECT * FROM %s", table)"#
-        )]
+        BTreeSet::from([
+            (
+                "SQL statement is computed",
+                r#"fmt.Sprintf("SELECT * FROM %s", table)"#
+            ),
+            (
+                "SQL statement names a computed table",
+                r#""SELECT * FROM users JOIN " + table + " ON true""#
+            ),
+        ])
     );
     assert!(
         access("#Search")

@@ -120,15 +120,22 @@ pub(super) fn extract(
             0,
             &mut statements,
         );
-        let found: Vec<Access> = statements
-            .texts
-            .iter()
-            .flat_map(|text| parse(text))
-            .collect();
+        let mut found: Vec<Access> = Vec::new();
+        let mut unresolved = false;
+        for text in &statements.texts {
+            let (accesses, computed_table) = parse_with_gaps(text);
+            found.extend(accesses);
+            unresolved |= computed_table;
+        }
+        if core && (unresolved || (found.is_empty() && statements.computed)) {
+            let reason = if found.is_empty() {
+                "SQL statement is computed"
+            } else {
+                "SQL statement names a computed table"
+            };
+            gap(cx, node, argument, &src, reason, out);
+        }
         if found.is_empty() {
-            if core && statements.computed {
-                gap(cx, node, argument, &src, out);
-            }
             continue;
         }
         let exact = !statements.computed && statements.texts.len() == 1;
@@ -296,7 +303,7 @@ fn piece(
     texts: &mut Vec<String>,
 ) -> bool {
     if depth > 4 {
-        texts.push("?".into());
+        texts.push(COMPUTED.to_string());
         return true;
     }
     if let Some(text) = literal_string(cx, expression) {
@@ -318,7 +325,7 @@ fn piece(
                 expression.child_by_field_name("left"),
                 expression.child_by_field_name("right"),
             ) else {
-                texts.push("?".into());
+                texts.push(COMPUTED.to_string());
                 return true;
             };
             let mut lefts = Vec::new();
@@ -327,7 +334,7 @@ fn piece(
                 | piece(cx, constants, right, before, depth + 1, &mut rights);
             for l in &lefts {
                 for r in &rights {
-                    texts.push(format!("{l} {r}"));
+                    texts.push(format!("{l}{r}"));
                 }
             }
             return computed;
@@ -339,6 +346,10 @@ fn piece(
             if let (true, Some(format)) = (sprintf, call_arguments(expression).first())
                 && let Some(text) = literal_string(cx, *format)
             {
+                let mut text = text.replace("%%", "%");
+                for verb in ["%s", "%v", "%q", "%d"] {
+                    text = text.replace(verb, &COMPUTED.to_string());
+                }
                 texts.push(text);
                 return true;
             }
@@ -360,7 +371,7 @@ fn piece(
         }
         _ => {}
     }
-    texts.push("?".into());
+    texts.push(COMPUTED.to_string());
     true
 }
 
@@ -430,8 +441,14 @@ fn assignments<'t>(cx: &FileCx<'_>, at: TsNode<'t>, name: &str, before: usize) -
     values
 }
 
-fn gap(cx: &FileCx<'_>, call: TsNode<'_>, argument: TsNode<'_>, src: &str, out: &mut Extraction) {
-    let reason = "SQL statement is computed";
+fn gap(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    argument: TsNode<'_>,
+    src: &str,
+    reason: &str,
+    out: &mut Extraction,
+) {
     let gap = format!("gap:sql:{}@{}@{}", cx.id.repo, cx.path, call.start_byte());
     let mut expression = cx.text(&argument).to_string();
     if expression.len() > 160 {
@@ -503,8 +520,13 @@ enum Token {
     /// A quoted identifier, as written.
     Quoted(String),
     Punct(char),
+    /// A piece computed at run time, or a word it touches.
+    Computed,
     Other,
 }
+
+/// Stands for a piece of a statement computed at run time.
+const COMPUTED: char = '\u{1}';
 
 fn tokens(sql: &str) -> Vec<Token> {
     let chars: Vec<char> = sql.chars().collect();
@@ -512,7 +534,10 @@ fn tokens(sql: &str) -> Vec<Token> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() {
+        if c == COMPUTED {
+            out.push(Token::Computed);
+            i += 1;
+        } else if c.is_whitespace() {
             i += 1;
         } else if c == '-' && chars.get(i + 1) == Some(&'-') {
             while i < chars.len() && chars[i] != '\n' {
@@ -554,9 +579,14 @@ fn tokens(sql: &str) -> Vec<Token> {
             while i < chars.len() && (chars[i].is_alphanumeric() || matches!(chars[i], '_' | '$')) {
                 i += 1;
             }
-            out.push(Token::Word(
-                chars[start..i].iter().collect::<String>().to_lowercase(),
-            ));
+            // A word joined to a computed piece is not a whole name.
+            let joined = chars.get(i) == Some(&COMPUTED)
+                || start.checked_sub(1).map(|p| chars[p]) == Some(COMPUTED);
+            out.push(if joined {
+                Token::Computed
+            } else {
+                Token::Word(chars[start..i].iter().collect::<String>().to_lowercase())
+            });
         } else if matches!(c, '(' | ')' | ',' | '.' | ';' | '=') {
             out.push(Token::Punct(c));
             i += 1;
@@ -596,6 +626,8 @@ const KEYWORDS: &[&str] = &[
     "with",
     "using",
     "lateral",
+    "materialized",
+    "recursive",
     "any",
     "all",
     "some",
@@ -628,7 +660,9 @@ fn table_name(tokens: &[Token], mut at: usize, columns: bool) -> Option<(String,
     loop {
         match tokens.get(at)? {
             Token::Word(word) if !KEYWORDS.contains(&word.as_str()) => parts.push(word.clone()),
-            Token::Quoted(name) if !name.is_empty() => parts.push(name.clone()),
+            Token::Quoted(name) if !name.is_empty() && !name.contains(COMPUTED) => {
+                parts.push(name.clone())
+            }
             _ => return None,
         }
         at += 1;
@@ -736,9 +770,34 @@ fn set_columns(tokens: &[Token], at: usize) -> Vec<String> {
     columns
 }
 
-/// The tables one or more SQL statements read and write.
-pub(super) fn parse(sql: &str) -> Vec<Access> {
+/// Whether the table reference at `at` is computed: a computed piece, a
+/// quoted name holding one, or a qualified name ending in one.
+fn computed_slot(tokens: &[Token], mut at: usize) -> bool {
+    loop {
+        match tokens.get(at) {
+            Some(Token::Computed) => return true,
+            Some(Token::Quoted(name)) if name.contains(COMPUTED) => return true,
+            Some(Token::Word(_) | Token::Quoted(_))
+                if tokens.get(at + 1) == Some(&Token::Punct('.')) =>
+            {
+                at += 2;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The tables one or more SQL statements read and write, and whether a
+/// table reference in them is computed.
+pub(super) fn parse_with_gaps(sql: &str) -> (Vec<Access>, bool) {
     let tokens = tokens(sql);
+    let unresolved = std::cell::Cell::new(false);
+    let slot = |at: usize, columns: bool| {
+        if computed_slot(&tokens, at) {
+            unresolved.set(true);
+        }
+        table_name(&tokens, at, columns)
+    };
     let mut out: Vec<Access> = Vec::new();
     let mut push = |access: Access| {
         if let Some(existing) = out
@@ -785,7 +844,7 @@ pub(super) fn parse(sql: &str) -> Vec<Access> {
                         if word(&tokens, at) == Some("into") {
                             at += 1;
                         }
-                        if let Some((table, next)) = table_name(&tokens, at, true) {
+                        if let Some((table, next)) = slot(at, true) {
                             let next = skip_alias(&tokens, next);
                             let (columns, next) = name_list(&tokens, next);
                             push(Access {
@@ -804,7 +863,7 @@ pub(super) fn parse(sql: &str) -> Vec<Access> {
                         if word(&tokens, at) == Some("only") {
                             at += 1;
                         }
-                        if let Some((table, next)) = table_name(&tokens, at, false) {
+                        if let Some((table, next)) = slot(at, false) {
                             let next = skip_alias(&tokens, next);
                             let columns = if word(&tokens, next) == Some("set") {
                                 set_columns(&tokens, next + 1)
@@ -825,7 +884,7 @@ pub(super) fn parse(sql: &str) -> Vec<Access> {
                         if word(&tokens, at) == Some("only") {
                             at += 1;
                         }
-                        if let Some((table, next)) = table_name(&tokens, at, false) {
+                        if let Some((table, next)) = slot(at, false) {
                             push(Access {
                                 table,
                                 write: Some("delete"),
@@ -858,7 +917,7 @@ pub(super) fn parse(sql: &str) -> Vec<Access> {
                         if word(&tokens, at) == Some("only") {
                             at += 1;
                         }
-                        while let Some((table, next)) = table_name(&tokens, at, false) {
+                        while let Some((table, next)) = slot(at, false) {
                             push(Access {
                                 table,
                                 write: None,
@@ -892,26 +951,45 @@ pub(super) fn parse(sql: &str) -> Vec<Access> {
         }
     }
     out.retain(|access| !ctes.contains(&access.table));
-    out
+    (out, unresolved.get())
 }
 
-/// The names `WITH name AS (…)` defines.
+/// The names `WITH name [(columns)] AS [[NOT] MATERIALIZED] (…)` defines.
 fn cte_names(tokens: &[Token]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for (i, token) in tokens.iter().enumerate() {
         let (Token::Word(name) | Token::Quoted(name)) = token else {
             continue;
         };
-        let defines = word(tokens, i + 1) == Some("as")
-            && tokens.get(i + 2) == Some(&Token::Punct('('))
-            && matches!(
-                i.checked_sub(1).map(|p| &tokens[p]),
-                Some(Token::Punct(',')) | Some(Token::Word(_))
-            )
-            && (word(tokens, i.wrapping_sub(1)) == Some("with")
-                || word(tokens, i.wrapping_sub(1)) == Some("recursive")
-                || tokens.get(i.wrapping_sub(1)) == Some(&Token::Punct(',')));
-        if defines {
+        let after_list = matches!(
+            i.checked_sub(1).map(|p| &tokens[p]),
+            Some(Token::Punct(','))
+        ) || matches!(
+            i.checked_sub(1).and_then(|p| word(tokens, p)),
+            Some("with" | "recursive")
+        );
+        if !after_list {
+            continue;
+        }
+        let mut at = i + 1;
+        if tokens.get(at) == Some(&Token::Punct('(')) {
+            let (_, next) = name_list(tokens, at);
+            if next == at {
+                continue;
+            }
+            at = next;
+        }
+        if word(tokens, at) != Some("as") {
+            continue;
+        }
+        at += 1;
+        if word(tokens, at) == Some("not") {
+            at += 1;
+        }
+        if word(tokens, at) == Some("materialized") {
+            at += 1;
+        }
+        if tokens.get(at) == Some(&Token::Punct('(')) {
             names.insert(name.clone());
         }
     }
