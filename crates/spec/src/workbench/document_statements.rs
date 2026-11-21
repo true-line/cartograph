@@ -981,6 +981,14 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                 (left.as_ref(), op.as_str(), right.as_ref())
             {
                 let present = (op == "in") != negated;
+                if text == "\\n" {
+                    let whole = noun(right, cx)?;
+                    return Some(if present {
+                        format!("{whole} contains a line break")
+                    } else {
+                        format!("{whole} does not contain a line break")
+                    });
+                }
                 if request_input(r) {
                     let key = words(text);
                     return Some(if present {
@@ -998,13 +1006,6 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     });
                 }
                 let whole = noun(right, cx)?;
-                if text == "\\n" {
-                    return Some(if present {
-                        format!("{whole} contains a line break")
-                    } else {
-                        format!("{whole} does not contain a line break")
-                    });
-                }
                 return Some(if present {
                     format!("{whole} contains “{text}”")
                 } else {
@@ -1438,13 +1439,36 @@ pub(super) fn go_error(display: &str) -> Option<String> {
     (all_ident && rest.starts_with(|c: char| c.is_ascii_uppercase())).then(|| words(rest))
 }
 
+/// Python `alias.name = alias.name.replace("\n", "")` as "line breaks are
+/// removed from the alias's name" (#1998). Python's `str.replace` replaces
+/// every occurrence; JavaScript's replaces only the first, so callers apply
+/// this to Python evidence only. `None` for any other assignment.
+fn line_breaks_removed(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
+    let args = value
+        .strip_prefix(target.trim())?
+        .strip_prefix(".replace(")?
+        .strip_suffix(')')?;
+    let (from, to) = args.split_once(',')?;
+    if !matches!(
+        (from.trim(), to.trim()),
+        ("\"\\n\"" | "'\\n'", "\"\"" | "''")
+    ) {
+        return None;
+    }
+    let Expr::Ref(path) = parse(target.trim())? else {
+        return None;
+    };
+    Some(format!(
+        "line breaks are removed from {}",
+        subject(&path, cx)?
+    ))
+}
+
 /// `x.field = value` as a clause (#1998): `g.user = api_key.user` is "the
 /// request acts as the API key's user"; `alias.enabled = False` is "the
 /// alias is no longer enabled"; `alias.delete_on = arrow.now().shift(days=+N)`
 /// is "the alias's delete on is set to N days from now"; otherwise "the
-/// alias's note is set to the note"; `alias.name =
-/// alias.name.replace("\n", "")` is "line breaks are removed from the
-/// alias's name". `None` outside these rules.
+/// alias's note is set to the note". `None` outside these rules.
 fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
     let Expr::Ref(path) = parse(target.trim())? else {
         return None;
@@ -1464,18 +1488,6 @@ fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
         }
         _ => subject(&path, cx)?,
     };
-    // `x.name = x.name.replace("\n", "")`: line breaks are removed.
-    if let Some(args) = value
-        .strip_prefix(target.trim())
-        .and_then(|r| r.strip_prefix(".replace("))
-        .and_then(|r| r.strip_suffix(')'))
-        && matches!(
-            args.split_once(',').map(|(a, b)| (a.trim(), b.trim())),
-            Some(("\"\\n\"" | "'\\n'", "\"\"" | "''"))
-        )
-    {
-        return Some(format!("line breaks are removed from {place}"));
-    }
     // `arrow.now().shift(days=+N)`: N days from now.
     if let Some(rest) = value
         .strip_prefix("arrow.now().shift(")
@@ -1853,6 +1865,13 @@ fn rendered(
     }
     // A state change or a call (#1998, AC-0910).
     let changed = match &evidence.effect {
+        LocalExit::Assign { target, value }
+            if evidence.exit_source.path.ends_with(".py")
+                && let Some(removed) =
+                    line_breaks_removed(target.display.as_str(), value.display.as_str(), &cx) =>
+        {
+            Some(removed)
+        }
         LocalExit::Assign { target, value } => Some(assigned(
             target.display.as_str(),
             value.display.as_str(),
@@ -2496,15 +2515,23 @@ mod tests {
             "the alias's note is set to the “compute” result"
         );
         assert_eq!(set("alias.note", "compute(alias) + 1"), None);
+        let removed = |t: &str, v: &str| line_breaks_removed(t, v, &cx);
         assert_eq!(
-            set("alias.name", r#"alias.name.replace("\n", "")"#).unwrap(),
+            removed("alias.name", r#"alias.name.replace("\n", "")"#).unwrap(),
             "line breaks are removed from the alias's name"
         );
         assert_eq!(
-            set("alias.name", r#"alias.name.replace('\n', '')"#).unwrap(),
+            removed("alias.name", r#"alias.name.replace('\n', '')"#).unwrap(),
             "line breaks are removed from the alias's name"
         );
-        assert_eq!(set("alias.name", r#"other.name.replace("\n", "")"#), None);
+        assert_eq!(
+            removed("alias.name", r#"other.name.replace("\n", "")"#),
+            None
+        );
+        assert_eq!(
+            condition(r#""\n" in data"#, BranchPolarity::TruthyBranch, &cx).unwrap(),
+            "the data contains a line break"
+        );
         assert_eq!(
             condition(
                 r#"alias.name and "\n" in alias.name"#,
