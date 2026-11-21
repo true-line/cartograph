@@ -396,3 +396,67 @@ fn accepted_drafts_are_bounded_by_bytes_not_by_count() {
         MAX_CURATED_ACCEPTED * agents::draft_store::MAX_DRAFT_RECORD_BYTES
     );
 }
+
+// AC-1011 (T-1011): an accepted draft citing a Capability that lives only in
+// the knowledge overlay is eligible when the overlay is current for the
+// export, and `unresolvable` when the export reads no overlay (#2040).
+#[test]
+fn a_draft_citing_an_overlay_capability_resolves_against_the_overlay() {
+    use context_hub::curated::{DraftAddress, DraftClaim, DraftReview, ReviewedDraft};
+    let fixture = fixture();
+    let derived = capability("capability:returns", "derived returns");
+    let cited = vec![id("capability:returns"), id("cap:checkout")];
+    let (revision, ((nodes, edges), coverage)) =
+        read_graph(&fixture.graph.lock().unwrap()).unwrap();
+    let ids: BTreeSet<String> = cited.iter().cloned().collect();
+    let mut cited_hashes = spec::cited_fact_hashes(&nodes, &edges, &ids);
+    cited_hashes.extend(spec::cited_node_hashes([&derived], &ids));
+    assert_eq!(cited_hashes.len(), 2);
+    let review = CuratedReview {
+        failure: None,
+        proposals: Vec::new(),
+        drafts: vec![ReviewedDraft {
+            draft_id: "draft-overlay".into(),
+            address: DraftAddress {
+                catalogue_version: "1.0".into(),
+                document: "D1".into(),
+                section: "1.3".into(),
+                scope: SYSTEM_SCOPE.into(),
+            },
+            role: "section-composer@1".into(),
+            claims: vec![DraftClaim {
+                statement: "Returns are taken at checkout.".into(),
+                kind: "implemented".into(),
+                citations: cited,
+            }],
+            cited_hashes,
+            replaces: None,
+            decision: Some(DraftReview::Accepted),
+        }],
+        findings: Vec::new(),
+        assessments: BTreeMap::new(),
+        settled: Arc::default(),
+    };
+    let content_hash = spec::graph_content_hash(&nodes, &edges);
+    let counts = |overlay: &[&Node]| {
+        project(
+            &review,
+            &Snapshot {
+                nodes: &nodes,
+                edges: &edges,
+                overlay,
+                derived_decisions: DerivedDecisions::Compile(&[]),
+                coverage: &coverage,
+                content_hash: &content_hash,
+                revision: &revision,
+            },
+            &[],
+        )
+        .unwrap()
+        .draft_counts
+    };
+    let with = counts(&[&derived]);
+    assert_eq!((with.eligible, with.unresolvable), (1, 0));
+    let without = counts(&[]);
+    assert_eq!((without.eligible, without.unresolvable), (0, 1));
+}
