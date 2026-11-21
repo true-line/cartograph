@@ -144,7 +144,9 @@ cannot be done the way it describes, skip it and report.
   titles and bodies, commits and trailers, issues, comments, docs or files.
   Add no "Requested by" line and no hidden attribution comment, and never
   pair the owner's login with a name.
-- Never assign the owner or request the owner's review on a PR.
+- Never assign the owner on a PR or send the owner a GitHub review request.
+  Critical changes that need owner review still get the `owner-review` label
+  and stay unmerged, as the review and merge policy above requires.
 
 ## Versioning and releases
 
