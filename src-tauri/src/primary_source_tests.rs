@@ -3479,3 +3479,108 @@ fn python_facts_are_parsed_from_the_capture_and_cited() {
         FactKey::Node { id } if id.contains("handler")
     )));
 }
+
+// AC-1026: a source's `.go` files join its capture; the Go pass parses the
+// retained bytes, not the checkout, and each surviving Go fact whose
+// provenance lies in one captured file gets a provenance-only Go receipt that
+// reads back its captured span.
+#[test]
+fn go_facts_are_parsed_from_the_capture_and_cited() {
+    const GO: &str = "package main\n\nfunc Handler() {}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("main.go"), GO).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let paths: Vec<_> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["main.go", "source.ts"]);
+    // The checkout changes after capture; the parse must not see it.
+    std::fs::write(root.join("main.go"), "package main\n\nfunc Other() {}\n").unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    assert!(
+        extraction
+            .nodes
+            .iter()
+            .any(|node| node.id.contains("Handler")),
+        "the captured Go bytes were parsed"
+    );
+    assert!(
+        !extraction
+            .nodes
+            .iter()
+            .any(|node| node.id.contains("Other"))
+    );
+    let go: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.file().path == "main.go")
+        .collect();
+    assert!(!go.is_empty());
+    let file = capture.file("main.go").unwrap();
+    for minted in &go {
+        assert!(minted.id().starts_with("go-primary-v1:"), "{}", minted.id());
+        let receipt = minted.to_receipt().unwrap();
+        assert_eq!(receipt.grammar(), adapters_lang_ts::captured::Grammar::Go);
+        assert_eq!(
+            Receipt::from_json(&receipt.to_json().unwrap()).unwrap(),
+            receipt
+        );
+        for range in receipt.ranges() {
+            assert_eq!(
+                range.role,
+                adapters_lang_ts::captured::RangeRole::Provenance
+            );
+            assert_eq!(range.captured.file, *file.reference());
+            assert!(
+                file.span(range.evidence.byte_start, range.evidence.byte_end)
+                    .is_ok()
+            );
+        }
+    }
+    // Every Go receipt binds a fact the recovery publishes.
+    let bound = crate::primary_source::matching_bindings(&extraction, &receipts);
+    assert!(go.iter().all(|receipt| {
+        bound
+            .iter()
+            .any(|binding| binding.receipt_id == receipt.id())
+    }));
+    // A function node carries one.
+    assert!(go.iter().any(|receipt| matches!(
+        receipt.fact_key(),
+        FactKey::Node { id } if id.contains("Handler")
+    )));
+}
