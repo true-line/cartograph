@@ -5675,3 +5675,200 @@ fn system_getenv_needs_an_unshadowed_system() {
     let out = extract_dir(dir.path(), &id()).unwrap();
     assert!(config_read_ids(&out).is_empty());
 }
+
+// AC-1023: import-proven Ktor routing builders are Endpoints. `route`
+// prefixes compose, a `Route` extension group mounted from another file
+// takes its mount's prefix, and the handler lambda is the handler Symbol
+// that owns the calls inside it. A computed path or an unmounted group is a
+// Gap; a file without the routing import, a same-file `get`, an uncalled
+// local function and a test source set assert nothing.
+#[test]
+fn ktor_routing_dsl_composes_routes_groups_and_handlers() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/App.kt",
+        r#"package com.demo
+
+import io.ktor.server.application.*
+import io.ktor.server.routing.routing
+import io.ktor.server.routing.route
+import io.ktor.server.routing.get
+import io.ktor.server.routing.post
+
+fun Application.module() {
+    routing {
+        get("/health") { call.respondText("ok") }
+        route("/api") {
+            route("/v1") {
+                userRoutes()
+                post { audit() }
+                fun helper() {
+                    get("/hidden") { }
+                }
+            }
+            get(pathFor()) { }
+        }
+    }
+}
+
+fun audit() {}
+fun pathFor(): String = "/x"
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/Users.kt",
+        r#"package com.demo
+
+import io.ktor.server.routing.*
+
+fun Route.userRoutes() {
+    route("/users") {
+        get { listUsers() }
+        get("/{id}") { }
+    }
+}
+
+fun Route.orphanRoutes() {
+    get("/orphan") { }
+}
+
+fun listUsers() {}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/NoImport.kt",
+        r#"package com.demo
+
+fun Application.other() {
+    routing { get("/no-import") { } }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/local/Local.kt",
+        r#"package com.demo.local
+
+import io.ktor.server.routing.*
+
+fun get(path: String, body: () -> Unit) {}
+
+fun Application.local() {
+    routing { get("/local") { } }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/demo/AppTest.kt",
+        r#"package com.demo
+
+import io.ktor.server.routing.*
+
+fun Application.testModule() {
+    routing { get("/test-only") { } }
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut endpoints: Vec<String> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Endpoint")
+        .map(|node| node.id.clone())
+        .collect();
+    endpoints.sort();
+    assert_eq!(
+        endpoints,
+        [
+            "ep:local/demo@GET:/api/v1/users",
+            "ep:local/demo@GET:/api/v1/users/{id}",
+            "ep:local/demo@GET:/health",
+            "ep:local/demo@POST:/api/v1",
+        ]
+    );
+    let health = node(&out.nodes, "ep:local/demo@GET:/health");
+    assert_eq!(health.props["framework"], "ktor");
+    let handler = health.props["handler_sym"].as_str().unwrap().to_string();
+    assert!(
+        handler
+            .starts_with("sym:local/demo@src/main/kotlin/com/demo/App.kt#Application.module/get@"),
+        "{handler}"
+    );
+    assert_eq!(node(&out.nodes, &handler).props["kind"], "route handler");
+    edge(&out.edges, "ep:local/demo@GET:/health", &handler, "HANDLES");
+    let evidence = &health.props["prov"]["evidence"][0];
+    let source =
+        std::fs::read_to_string(dir.path().join("src/main/kotlin/com/demo/App.kt")).unwrap();
+    let span = &source[evidence["byte_start"].as_u64().unwrap() as usize
+        ..evidence["byte_end"].as_u64().unwrap() as usize];
+    assert!(span.starts_with("get(\"/health\")"), "{span}");
+
+    // Calls inside a handler are the handler's.
+    let list = node(&out.nodes, "ep:local/demo@GET:/api/v1/users").props["handler_sym"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    edge(
+        &out.edges,
+        &list,
+        "sym:local/demo@src/main/kotlin/com/demo/Users.kt#listUsers",
+        "CALLS",
+    );
+    let post = node(&out.nodes, "ep:local/demo@POST:/api/v1").props["handler_sym"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    edge(
+        &out.edges,
+        &post,
+        "sym:local/demo@src/main/kotlin/com/demo/App.kt#audit",
+        "CALLS",
+    );
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "ktor")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "Ktor route group not mounted in any routing block",
+            "dynamic Ktor route path",
+        ]
+    );
+}
+
+// AC-1023: a star-imported routing name that the package also declares
+// elsewhere is obscured, so the route is a Gap, not an Endpoint.
+#[test]
+fn ktor_star_import_obscured_by_same_package_function_is_a_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/App.kt",
+        r#"package com.demo
+
+import io.ktor.server.routing.*
+
+fun Application.module() {
+    routing { get("/x") { } }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/Get.kt",
+        "package com.demo\n\nfun get(path: String, body: () -> Unit) {}\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    assert!(!out.nodes.iter().any(|node| node.label == "Endpoint"));
+    assert!(out.nodes.iter().any(|node| node.label == "Gap"
+        && node.props["reason"] == "Ktor routing name obscured by a same-package declaration"));
+}
