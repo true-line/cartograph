@@ -182,7 +182,11 @@ impl JobStore {
             } | InvestigationTransition::FinishRefused { .. }
                 | InvestigationTransition::SourceReplayRefused { .. }
         );
-        let stopping = matches!(&transition, InvestigationTransition::StopWithElapsed { .. });
+        let stopping = matches!(
+            &transition,
+            InvestigationTransition::StopWithElapsed { .. }
+                | InvestigationTransition::StopRejected { .. }
+        );
         if task.detail.summary.revision != expected_revision {
             return Err(InvestigationStoreError::Stale);
         }
@@ -622,6 +626,18 @@ impl JobStore {
                 task.detail.usage.active_milliseconds = active_milliseconds;
                 stop(&tx, &mut task, reason)?;
             }
+            InvestigationTransition::StopRejected {
+                reason,
+                active_milliseconds,
+                rejected,
+            } => {
+                if active_milliseconds < task.detail.usage.active_milliseconds {
+                    return Err(InvestigationStoreError::Invalid);
+                }
+                task.detail.usage.active_milliseconds = active_milliseconds;
+                stop(&tx, &mut task, reason)?;
+                super::rejected_responses::record_on_stop(&tx, &task, reason, Some(&rejected))?;
+            }
         }
         let terminal = task.phase == Phase::Terminal;
         save_task(&tx, &task, expected_revision, terminal)?;
@@ -758,6 +774,24 @@ impl JobStore {
         reason: InvestigationStopReason,
         active_milliseconds: u64,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.stop_next_prompt_investigation_keeping(
+            execution,
+            revision,
+            reason,
+            active_milliseconds,
+            None,
+        )
+    }
+
+    /// The same stop, also keeping the rejected response that caused it (AC-1403).
+    pub(crate) fn stop_next_prompt_investigation_keeping(
+        &mut self,
+        execution: &JobExecution,
+        revision: u64,
+        reason: InvestigationStopReason,
+        active_milliseconds: u64,
+        rejected: Option<&super::RejectedCompletion>,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
@@ -791,6 +825,7 @@ impl JobStore {
                 .current_call = None;
         }
         stop(&tx, &mut task, reason)?;
+        super::rejected_responses::record_on_stop(&tx, &task, reason, rejected)?;
         save_next_prompt_task(&tx, &task, revision, true)?;
         if task.semantic_audit.is_some() {
             load_next_prompt_task(&tx, &id)?;
