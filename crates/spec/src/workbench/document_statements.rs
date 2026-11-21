@@ -1376,7 +1376,46 @@ fn said_once(conditions: Vec<String>) -> Vec<String> {
             said.push(rest.to_owned());
         }
     }
-    said
+    // An `elif` chain tests a value against each earlier branch before the
+    // one it takes: "the form name is not “cancel”, and the form name is
+    // “change-yearly”" says only "the form name is “change-yearly”", which
+    // a reader (and a small model) cannot misread as no option matching.
+    let pinned: Vec<(&str, &str)> = said
+        .iter()
+        .filter_map(|s| {
+            let (subject, value) = s.split_once(" is ")?;
+            (!subject.contains(" is ") && spoken_literal(value)).then_some((subject, value))
+        })
+        .collect();
+    let implied: Vec<bool> = said
+        .iter()
+        .map(|s| {
+            s.split_once(" is not ").is_some_and(|(subject, value)| {
+                spoken_literal(value)
+                    && pinned
+                        .iter()
+                        .any(|&(pinned, other)| pinned == subject && other != value)
+            })
+        })
+        .collect();
+    said.into_iter()
+        .zip(implied)
+        .filter_map(|(s, implied)| (!implied).then_some(s))
+        .collect()
+}
+
+/// A literal as [`literal`] speaks it: a quoted text or a number.
+fn spoken_literal(value: &str) -> bool {
+    let quoted = value
+        .strip_prefix('“')
+        .and_then(|v| v.strip_suffix('”'))
+        .is_some_and(|inner| !inner.contains(['“', '”']));
+    let number = !value.is_empty()
+        && value
+            .trim_start_matches('-')
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.');
+    quoted || number
 }
 
 /// The statement of one guarded exit in domain terms, or `None` when its
@@ -1772,6 +1811,44 @@ mod tests {
                 "the “X-Sl-Allowcookies” header is set".to_owned(),
             ],
         );
+    }
+
+    // AC-1004 (#2083): in an `elif` chain the value the branch takes is said
+    // alone: a negated equality on a value the same conditions pin to
+    // another literal is dropped; one on a value nothing pins, or a pin to
+    // the same literal, is kept.
+    #[test]
+    fn a_value_pinned_by_its_branch_is_not_also_said_to_differ() {
+        let said =
+            |conditions: &[&str]| said_once(conditions.iter().map(|c| (*c).to_owned()).collect());
+        assert_eq!(
+            said(&[
+                "the method is “POST”",
+                "the form name is not “cancel”",
+                "the form name is not “change-monthly”",
+                "the form name is “change-yearly”",
+                "a success is given",
+            ]),
+            vec![
+                "the method is “POST”",
+                "the form name is “change-yearly”",
+                "a success is given",
+            ]
+        );
+        assert_eq!(
+            said(&["the count is not 0", "the count is 3"]),
+            vec!["the count is 3"]
+        );
+        for kept in [
+            vec!["the form name is not “cancel”", "the plan is “yearly”"],
+            vec!["the form name is not “cancel”", "the form name is set"],
+            vec![
+                "the form name is not “cancel”",
+                "the form name is one of the options",
+            ],
+        ] {
+            assert_eq!(said(&kept), kept);
+        }
     }
 
     // AC-0912: membership, calls with arguments, type tests, lengths,
