@@ -225,6 +225,7 @@ pub(crate) fn ask(
     prepared: &Prepared,
     approved_payload_hash: Option<String>,
     check: &dyn Fn() -> CallDirective,
+    job_id: Option<i64>,
 ) -> Result<Asked, String> {
     let completion = crate::section_compose::complete(
         state,
@@ -232,6 +233,7 @@ pub(crate) fn ask(
         &prepared.action,
         approved_payload_hash,
         check,
+        job_id,
     )?;
     let reported = completion.usage.as_ref();
     Ok(Asked {
@@ -289,7 +291,14 @@ fn run_blocking(
         Ok(true) => CallDirective::Cancelled,
         Err(_) => CallDirective::OwnershipLost,
     };
-    let Asked { answer, usage } = ask(state, provider, &prepared, approved_payload_hash, &check)?;
+    let Asked { answer, usage } = ask(
+        state,
+        provider,
+        &prepared,
+        approved_payload_hash,
+        &check,
+        Some(execution.id()),
+    )?;
     Ok(match answer {
         Ok(answer) => AskOutcome::Answered {
             area: prepared.view.area,

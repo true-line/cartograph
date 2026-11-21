@@ -343,6 +343,7 @@ pub(crate) fn compose(
     prepared: &Prepared,
     approved_payload_hash: Option<String>,
     check: &dyn Fn() -> CallDirective,
+    job_id: Option<i64>,
 ) -> Result<Result<Composed, &'static str>, String> {
     let text = complete(
         state,
@@ -350,6 +351,7 @@ pub(crate) fn compose(
         &prepared.action,
         approved_payload_hash,
         check,
+        job_id,
     )?
     .text;
     Ok(
@@ -369,6 +371,7 @@ pub(crate) fn complete(
     action: &CompletionAction,
     approved_payload_hash: Option<String>,
     check: &dyn Fn() -> CallDirective,
+    job_id: Option<i64>,
 ) -> Result<BoundedCompletion, String> {
     let limits = limits()?;
     let firewall = firewall(state)?;
@@ -402,7 +405,7 @@ pub(crate) fn complete(
     let cloud = provider.locality() == Locality::Cloud;
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_millis(limits.values().request_timeout_ms);
-    provider
+    let completion = provider
         .complete_bounded(
             &authorized,
             &CompletionControl {
@@ -411,7 +414,27 @@ pub(crate) fn complete(
                 dispatching: cloud.then_some(&record),
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Some(job_id) = job_id {
+        record_usage(state, job_id, &completion);
+    }
+    Ok(completion)
+}
+
+/// Add a returned call's provider-reported usage to its job (AC-1703).
+/// The answer is already valid, so a usage row that cannot be written is
+/// left out rather than failing the call; the job then shows no usage.
+fn record_usage(state: &AppState, job_id: i64, completion: &BoundedCompletion) {
+    let reported = completion.usage.as_ref();
+    let call = crate::jobs::CallUsage {
+        model: &completion.requested_model,
+        input_tokens: reported.and_then(|usage| usage.input_tokens),
+        output_tokens: reported.and_then(|usage| usage.output_tokens),
+        request_bytes: completion.request_bytes,
+    };
+    if let Ok(mut jobs) = state.jobs.lock() {
+        let _ = jobs.add_usage(job_id, &call);
+    }
 }
 
 /// Stage a decoded composition as a draft of job `job_id`.
@@ -577,7 +600,14 @@ fn run_blocking(
         Ok(true) => CallDirective::Cancelled,
         Err(_) => CallDirective::OwnershipLost,
     };
-    match compose(state, provider, &prepared, approved_payload_hash, &check)? {
+    match compose(
+        state,
+        provider,
+        &prepared,
+        approved_payload_hash,
+        &check,
+        Some(execution.id()),
+    )? {
         Ok(composed) => stage(state, &prepared, composed, execution.id()),
         Err(reason) => Ok(ComposeOutcome::none(reason)),
     }
@@ -648,6 +678,7 @@ struct HostModel<'a> {
     state: &'a AppState,
     provider: &'a dyn LlmProvider,
     check: &'a dyn Fn() -> CallDirective,
+    job_id: i64,
 }
 
 impl StageModel for HostModel<'_> {
@@ -657,7 +688,15 @@ impl StageModel for HostModel<'_> {
             // one exact payload, so this slice runs locally only.
             return Err("gated_composition_local_only".into());
         }
-        Ok(complete(self.state, self.provider, action, None, self.check)?.text)
+        Ok(complete(
+            self.state,
+            self.provider,
+            action,
+            None,
+            self.check,
+            Some(self.job_id),
+        )?
+        .text)
     }
 }
 
@@ -683,6 +722,7 @@ pub(crate) fn compose_gated(
         state,
         provider,
         check,
+        job_id,
     };
     let outcome = gated_compose::run(
         &workflow,

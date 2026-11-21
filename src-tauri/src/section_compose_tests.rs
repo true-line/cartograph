@@ -126,9 +126,14 @@ fn a_section_is_composed_from_its_compiled_text_and_staged_for_review() {
         reply: reply(),
         prompts: Mutex::new(Vec::new()),
     };
-    let composed = compose(&state, &provider, &prepared, None, &|| {
-        CallDirective::Continue
-    })
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
     .unwrap()
     .unwrap();
     assert_eq!(composed.left_out, 1);
@@ -179,9 +184,14 @@ fn a_composition_is_refused_off_the_system_or_an_area_scope_or_after_the_graph_c
         reply: reply(),
         prompts: Mutex::new(Vec::new()),
     };
-    let composed = compose(&state, &provider, &prepared, None, &|| {
-        CallDirective::Continue
-    })
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
     .unwrap()
     .unwrap();
     state
@@ -203,9 +213,14 @@ fn a_reply_that_is_not_the_schema_stages_nothing() {
         reply: "I drafted the section: Checkout takes orders.".into(),
         prompts: Mutex::new(Vec::new()),
     };
-    let decoded = compose(&state, &provider, &prepared, None, &|| {
-        CallDirective::Continue
-    })
+    let decoded = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
     .unwrap();
     assert_eq!(decoded.err(), Some("reply_not_the_schema"));
 }
@@ -250,6 +265,7 @@ fn a_gated_composition_runs_on_section_1_5_and_a_local_provider_only() {
         state: &state,
         provider: &Cloud,
         check: &continue_,
+        job_id: 1,
     };
     assert_eq!(
         model.complete(&prepared.action),
