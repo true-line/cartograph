@@ -167,14 +167,12 @@ fn auditor12_rejected_finish_preserves_reason_usage_and_reopens() {
         );
     }
 }
+// Each rejection is its own whole replay run, so each is its own test: one
+// test looping over them ran 60 to 180 s, the longest of the app binary
+// (#1924), and libtest can run separate tests side by side.
 #[test]
 fn auditor13_replay_correction_succeeds_or_exhausts_and_reopens() {
-    for rejection in [
-        Rejection::Once,
-        Rejection::Repeated,
-        Rejection::ShortTitle,
-        Rejection::Sensitive,
-    ] {
+    for rejection in [Rejection::Once, Rejection::Repeated] {
         exercise_auditor_configured(
             Scenario::CloudComplete,
             SpecialistId::EvidenceAuditorV13,
@@ -183,18 +181,51 @@ fn auditor13_replay_correction_succeeds_or_exhausts_and_reopens() {
     }
 }
 #[test]
+fn auditor13_short_title_replay_correction_reopens() {
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV13,
+        Some(Rejection::ShortTitle),
+    );
+}
+#[test]
+fn auditor13_sensitive_replay_correction_reopens() {
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV13,
+        Some(Rejection::Sensitive),
+    );
+}
+#[test]
 fn auditor13_withheld_parent_cloud_shaped_receipt_reopens() {
     exercise_auditor_role(Scenario::WithheldCloud, SpecialistId::EvidenceAuditorV13);
 }
 
 #[test]
-fn auditor14_replay_correction_and_withheld_parent_receipt_reopen() {
-    for rejection in [Rejection::Once, Rejection::Repeated, Rejection::ShortTitle] {
-        exercise_auditor_configured(
-            Scenario::CloudComplete,
-            SpecialistId::EvidenceAuditorV14,
-            Some(rejection),
-        );
-    }
+fn auditor14_replay_correction_once_reopens() {
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV14,
+        Some(Rejection::Once),
+    );
+}
+#[test]
+fn auditor14_withheld_parent_receipt_reopens() {
     exercise_auditor_role(Scenario::WithheldCloud, SpecialistId::EvidenceAuditorV14);
+}
+#[test]
+fn auditor14_repeated_rejection_replay_correction_reopens() {
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV14,
+        Some(Rejection::Repeated),
+    );
+}
+#[test]
+fn auditor14_short_title_replay_correction_reopens() {
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV14,
+        Some(Rejection::ShortTitle),
+    );
 }
