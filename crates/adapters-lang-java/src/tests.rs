@@ -5638,3 +5638,111 @@ public class Resource {
     );
     assert_eq!(purge["roles"], serde_json::json!(["ADMIN"]));
 }
+
+// AC-0964: a rule stated under an `if` inside the configuring lambda applies
+// only under that condition; a security annotation proven by a wildcard
+// import alone is the repository's own same-package type when one is
+// declared; overloaded JUnit tests are separate TestCases.
+#[test]
+fn spring_nested_conditional_rules_shadowed_annotations_and_overloaded_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    let own = dir.path().join("src/main/java/com/acme/own");
+    let test = dir.path().join("src/test/java/com/acme");
+    for d in [&base, &own, &test] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        base.join("SecurityConfiguration.java"),
+        r#"package com.acme;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, boolean dev) throws Exception {
+        http.authorizeHttpRequests(authz -> {
+            if (dev) {
+                authz.requestMatchers("/api/debug/**").permitAll();
+            }
+            authz.requestMatchers("/api/own/**").permitAll();
+            authz.anyRequest().authenticated();
+        });
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("Resource.java"),
+        r#"package com.acme;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @GetMapping("/api/debug/heap") public void heap() {}
+    @GetMapping("/api/open/ping") public void ping() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        own.join("PreAuthorize.java"),
+        "package com.acme.own;\npublic @interface PreAuthorize { String value(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        own.join("OwnResource.java"),
+        r#"package com.acme.own;
+import org.springframework.security.access.prepost.*;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class OwnResource {
+    @PreAuthorize("hasRole('ADMIN')")
+    @GetMapping("/api/own/thing") public void thing() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("CheckTest.java"),
+        r#"package com.acme;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+class CheckTest {
+    @Test void check() {}
+    @ParameterizedTest void check(int value) {}
+    @Test void other() {}
+}
+"#,
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["auth"]
+            .clone()
+    };
+    let heap = auth("/api/debug/heap");
+    assert_eq!(heap["state"], "unknown", "{heap}");
+    assert!(heap.to_string().contains("under a condition"), "{heap}");
+    let ping = auth("/api/open/ping");
+    assert_eq!(ping["caller"], "signed-in user", "{ping}");
+    // `@PreAuthorize` here binds to `com.acme.own.PreAuthorize`, not Spring's.
+    let thing = auth("/api/own/thing");
+    assert_eq!(thing["state"], "unknown", "{thing}");
+    assert!(
+        thing.to_string().contains("com.acme.own.PreAuthorize"),
+        "{thing}"
+    );
+    assert!(!thing.to_string().contains("ADMIN"), "{thing}");
+    let tests: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.id.rsplit('#').next().unwrap())
+        .collect();
+    assert_eq!(tests.len(), 3, "{tests:?}");
+    assert!(tests.contains("CheckTest.other"), "{tests:?}");
+}

@@ -41,6 +41,9 @@ pub(super) struct Rule {
     /// The rule as spelled, for the guard.
     pub(super) display: String,
     pub(super) prov: serde_json::Value,
+    /// Whether the rule is stated under an `if`, `switch` or loop inside the
+    /// configuring lambda, so it applies only under a condition.
+    pub(super) conditional: bool,
 }
 
 /// The rules of one `authorizeHttpRequests` call.
@@ -204,11 +207,11 @@ fn rules(
     cx: &FileCx<'_>,
     imports: &Imports,
     package: Option<&str>,
-    calls: &[TsNode<'_>],
+    calls: &[(TsNode<'_>, bool)],
 ) -> Vec<Rule> {
     let mut out = Vec::new();
     let mut pending: Option<(TsNode<'_>, Option<String>, Matcher)> = None;
-    for call in calls {
+    for (call, conditional) in calls {
         let called = name(cx, *call);
         if let Some((verb, matcher)) = matcher(cx, imports, package, *call) {
             pending = Some((*call, verb, matcher));
@@ -240,6 +243,7 @@ fn rules(
                 ConfidenceTier::InferredStrong,
                 "HttpSecurity rule",
             ),
+            conditional: *conditional,
         });
     }
     out
@@ -292,27 +296,49 @@ pub(super) fn chains(
             continue;
         };
         let scoped = cx.text(&bean).contains("securityMatcher");
-        let calls: Vec<TsNode<'_>> = match arguments(call).first() {
+        let calls: Vec<(TsNode<'_>, bool)> = match arguments(call).first() {
             // `authorizeHttpRequests(authz -> authz.requestMatchers(…)…)`
             Some(lambda) if lambda.kind() == "lambda_expression" => {
                 let Some(body) = lambda.child_by_field_name("body") else {
                     continue;
                 };
-                let statements: Vec<TsNode<'_>> = if body.kind() == "block" {
+                // A statement nested under an `if`, `switch`, loop or `try`
+                // of the block states its rules under a condition.
+                let statements: Vec<(TsNode<'_>, bool)> = if body.kind() == "block" {
+                    let mut statements = Vec::new();
                     let mut cursor = body.walk();
-                    body.named_children(&mut cursor)
-                        .filter_map(|s| {
-                            (s.kind() == "expression_statement")
-                                .then(|| s.named_child(0))
-                                .flatten()
-                        })
-                        .collect()
+                    for statement in body.named_children(&mut cursor) {
+                        if statement.kind() == "expression_statement" {
+                            statements.extend(statement.named_child(0).map(|s| (s, false)));
+                            continue;
+                        }
+                        // Each outermost call chain in it, a nested lambda's too.
+                        let mut stack = vec![statement];
+                        let mut nested = Vec::new();
+                        while let Some(node) = stack.pop() {
+                            let outermost = node.kind() == "method_invocation"
+                                && !node.parent().is_some_and(|parent| {
+                                    parent.kind() == "method_invocation"
+                                        && parent.child_by_field_name("object") == Some(node)
+                                });
+                            if outermost {
+                                nested.push(node);
+                            }
+                            let mut walk = node.walk();
+                            stack.extend(node.named_children(&mut walk));
+                        }
+                        nested.sort_by_key(|n| n.start_byte());
+                        statements.extend(nested.into_iter().map(|s| (s, true)));
+                    }
+                    statements
                 } else {
-                    vec![body]
+                    vec![(body, false)]
                 };
                 statements
                     .into_iter()
-                    .flat_map(|s| chain_calls(s).0)
+                    .flat_map(|(s, conditional)| {
+                        chain_calls(s).0.into_iter().map(move |c| (c, conditional))
+                    })
                     .collect()
             }
             Some(_) => continue,
@@ -329,7 +355,7 @@ pub(super) fn chains(
                     if name(cx, parent) == "and" {
                         break;
                     }
-                    calls.push(parent);
+                    calls.push((parent, false));
                     node = parent;
                 }
                 calls
@@ -496,7 +522,7 @@ pub(super) fn reading(
                         rule.display
                     ));
                 }
-                Cover::All if chain.conditional => {
+                Cover::All if chain.conditional || rule.conditional => {
                     return Url::Unknown(format!(
                         "URL rule {} applies only under a condition",
                         rule.display

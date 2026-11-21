@@ -849,6 +849,7 @@ pub fn extract_source(
         &mut out.nodes,
         &settled,
         &std::mem::take(&mut out.http_chains),
+        &|fqn| package_types.contains(fqn),
     );
     target_tests::resolve(
         std::mem::take(&mut out.test_requests),
@@ -1824,6 +1825,7 @@ pub fn extract_dir_incremental_with_progress(
         &mut out.nodes,
         &settled,
         &std::mem::take(&mut out.http_chains),
+        &|fqn| package_types.contains(fqn),
     );
     target_tests::resolve(
         std::mem::take(&mut out.test_requests),

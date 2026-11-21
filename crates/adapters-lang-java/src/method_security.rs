@@ -47,28 +47,36 @@ fn packages(name: &str) -> &'static [&'static str] {
     }
 }
 
-fn proven(cx: &FileCx<'_>, annotation: TsNode<'_>, name: &str, imports: &Imports) -> bool {
+/// Whether the annotation is a supported security annotation: `Some(true)`
+/// when only a wildcard import proves it, which a same-package type of the
+/// same name would obscure (JLS §6.4.1), so [`resolve`] settles it against
+/// the repository's types; `Some(false)` when proven outright.
+fn proven(cx: &FileCx<'_>, annotation: TsNode<'_>, name: &str, imports: &Imports) -> Option<bool> {
     let packages = packages(name);
     if packages.is_empty() {
-        return false;
+        return None;
     }
     let spelling = annotation
         .child_by_field_name("name")
         .map(|spelled| cx.text(&spelled))
         .unwrap_or_default();
     if spelling.contains('.') {
-        return packages.iter().any(|p| spelling == format!("{p}.{name}"));
+        return packages
+            .iter()
+            .any(|p| spelling == format!("{p}.{name}"))
+            .then_some(false);
     }
-    imports
-        .bindings
-        .get(name)
-        .map(|fqn| packages.iter().any(|p| *fqn == format!("{p}.{name}")))
-        .unwrap_or_else(|| {
-            imports
-                .wildcard_packages
-                .iter()
-                .any(|w| packages.contains(&w.as_str()))
-        })
+    match imports.bindings.get(name) {
+        Some(fqn) => packages
+            .iter()
+            .any(|p| *fqn == format!("{p}.{name}"))
+            .then_some(false),
+        None => imports
+            .wildcard_packages
+            .iter()
+            .any(|w| packages.contains(&w.as_str()))
+            .then_some(true),
+    }
 }
 
 /// The annotation's `value`: the sole unnamed argument or `value = …`.
@@ -113,8 +121,10 @@ fn role_name(role: &str) -> String {
     role.strip_prefix("ROLE_").unwrap_or(role).to_string()
 }
 
-/// The quoted arguments of each `name(...)` call in a SpEL expression.
-fn calls<'e>(expression: &'e str, name: &str) -> Vec<Vec<&'e str>> {
+/// The arguments of each `name(...)` call in a SpEL expression: `Some`
+/// when every argument is a quoted string literal (`'ADMIN'`, `"A,B"`),
+/// `None` when one is anything else (`#requiredRole`).
+fn calls(expression: &str, name: &str) -> Vec<Option<Vec<String>>> {
     let mut found = Vec::new();
     let mut rest = expression;
     while let Some(at) = rest.find(name) {
@@ -127,18 +137,44 @@ fn calls<'e>(expression: &'e str, name: &str) -> Vec<Vec<&'e str>> {
         let Some(inner) = after.strip_prefix('(') else {
             continue;
         };
-        let Some(close) = inner.find(')') else {
-            continue;
-        };
-        found.push(
-            inner[..close]
-                .split(',')
-                .map(|a| a.trim().trim_matches(['\'', '"']))
-                .filter(|a| !a.is_empty())
-                .collect(),
-        );
+        found.push(literal_arguments(inner));
     }
     found
+}
+
+/// The quoted literals up to the closing `)`; SpEL doubles a quote to
+/// escape it.
+fn literal_arguments(inner: &str) -> Option<Vec<String>> {
+    let mut arguments = Vec::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        match chars.next()? {
+            ')' if arguments.is_empty() => return Some(arguments),
+            quote @ ('\'' | '"') => {
+                let mut literal = String::new();
+                loop {
+                    let c = chars.next()?;
+                    if c == quote {
+                        if chars.next_if_eq(&quote).is_some() {
+                            literal.push(quote);
+                            continue;
+                        }
+                        break;
+                    }
+                    literal.push(c);
+                }
+                arguments.push(literal);
+            }
+            _ => return None,
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        match chars.next()? {
+            ',' => {}
+            ')' => return Some(arguments),
+            _ => return None,
+        }
+    }
 }
 
 /// Whether `name` occurs as a whole word, called or not.
@@ -163,11 +199,16 @@ pub(super) fn expression(expression: &str) -> Admits {
         ("hasAnyAuthority", false),
     ] {
         for arguments in calls(expression, name) {
-            for argument in arguments {
+            // A role named by anything but a literal is no fixed role.
+            let Some(arguments) = arguments else {
+                admits.other = true;
+                continue;
+            };
+            for argument in arguments.into_iter().filter(|a| !a.is_empty()) {
                 if roles {
-                    admits.roles.push(role_name(argument));
+                    admits.roles.push(role_name(&argument));
                 } else {
-                    admits.authorities.push(argument.to_string());
+                    admits.authorities.push(argument);
                 }
             }
         }
@@ -221,7 +262,7 @@ pub(super) fn expression(expression: &str) -> Admits {
             residue.replace_range(at..end, " ");
         }
     }
-    admits.other = residue
+    admits.other |= residue
         .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '#' || c == '.'))
         .any(|word| !word.is_empty() && !matches!(word, "and" | "or" | "not"));
     admits
@@ -591,17 +632,44 @@ pub(super) fn auth<'t>(
         cx: &FileCx<'_>,
         imports: &Imports,
         annotations: &[(String, TsNode<'t>)],
-    ) -> Vec<(String, TsNode<'t>)> {
+    ) -> Vec<(String, TsNode<'t>, bool)> {
         annotations
             .iter()
-            .filter(|(name, node)| proven(cx, *node, name, imports))
-            .map(|(name, node)| (name.clone(), *node))
+            .filter_map(|(name, node)| {
+                proven(cx, *node, name, imports).map(|wildcard| (name.clone(), *node, wildcard))
+            })
             .collect()
     }
-    let mut found = security(cx, imports, method);
-    if found.is_empty() {
-        found = security(cx, imports, class);
+    let mut proven = security(cx, imports, method);
+    if proven.is_empty() {
+        proven = security(cx, imports, class);
     }
+    // A same-package type of a wildcard-proven name would be the annotation.
+    let shadowed_by: Vec<String> = proven
+        .iter()
+        .filter(|(_, _, wildcard)| *wildcard)
+        .map(|(name, _, _)| match package {
+            Some(package) => format!("{package}.{name}"),
+            None => name.clone(),
+        })
+        .collect();
+    let found: Vec<(String, TsNode<'_>)> = proven
+        .into_iter()
+        .map(|(name, node, _)| (name, node))
+        .collect();
+    let mut reading = read(cx, imports, package, &found);
+    if !shadowed_by.is_empty() {
+        reading["shadowed_by"] = shadowed_by.into();
+    }
+    reading
+}
+
+fn read<'t>(
+    cx: &FileCx<'_>,
+    imports: &Imports,
+    package: Option<&str>,
+    found: &[(String, TsNode<'t>)],
+) -> serde_json::Value {
     if found.is_empty() {
         return serde_json::json!({
             "state": "unknown",
@@ -612,7 +680,7 @@ pub(super) fn auth<'t>(
     let nodes: Vec<TsNode<'_>> = found.iter().map(|(_, n)| *n).collect();
     let prov = cx.prov_spanning(&nodes, ConfidenceTier::Confirmed, "auth");
     let mut annotations: Annotations = Vec::new();
-    for (name, annotation) in &found {
+    for (name, annotation) in found {
         if matches!(name.as_str(), "PermitAll" | "DenyAll") {
             annotations.push((name.clone(), Some(Vec::new())));
             continue;
@@ -680,12 +748,38 @@ const URL: &str = "HttpSecurity ";
 /// Settle every held reading against the repository's constants, then
 /// combine each Spring endpoint's method reading with the URL rule that
 /// covers it: both must admit a caller.
-pub(super) fn resolve(nodes: &mut [super::Node], settled: &Settled, chains: &[Chain]) {
+pub(super) fn resolve(
+    nodes: &mut [super::Node],
+    settled: &Settled,
+    chains: &[Chain],
+    declared: &dyn Fn(&str) -> bool,
+) {
     let settle = |parts: &[Part], missing: &mut Vec<String>| settled.settle(parts, missing);
     let text = |parts: &[Part]| settled.text(parts);
     for node in nodes.iter_mut() {
         if node.label != "Endpoint" || node.props["framework"] != "spring" {
             continue;
+        }
+        // An annotation proven only by a wildcard import is the repository's
+        // own same-package type when one is declared, not Spring's.
+        if let Some(shadowed_by) = node.props["auth"]
+            .as_object_mut()
+            .and_then(|auth| auth.remove("shadowed_by"))
+        {
+            let shadowing: Vec<String> = shadowed_by
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|fqn| fqn.as_str())
+                .filter(|fqn| declared(fqn))
+                .map(|fqn| format!("`{fqn}` is declared in the repository and may be the annotation the handler names"))
+                .collect();
+            if !shadowing.is_empty() {
+                node.props["auth"] = serde_json::json!({
+                    "state": "unknown",
+                    "reasons": shadowing,
+                });
+            }
         }
         if node.props["auth"]["state"] == "pending" {
             let auth = node.props["auth"].take();
@@ -1026,5 +1120,12 @@ mod tests {
             assert_eq!(caller(&read, both), format!("caller that `{both}` admits"));
         }
         assert!(!expression("hasRole('A') or hasAuthority('b')").compound);
+        // Only quoted literals are fixed roles; a quoted comma is one authority.
+        let read = expression("hasRole(#requiredRole)");
+        assert!(read.roles.is_empty() && read.other, "{read:?}");
+        let read = expression("hasAnyAuthority('a,b', \"c\") or hasRole('it''s')");
+        assert_eq!(read.authorities, ["a,b", "c"]);
+        assert_eq!(read.roles, ["it's"]);
+        assert!(!read.other, "{read:?}");
     }
 }

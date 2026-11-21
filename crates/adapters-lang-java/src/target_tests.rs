@@ -213,18 +213,33 @@ pub(super) fn extract(
     out: &mut Extraction,
 ) {
     let statics = static_imports(cx, root);
-    for (method, symbol, chain, name) in methods {
-        let annotated = declaration_annotations(cx, *method)
-            .iter()
-            .any(|(n, a)| is_test_annotation(cx, imports, n, *a));
-        if !annotated {
-            continue;
-        }
+    let tests: Vec<_> = methods
+        .iter()
+        .filter(|(method, ..)| {
+            declaration_annotations(cx, *method)
+                .iter()
+                .any(|(n, a)| is_test_annotation(cx, imports, n, *a))
+        })
+        .collect();
+    let mut overloads: HashMap<String, usize> = HashMap::new();
+    for (_, _, chain, name) in &tests {
+        *overloads
+            .entry(format!("{}.{name}", chain.join(".")))
+            .or_default() += 1;
+    }
+    for (method, symbol, chain, name) in tests {
         let Some(body) = method.child_by_field_name("body") else {
             continue;
         };
         let qualified = format!("{}.{name}", chain.join("."));
-        let test = format!("test:{}@{}#{qualified}", cx.id.repo, cx.path);
+        // Overloaded tests (`check()`, `check(int)`) are told apart by the
+        // signature their method Symbol carries.
+        let key = if overloads[&qualified] > 1 {
+            symbol.rsplit('#').next().unwrap_or(&qualified).to_string()
+        } else {
+            qualified.clone()
+        };
+        let test = format!("test:{}@{}#{key}", cx.id.repo, cx.path);
         out.nodes.push(Node {
             id: test.clone(),
             label: "TestCase".into(),
