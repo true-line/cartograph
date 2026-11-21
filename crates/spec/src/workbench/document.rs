@@ -1108,6 +1108,13 @@ pub(super) fn d1(
                         (&mut assertions, &mut drafted.asserted),
                         &mut content,
                     )?;
+                    // The user actions that reach each capability (#2005).
+                    cited += actions::actions_per_capability(
+                        (nodes, edges),
+                        knowledge,
+                        (&mut assertions, &mut drafted.asserted),
+                        &mut content,
+                    )?;
                 }
             }
             // §1.3 states the operations no Capability groups, and why (#2007).
@@ -1187,6 +1194,9 @@ pub(super) mod flows;
 
 #[path = "document_operations.rs"]
 pub(super) mod operations;
+
+#[path = "document_actions.rs"]
+pub(super) mod actions;
 
 #[path = "document_statements.rs"]
 pub(super) mod statements;

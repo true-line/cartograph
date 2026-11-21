@@ -709,6 +709,8 @@ pub fn logical_knowledge_story_compile_bound(
         super::document::flows::flows_per_capability_workspace(graph)?,
         // D1 §1.3 and §1.5 state operations and rate limits (AC-0882).
         super::document::operations::operations_per_capability_workspace(graph)?,
+        // D1 §1.3 lists the user actions per Capability (AC-0955).
+        super::document::actions::actions_per_capability_workspace(graph)?,
     ])?;
     Some(KnowledgeStoryCompileWorkspaceBound {
         capability_validation_bytes,
