@@ -20,6 +20,10 @@
 //! - a Java `public static void main`, a message-listener, `@Scheduled` or
 //!   runner method is a process start, queue consumer, scheduled job or
 //!   startup task (`java.rs`).
+//! - a Kotlin `fun main`, a message-listener, `@Scheduled` or runner
+//!   function is a process start (an HTTP server when it starts Ktor or
+//!   Spring Boot with web endpoints), queue consumer, scheduled job or
+//!   startup task (`kotlin.rs`).
 //! - a Rust `fn main()` in a binary root is a process start, a
 //!   `#[tauri::command]` function an IPC command and a tonic service method
 //!   a gRPC method (`rust.rs`).
@@ -149,6 +153,7 @@ pub fn extract_dir(
     };
     let mut starts: Vec<Start> = Vec::new();
     let mut java_files: Vec<(String, String)> = Vec::new();
+    let mut kotlin_files: Vec<(String, String)> = Vec::new();
     for file in &walked {
         let rel = file.rel.as_str();
         if rel.ends_with(".py") {
@@ -187,6 +192,9 @@ pub fn extract_dir(
         } else if java::candidate(rel) {
             let Some(text) = read(rel) else { continue };
             java_files.push((rel.to_string(), text));
+        } else if kotlin::candidate(rel) {
+            let Some(text) = read(rel) else { continue };
+            kotlin_files.push((rel.to_string(), text));
         } else if node::candidate(rel) && !rel.contains("node_modules/") {
             if scheduled.contains(rel) {
                 continue;
@@ -198,6 +206,10 @@ pub fn extract_dir(
             starts.extend(package_bins(rel, &text, &files));
         }
     }
+    // A Kotlin Spring Boot main serves HTTP when Kotlin or Java sources
+    // declare Spring web endpoints (AC-1104).
+    let web = kotlin::spring_web(&kotlin_files).or_else(|| kotlin::spring_web(&java_files));
+    starts.extend(kotlin::starts(id.repo, &kotlin_files, web, symbols));
     starts.extend(java::starts(id.repo, &java_files, symbols));
     let mut out = EntryPointExtraction::default();
     let declaring: BTreeSet<&str> = starts.iter().map(|s| s.declared_in.as_str()).collect();
@@ -1247,6 +1259,7 @@ fn emit(
 
 mod go;
 mod java;
+mod kotlin;
 mod node;
 mod rust;
 mod wrangler;
