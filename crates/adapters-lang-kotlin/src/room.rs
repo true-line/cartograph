@@ -337,10 +337,19 @@ fn columns(
                     else {
                         continue;
                     };
-                    // A getter-only property has no backing field.
-                    if named_children(member)
+                    // A property with a getter has no backing field unless it
+                    // is initialized or an accessor uses `field`.
+                    let parts = named_children(member);
+                    let accessors: Vec<TsNode<'_>> = parts
                         .iter()
-                        .any(|part| part.kind() == "getter")
+                        .copied()
+                        .filter(|part| matches!(part.kind(), "getter" | "setter"))
+                        .collect();
+                    let mut walk = member.walk();
+                    let initialized = member.children(&mut walk).any(|part| part.kind() == "=");
+                    if !accessors.is_empty()
+                        && !initialized
+                        && !accessors.iter().any(|accessor| uses_field(cx, *accessor))
                     {
                         continue;
                     }
@@ -353,6 +362,18 @@ fn columns(
         }
     }
     found
+}
+
+/// Whether an accessor reads or writes its backing `field`.
+fn uses_field(cx: &FileCx<'_>, accessor: TsNode<'_>) -> bool {
+    let mut stack = vec![accessor];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier" && cx.text(&node) == "field" {
+            return true;
+        }
+        stack.extend(named_children(node));
+    }
+    false
 }
 
 /// The entity type a write function's first parameter names, unwrapped
@@ -463,7 +484,14 @@ pub(crate) fn extract(
             let class = super::symbol_id(cx.id.repo, cx.path, &qualified);
             let table = match argument(cx, entity.node, "tableName", false) {
                 Ok(None) => Some(cx.text(&name).to_string()),
-                Ok(Some(value)) => pure_string_literal(cx, value),
+                // Room's default `""` means the class name.
+                Ok(Some(value)) => pure_string_literal(cx, value).map(|table| {
+                    if table.is_empty() {
+                        cx.text(&name).to_string()
+                    } else {
+                        table
+                    }
+                }),
                 Err(()) => None,
             };
             let Some(table) = table else {

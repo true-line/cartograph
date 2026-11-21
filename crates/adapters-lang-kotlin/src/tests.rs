@@ -5899,9 +5899,13 @@ data class User(
     val name: String,
 ) {
     @Ignore var cached: Int = 0
+    var nickname: String = ""
+        get() = field.trim()
+    val display: String
+        get() = name.uppercase()
 }
 
-@Entity
+@Entity(tableName = "")
 class Alias(@PrimaryKey val id: Long, val userId: Long)
 
 @Entity(tableName = TABLE)
@@ -5987,7 +5991,12 @@ interface FakeDao {
     assert_eq!(users.props["class"], "com.demo.data.User");
     assert_eq!(
         users.props["columns"],
-        serde_json::json!([{"name": "id"}, {"name": "e_mail"}, {"name": "name"}])
+        serde_json::json!([
+            {"name": "id"},
+            {"name": "e_mail"},
+            {"name": "name"},
+            {"name": "nickname"}
+        ])
     );
 
     let dao = "sym:local/demo@app/src/main/kotlin/com/demo/dao/UserDao.kt#UserDao";
