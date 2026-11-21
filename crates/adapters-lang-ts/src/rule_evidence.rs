@@ -935,8 +935,19 @@ pub(super) fn extract<'tree>(
                 },
                 redactions,
             };
-            if evidence.validate().is_err() {
-                continue;
+            if let Err(error) = evidence.validate() {
+                omission_gap(
+                    cx,
+                    at,
+                    &owner_id,
+                    if matches!(error, RuleValidationError::Limit(_)) {
+                        RuleGapReason::AnalysisLimit
+                    } else {
+                        RuleGapReason::UnsupportedRuleSyntax
+                    },
+                    out,
+                );
+                return;
             }
             let payload = serde_json::to_value(evidence).expect("rule serializes");
             let canonical = serde_json::to_string(&payload).expect("rule serializes");

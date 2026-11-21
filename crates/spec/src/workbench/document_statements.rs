@@ -1516,8 +1516,12 @@ fn repository_write(value: &str) -> Option<String> {
         let entity = args[..close].rsplit(',').next()?.trim();
         (entity, &args[close + 1..])
     } else {
+        // A `this.…Repository` field: only TypeScript evidence has `this`.
         let callee = &value[..value.find('(')?];
         let (object, _) = callee.rsplit_once('.')?;
+        if !object.starts_with("this.") {
+            return None;
+        }
         let entity = object.rsplit('.').next()?.strip_suffix("Repository")?;
         (entity, &value[object.len()..])
     };
@@ -2389,6 +2393,11 @@ mod tests {
         assert_eq!(
             called("this.orderItemRepository.delete(item.id)").unwrap(),
             "the “order item” record is deleted"
+        );
+        // A Python `userRepository` alias is not a TypeORM field.
+        assert_eq!(
+            called("userRepository.delete(x)").unwrap(),
+            "it runs “delete”"
         );
         assert_eq!(
             called("this.connection.getRepository(ctx, Payment).insert(p)").unwrap(),
