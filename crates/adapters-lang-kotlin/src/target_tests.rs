@@ -33,7 +33,11 @@
 //! Each resolved link is one InferredStrong `REQUESTS` edge per test and
 //! endpoint, marked `handler_assumed`, with the statuses the test expects
 //! (`status { isOk() }`, `status().isNotFound()`) anywhere in its body.
-//! MockK stubs (`every { … }`) are not read.
+//! A verb call on a receiver counts only when the receiver is a declared
+//! test client: a property or parameter typed `MockMvc` or `HttpClient`, a
+//! value built by `HttpClient(…)` or `createClient`, or `client` inside a
+//! `testApplication { … }` block. MockK stubs and verifications
+//! (`every { … }`, `verify { … }`) are not read.
 
 use super::rest_template::named_children;
 use super::*;
@@ -76,14 +80,14 @@ fn test_annotation(annotation: &AnnotationUse<'_>, imports: &Imports) -> Option<
     let name = annotation.simple.as_str();
     let mut star = None;
     for (simple, package) in JUNIT {
-        if *simple != name {
-            continue;
-        }
         let fqn = format!("{package}.{simple}");
+        // A qualified spelling, or a named import under its own name or an
+        // alias.
         if annotation.spelled == fqn || imports.bindings.get(name) == Some(&fqn) {
             return Some(false);
         }
-        if annotation.spelled == name
+        if *simple == name
+            && annotation.spelled == name
             && !imports.bindings.contains_key(name)
             && imports.wildcard_packages.iter().any(|p| p == package)
         {
@@ -132,11 +136,135 @@ fn value_arguments<'t>(call: TsNode<'t>) -> Option<Vec<TsNode<'t>>> {
     )
 }
 
+const MOCK_MVC: (&str, &str) = ("org.springframework.test.web.servlet", "MockMvc");
+const HTTP_CLIENT: (&str, &str) = ("io.ktor.client", "HttpClient");
+const KTOR_TESTING: &str = "io.ktor.server.testing";
+/// MockK calls whose lambdas stub or verify, never perform, a call.
+const MOCKK_BLOCKS: &[&str] = &[
+    "every",
+    "coEvery",
+    "verify",
+    "coVerify",
+    "verifyAll",
+    "coVerifyAll",
+    "verifyOrder",
+    "coVerifyOrder",
+    "verifySequence",
+    "coVerifySequence",
+    "excludeRecords",
+];
+
+/// The names a file declares as test clients: properties and parameters
+/// typed `MockMvc` or Ktor's `HttpClient`, and values built by
+/// `HttpClient(…)` or a test application's `createClient { … }`.
+#[derive(Default)]
+struct Clients<'t> {
+    mock_mvc: BTreeSet<String>,
+    ktor: BTreeSet<String>,
+    /// `testApplication { … }` lambdas, whose receiver has a `client`.
+    test_applications: Vec<TsNode<'t>>,
+}
+
+impl Clients<'_> {
+    fn in_test_application(&self, call: TsNode<'_>) -> bool {
+        self.test_applications.iter().any(|lambda| {
+            lambda.start_byte() <= call.start_byte() && call.end_byte() <= lambda.end_byte()
+        })
+    }
+}
+
+/// Whether a type as spelled is `package.simple`.
+fn names_type(spelled: &str, imports: &Imports, (package, simple): (&str, &str)) -> bool {
+    let spelled = spelled.trim_end_matches('?');
+    spelled == format!("{package}.{simple}")
+        || (spelled == simple && imported(imports, package, simple))
+}
+
+fn clients<'t>(cx: &FileCx<'_>, root: TsNode<'t>, imports: &Imports) -> Clients<'t> {
+    let mut out = Clients::default();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        stack.extend(named_children(node));
+        match node.kind() {
+            "property_declaration" | "class_parameter" | "parameter" => {
+                let parts = named_children(node);
+                let holder = parts
+                    .iter()
+                    .find(|c| c.kind() == "variable_declaration")
+                    .copied()
+                    .unwrap_or(node);
+                let held = named_children(holder);
+                let Some(name) = held.iter().find(|c| c.kind() == "identifier") else {
+                    continue;
+                };
+                let name = cx.text(name).to_string();
+                let ty = held
+                    .iter()
+                    .chain(parts.iter())
+                    .find(|c| matches!(c.kind(), "user_type" | "nullable_type"))
+                    .map(|ty| cx.text(ty).split_whitespace().collect::<String>());
+                let built = parts
+                    .iter()
+                    .filter(|c| c.kind() == "call_expression")
+                    .filter_map(|c| callee(cx, *c))
+                    .any(|(receiver, callee)| {
+                        (receiver.is_none()
+                            && callee == "HttpClient"
+                            && imported(imports, HTTP_CLIENT.0, HTTP_CLIENT.1))
+                            || callee == "createClient"
+                    });
+                match ty {
+                    Some(ty) if names_type(&ty, imports, MOCK_MVC) => {
+                        out.mock_mvc.insert(name);
+                    }
+                    Some(ty) if names_type(&ty, imports, HTTP_CLIENT) => {
+                        out.ktor.insert(name);
+                    }
+                    None if built => {
+                        out.ktor.insert(name);
+                    }
+                    _ => {}
+                }
+            }
+            "call_expression" => {
+                if let Some((None, name)) = callee(cx, node)
+                    && name == "testApplication"
+                    && imported(imports, KTOR_TESTING, "testApplication")
+                    && let Some(lambda) = trailing_lambda(node)
+                {
+                    out.test_applications.push(lambda);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A call's trailing lambda.
+fn trailing_lambda(call: TsNode<'_>) -> Option<TsNode<'_>> {
+    named_children(call)
+        .into_iter()
+        .find(|c| c.kind() == "annotated_lambda")
+        .and_then(|annotated| {
+            named_children(annotated)
+                .into_iter()
+                .find(|c| c.kind() == "lambda_literal")
+        })
+}
+
+/// Whether `call` is a MockK stub or verification block (`every { … }`).
+fn mockk_block(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
+    callee(cx, call)
+        .is_some_and(|(receiver, name)| receiver.is_none() && MOCKK_BLOCKS.contains(&name.as_str()))
+}
+
 /// A request call: its method (`None` when computed) and URL argument.
 fn request<'t>(
     cx: &FileCx<'_>,
     call: TsNode<'t>,
     imports: &Imports,
+    clients: &Clients,
 ) -> Option<(Option<String>, Option<TsNode<'t>>)> {
     let (receiver, name) = callee(cx, call)?;
     let args = value_arguments(call)?;
@@ -146,8 +274,14 @@ fn request<'t>(
     });
     let proven = if builder_receiver {
         true
-    } else if receiver.is_some() {
-        imported(imports, MOCK_MVC_DSL, &name) || imported(imports, KTOR_CLIENT, &name)
+    } else if let Some(receiver) = receiver {
+        // A member of the receiver's own type wins over an imported
+        // extension, so the receiver must be the test client itself.
+        let receiver = cx.text(&receiver);
+        (imported(imports, MOCK_MVC_DSL, &name) && clients.mock_mvc.contains(receiver))
+            || (imported(imports, KTOR_CLIENT, &name)
+                && (clients.ktor.contains(receiver)
+                    || (receiver == "client" && clients.in_test_application(call))))
     } else {
         imported(imports, BUILDERS, &name)
     };
@@ -321,6 +455,14 @@ pub(crate) fn extract(
     edges: &mut Vec<Edge>,
     requests: &mut Vec<Request>,
 ) {
+    // The file's test clients, read once from its root.
+    let Some(mut root) = functions.first().map(|(function, _)| *function) else {
+        return;
+    };
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let clients = &clients(cx, root, imports);
     for (function, symbol) in functions {
         let proofs: Vec<(String, bool)> = declaration_annotations(cx, *function)
             .iter()
@@ -388,9 +530,12 @@ pub(crate) fn extract(
         let mut found = Vec::new();
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
+            if node.kind() == "call_expression" && mockk_block(cx, node) {
+                continue;
+            }
             stack.extend(named_children(node));
             if node.kind() == "call_expression"
-                && let Some((method, url)) = request(cx, node, imports)
+                && let Some((method, url)) = request(cx, node, imports, clients)
             {
                 found.push((node, method, url));
             }
@@ -411,6 +556,14 @@ pub(crate) fn extract(
             });
         }
     }
+}
+
+/// Whether a TestCase proven only by a star import waits on the shadow
+/// check, which needs the repository's product Java types.
+pub(crate) fn awaits_shadow_check(nodes: &[Node]) -> bool {
+    nodes
+        .iter()
+        .any(|n| n.label == "TestCase" && n.props.get("shadowed_by").is_some())
 }
 
 /// A request URL's path: without origin, query or fragment.

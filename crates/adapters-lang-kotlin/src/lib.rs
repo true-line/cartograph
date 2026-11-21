@@ -2674,9 +2674,10 @@ pub fn extract_dir_incremental_with_progress(
     // or type alias of that name obscures the star import, so the route
     // fails closed to a Gap. In a mixed JVM tree a product Java type of the
     // package obscures it too; Java sources are read only when some route
-    // waits on the check.
+    // or star-proven test waits on the check.
     let java_types: BTreeSet<String> = if out.pending_endpoints.is_empty()
         && out.pending_config.is_empty()
+        && !target_tests::awaits_shadow_check(&out.nodes)
     {
         BTreeSet::new()
     } else {
