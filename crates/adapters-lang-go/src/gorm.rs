@@ -18,7 +18,9 @@
 //! That argument can be a composite literal (`&T{…}`, `T{}`). It can be a
 //! variable the function declares with a type, as a parameter or receiver
 //! of type `T`, `*T` or `[]T`. It can be `make([]T, …)` or `new(T)`. It can
-//! also be the argument of a `Model(…)` earlier in the same chain.
+//! also be the argument of a `Model(…)` earlier in the same chain, which
+//! names the table over the method's own argument: when that `Model(…)`
+//! is not resolved, the destination does not stand in for it.
 //!
 //! The methods map to operations as follows:
 //!
