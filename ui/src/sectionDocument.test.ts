@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { NOT_COMPUTED_READ, curatedReadFixture } from './curatedFixtures';
 import {
-  composeOutcomeText, curatedDraftStates, curatedReadStatesDrafts, runSectionCompose, scopeLabel,
+  composeOutcomeText, curatedDraftStates, curatedReadStatesDrafts, runSectionCompose,
+  runSectionComposeGated, scopeLabel,
   sectionComposePreview, sectionDraftQuestion, sectionRedraftQuestion,
   useSectionDocumentStore,
 } from './sectionDocument';
@@ -191,5 +192,36 @@ describe('section composition (AC-0862)', () => {
       .toBe('The graph changed while the section was being composed. Compose it again.');
     expect(composeOutcomeText({ outcome: 'no_draft', reason: 'citation_not_admitted', claims: 0, left_out: 2 }))
       .toBe('citation_not_admitted 2 claims were left out.');
+  });
+});
+
+// #2083, AC-0970: gated §1.5 drafting runs on the local model with no
+// consent step and reports its coverage.
+describe('gated section composition (AC-0970)', () => {
+  const address = { catalogue_version: '1.0', document: 'D1', section: '1.5', scope: 'system' };
+  const gated = {
+    chunks: 3, rows: 24, rows_covered: 23, calls: 9, first_try_passed: 1, retries: 2,
+    sent_back: 1, audit_dropped: 0, audit_failed: 0, failures: {},
+  };
+
+  it('runs the gated command for the address and says how much it covered', async () => {
+    const commands: [string, unknown][] = [];
+    mockIPC((command, args) => {
+      commands.push([command, args]);
+      return { outcome: 'staged', draft_id: 'draft-2', claims: 14, left_out: 1, gated };
+    });
+    const outcome = await runSectionComposeGated(address);
+    expect(composeOutcomeText(outcome)).toBe(
+      'Composed 14 claims for review. 1 claim was left out. 23 of 24 rule rows covered in 9 local calls.',
+    );
+    expect(commands).toEqual([
+      ['run_section_compose_gated', { catalogueVersion: '1.0', document: 'D1', section: '1.5', scope: 'system' }],
+    ]);
+  });
+
+  it('puts the gated refusals into words', () => {
+    expect(composeOutcomeText({ outcome: 'no_draft', reason: 'no_claim_admitted', claims: 0, left_out: 3, gated }))
+      .toBe('No drafted claim passed the gates, so nothing was staged. 3 claims were left out. '
+        + '23 of 24 rule rows covered in 9 local calls.');
   });
 });

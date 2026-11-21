@@ -163,8 +163,22 @@ export async function sectionDraftQuestion(address: SectionAddress): Promise<str
  *  closed reason there is none, with how many claims were staged and left
  *  out. */
 export type ComposeOutcome =
-  | { outcome: 'staged'; draft_id: string; claims: number; left_out: number }
-  | { outcome: 'no_draft'; reason: string; claims: number; left_out: number };
+  | { outcome: 'staged'; draft_id: string; claims: number; left_out: number; gated?: GatedStats }
+  | { outcome: 'no_draft'; reason: string; claims: number; left_out: number; gated?: GatedStats };
+
+/** What a gated composition (`draft-rules@1`, #2083, AC-0970) did. */
+export interface GatedStats {
+  chunks: number;
+  rows: number;
+  rows_covered: number;
+  calls: number;
+  first_try_passed: number;
+  retries: number;
+  sent_back: number;
+  audit_dropped: number;
+  audit_failed: number;
+  failures: Record<string, number>;
+}
 
 /** Why a composition staged nothing, by its closed code. */
 export const COMPOSE_REFUSAL: Record<string, string> = {
@@ -176,6 +190,8 @@ export const COMPOSE_REFUSAL: Record<string, string> = {
   no_admissible_claim: 'No claim in the reply kept the citation and statement rules.',
   statement_names_source: 'Every claim named a source file or code symbol, so none was staged.',
   graph_changed: 'The graph changed while the section was being composed. Compose it again.',
+  no_claim_admitted: 'No drafted claim passed the gates, so nothing was staged.',
+  gated_composition_section_unsupported: 'Only section 1.5 is drafted through the gated workflow.',
 };
 
 /** The exact payload a cloud composition of the address would send. */
@@ -207,15 +223,31 @@ export async function runSectionCompose(
   return outcome;
 }
 
+/** Draft §1.5 through the gated workflow on the configured local model
+ *  (#2083, AC-0970). Nothing leaves the machine, so there is no consent. */
+export async function runSectionComposeGated(address: SectionAddress): Promise<ComposeOutcome> {
+  const outcome = await invokeOr<ComposeOutcome | null>('run_section_compose_gated', null, {
+    catalogueVersion: address.catalogue_version,
+    document: address.document,
+    section: address.section,
+    scope: address.scope,
+  });
+  if (!outcome) throw new Error('The core did not return a composition outcome.');
+  return outcome;
+}
+
 /** One line for the user about a composition's outcome. */
 export function composeOutcomeText(outcome: ComposeOutcome): string {
   const left = outcome.left_out > 0
     ? ` ${outcome.left_out} ${outcome.left_out === 1 ? 'claim was' : 'claims were'} left out.`
     : '';
+  const gated = outcome.gated
+    ? ` ${outcome.gated.rows_covered} of ${outcome.gated.rows} rule rows covered in ${outcome.gated.calls} local calls.`
+    : '';
   if (outcome.outcome === 'staged') {
-    return `Composed ${outcome.claims} ${outcome.claims === 1 ? 'claim' : 'claims'} for review.${left}`;
+    return `Composed ${outcome.claims} ${outcome.claims === 1 ? 'claim' : 'claims'} for review.${left}${gated}`;
   }
-  return `${COMPOSE_REFUSAL[outcome.reason] ?? outcome.reason}${left}`;
+  return `${COMPOSE_REFUSAL[outcome.reason] ?? outcome.reason}${left}${gated}`;
 }
 
 /** Why the host refuses a re-draft, by its closed code (SPEC-17). */

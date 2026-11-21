@@ -25,6 +25,7 @@ const meta = {
     onDraft: fn(),
     onRedraft: fn(),
     onCompose: fn(),
+    onComposeGated: fn(),
     onReview: fn(),
     onOpenCitation: fn(),
   },
@@ -343,5 +344,19 @@ export const NotRead: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByTestId('document-unread')).toHaveTextContent('has not been read');
     await expect(canvas.queryByRole('button')).not.toBeInTheDocument();
+  },
+};
+
+export const ComposeGatedOnlyForBusinessRules: Story = {
+  // #2083, AC-0970: the gated local workflow is offered on 1.5 only, for the
+  // whole system.
+  play: async ({ canvasElement, args }) => {
+    const canvas = await open(canvasElement);
+    const rules = within(canvas.getByRole('region', { name: /1\.5 Business rules/ }));
+    await userEvent.click(rules.getByRole('button', { name: 'Compose locally, checked' }));
+    await expect(args.onComposeGated).toHaveBeenLastCalledWith({
+      catalogue_version: '1.0', document: 'D1', section: '1.5', scope: 'system',
+    });
+    await expect(canvas.getAllByRole('button', { name: 'Compose locally, checked' })).toHaveLength(1);
   },
 };
