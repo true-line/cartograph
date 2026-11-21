@@ -1356,6 +1356,7 @@ fn extract_source_with_module(
         target_tests::keep_test_facts(&mut out);
     } else {
         rule_evidence::extract(&cx, root, &functions_by_start, &bindings, &mut out);
+        sql::extract(&cx, root, &functions_by_start, &bindings, &mut out);
     }
     Ok(out)
 }
@@ -1728,6 +1729,7 @@ pub fn extract_dir_incremental_with_progress(
     let functions = std::mem::take(&mut out.handler_functions);
     vercel::routes(root, id.repo, id.commit, &functions, &mut out);
     target_tests::resolve(&mut out, id.repo);
+    sql::merge(&mut out);
     let modules = repo_modules(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
@@ -1760,6 +1762,7 @@ mod config_read;
 mod events;
 mod queries;
 mod rule_evidence;
+mod sql;
 mod target_tests;
 mod vercel;
 
