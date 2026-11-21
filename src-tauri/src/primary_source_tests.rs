@@ -4151,6 +4151,17 @@ fn facts_citing_several_captured_files_are_cited_and_read_back() {
             .iter()
             .any(|binding| binding.receipt_id == receipt.id())
     );
+    // It is stored in the shared-header form, not verbatim.
+    let header: Option<String> =
+        rusqlite::Connection::open(app_data.join("retained-source/receipts.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT header_id FROM receipts WHERE id = ?1",
+                [receipt.id()],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert!(header.is_some());
     let fact = FactKey::Node {
         id: endpoint.id.clone(),
     };
