@@ -1157,10 +1157,73 @@ fn plain_message(arg: &str) -> Option<String> {
     (!inner.is_empty() && !inner.contains(['"', '\'', '{', '\\'])).then(|| inner.to_owned())
 }
 
+/// A Java string literal's text with its escapes decoded (`"User's id"`,
+/// `"Invalid\nID"`); line breaks and tabs read as spaces. `None` for
+/// anything but one plain literal, an empty one, a unicode or octal escape,
+/// or a `{placeholder}`.
+fn java_message(arg: &str) -> Option<String> {
+    let mut chars = arg.strip_prefix('"')?.chars();
+    let mut out = String::new();
+    loop {
+        match chars.next()? {
+            '"' => break,
+            '\\' => match chars.next()? {
+                '"' => out.push('"'),
+                '\'' => out.push('\''),
+                '\\' => out.push('\\'),
+                'n' | 't' | 'r' | 'f' | 'b' | 's' => out.push(' '),
+                _ => return None,
+            },
+            c => out.push(c),
+        }
+    }
+    let message = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    (chars.as_str().is_empty() && !message.is_empty() && !message.contains('{')).then_some(message)
+}
+
 /// Whether a rule was recovered from Go source: the Go response and error
 /// shapes are read only there, never in another language's display text.
 pub(super) fn is_go(evidence: &GuardedExitEvidence) -> bool {
     evidence.exit_source.path.ends_with(".go")
+}
+
+/// Whether a rule was recovered from Java source (#2020).
+pub(super) fn is_java(evidence: &GuardedExitEvidence) -> bool {
+    evidence.exit_source.path.ends_with(".java")
+}
+
+/// The error a Java `throw new X(…)` raises, in words (#2020): its literal
+/// message when its first argument is one (`new BadRequestAlertException("Invalid
+/// id", ENTITY_NAME, "idnull")` gives `the error “Invalid id”`), else the
+/// exception's name without its `Exception`/`Error` suffix
+/// (`new LoginAlreadyUsedException()` gives `a “login already used” error`).
+/// `None` for any other thrown expression.
+pub(super) fn java_thrown(display: &str) -> Option<String> {
+    let rest = display.trim().strip_prefix("new ")?;
+    let open = rest.find('(')?;
+    let class = rest[..open].trim();
+    if class.is_empty()
+        || !class
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return None;
+    }
+    let inner = rest[open + 1..].strip_suffix(')')?;
+    let parts = top_level_parts(inner)?;
+    if let Some(message) = parts.first().and_then(|first| java_message(first.trim())) {
+        return Some(format!("the error “{message}”"));
+    }
+    let name = class.rsplit('.').next().unwrap_or(class);
+    let name = name
+        .strip_suffix("Exception")
+        .or_else(|| name.strip_suffix("Error"))
+        .unwrap_or(name);
+    // `new RuntimeException(e)` names no rule of its own.
+    if name.is_empty() || matches!(name, "Runtime" | "IllegalState" | "IllegalArgument") {
+        return Some("an error".to_owned());
+    }
+    Some(format!("a “{}” error", words(name)))
 }
 
 /// The status a Go response call writes and its literal message (#2009):
@@ -1488,12 +1551,13 @@ fn rendered(
     }
     let value = match &evidence.effect {
         LocalExit::Assign { .. } | LocalExit::Call { .. } => return None,
-        LocalExit::Throw { .. } => {
-            return Some(if conditions.is_empty() {
-                "It fails with an error.".to_owned()
-            } else {
-                format!("When {when}, it fails with an error.")
-            });
+        LocalExit::Throw { value } => {
+            // A Java exception names the error it raises (#2020).
+            let error = is_java(evidence)
+                .then(|| java_thrown(value.display.as_str()))
+                .flatten()
+                .unwrap_or_else(|| "an error".to_owned());
+            return Some(sentence(format!("it fails with {error}")));
         }
         LocalExit::Return { value: None } => return None,
         LocalExit::Return { value: Some(value) } if super::rules::constructs_error(value) => {
@@ -1841,6 +1905,30 @@ mod tests {
             Some("")
         );
         assert_eq!(go_error("nil, err"), None);
+        // AC-0967: a Java exception names its message, else its kind.
+        assert_eq!(
+            java_thrown("new BadRequestAlertException(\"Invalid id\", ENTITY_NAME, \"idnull\")")
+                .as_deref(),
+            Some("the error “Invalid id”")
+        );
+        assert_eq!(
+            java_thrown("new LoginAlreadyUsedException()").as_deref(),
+            Some("a “login already used” error")
+        );
+        assert_eq!(
+            java_thrown("new IllegalStateException(cause)").as_deref(),
+            Some("an error")
+        );
+        assert_eq!(java_thrown("error"), None);
+        // A literal with an apostrophe or escapes is still the message.
+        assert_eq!(
+            java_thrown("new ValidationException(\"User's id is \\\"bad\\\"\\nnow\")").as_deref(),
+            Some("the error “User's id is \"bad\" now”")
+        );
+        assert_eq!(
+            java_thrown("new ValidationException(\"a\" + b)").as_deref(),
+            Some("a “validation” error")
+        );
         // The call whose error is tested names the condition.
         let failed = |display: &str, polarity, call| {
             condition(
