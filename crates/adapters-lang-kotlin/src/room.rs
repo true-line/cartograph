@@ -83,7 +83,7 @@ impl Pending {
         self.accesses.extend(other.accesses);
     }
 
-    /// A table another persistence reader recovered (Exposed, AC-1026),
+    /// A table another persistence reader recovered (Exposed, AC-1027),
     /// joined with Room's.
     pub(crate) fn push_entity(
         &mut self,

@@ -6093,7 +6093,7 @@ interface UserDao {
         && node.props["reason"] == "Room write type `User` is not a recovered @Entity"));
 }
 
-// AC-1026: import-proven Exposed table objects are SQL tables with their
+// AC-1027: import-proven Exposed table objects are SQL tables with their
 // columns, named by the constructor literal or the object name less
 // `Table`, and DSL statements on them are reads and writes of the
 // enclosing function across files. A computed table name and a statement

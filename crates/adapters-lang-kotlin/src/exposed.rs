@@ -1,4 +1,4 @@
-//! JetBrains Exposed persistence (#2021, AC-1026).
+//! JetBrains Exposed persistence (#2021, AC-1027).
 //!
 //! An `object` whose supertype is an import-proven Exposed table base
 //! (`Table`, or `IdTable`, `IntIdTable`, `LongIdTable`, `UIntIdTable`,

@@ -92,7 +92,7 @@ pub struct Extraction {
     /// Ktor routing DSL routes and mounts, composed at the join (AC-1023).
     ktor_routes: ktor_routes::Pending,
     /// Room entities and DAO accesses, and Exposed tables and statements,
-    /// joined repo-wide (AC-1025, AC-1026).
+    /// joined repo-wide (AC-1025, AC-1027).
     room: room::Pending,
 }
 
@@ -2098,7 +2098,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             &mut out.nodes,
             &mut out.edges,
         );
-        // Exposed tables and DSL statements join with Room's (AC-1026).
+        // Exposed tables and DSL statements join with Room's (AC-1027).
         exposed::extract(
             &cx,
             root,
