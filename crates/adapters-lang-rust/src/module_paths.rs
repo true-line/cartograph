@@ -219,12 +219,12 @@ pub(super) fn modules(
 }
 
 /// Followed declarations that still do not wire their file in, as
-/// `(declaring file, index into its declarations, reason)`: the path leaves the repository
-/// or is absolute (`outside_repository`), names the declaring file itself
-/// (`declaring_file`) or a file not in `files` (`file_not_found`), names a
-/// file an earlier declaration in path order wires in (`already_declared`),
-/// or sits on a declaration cycle (`cycle`), which keeps the location's
-/// module.
+/// `(declaring file, index into its followed declarations, reason)`: the
+/// path leaves the repository or is absolute (`outside_repository`), names
+/// the declaring file itself (`declaring_file`) or a file not in `files`
+/// (`file_not_found`), names a file an earlier declaration in path order
+/// wires in (`already_declared`), or sits on a declaration cycle (`cycle`),
+/// which keeps the location's module.
 pub(super) fn unresolved(
     declared: &BTreeMap<String, Vec<(String, String)>>,
     files: &BTreeSet<String>,
