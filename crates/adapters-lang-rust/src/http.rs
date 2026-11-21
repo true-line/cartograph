@@ -13,7 +13,7 @@ enum RoutePathArg {
 }
 
 #[derive(Debug, Clone)]
-enum HandlerTarget {
+pub(super) enum HandlerTarget {
     Resolved(String),
     Pending(Target),
     Unresolved,
@@ -42,6 +42,16 @@ enum AxumRouterItem {
     Merge {
         sub: AxumSubRouter,
     },
+    /// `layer` / `route_layer`: wraps every route added before it (#2163).
+    Layer(Vec<auth::Layer>),
+}
+
+/// A route handler's target, as the auth pass reads a `from_fn` argument.
+pub(super) type HandlerTargetRef = HandlerTarget;
+
+/// [`resolve_handler_target`] for the auth pass.
+pub(super) fn resolve_target_ref(target: &HandlerTarget, index: &SymbolIndex) -> Option<String> {
+    resolve_handler_target(target, index)
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +129,11 @@ fn retarget_axum_items(items: &mut [AxumRouterItem], commit: &str) {
             AxumRouterItem::Merge { sub } => {
                 if let AxumSubRouter::Inline(inner) = sub {
                     retarget_axum_items(inner, commit);
+                }
+            }
+            AxumRouterItem::Layer(layers) => {
+                for layer in layers {
+                    layer.evidence.commit_sha = commit.into();
                 }
             }
         }
@@ -757,9 +772,16 @@ fn eval_axum_expr(
                 }
                 Some(items)
             }
-            "layer"
-            | "route_layer"
-            | "with_state"
+            "layer" | "route_layer" => {
+                if let Some(&arg) = args.first() {
+                    let resolve = |node: TsNode<'_>| {
+                        resolve_handler_expr(cx, node, bindings, locals, value_shadows).target
+                    };
+                    items.push(AxumRouterItem::Layer(auth::layers(cx, arg, &resolve)));
+                }
+                Some(items)
+            }
+            "with_state"
             | "fallback"
             | "fallback_service"
             | "nest_service"
@@ -1461,7 +1483,7 @@ fn emit_endpoint(
     out: &mut Extraction,
     seen_nodes: &mut BTreeSet<String>,
     seen_edges: &mut BTreeSet<(String, String, String)>,
-) {
+) -> (String, Option<String>) {
     let ep_id = format!("ep:{}@{method}:{path}", evidence.repo);
     let resolved_sym = resolve_handler_target(&handler.target, index);
     let dst_id = match &resolved_sym {
@@ -1489,7 +1511,7 @@ fn emit_endpoint(
             }),
         });
     }
-    match resolved_sym {
+    match resolved_sym.clone() {
         Some(sym) => {
             if seen_edges.insert((ep_id.clone(), sym.clone(), "HANDLES".into())) {
                 out.edges.push(Edge {
@@ -1541,6 +1563,7 @@ fn emit_endpoint(
             }
         }
     }
+    (ep_id, resolved_sym)
 }
 
 fn emit_computed_route(
@@ -1599,7 +1622,7 @@ fn mark_consumed_axum_fns(
     for item in items {
         let sub = match item {
             AxumRouterItem::Nest { sub, .. } | AxumRouterItem::Merge { sub } => sub,
-            AxumRouterItem::Route { .. } => continue,
+            AxumRouterItem::Route { .. } | AxumRouterItem::Layer(_) => continue,
         };
         match sub {
             AxumSubRouter::Inline(inner) => {
@@ -1622,15 +1645,26 @@ fn mark_consumed_axum_fns(
 fn expand_axum_items(
     items: &[AxumRouterItem],
     prefix: &str,
+    outer: &[auth::Layer],
     routers_by_fn: &BTreeMap<String, Vec<AxumRouterItem>>,
     index: &SymbolIndex,
     visited: &mut BTreeSet<String>,
     out: &mut Extraction,
     seen_nodes: &mut BTreeSet<String>,
     seen_edges: &mut BTreeSet<(String, String, String)>,
+    routes: &mut Vec<auth::Route>,
 ) {
-    for item in items {
+    for (at, item) in items.iter().enumerate() {
+        // A layer wraps the routes added before it, so an item is under the
+        // layers that follow it and every layer over this router.
+        let mut layers = outer.to_vec();
+        for later in &items[at + 1..] {
+            if let AxumRouterItem::Layer(found) = later {
+                layers.extend(found.iter().cloned());
+            }
+        }
         match item {
+            AxumRouterItem::Layer(_) => {}
             AxumRouterItem::Route {
                 path,
                 method,
@@ -1639,10 +1673,15 @@ fn expand_axum_items(
             } => match path {
                 RoutePathArg::Literal(sub_path) => {
                     let full_path = join_route(prefix, sub_path);
-                    emit_endpoint(
+                    let (endpoint, handler) = emit_endpoint(
                         "axum", method, &full_path, handler, evidence, index, out, seen_nodes,
                         seen_edges,
                     );
+                    routes.push(auth::Route {
+                        endpoint,
+                        handler,
+                        layers: layers.clone(),
+                    });
                 }
                 RoutePathArg::Computed(expr) => {
                     let sym = resolve_handler_target(&handler.target, index);
@@ -1664,12 +1703,14 @@ fn expand_axum_items(
                             expand_axum_items(
                                 inner,
                                 &next_prefix,
+                                &layers,
                                 routers_by_fn,
                                 index,
                                 visited,
                                 out,
                                 seen_nodes,
                                 seen_edges,
+                                routes,
                             );
                         }
                         AxumSubRouter::Call { target } => {
@@ -1681,12 +1722,14 @@ fn expand_axum_items(
                                     expand_axum_items(
                                         inner,
                                         &next_prefix,
+                                        &layers,
                                         routers_by_fn,
                                         index,
                                         visited,
                                         out,
                                         seen_nodes,
                                         seen_edges,
+                                        routes,
                                     );
                                     visited.remove(&key);
                                 }
@@ -1701,12 +1744,14 @@ fn expand_axum_items(
                     expand_axum_items(
                         inner,
                         prefix,
+                        &layers,
                         routers_by_fn,
                         index,
                         visited,
                         out,
                         seen_nodes,
                         seen_edges,
+                        routes,
                     );
                 }
                 AxumSubRouter::Call { target } => {
@@ -1718,12 +1763,14 @@ fn expand_axum_items(
                             expand_axum_items(
                                 inner,
                                 prefix,
+                                &layers,
                                 routers_by_fn,
                                 index,
                                 visited,
                                 out,
                                 seen_nodes,
                                 seen_edges,
+                                routes,
                             );
                             visited.remove(&key);
                         }
@@ -1738,6 +1785,7 @@ fn expand_axum_items(
 pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
     let mut seen_nodes = BTreeSet::new();
     let mut seen_edges = BTreeSet::new();
+    let mut routes = Vec::new();
 
     let axum_routers = std::mem::take(&mut out.axum_routers);
     let mut routers_by_fn: BTreeMap<String, Vec<AxumRouterItem>> = BTreeMap::new();
@@ -1768,12 +1816,14 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
         expand_axum_items(
             &router.items,
             "",
+            &[],
             &routers_by_fn,
             index,
             &mut visited,
             out,
             &mut seen_nodes,
             &mut seen_edges,
+            &mut routes,
         );
     }
 
@@ -1817,7 +1867,7 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
                     .unwrap_or(&[]);
                 if prefixes.is_empty() {
                     for method in &attr.methods {
-                        emit_endpoint(
+                        let (endpoint, handler) = emit_endpoint(
                             "actix-web",
                             method,
                             sub_path,
@@ -1828,6 +1878,11 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
                             &mut seen_nodes,
                             &mut seen_edges,
                         );
+                        routes.push(auth::Route {
+                            endpoint,
+                            handler,
+                            layers: Vec::new(),
+                        });
                     }
                 } else {
                     for pfx in prefixes {
@@ -1844,7 +1899,7 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
                         };
                         let full_path = join_actix_route(pfx, sub_path);
                         for method in &attr.methods {
-                            emit_endpoint(
+                            let (endpoint, handler) = emit_endpoint(
                                 "actix-web",
                                 method,
                                 &full_path,
@@ -1855,6 +1910,11 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
                                 &mut seen_nodes,
                                 &mut seen_edges,
                             );
+                            routes.push(auth::Route {
+                                endpoint,
+                                handler,
+                                layers: Vec::new(),
+                            });
                         }
                     }
                 }
@@ -1880,7 +1940,7 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
             }
             RoutePathArg::Literal(full_path) => {
                 if let Some(handler) = &ep.handler {
-                    emit_endpoint(
+                    let (endpoint, handler) = emit_endpoint(
                         ep.framework,
                         &ep.method,
                         full_path,
@@ -1891,8 +1951,14 @@ pub(super) fn finalize_endpoints(out: &mut Extraction, index: &SymbolIndex) {
                         &mut seen_nodes,
                         &mut seen_edges,
                     );
+                    routes.push(auth::Route {
+                        endpoint,
+                        handler,
+                        layers: Vec::new(),
+                    });
                 }
             }
         }
     }
+    auth::resolve(out, routes, index);
 }
