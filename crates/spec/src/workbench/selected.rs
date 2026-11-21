@@ -1053,20 +1053,29 @@ impl Citations {
         }
     }
 }
-pub(super) fn all(
+pub(super) fn all<A>(
     nodes: &[Node],
     edges: &[Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     supplied: Supplied<'_>,
-) -> Result<SpecBundle, FactIndexError> {
+    keep: impl FnMut(SpecArtifact) -> A,
+) -> Result<SpecBundle<A>, FactIndexError> {
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let beside = Beside::new(nodes, edges, mode, rejected, supplied);
     let nodes = filter_nodes(&projection.nodes, mode, rejected);
     let edges = filter_edges(&projection.edges, mode, rejected);
-    try_bundle_from_filtered(&nodes, &edges, &projection.flows, mode, rejected, beside)
+    try_bundle_from_filtered_kept(
+        &nodes,
+        &edges,
+        &projection.flows,
+        mode,
+        rejected,
+        beside,
+        keep,
+    )
 }
 pub(crate) fn flow_artifact_from_filtered(
     nodes: &[&Node],
@@ -1095,15 +1104,25 @@ pub(crate) fn flow_artifact_from_filtered(
 /// The complete bundle, or the reason its citations do not resolve
 /// (ADR-0058 decision 6): nothing is returned for an export whose own
 /// assertions cite an id without a row or share an id between two facts.
-pub(crate) fn try_bundle_from_filtered(
+/// `keep(artifact)` is what is kept of each artifact, as it is compiled
+/// (#2215).
+pub(crate) fn try_bundle_from_filtered_kept<A>(
     nodes: &[&Node],
     edges: &[&Edge],
     flows: &[Flow],
     mode: ExportMode,
     rejected: &BTreeSet<String>,
     beside: Beside<'_>,
-) -> Result<SpecBundle, FactIndexError> {
-    bundle_with_citation_ids(nodes, edges, flows, (mode, rejected, beside), citation_id)
+    keep: impl FnMut(SpecArtifact) -> A,
+) -> Result<SpecBundle<A>, FactIndexError> {
+    bundle_kept(
+        nodes,
+        edges,
+        flows,
+        (mode, rejected, beside),
+        citation_id,
+        keep,
+    )
 }
 
 fn cite(
@@ -1118,8 +1137,9 @@ fn cite(
         .cite(artifact_id, assertions, subjects)
 }
 
-/// [`try_bundle_from_filtered`] with the id function named, so a test can
-/// force two facts onto one id.
+/// [`try_bundle_from_filtered_kept`] with the id function named, so a test
+/// can force two facts onto one id.
+#[cfg(test)]
 pub(super) fn bundle_with_citation_ids(
     nodes: &[&Node],
     edges: &[&Edge],
@@ -1127,6 +1147,24 @@ pub(super) fn bundle_with_citation_ids(
     (mode, rejected, beside): (ExportMode, &BTreeSet<String>, Beside<'_>),
     id_of: fn(&core_graph::FactKey) -> String,
 ) -> Result<SpecBundle, FactIndexError> {
+    bundle_kept(nodes, edges, flows, (mode, rejected, beside), id_of, |a| a)
+}
+
+/// The bundle loop: each artifact is cited, counted and handed to `keep`
+/// before the next is compiled.
+fn bundle_kept<A>(
+    nodes: &[&Node],
+    edges: &[&Edge],
+    flows: &[Flow],
+    (mode, rejected, beside): (ExportMode, &BTreeSet<String>, Beside<'_>),
+    id_of: fn(&core_graph::FactKey) -> String,
+    mut keep: impl FnMut(SpecArtifact) -> A,
+) -> Result<SpecBundle<A>, FactIndexError> {
+    let mut assertion_count = 0;
+    let mut push = |artifacts: &mut Vec<A>, artifact: SpecArtifact| {
+        assertion_count += artifact.assertions.len();
+        artifacts.push(keep(artifact));
+    };
     let mut citations = Some(fact_index::Collector::new(mode, id_of));
     let mut finished: Option<FactIndex> = None;
     let gap_count = count_gap_findings(nodes.iter().copied(), edges.iter().copied());
@@ -1145,7 +1183,8 @@ pub(super) fn bundle_with_citation_ids(
             if let Some(collector) = citations.take() {
                 finished = Some(collector.finish()?);
             }
-            artifacts.push(
+            push(
+                &mut artifacts,
                 index_artifact(a, finished.as_ref().expect("finished index"), None)
                     .expect("unbounded native artifact"),
             );
@@ -1153,14 +1192,10 @@ pub(super) fn bundle_with_citation_ids(
         }
         if let Some((id, content)) = pending_index.take() {
             assert_eq!(a.id, id, "paired index follows its Markdown artifact");
-            artifacts.push(identified_artifact(
-                a.id,
-                a.file,
-                a.title,
-                a.format,
-                content,
-                Vec::new(),
-            ));
+            push(
+                &mut artifacts,
+                identified_artifact(a.id, a.file, a.title, a.format, content, Vec::new()),
+            );
             continue;
         }
         let pair = match a.id {
@@ -1195,14 +1230,17 @@ pub(super) fn bundle_with_citation_ids(
             let (markdown, index, assertions, subjects) =
                 output.expect("unbounded native artifact");
             cite(&mut citations, a.id, &assertions, &subjects)?;
-            artifacts.push(identified_artifact(
-                a.id,
-                a.file,
-                a.title,
-                a.format,
-                markdown.expect("paired Markdown content"),
-                assertions,
-            ));
+            push(
+                &mut artifacts,
+                identified_artifact(
+                    a.id,
+                    a.file,
+                    a.title,
+                    a.format,
+                    markdown.expect("paired Markdown content"),
+                    assertions,
+                ),
+            );
             pending_index = Some((index_id, index.expect("paired index content")));
             continue;
         }
@@ -1222,10 +1260,9 @@ pub(super) fn bundle_with_citation_ids(
             &cited.artifact.assertions,
             &cited.subjects,
         )?;
-        artifacts.push(cited.artifact);
+        push(&mut artifacts, cited.artifact);
     }
     assert!(pending_index.is_none(), "paired index artifact missing");
-    let assertion_count = artifacts.iter().map(|a| a.assertions.len()).sum();
     Ok(SpecBundle {
         mode,
         artifacts,

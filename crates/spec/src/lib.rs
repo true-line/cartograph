@@ -93,6 +93,7 @@ pub use views::{
     SPEC_VIEW_MAX_NODES, SpecDiagramView, SpecViewBundle, compile_selected_flow_view,
     compile_spec_views, compile_spec_with_views, compile_spec_with_views_and_coverage,
     try_compile_spec_with_views_and_coverage, try_compile_spec_with_views_supplied,
+    try_compile_spec_with_views_supplied_kept,
 };
 pub use workbench::{
     AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_blocks, area_briefing,
@@ -121,7 +122,7 @@ pub use workbench::{
     is_gap_node, logical_actor_story_workspace_bound, logical_capability_compile_bound,
     logical_compile_bound, logical_coverage_render_bound, logical_knowledge_story_compile_bound,
     logical_partition_bound, project_recovered_facts, provenance, try_compile_spec_supplied,
-    try_compile_spec_with_coverage, validate_knowledge_stories,
+    try_compile_spec_supplied_kept, try_compile_spec_with_coverage, validate_knowledge_stories,
 };
 pub use workbench::{
     CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,

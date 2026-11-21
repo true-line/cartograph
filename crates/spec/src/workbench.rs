@@ -212,13 +212,16 @@ impl SpecArtifact {
     }
 }
 
-/// Full official spec export returned to the Workbench.
+/// Full official spec export returned to the Workbench. `A` is what is kept
+/// of each artifact: the artifact itself, or what a caller keeps of it as it
+/// is compiled ([`try_compile_spec_supplied_kept`]), so a bundle-sized export
+/// need not hold every artifact at once (#2215).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecBundle {
+pub struct SpecBundle<A = SpecArtifact> {
     /// R-INT-5 projection applied consistently to all artifacts.
     pub mode: ExportMode,
     /// The complete official artifact set in stable order.
-    pub artifacts: Vec<SpecArtifact>,
+    pub artifacts: Vec<A>,
     /// Number of visible graph-backed assertions across artifacts.
     pub assertion_count: usize,
     /// Explicit unresolved assertions in the Gap register.
@@ -767,7 +770,32 @@ pub fn try_compile_spec_supplied(
     rejected_hashes: &BTreeSet<String>,
     supplied: Supplied<'_>,
 ) -> Result<SpecBundle, FactIndexError> {
-    selected::all(nodes, edges, flows, mode, rejected_hashes, supplied)
+    selected::all(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        supplied,
+        |artifact| artifact,
+    )
+}
+
+/// [`try_compile_spec_supplied`] keeping only `keep(artifact)` of each
+/// artifact, called as soon as that artifact is compiled and cited, in
+/// bundle order. The artifacts compiled and their counts are the same; an
+/// artifact is dropped once `keep` returns, so the bundle is never held
+/// whole (#2215).
+pub fn try_compile_spec_supplied_kept<A>(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    supplied: Supplied<'_>,
+    keep: impl FnMut(SpecArtifact) -> A,
+) -> Result<SpecBundle<A>, FactIndexError> {
+    selected::all(nodes, edges, flows, mode, rejected_hashes, supplied, keep)
 }
 
 /// The bundle of an export whose citations resolve. The infallible compilers
