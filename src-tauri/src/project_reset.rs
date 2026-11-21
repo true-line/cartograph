@@ -60,7 +60,10 @@ pub(crate) const REMOVED: &[&str] = &[
 /// entry a launch makes against, so a new store is never left out of both.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "read by the test that checks every entry is listed")
+    expect(
+        dead_code,
+        reason = "read by the test that checks every entry is listed"
+    )
 )]
 pub(crate) const KEPT: &[&str] = &[
     "state.db",
