@@ -1509,6 +1509,10 @@ fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
         });
     }
     let parsed = parse(value)?;
+    // A local set to `None` under a branch: the value found is discarded.
+    if matches!(parsed, Expr::Lit(Lit::None)) && path.len() == 1 {
+        return Some(format!("{place} is discarded"));
+    }
     if let (Expr::Lit(Lit::Bool(on)), [owner @ .., last]) = (&parsed, &path[..])
         && !owner.is_empty()
     {
@@ -2515,6 +2519,11 @@ mod tests {
             "the alias's note is set to the “compute” result"
         );
         assert_eq!(set("alias.note", "compute(alias) + 1"), None);
+        assert_eq!(set("alias", "None").unwrap(), "the alias is discarded");
+        assert_eq!(
+            set("user.expires", "None").unwrap(),
+            "the user's expires is set to empty"
+        );
         let removed = |t: &str, v: &str| line_breaks_removed(t, v, &cx);
         assert_eq!(
             removed("alias.name", r#"alias.name.replace("\n", "")"#).unwrap(),
@@ -2527,6 +2536,10 @@ mod tests {
         assert_eq!(
             removed("alias.name", r#"other.name.replace("\n", "")"#),
             None
+        );
+        assert_eq!(
+            removed("new_name", r#"new_name.replace("\n", "")"#).unwrap(),
+            "line breaks are removed from the new name"
         );
         assert_eq!(
             condition(r#""\n" in data"#, BranchPolarity::TruthyBranch, &cx).unwrap(),
