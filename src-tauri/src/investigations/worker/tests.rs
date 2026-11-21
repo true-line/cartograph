@@ -1084,6 +1084,26 @@ fn investigation_worker_rejects_malformed_actions_without_model_repair() {
         detail.error.as_deref(),
         Some("The completed provider response was not an admissible action.")
     );
+    // AC-1403: the rejected response is kept, bounded and redacted, with the task.
+    let kept = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_rejected_response(&fixture.id)
+        .unwrap()
+        .unwrap();
+    let text = "```json\n{}\n```";
+    assert_eq!(kept.step_id, "step-1");
+    assert_eq!(kept.response_bytes, text.len() as u64);
+    assert_eq!(kept.response_hash, core_prov::content_hash(text.as_bytes()));
+    assert_eq!(
+        kept.retention,
+        agents::investigation::rejected_response::ExcerptRetention::Excerpt {
+            text: text.into(),
+            truncated: false,
+            redactions: 0,
+        }
+    );
 }
 
 #[test]

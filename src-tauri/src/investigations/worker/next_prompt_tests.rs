@@ -1901,6 +1901,27 @@ fn next_prompt_response_rejection_stages_are_content_free_and_durable() {
         assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
         assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
         assert!(reopened.investigation_result(&f.id).unwrap().is_none());
+        // AC-1403 (ADR-0076): a response rejected at action decoding is kept
+        // only as its bounded redacted record; every other stage keeps nothing.
+        let kept = reopened.investigation_rejected_response(&f.id).unwrap();
+        if matches!(
+            stage,
+            InvestigationStopReason::ActionDecode(_) | InvestigationStopReason::InvalidResponse
+        ) {
+            assert_eq!(
+                kept,
+                Some(
+                    agents::investigation::rejected_response::RejectedResponse::capture(
+                        "step-1",
+                        &text,
+                        detail.terminal_diagnostic.as_ref(),
+                    )
+                    .unwrap()
+                )
+            );
+            continue;
+        }
+        assert_eq!(kept, None);
         // Include SQLite's WAL: rejected response bytes and their digest must
         // not be retained even in pages outside the current logical rows.
         for path in [db.clone(), db.with_file_name("state.db-wal")] {
