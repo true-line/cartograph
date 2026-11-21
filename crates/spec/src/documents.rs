@@ -535,6 +535,9 @@ pub fn read_documentation(
         .collect();
     // Declared references the walk counted, read or not.
     let mut walked = BTreeSet::new();
+    // Paths the decision case read, so a declared reference read after the
+    // walk links to its `ADR` too.
+    let mut decided = BTreeSet::new();
     let skipped = |facts: &mut DocumentFacts, reason: DocumentSkip| {
         *facts.counts.skipped.entry(reason.code()).or_default() += 1;
     };
@@ -561,8 +564,12 @@ pub fn read_documentation(
                 }
             }
         }
+        // A declared reference is read from the contents its loader
+        // validated, so the contract and every case of this walk see the
+        // same bytes (AC-1601).
+        let validated = declared.get(path).map(|doc| doc.contents.as_str());
         // One size bound for every case: both readers kept 1 MiB.
-        if file.path.metadata()?.len() > MAX_DOCUMENT_BYTES {
+        if validated.is_none() && file.path.metadata()?.len() > MAX_DOCUMENT_BYTES {
             if document.is_some() {
                 skipped(&mut read.documents, DocumentSkip::TooLarge);
             }
@@ -575,7 +582,13 @@ pub fn read_documentation(
             }
             continue;
         }
-        let Ok(text) = String::from_utf8(std::fs::read(&file.path)?) else {
+        let owned;
+        let text = if let Some(validated) = validated {
+            validated
+        } else if let Ok(text) = String::from_utf8(std::fs::read(&file.path)?) {
+            owned = text;
+            owned.as_str()
+        } else {
             if document.is_some() {
                 skipped(&mut read.documents, DocumentSkip::NotUtf8);
             }
@@ -588,15 +601,11 @@ pub fn read_documentation(
             }
             continue;
         };
+        if decision_case.is_some() {
+            decided.insert(path.to_string());
+        }
         if let Some(is_candidate) = decision_case {
-            crate::adr::read_found_adr(
-                &mut read.decisions,
-                repo,
-                commit,
-                path,
-                &text,
-                is_candidate,
-            );
+            crate::adr::read_found_adr(&mut read.decisions, repo, commit, path, text, is_candidate);
         }
         if let Some(format) = document {
             let mut roles = Vec::new();
@@ -613,7 +622,7 @@ pub fn read_documentation(
                 path,
                 &file.name,
                 format,
-                &text,
+                text,
                 &roles,
             );
             if decision_case.is_some() {
@@ -636,6 +645,18 @@ pub fn read_documentation(
             };
             let name = path.rsplit('/').next().unwrap_or(path);
             read.documents.counts.found += 1;
+            // The same file bound as the walk's (AC-1601).
+            if read.documents.counts.read as usize >= MAX_DOCUMENTS_PER_REPO {
+                skipped(&mut read.documents, DocumentSkip::OverFileLimit);
+                continue;
+            }
+            // A decision record under build output is read by the decision
+            // case and not by the walk's document case: its document keeps
+            // both roles and its `RECORDS` edge.
+            let mut roles = vec![ROLE_API_REFERENCE];
+            if crate::adr::is_decision_record(path, name) {
+                roles.push(ROLE_DECISION_RECORD);
+            }
             push_document(
                 &mut read.documents,
                 repo,
@@ -644,8 +665,11 @@ pub fn read_documentation(
                 name,
                 format,
                 &doc.contents,
-                &[ROLE_API_REFERENCE],
+                &roles,
             );
+            if decided.contains(*path) {
+                push_records_edge(&mut read.documents, repo, commit, path, doc.contents.len());
+            }
         }
     }
     let facts = &mut read.documents;

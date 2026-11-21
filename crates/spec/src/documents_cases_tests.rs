@@ -352,3 +352,89 @@ fn documentation_evidence_names_a_documents_role() {
         );
     }
 }
+
+fn with_references(root: &Path, references: &[crate::DeclaredApiDoc]) -> Documentation {
+    read_documentation(
+        root,
+        "local/shop",
+        "c1",
+        &DocumentationCases {
+            documents: true,
+            api_references: references,
+            decisions: Some(&candidate),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_declared_reference_past_the_file_bound_is_skipped_like_any_file() {
+    // AC-1601 (T-1601): a reference the walk did not reach is held to the
+    // same file bound.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for index in 0..MAX_DOCUMENTS_PER_REPO {
+        write(root, &format!("a/{index:05}.txt"), b"x\n");
+    }
+    write(root, "openapi.json", b"{}");
+    let read = with_references(root, &[declared("openapi.json", "{}")]);
+    assert_eq!(read.documents.counts.read as usize, MAX_DOCUMENTS_PER_REPO);
+    assert_eq!(
+        read.documents.counts.found as usize,
+        MAX_DOCUMENTS_PER_REPO + 1
+    );
+    assert_eq!(
+        read.documents.counts.skipped.get("over_file_limit"),
+        Some(&1)
+    );
+    assert!(
+        read.documents
+            .nodes
+            .iter()
+            .all(|node| node.id != "doc:local/shop@openapi.json")
+    );
+}
+
+#[test]
+fn a_declared_decision_under_build_output_keeps_both_roles_and_its_adr() {
+    // AC-1601 (T-1601).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let text = "# Cache\n\n## GET /cache\n";
+    write(root, "build/rfc-0002-cache.md", text.as_bytes());
+    let read = with_references(root, &[declared("build/rfc-0002-cache.md", text)]);
+    let document = read
+        .documents
+        .nodes
+        .iter()
+        .find(|node| node.id == "doc:local/shop@build/rfc-0002-cache.md")
+        .unwrap();
+    assert_eq!(
+        document.props["roles"],
+        serde_json::json!([ROLE_API_REFERENCE, ROLE_DECISION_RECORD])
+    );
+    assert!(read.documents.edges.iter().any(
+        |edge| edge.label == "RECORDS" && edge.dst == "adr:local/shop@build/rfc-0002-cache.md"
+    ));
+    assert_eq!(read.decisions.files, 1);
+}
+
+#[test]
+fn a_walked_declared_reference_is_read_from_its_validated_contents() {
+    // AC-1601 (T-1601): the walk does not read a declared file again, so
+    // the document and the contract see the same bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "docs/api.md", b"# Changed on disk since validation\n");
+    let validated = "# API\n\n## GET /orders\n";
+    let read = with_references(root, &[declared("docs/api.md", validated)]);
+    let document = read
+        .documents
+        .nodes
+        .iter()
+        .find(|node| node.id == "doc:local/shop@docs/api.md")
+        .unwrap();
+    assert_eq!(document.props["title"], "API");
+    assert_eq!(document.props["bytes"], validated.len());
+    assert_eq!(read.documents.counts.found, 1);
+}
