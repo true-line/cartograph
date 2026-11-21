@@ -111,6 +111,9 @@ const EXTRACTOR_ID: &str = STITCH_EXTRACTOR_ID;
 pub struct ConfigIndex {
     /// key → (value, repo-relative source file)
     env: BTreeMap<String, (String, String)>,
+    /// Keys an env file sets whose value was not read because no allowlist
+    /// lists them (ADR-0075), with the first file that sets each.
+    unread: BTreeMap<String, String>,
     /// Origins the system manifest binds; absolute calls to them wait for
     /// the system pass (#589).
     deferred_origins: std::collections::BTreeSet<String>,
@@ -125,10 +128,16 @@ impl ConfigIndex {
     /// visited in sorted order and the first definition of a key wins, so
     /// the index is deterministic regardless of walk order (US-0014).
     ///
-    /// Fails closed with [`StitchError::SecretsInEnvFiles`] when any line
-    /// holds a secret-shaped value (AC-0990), listing every one in file and
-    /// line order, so one refusal names everything to remove.
-    pub fn from_dir(root: &Path) -> Result<Self, StitchError> {
+    /// Only keys in `read` (the union of the system manifest's `env_read`
+    /// and the repository's `.cartograph/env.toml`) have their value read;
+    /// any other key is remembered as unread so its Gap can say why
+    /// (ADR-0075, AC-1018). A URL value loses any `user@` part.
+    ///
+    /// Fails closed with [`StitchError::SecretsInEnvFiles`] when any line,
+    /// listed or not, holds a secret-shaped value (AC-0990), listing every
+    /// one in file and line order, so one refusal names everything to
+    /// remove.
+    pub fn from_dir(root: &Path, read: &BTreeSet<String>) -> Result<Self, StitchError> {
         let mut index = ConfigIndex::default();
         let mut secrets = Vec::new();
         for rel in env_files(root)? {
@@ -155,10 +164,17 @@ impl ConfigIndex {
                     });
                     continue;
                 }
+                if !read.contains(key) {
+                    index
+                        .unread
+                        .entry(key.to_string())
+                        .or_insert_with(|| rel.clone());
+                    continue;
+                }
                 index
                     .env
                     .entry(key.to_string())
-                    .or_insert_with(|| (value.to_string(), rel.clone()));
+                    .or_insert_with(|| (without_userinfo(value), rel.clone()));
             }
         }
         if !secrets.is_empty() {
@@ -170,6 +186,18 @@ impl ConfigIndex {
     /// Resolve an env key to `(value, source file)`.
     pub fn resolve(&self, key: &str) -> Option<(&str, &str)> {
         self.env.get(key).map(|(v, f)| (v.as_str(), f.as_str()))
+    }
+
+    /// Why an env key did not resolve (AC-0011, AC-1018): an env file sets
+    /// it but no allowlist lists it, or no env file sets it.
+    pub fn unresolved(&self, key: &str) -> String {
+        match self.unread.get(key) {
+            Some(file) => format!(
+                "env key {key} is set in {file} but its value is not read: list it in env_read \
+                 in cartograph.system.toml or in .cartograph/env.toml"
+            ),
+            None => format!("env key {key} not found in any env file in the repo"),
+        }
     }
 
     /// Defer absolute-URL calls to these origins (`scheme://host`) to the
@@ -216,6 +244,19 @@ pub fn env_files(root: &Path) -> std::io::Result<Vec<String>> {
             .collect();
     files.sort();
     Ok(files)
+}
+
+/// `value` with any `user@` removed from a `scheme://user@host…` URL
+/// (ADR-0075 decision 4); any other value unchanged.
+fn without_userinfo(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_string();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{}", &rest[authority_end..]),
+        None => value.to_string(),
+    }
 }
 
 /// Why an env-file value counts as a secret, or none (#933, AC-0990):
@@ -436,10 +477,9 @@ pub fn stitch(sites: &[EventSite], cfg: &ConfigIndex, id: &SourceId) -> Extracti
                 // Gap node truncates the hop with a reason (AC-0012,
                 // R-INT-4) — the site is never silently dropped.
                 let (reason, raw) = match identity {
-                    IdentityExpr::EnvRef(key) => (
-                        format!("env key {key} not found in any env file in the repo"),
-                        format!("process.env.{key}"),
-                    ),
+                    IdentityExpr::EnvRef(key) => {
+                        (cfg.unresolved(key), format!("process.env.{key}"))
+                    }
                     IdentityExpr::Computed(raw) => {
                         ("runtime-computed channel identity".to_string(), raw.clone())
                     }
@@ -624,8 +664,10 @@ fn resolve_site_url(
                 .resolve(key)
                 .map(|(value, file)| (value.to_string(), format!("config:{file}")))
                 .ok_or_else(|| match joined {
-                    true => format!("env key {key} (base URL of {entry}) not found in any env file in the repo"),
-                    false => format!("env key {key} not found in any env file in the repo"),
+                    true => cfg
+                        .unresolved(key)
+                        .replacen(&format!("env key {key}"), &format!("env key {key} (base URL of {entry})"), 1),
+                    false => cfg.unresolved(key),
                 }),
             IdentityExpr::Computed(text) if joined => cfg
                 .resolve_declared(text)
