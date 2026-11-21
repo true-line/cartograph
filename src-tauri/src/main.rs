@@ -2105,13 +2105,52 @@ fn extract_tree_packed(
     if wants_application {
         let java_id = adapters_lang_java::SourceId { repo, commit };
         let mut java_progress = |path: &str| on_file(&format!("Reading Java sources — {path}"));
-        let (java, stats) = adapters_lang_java::extract_dir_incremental_with_progress(
-            root,
-            &java_id,
-            &mut cache.java,
-            &mut java_progress,
-        )
-        .map_err(|error| error.to_string())?;
+        // As for Python and Go, a capture holding the Java selection is parsed
+        // from its retained bytes with provenance-only Java receipts
+        // (AC-1031); build and configuration files are still read from `root`.
+        let captured_java = captured_lane_paths(primary, ".java");
+        let (java, stats) = if let (Some(capture), false) = (primary, captured_java.is_empty()) {
+            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
+            let java = adapters_lang_java::extract_dir_from_sources(
+                root,
+                &java_id,
+                &captured_java,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| std::io::Error::other("captured Java file is unavailable"))
+                },
+                &mut java_progress,
+                &mut |path, parsed| {
+                    if let Ok(file) = capture.file(path)
+                        && let Ok(receipts) = adapters_lang_ts::captured::mint_java_file_receipts(
+                            file,
+                            &ts_id,
+                            &parsed.nodes,
+                            &parsed.edges,
+                        )
+                    {
+                        stage.extend(receipts);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            admit_surviving_lane_receipts(&java.nodes, &java.edges, stage, receipts);
+            let stats = adapters_lang_java::IncrementalStats {
+                recomputed_files: captured_java.len() as u64,
+                ..Default::default()
+            };
+            (java, stats)
+        } else {
+            adapters_lang_java::extract_dir_incremental_with_progress(
+                root,
+                &java_id,
+                &mut cache.java,
+                &mut java_progress,
+            )
+            .map_err(|error| error.to_string())?
+        };
         delta.add(
             stats.recomputed_files,
             stats.reused_files,
