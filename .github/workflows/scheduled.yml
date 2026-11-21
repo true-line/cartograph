@@ -1,0 +1,378 @@
+# Scheduled checks against real repositories and the shipping platform
+# (#1812, #1768, #1770, #1762). None of these lanes gates a pull request: the
+# per-PR suite stays in ci.yml. Each lane owns one tracking issue, opened or
+# updated by scripts/scheduled-issue.mjs when the lane fails and closed when
+# it passes again.
+#
+# The macOS lanes run on the organisation's self-hosted Mac runners, which
+# also package releases. This workflow has no pull_request trigger, so fork
+# code never reaches them, and every Mac job shares one concurrency group so
+# at most one of them builds at a time. Nothing is installed on the Macs:
+# the jobs use the toolchain the release packaging already uses, and keep
+# their Cargo build and the pinned source checkouts under
+# ~/.cartograph-scheduled so a nightly build is incremental.
+name: Scheduled checks
+
+on:
+  schedule:
+    # Daily: changelog/tag check and the macOS test + determinism lane.
+    - cron: '17 6 * * *'
+    # Weekly (Sunday): the pinned SimpleLogin showcase.
+    - cron: '43 7 * * 0'
+    # Monthly: the scale showcase lanes (bench/repos.toml).
+    - cron: '29 9 1 * *'
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Scheduled lane to run now
+        required: true
+        type: choice
+        options:
+          - release-tags
+          - macos-tests
+          - simplelogin-showcase
+          - scale-showcase
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Action Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Authorize direct workflow event
+        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          authorization-only: 'true'
+
+  # #1762: every changelog version is tagged, still inside the tag handoff
+  # window, or recorded as never released in docs/release/untagged-versions.json.
+  release-tags:
+    name: Changelog versions are tagged
+    needs: policy
+    if: github.event.schedule == '17 6 * * *' || inputs.lane == 'release-tags'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout main with history and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Compare changelog versions with tags
+        id: check
+        run: |
+          set +e
+          node scripts/release-tags.mjs --window-hours 3 --report "$RUNNER_TEMP/report.md"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Track the result in an issue
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.check.outputs.status }}
+        run: |
+          test -s "$RUNNER_TEMP/report.md" || echo "The release tag check did not produce a report (exit $STATUS)." > "$RUNNER_TEMP/report.md"
+          mode=close
+          [ "$STATUS" = 0 ] || mode=open
+          node scripts/scheduled-issue.mjs "$mode" --title 'Scheduled: changelog versions without a release tag' --body-file "$RUNNER_TEMP/report.md"
+
+      - name: Fail on a missing tag
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+        run: test "$STATUS" = 0
+
+  # #1770 and #1812: the Rust suite on the platform Cartograph ships for, then
+  # the real-repository determinism check on the same debug build.
+  macos-tests:
+    name: macOS Rust tests and determinism
+    needs: policy
+    if: github.event.schedule == '17 6 * * *' || inputs.lane == 'macos-tests'
+    runs-on: [self-hosted, macOS, ARM64]
+    # A cold build of every test binary plus the suite fits well inside; a
+    # warm night is mostly test time.
+    timeout-minutes: 180
+    concurrency:
+      group: scheduled-macos
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # The determinism pin: Cartograph's own tree at the v0.69.0 cut, where
+      # the check first passed (32,502 nodes, 58,430 edges). Moving it is a
+      # reviewed change, as the result is compared at this commit.
+      DETERMINISM_COMMIT: b0a139c2bb11a0d1310f3e214e5fadc90b5702d1
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # One target directory kept between nights, so a night rebuilds only
+      # what changed. Past 60 GiB it starts over rather than fill the disk.
+      - name: Use the scheduled Cargo target directory
+        run: |
+          dir="$HOME/.cartograph-scheduled/target"
+          if [ -d "$dir" ] && [ "$(du -sk "$dir" | cut -f1)" -gt 62914560 ]; then rm -rf "$dir"; fi
+          mkdir -p "$dir"
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      # Every package but `app`, including the job-ownership harness
+      # (job-execution-tests) and the MCP local-socket tests.
+      - name: Workspace tests except app
+        id: workspace
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --exclude app 2>&1 | tee "$RUNNER_TEMP/workspace.log"
+
+      # The app test binary runs as four processes, as in CI. One process
+      # holding the whole suite's fixtures passes ~10,000 descriptors on macOS
+      # and its later spawns fail with EBADF (#1621); a quarter of the suite
+      # holds about a quarter of them, so no test is excluded. #1621 itself
+      # (fixtures releasing their state) stays open.
+      - name: App tests in four processes
+        id: app
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          failed=0
+          for shard in 1 2 3 4; do
+            node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --bin app 2>&1 | tee -a "$RUNNER_TEMP/app.log" || failed=1
+          done
+          exit "$failed"
+
+      - name: Check out the determinism pin
+        id: pin
+        continue-on-error: true
+        run: |
+          git fetch --no-tags --depth=1 origin "$DETERMINISM_COMMIT"
+          tree="$RUNNER_TEMP/determinism-tree"
+          git worktree remove --force "$tree" 2>/dev/null || rm -rf "$tree"
+          git worktree prune
+          git worktree add --detach "$tree" "$DETERMINISM_COMMIT"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      # AC-0593 / AC-0770: two ingests at production parallelism and one
+      # serial; a failure names the first differing fact.
+      - name: Real-repository determinism
+        id: determinism
+        if: steps.pin.outcome == 'success'
+        continue-on-error: true
+        env:
+          CARTOGRAPH_DETERMINISM_ROOT: ${{ steps.pin.outputs.tree }}
+          CARTOGRAPH_DETERMINISM_COMMIT: ${{ env.DETERMINISM_COMMIT }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p app --bin app -- --ignored --exact \
+            registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/determinism.log"
+
+      - name: Remove the determinism worktree
+        if: always()
+        run: |
+          git worktree remove --force "$RUNNER_TEMP/determinism-tree" 2>/dev/null || true
+          git worktree prune
+
+      - name: Summarize
+        id: summary
+        if: ${{ !cancelled() }}
+        env:
+          WORKSPACE: ${{ steps.workspace.outcome }}
+          APP: ${{ steps.app.outcome }}
+          PIN: ${{ steps.pin.outcome }}
+          DETERMINISM: ${{ steps.determinism.outcome }}
+        run: |
+          node scripts/scheduled-summary.mjs \
+            --title 'macOS Rust tests and real-repository determinism' \
+            --step "Workspace tests except app=$WORKSPACE=$RUNNER_TEMP/workspace.log" \
+            --step "App tests (four processes)=$APP=$RUNNER_TEMP/app.log" \
+            --step "Determinism pin checkout=$PIN=" \
+            --step "Real-repository determinism at ${DETERMINISM_COMMIT}=$DETERMINISM=$RUNNER_TEMP/determinism.log" \
+            --report "$RUNNER_TEMP/report.md" --status-output "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Track the result in an issue
+        if: ${{ !cancelled() && steps.summary.outcome == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.summary.outputs.status }}
+        run: |
+          mode=close
+          [ "$STATUS" = 0 ] || mode=open
+          node scripts/scheduled-issue.mjs "$mode" --title 'Scheduled: macOS Rust tests or determinism failing' --body-file "$RUNNER_TEMP/report.md"
+
+      - name: Fail on any failed part
+        env:
+          STATUS: ${{ steps.summary.outputs.status }}
+        run: test "$STATUS" = 0
+
+  # #1768: the pinned SimpleLogin showcase with a release build, compared with
+  # the thresholds recorded in bench/thresholds/simplelogin.json.
+  simplelogin-showcase:
+    name: SimpleLogin showcase thresholds
+    needs: policy
+    if: github.event.schedule == '43 7 * * 0' || inputs.lane == 'simplelogin-showcase'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 120
+    concurrency:
+      group: scheduled-macos
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Use the scheduled Cargo target directory
+        run: |
+          dir="$HOME/.cartograph-scheduled/target"
+          if [ -d "$dir" ] && [ "$(du -sk "$dir" | cut -f1)" -gt 62914560 ]; then rm -rf "$dir"; fi
+          mkdir -p "$dir"
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      - name: Run the showcase and compare with its thresholds
+        id: check
+        run: |
+          set +e
+          node scripts/showcase-watch.mjs simplelogin \
+            --work "$HOME/.cartograph-scheduled/showcase" \
+            --thresholds bench/thresholds/simplelogin.json \
+            --results "$RUNNER_TEMP/results" \
+            --report "$RUNNER_TEMP/report.md"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Upload the measured results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: simplelogin-showcase-${{ github.run_id }}
+          path: ${{ runner.temp }}/results
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Track the result in an issue
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.check.outputs.status }}
+        run: |
+          test -s "$RUNNER_TEMP/report.md" || echo "The SimpleLogin showcase did not produce a report (exit $STATUS)." > "$RUNNER_TEMP/report.md"
+          mode=close
+          [ "$STATUS" = 0 ] || mode=open
+          node scripts/scheduled-issue.mjs "$mode" --title 'Scheduled: SimpleLogin showcase below its thresholds' --body-file "$RUNNER_TEMP/report.md"
+
+      - name: Fail on a missed threshold
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+        run: test "$STATUS" = 0
+
+  # #1768: the scale lanes of bench/repos.toml, monthly or on demand, compared
+  # with bench/thresholds/scale.json.
+  scale-showcase:
+    name: Scale showcase thresholds
+    needs: policy
+    if: github.event.schedule == '29 9 1 * *' || inputs.lane == 'scale-showcase'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 240
+    concurrency:
+      group: scheduled-macos
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Use the scheduled Cargo target directory
+        run: |
+          dir="$HOME/.cartograph-scheduled/target"
+          if [ -d "$dir" ] && [ "$(du -sk "$dir" | cut -f1)" -gt 62914560 ]; then rm -rf "$dir"; fi
+          mkdir -p "$dir"
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      - name: Run the scale lanes and compare with their thresholds
+        id: check
+        run: |
+          set +e
+          node scripts/showcase-watch.mjs scale \
+            --work "$HOME/.cartograph-scheduled/bench" \
+            --thresholds bench/thresholds/scale.json \
+            --results "$RUNNER_TEMP/results" \
+            --report "$RUNNER_TEMP/report.md"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Upload the measured results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scale-showcase-${{ github.run_id }}
+          path: ${{ runner.temp }}/results
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Track the result in an issue
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.check.outputs.status }}
+        run: |
+          test -s "$RUNNER_TEMP/report.md" || echo "The scale showcase did not produce a report (exit $STATUS)." > "$RUNNER_TEMP/report.md"
+          mode=close
+          [ "$STATUS" = 0 ] || mode=open
+          node scripts/scheduled-issue.mjs "$mode" --title 'Scheduled: scale showcase below its thresholds' --body-file "$RUNNER_TEMP/report.md"
+
+      - name: Fail on a missed threshold
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+        run: test "$STATUS" = 0
