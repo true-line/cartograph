@@ -1556,6 +1556,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Security:** Local reads only. With T2 off no provider is contacted; the notice carries reason codes and counts, never source text.
 - **Performance:** A desktop context query copies the whole base per page, so its cost grows with the graph; the knowledge phase now runs after every ingest, on the existing single coalesced worker.
 - **Trace:** P1 (#1782) · `app`, `ui` · ADR-0051, ADR-0052 · T-0588
+- **AC-1202** Given a committed ingest and the knowledge phase that follows it, when the phase reads its base, then it streams the graph under the same snapshot admission, in the same row order and revision as the materialized bounded read, and keeps every node and edge with its id and label, but holds `BusinessRule` props, which no producer, knowledge unit or overlay admission reads, as `{}`. The derived facts and the published overlay are identical. On REA the phase's read goes from +1.73 GB to +0.74 GB and its peak from 3.79 GB to 2.80 GB.
+- **Trace:** P1 · `core-graph`, `app` · ADR-0051, ADR-0052 · T-1202
 
 ### US-0047 — Have an agent draft a section of a catalogue document
 - **Actor:** Engineer or product owner
