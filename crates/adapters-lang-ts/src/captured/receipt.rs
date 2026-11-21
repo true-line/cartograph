@@ -32,7 +32,7 @@ struct Contract {
 }
 
 /// The producer contract a receipt of `version` and `grammar` was minted
-/// under. Python receipts (AC-1023) exist only in the v3 shape and carry
+/// under. Python receipts (AC-1024) exist only in the v3 shape and carry
 /// primary provenance alone; their own prefix and domain keep them distinct
 /// from every TypeScript receipt.
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
@@ -104,7 +104,7 @@ pub enum Grammar {
     TypeScript,
     /// Other supported JS/TS extensions use the JSX-aware grammar.
     Tsx,
-    /// `.py` files, parsed by the Python adapter (AC-1023).
+    /// `.py` files, parsed by the Python adapter (AC-1024).
     Python,
 }
 
@@ -645,7 +645,7 @@ fn inventory(
         push(RangeRole::Provenance, index, evidence)?;
     }
     if let Some(value) = props.get("rule") {
-        // The Python lane carries primary provenance alone (AC-1023).
+        // The Python lane carries primary provenance alone (AC-1024).
         if grammar == Grammar::Python {
             return Err(CapturedError::Invalid("rule source inventory"));
         }

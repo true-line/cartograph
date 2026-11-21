@@ -2419,7 +2419,7 @@ pub fn python_paths(root: &Path) -> Result<Vec<String>, ExtractError> {
 }
 
 /// Recover a Python directory whose `.py` sources are the retained bytes
-/// `read` returns for each of `files` (AC-1023), instead of the checkout.
+/// `read` returns for each of `files` (AC-1024), instead of the checkout.
 /// Each file's own extraction is handed to `on_parsed` before directory
 /// resolution, so a caller can bind receipts to it; directory resolution
 /// still reads the auxiliary inputs under `root` (templates, requirement

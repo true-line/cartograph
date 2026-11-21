@@ -1,4 +1,4 @@
-//! Provenance-only receipts for the captured Python lane (AC-1023, #385).
+//! Provenance-only receipts for the captured Python lane (AC-1024, #385).
 //!
 //! The Python adapter parses each captured `.py` file's retained bytes; this
 //! module binds that file's own facts to the exact captured spans their
@@ -145,7 +145,7 @@ mod tests {
         }
     }
 
-    // AC-1023: a Python fact citing its own captured file gets a Python
+    // AC-1024: a Python fact citing its own captured file gets a Python
     // receipt; a rule-bearing fact or one citing another file gets none.
     #[test]
     fn python_receipts_bind_only_provenance_in_the_captured_file() {
@@ -199,7 +199,7 @@ mod tests {
         assert!(mint_python_file_receipts(ts.file("a.ts").unwrap(), &id, &[own], &[]).is_err());
     }
 
-    // AC-1023: Python receipts are admitted after those already held, within
+    // AC-1024: Python receipts are admitted after those already held, within
     // the budget; one that does not fit is left out.
     #[test]
     fn python_receipts_are_admitted_after_held_ones_within_budget() {

@@ -626,7 +626,7 @@ fn extract_captured_dir_packed_with_policy(
         measure_source,
     } = policy;
     receipt::validate_source_repo(&capture.manifest().source_id, id.repo)?;
-    // A capture may also hold the Python lane's files (AC-1023); this walk
+    // A capture may also hold the Python lane's files (AC-1024); this walk
     // reads only the TS/JS selection.
     let paths: Vec<String> = capture
         .manifest()
