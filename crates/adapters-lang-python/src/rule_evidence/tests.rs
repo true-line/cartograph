@@ -304,6 +304,49 @@ def suggest(user, hostname):
 }
 
 #[test]
+fn a_local_discarded_or_cleaned_under_a_branch_is_a_guarded_effect() {
+    // AC-0910 (T-0910, #1998): under an `if` branch, a local bound earlier
+    // (also by unpacking) and set to `None` or to its own
+    // `.replace("…", "…")` is an effect. A first binding, an unbranched
+    // rebinding, another value and a `.replace` of another name are not.
+    let code = r#"
+def suggest(user, hostname, data):
+    alias = Alias.get_by(email=hostname)
+    if alias and not alias.user_id == user.id:
+        alias = None
+    new_name = data.get("name")
+    if new_name:
+        new_name = new_name.replace("\n", "")
+        other = None
+        new_name = other.replace("\n", "")
+        alias = make(alias)
+    alias = None
+    if hostname:
+        hostname = hostname.replace(old, "")
+
+def unpacked(user):
+    found, meta = load(user)
+    if found and found.user_id != user.id:
+        found = None
+"#;
+    let out = recover(code);
+    let found: Vec<(String, usize)> = rules(&out)
+        .into_iter()
+        .filter(|(_, r)| r.kind == RuleKind::GuardedEffect)
+        .map(|(_, r)| (value(&r).1, r.conditions.len()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("alias = None".to_owned(), 1),
+            (r#"new_name = new_name.replace("\n", "")"#.to_owned(), 1),
+            ("found = None".to_owned(), 1),
+        ],
+        "{found:?}"
+    );
+}
+
+#[test]
 fn guarded_returns_and_raises_are_owned_by_their_function() {
     // AC-0852: if / elif / else branches, outermost first; a nested function
     // and a lambda own their own exits; an unguarded or bare exit is none.

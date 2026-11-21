@@ -1088,6 +1088,12 @@ const BUILTINS: &[&str] = &[
 /// Whether `name` is bound in `function` itself, as a parameter or by an
 /// assignment, loop or `with` target, so it is not the module of that name.
 fn bound_locally(cx: &FileCx<'_>, function: TsNode<'_>, name: &str) -> bool {
+    bound_before(cx, function, name, usize::MAX)
+}
+
+/// Whether `function` binds `name` (as [`bound_locally`]) at a node that
+/// starts before byte `before`.
+fn bound_before(cx: &FileCx<'_>, function: TsNode<'_>, name: &str, before: usize) -> bool {
     let mut stack = vec![function];
     while let Some(node) = stack.pop() {
         if node != function
@@ -1109,14 +1115,33 @@ fn bound_locally(cx: &FileCx<'_>, function: TsNode<'_>, name: &str) -> bool {
                         "assignment" | "augmented_assignment" | "for_statement"
                     ) && p.child_by_field_name("left") == Some(node))
                     || p.kind() == "as_pattern_target"
+                    || unpacked_target(node)
             }),
             _ => false,
         };
-        if bound && cx.text(&node) == name {
+        if bound && node.start_byte() < before && cx.text(&node) == name {
             return true;
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
+    }
+    false
+}
+
+/// Whether `node` is a name unpacked by an assignment or `for` target
+/// (`alias, meta = load()`, `for (a, b) in rows`), at any nesting.
+fn unpacked_target(node: TsNode<'_>) -> bool {
+    let mut pattern = node;
+    while let Some(parent) = pattern.parent() {
+        match parent.kind() {
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern" => {
+                pattern = parent;
+            }
+            "assignment" | "for_statement" => {
+                return pattern != node && parent.child_by_field_name("left") == Some(pattern);
+            }
+            _ => return false,
+        }
     }
     false
 }
@@ -1178,6 +1203,17 @@ fn effect_statement<'t>(
                 return Some(Effect {
                     statement: node,
                     kind: EffectKind::Call { call: create },
+                });
+            }
+            // `alias = None` or `name = name.replace("\n", "")` under a
+            // branch: a local bound earlier is discarded or cleaned (#1998).
+            if target.kind() == "identifier"
+                && inner.child_by_field_name("type").is_none()
+                && local_rebind(cx, node, target, value)
+            {
+                return Some(Effect {
+                    statement: node,
+                    kind: EffectKind::Assign { target, value },
                 });
             }
             if target.kind() != "attribute" || inner.child_by_field_name("type").is_some() {
@@ -1267,6 +1303,54 @@ fn effect_statement<'t>(
         statement: node,
         kind,
     })
+}
+
+/// Whether `target = value` rebinds, under an `if` branch of its function, a
+/// local the function bound earlier, to `None` or to its own
+/// `.replace("…", "…")` (#1998). Any other plain-name assignment is no
+/// effect.
+fn local_rebind(
+    cx: &FileCx<'_>,
+    statement: TsNode<'_>,
+    target: TsNode<'_>,
+    value: TsNode<'_>,
+) -> bool {
+    let Some(function) = owner_function(statement) else {
+        return false;
+    };
+    let name = cx.text(&target);
+    let mut parent = statement.parent();
+    let mut branched = false;
+    while let Some(node) = parent.filter(|n| *n != function) {
+        branched |= matches!(node.kind(), "if_statement" | "elif_clause" | "else_clause");
+        parent = node.parent();
+    }
+    if !branched || !bound_before(cx, function, name, statement.start_byte()) {
+        return false;
+    }
+    match value.kind() {
+        "none" => true,
+        "call" => {
+            let Some(callee) = value
+                .child_by_field_name("function")
+                .filter(|c| c.kind() == "attribute")
+            else {
+                return false;
+            };
+            let receiver = callee.child_by_field_name("object");
+            let arguments = value.child_by_field_name("arguments");
+            callee
+                .child_by_field_name("attribute")
+                .is_some_and(|a| cx.text(&a) == "replace")
+                && receiver.is_some_and(|r| r.kind() == "identifier" && cx.text(&r) == name)
+                && arguments.is_some_and(|a| {
+                    let mut cursor = a.walk();
+                    let args: Vec<_> = a.named_children(&mut cursor).collect();
+                    args.len() == 2 && args.iter().all(|arg| arg.kind() == "string")
+                })
+        }
+        _ => false,
+    }
 }
 
 /// Whether `name` is an upper-case class imported at the top of the file or
