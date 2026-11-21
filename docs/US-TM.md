@@ -2,6 +2,9 @@
 
 Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
+This table and the ADR index continue in [`us-tm.d/`](us-tm.d/README.md): add new
+ACs and ADR index rows there as fragment files, not by editing a shared row.
+
 | US | AC range | Crate(s) | Milestone | Flow | ADR | Tests |
 |----|----------|----------|-----------|------|-----|-------|
 | US-0001 | AC-0001..0003, AC-0049..0050, AC-0076..0078, AC-0085, AC-0094, AC-0195..0198, AC-0202..0203, AC-0224, AC-0215, AC-0705..0707, AC-1013..1014 | ingest, source-walk, core-graph, app, ui | M0–M3 | — | ADR-0001, ADR-0005, ADR-0009 | T-0001..0003, T-0049..0050, T-0076..0078, T-0085, T-0094, T-0195..0198, T-0202..0203, T-0224, T-0215, T-0705..0707, T-1013..1014 |
