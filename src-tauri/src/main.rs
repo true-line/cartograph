@@ -5745,9 +5745,10 @@ fn add_repo_blocking<R: tauri::Runtime>(
     let active_plugins = active_plugins_for_root(&app, &state, root).map_err(&fail)?;
     let registries = event_registries_for(&app).map_err(&fail)?;
     let mut on_file = detail_throttle(&app, job_id);
+    // A managed clone is captured from its cloned commit's Git objects (AC-1022).
     let primary = state
         .primary_sources
-        .prepare(&source, root, &[])
+        .prepare_at(&source, root, &[], Some(&cloned.commit_sha))
         .map_err(&fail)?;
     let mut receipts = Vec::new();
     let mut reads = ProducerReads {
@@ -6062,9 +6063,16 @@ fn add_system_blocking<R: tauri::Runtime>(
         let trace_paths: Vec<std::path::PathBuf> =
             entry.otel_jsonl.iter().map(|p| base.join(p)).collect();
         let active_plugins = active_plugins_for_root(&app, &state, root).map_err(&fail)?;
+        // A managed clone is captured from its cloned commit's Git objects
+        // (AC-1022); a local entry keeps a working-tree capture.
         let primary = state
             .primary_sources
-            .prepare(source, root, &entry.layers)
+            .prepare_at(
+                source,
+                root,
+                &entry.layers,
+                (*remote).then_some(commit.as_str()),
+            )
             .map_err(&fail)?;
         let mut receipts = Vec::new();
         let mut reads = ProducerReads {

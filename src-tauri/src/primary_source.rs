@@ -1915,6 +1915,23 @@ impl PrimarySourceStore {
         root: &Path,
         layers: &[String],
     ) -> Result<PrimaryInput, String> {
+        self.prepare_at(source, root, layers, None)
+    }
+
+    /// [`Self::prepare`], reading the selected files from the exact local Git
+    /// objects of `commit` when one is given (AC-1022). Only a managed clone
+    /// passes its cloned commit: the parser then consumes blob bytes, never
+    /// checkout bytes, so line-ending conversion and checkout filters cannot
+    /// change what a citation means. A selected path that is not a regular
+    /// blob of that commit, or a missing object, fails the recovery; there is
+    /// no fallback to the checkout. Local folders keep a working-tree capture.
+    pub(crate) fn prepare_at(
+        &self,
+        source: &RegisteredSource,
+        root: &Path,
+        layers: &[String],
+        commit: Option<&str>,
+    ) -> Result<PrimaryInput, String> {
         let wanted = layers.is_empty()
             || layers
                 .iter()
@@ -1930,7 +1947,10 @@ impl PrimarySourceStore {
         // CapturedError's diagnostics are fixed strings that never carry
         // source contents, so the reason is safe to name (#1229).
         let selection = captured::enumerate_selection(root).map_err(|error| format!("Selected TS/JS source could not be captured safely ({error}); recovery was not published."))?;
-        let capture = source_capture::capture_working_tree(root, &source_id(&source.source_id)?, &selection.files, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string())?;
+        let capture = match commit {
+            Some(commit) => source_capture::capture_git(root, &source_id(&source.source_id)?, commit, &selection.files, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be read from the cloned commit's Git objects within the capture limits; recovery was not published.".to_string())?,
+            None => source_capture::capture_working_tree(root, &source_id(&source.source_id)?, &selection.files, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string())?,
+        };
         Ok(PrimaryInput {
             capture: Some(capture),
             unfollowed: selection.unfollowed,
