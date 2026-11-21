@@ -52,7 +52,8 @@ pub struct DerivedGroup {
     pub citation_id: String,
     /// Its label, such as `Capability`.
     pub label: String,
-    /// Its display name.
+    /// Its display name, or its label when the name is its id or names a
+    /// fact it rests on by id.
     pub name: String,
     /// The citable base facts it rests on, in citation id order.
     pub rests_on: Vec<String>,
@@ -153,6 +154,20 @@ fn base_key(cite: &core_graph::overlay::BaseRef) -> FactKey {
     }
 }
 
+/// A derived fact's display name, unless it is its id or names a fact it
+/// rests on by id: an Actor derived from one endpoint's callers is named
+/// after that endpoint's node id, which encodes source paths.
+fn derived_name(node: &Node, cites: &BTreeSet<core_graph::overlay::BaseRef>) -> Option<String> {
+    let name = NodeName(node).to_string();
+    let names_an_id = cites.iter().any(|cite| match cite {
+        core_graph::overlay::BaseRef::Node(id) => name.contains(id.as_str()),
+        core_graph::overlay::BaseRef::Edge(source, destination, _) => {
+            name.contains(source.as_str()) || name.contains(destination.as_str())
+        }
+    });
+    (name != node.id && !names_an_id).then_some(name)
+}
+
 /// The facts a composer may cite for `section`, a section of the compiled
 /// D1, over the base `nodes` and `edges` and the derived knowledge `derived`
 /// (each derived node with the base facts it rests on).
@@ -164,7 +179,7 @@ pub fn composition_facts(
 ) -> CompositionFacts {
     let printed = printed_ids(section);
     // Derived facts the text prints, and the base facts behind each.
-    let mut groups: BTreeMap<String, (&Node, BTreeSet<String>)> = BTreeMap::new();
+    let mut groups: BTreeMap<String, (&Node, Option<String>, BTreeSet<String>)> = BTreeMap::new();
     for (node, cites) in derived {
         let id = citation_id(&FactKey::Node {
             id: node.id.clone(),
@@ -174,10 +189,10 @@ pub fn composition_facts(
                 .iter()
                 .map(|cite| citation_id(&base_key(cite)))
                 .collect();
-            groups.insert(id, (node, behind));
+            groups.insert(id, (node, derived_name(node, cites), behind));
         }
     }
-    let behind: BTreeSet<&String> = groups.values().flat_map(|(_, ids)| ids).collect();
+    let behind: BTreeSet<&String> = groups.values().flat_map(|(_, _, ids)| ids).collect();
     let wanted = |id: &String| printed.contains(id) || behind.contains(id);
     let mut rows: BTreeMap<String, (String, Option<String>, core_prov::Provenance)> =
         BTreeMap::new();
@@ -233,10 +248,9 @@ pub fn composition_facts(
         );
     }
     // Each derived fact the text prints is citable as itself (#2040).
-    for (id, (node, _)) in &groups {
+    for (id, (node, name, _)) in &groups {
         cited.insert(id.clone());
-        let name = NodeName(node).to_string();
-        let name = (name != node.id).then_some(name);
+        let name = name.clone();
         rows.insert(
             id.clone(),
             (
@@ -265,10 +279,10 @@ pub fn composition_facts(
     let citable: BTreeSet<&str> = facts.iter().map(|f| f.citation_id.as_str()).collect();
     let derived = groups
         .into_iter()
-        .map(|(id, (node, behind))| DerivedGroup {
+        .map(|(id, (node, name, behind))| DerivedGroup {
             citation_id: id,
             label: node.label.clone(),
-            name: NodeName(node).to_string(),
+            name: name.unwrap_or_else(|| node.label.clone()),
             rests_on: behind
                 .into_iter()
                 .filter(|id| citable.contains(id.as_str()))

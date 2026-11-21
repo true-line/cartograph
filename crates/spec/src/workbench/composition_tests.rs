@@ -133,3 +133,37 @@ fn the_composer_cites_base_facts_and_never_sees_a_source_identifier() {
     assert_eq!(row("file:app/api/orders.py").label, "File");
     assert_eq!(row("file:app/api/orders.py").name, None);
 }
+
+// AC-1011: a derived Actor named after the endpoint it rests on is citable
+// without that name, so no node id reaches the composer.
+#[test]
+fn a_derived_name_that_carries_a_node_id_is_not_shown() {
+    let endpoint = node(
+        "endpoint:app/api/orders.py#post",
+        "Endpoint",
+        json!({"method": "POST", "path": "/orders"}),
+    );
+    let actor = node(
+        "actor:allow-callers:abc",
+        "Actor",
+        json!({"name": "Caller set for endpoint endpoint:app/api/orders.py#post"}),
+    );
+    let cites = BTreeSet::from([BaseRef::Node("endpoint:app/api/orders.py#post".into())]);
+    let section = format!(
+        "## 1.2 Actors (P)\n\n| caller | {} |\n",
+        cite("actor:allow-callers:abc")
+    );
+    let nodes = vec![endpoint];
+    let composed = composition_facts(&section, &nodes, &[], &[(&actor, &cites)]);
+    let row = composed
+        .facts
+        .iter()
+        .find(|fact| fact.citation_id == cite("actor:allow-callers:abc"))
+        .unwrap();
+    assert_eq!((row.label.as_str(), row.name.as_deref()), ("Actor", None));
+    assert_eq!(composed.derived[0].name, "Actor");
+    assert!(
+        !format!("{composed:?}").contains("app/api/orders.py"),
+        "{composed:?}"
+    );
+}
