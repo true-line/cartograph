@@ -352,7 +352,7 @@ fn receipt_v2_accepts_frozen_pre_upgrade_parser_pin_but_rejects_arbitrary_value(
     v2_lagging.content.parser_package = "tree-sitter@0.27.0".into();
     v2_lagging.receipt_id = content_id(&v2_lagging.content).unwrap();
     v2_lagging.validate().unwrap();
-    for grammar in [Grammar::Python, Grammar::Go] {
+    for grammar in [Grammar::Python, Grammar::Go, Grammar::Java] {
         assert!(
             !contract(3, grammar)
                 .unwrap()
