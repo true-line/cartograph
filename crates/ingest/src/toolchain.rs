@@ -820,8 +820,11 @@ fn env_values(
     read: &std::collections::BTreeSet<String>,
 ) -> BTreeMap<String, (String, (u64, u64))> {
     let mut values = BTreeMap::new();
+    // The first assignment claims its key even when its value is dropped, so
+    // a later duplicate never takes its place.
+    let mut seen = std::collections::BTreeSet::new();
     for assignment in env_assignments(text) {
-        if !read.contains(assignment.key) || values.contains_key(assignment.key) {
+        if !read.contains(assignment.key) || !seen.insert(assignment.key) {
             continue;
         }
         let Some(value) = assignment.value else {
@@ -1343,7 +1346,9 @@ mod tests {
             OTHER=hidden\n\
             API_BASE=\"https://api.example.test\"\n\
             DB_PASSWORD=s3cr3t-pass\n\
-            NOTE=\"two\nlines\"\n";
+            NOTE=\"two\nlines\"\n\
+            NOTE=later\n\
+            DB_PASSWORD=later\n";
         write(dir.path(), ".env", env);
         write(dir.path(), ".env.example", "QUEUE_URL=amqp://localhost\n");
         write(dir.path(), "config/test.env", "OTHER=x\n");
