@@ -2315,15 +2315,18 @@ fn extract_tree_packed(
             let raw = std::fs::read_to_string(state_path)
                 .map_err(|e| format!("state_json {}: {e}", state_path.display()))?;
             let observed = dynamic::parse_state(&raw).map_err(|e| e.to_string())?;
+            // ADR-0077: a state that cannot be tied to one root module is
+            // not applied; its Gap joins the graph instead.
             facts
-                .update_nodes(&["Resource"], |nodes, _| {
-                    dynamic::enrich_resources(
+                .update_nodes(&["Resource"], |nodes, added| {
+                    let enrichment = dynamic::enrich_resources(
                         nodes,
                         repo,
                         &observed,
                         &state_path.to_string_lossy(),
                         &raw,
-                    )
+                    );
+                    added.extend(enrichment.unapplied);
                 })
                 .map_err(pack_err)?;
         }
@@ -2773,6 +2776,9 @@ fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
         // A name-only environment Gap has no evidence span to own it by
         // (AC-0097), like the environment-file `Tool` fact (#1791).
         || id.starts_with(&format!("gap:environment:{repo}@"))
+        // The unapplied-state Gap cites only the state file, an input
+        // artifact with no repository evidence (AC-1501, ADR-0077).
+        || id == format!("gap:tf-state-root:{repo}@")
 }
 
 fn edge_key(edge: &Edge) -> (String, String, String) {
@@ -11983,6 +11989,24 @@ export function queueOrder() {
             Err::<(), String>("boom".into())
         }));
         assert_eq!(err, Err("boom".into()));
+    }
+
+    #[test]
+    fn unapplied_state_gap_is_owned_by_its_repository() {
+        // AC-1501: the Gap carries no repository evidence, so re-ingest can
+        // retract it only through explicit id ownership.
+        assert!(crate::id_explicitly_owned_by_repo(
+            "gap:tf-state-root:acme/infra@",
+            "acme/infra"
+        ));
+        assert!(!crate::id_explicitly_owned_by_repo(
+            "gap:tf-state-root:acme/infra@",
+            "acme/infra2"
+        ));
+        assert!(!crate::id_explicitly_owned_by_repo(
+            "gap:tf-state-root:acme/infra2@",
+            "acme/infra"
+        ));
     }
 
     #[test]
