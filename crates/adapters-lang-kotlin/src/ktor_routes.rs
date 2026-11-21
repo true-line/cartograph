@@ -345,8 +345,15 @@ pub(crate) fn extract(
                 _ => {}
             }
         }
+        // A nested function's body runs only where it is called, so it is
+        // not routing on its own.
+        let inner = if node.kind() == "function_declaration" {
+            None
+        } else {
+            scope
+        };
         for child in named_children(node) {
-            stack.push((child, scope.clone()));
+            stack.push((child, inner.clone()));
         }
     }
     (pending, handlers)

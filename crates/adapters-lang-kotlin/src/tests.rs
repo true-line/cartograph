@@ -5680,8 +5680,8 @@ fn system_getenv_needs_an_unshadowed_system() {
 // prefixes compose, a `Route` extension group mounted from another file
 // takes its mount's prefix, and the handler lambda is the handler Symbol
 // that owns the calls inside it. A computed path or an unmounted group is a
-// Gap; a file without the routing import, a same-file `get`, and a test
-// source set assert nothing.
+// Gap; a file without the routing import, a same-file `get`, an uncalled
+// local function and a test source set assert nothing.
 #[test]
 fn ktor_routing_dsl_composes_routes_groups_and_handlers() {
     let dir = tempfile::tempdir().unwrap();
@@ -5703,6 +5703,9 @@ fun Application.module() {
             route("/v1") {
                 userRoutes()
                 post { audit() }
+                fun helper() {
+                    get("/hidden") { }
+                }
             }
             get(pathFor()) { }
         }
