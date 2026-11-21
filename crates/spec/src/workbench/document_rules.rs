@@ -353,6 +353,8 @@ struct Index<'a> {
     defined: BTreeMap<&'a str, Vec<&'a str>>,
     /// The Endpoints each Symbol handles.
     handled: BTreeMap<&'a str, Vec<&'a Node>>,
+    /// Declarative state machines (#2067), in id order.
+    machines: Vec<&'a Node>,
 }
 
 impl<'a> Index<'a> {
@@ -431,6 +433,11 @@ impl<'a> Index<'a> {
             entries,
             defined,
             handled,
+            machines: nodes
+                .iter()
+                .copied()
+                .filter(|n| n.label == "StateMachine")
+                .collect(),
         }
     }
 
@@ -1055,7 +1062,7 @@ pub(super) fn rules_per_capability(
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
     let index = Index::new(nodes, edges);
-    if index.governs.is_empty() {
+    if index.governs.is_empty() && index.machines.is_empty() {
         return Ok(0);
     }
     let listed = knowledge.capabilities();
@@ -1089,7 +1096,8 @@ pub(super) fn rules_per_capability(
         total += index.each(owners.iter().copied(), |_| Ok(()))?;
         changes += index.each_picked(owners.iter().copied(), effect, |_| Ok(()))?;
     }
-    if total + changes == 0 {
+    let (machines, loose_machines) = index.area_machines(knowledge);
+    if total + changes + index.machines.len() == 0 {
         return Ok(0);
     }
     writeln!(
@@ -1113,6 +1121,17 @@ pub(super) fn rules_per_capability(
          what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
          capability, nearest callable first.\n"
     )?;
+    if !index.machines.is_empty() {
+        writeln!(
+            out,
+            "State machines (#2067): {}. Each is a `transitions` table declared as data: every \
+             state with the states it may move to, as written (Deterministic). A state that may \
+             move nowhere is final. The guarded exits of a hook beside the table that the \
+             framework runs before a move (`onTransitionStart`) are listed under it. Whether the \
+             framework applies further moves is not established.\n",
+            index.machines.len()
+        )?;
+    }
     if !own_code.is_empty() {
         writeln!(
             out,
@@ -1132,6 +1151,7 @@ pub(super) fn rules_per_capability(
         .iter()
         .filter_map(|(area, _)| *area)
         .chain(own_code.iter().map(|(area, _)| *area))
+        .chain(machines.iter().map(|(area, _)| *area))
         .collect();
     named.sort_by(|a, b| area_order(a).cmp(&area_order(b)));
     named.dedup_by(|a, b| a.id == b.id);
@@ -1143,7 +1163,9 @@ pub(super) fn rules_per_capability(
                 .filter(|(a, _)| a.is_some_and(|a| a.id == area.id))
                 .map(|(a, story)| (*a, Some(*story))),
         );
-        if own_code.iter().any(|(a, _)| a.id == area.id) {
+        if own_code.iter().any(|(a, _)| a.id == area.id)
+            || machines.iter().any(|(a, _)| a.id == area.id)
+        {
             units.push((Some(area), None));
         }
     }
@@ -1156,12 +1178,18 @@ pub(super) fn rules_per_capability(
     for (area, story) in units {
         let Some(story) = story else {
             let area = area.expect("an own-code unit names its area");
-            let owners = &own_code
+            if let Some((_, owners)) = own_code.iter().find(|(a, _)| a.id == area.id) {
+                printed +=
+                    index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
+            }
+            for machine in machines
                 .iter()
-                .find(|(a, _)| a.id == area.id)
-                .expect("listed above")
-                .1;
-            printed += index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
+                .filter(|(a, _)| a.id == area.id)
+                .flat_map(|(_, m)| m)
+            {
+                let marks = headings.before(Some(area), out)?;
+                printed += state_machine(&index, machine, marks, assertions, asserted, out)?;
+            }
             continue;
         };
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
@@ -1195,6 +1223,12 @@ pub(super) fn rules_per_capability(
         }
         printed += index.changes(&reached, &mut explained, assertions, asserted, out)?;
     }
+    if !loose_machines.is_empty() {
+        out.push_str("### State machines\n\n")?;
+        for machine in loose_machines {
+            printed += state_machine(&index, machine, "####", assertions, asserted, out)?;
+        }
+    }
     let shared: Vec<&str> = shared().collect();
     if index.each(shared.iter().copied(), |_| Ok(()))? > 0 {
         out.push_str("### Shared rejections\n\n")?;
@@ -1226,6 +1260,113 @@ pub(super) const MAX_EFFECT_ROWS: usize = 16;
 
 /// Rejection rows printed for one area's own code (#2066).
 pub(super) const MAX_AREA_OWN_ROWS: usize = 32;
+
+/// One state machine's table (#2067): its states, then each state with the
+/// states it may move to, citing the machine. Returns the rows printed.
+fn state_machine<'a>(
+    index: &Index<'a>,
+    machine: &'a Node,
+    marks: &str,
+    assertions: &mut Assertions,
+    asserted: &mut BTreeSet<String>,
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    let id = citation_id(&FactKey::Node {
+        id: machine.id.clone(),
+    });
+    let name = machine.props["name"].as_str().unwrap_or("transitions");
+    fn names(value: &serde_json::Value) -> Vec<&str> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect()
+    }
+    let states = names(&machine.props["states"]);
+    writeln!(out, "{marks} State machine: {}\n", Literal(name))?;
+    let declared = machine.props["declared_type"]
+        .as_str()
+        .map(|t| format!(" (`{}`)", Literal(t)))
+        .unwrap_or_default();
+    writeln!(
+        out,
+        "{}{declared}, in `{}`, has {} states: {}.\n",
+        Literal(name),
+        Literal(machine.props["file"].as_str().unwrap_or_default()),
+        states.len(),
+        Literal(&states.join(", "))
+    )?;
+    out.push_str("| State | May move to | Citation |\n|---|---|---|\n")?;
+    let mut rows = 0;
+    for transition in machine.props["transitions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let to = names(&transition["to"]);
+        let to = if to.is_empty() {
+            "nothing (final)".to_owned()
+        } else {
+            to.join(", ")
+        };
+        writeln!(
+            out,
+            "| {} | {} | {id} |",
+            Literal(transition["from"].as_str().unwrap_or_default()),
+            Literal(&to)
+        )?;
+        rows += 1;
+    }
+    out.push_str("\n")?;
+    if asserted.insert(id) {
+        assertions.node(machine, None)?;
+    }
+    // The guarded exits of the hooks beside the table (`onTransitionStart`),
+    // every exit: a hook refuses a move by what it returns or throws.
+    let file = machine.props["file"].as_str().unwrap_or_default();
+    let repo = machine.props["prov"]["evidence"][0]["repo"]
+        .as_str()
+        .unwrap_or_default();
+    let prefix = format!("sym:{repo}@{file}#");
+    for hook in machine.props["hooks"].as_array().into_iter().flatten() {
+        let (Some(hook_name), Some(start)) = (hook["name"].as_str(), hook["byte_start"].as_u64())
+        else {
+            continue;
+        };
+        let suffix = format!(".{hook_name}@{start}");
+        let owners: Vec<&str> = index
+            .governs
+            .keys()
+            .copied()
+            .filter(|id| id.starts_with(&prefix) && id.ends_with(&suffix))
+            .collect();
+        let mut guards = Vec::new();
+        for owner in owners {
+            for rule in index.governs.get(owner).into_iter().flatten() {
+                if let Some(row) = guarded(rule, hook_name, true, Some(&|k| index.constant(k))) {
+                    guards.push(row);
+                }
+            }
+        }
+        if guards.is_empty() {
+            continue;
+        }
+        writeln!(
+            out,
+            "Guards in `{}`, which the framework runs before a move (`fromState`, `toState`); a \
+             returned message or a throw refuses the move:\n",
+            Literal(hook_name)
+        )?;
+        out.push_str(HEADER)?;
+        for row in &guards {
+            write_row(row, assertions, asserted, out)?;
+            rows += 1;
+        }
+        out.push_str("\n")?;
+    }
+    Ok(rows)
+}
 
 /// The order areas are listed in: by name, then id.
 fn area_order(area: &Node) -> (&str, &str) {
@@ -1289,6 +1430,32 @@ impl<'a> Index<'a> {
                 rows + changes > 0
             })
             .collect()
+    }
+
+    /// The state machines by the area of the file that declares them, keyed
+    /// in [`area_order`], and those in no area (#2067).
+    fn area_machines(
+        &self,
+        knowledge: &Stories<'a>,
+    ) -> (Vec<(&'a Node, Vec<&'a Node>)>, Vec<&'a Node>) {
+        let mut by_area: BTreeMap<(&str, &str), (&'a Node, Vec<&'a Node>)> = BTreeMap::new();
+        let mut loose = Vec::new();
+        for machine in &self.machines {
+            let evidence = &machine.props["prov"]["evidence"][0];
+            let file = match (evidence["repo"].as_str(), evidence["path"].as_str()) {
+                (Some(repo), Some(path)) => format!("file:{repo}@{path}"),
+                _ => String::new(),
+            };
+            match knowledge.file_areas.get(file.as_str()) {
+                Some(area) => by_area
+                    .entry(area_order(area))
+                    .or_insert_with(|| (*area, Vec::new()))
+                    .1
+                    .push(machine),
+                None => loose.push(*machine),
+            }
+        }
+        (by_area.into_values().collect(), loose)
     }
 
     /// The rules of one area's own code (#2066), under the area's heading:
@@ -1613,6 +1780,9 @@ pub(crate) fn rules_per_capability_workspace(graph: flowtracer::TraceGraphBound)
         set_slots::<&str>(rows)?,
         slots::<&str>(rows)?,
         slots::<(Option<&Node>, Option<&Story<'_>>)>(rows)?.checked_mul(2)?,
+        // State machines (#2067): the index's list, by area and loose.
+        slots::<&Node>(rows)?.checked_mul(3)?,
+        map_slots::<(&str, &str), (&Node, Vec<&Node>)>(rows)?,
     ])?;
     sum(&[index, reach_count, traversal, row, guards, own_code])
 }
@@ -2705,5 +2875,97 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         )
         .unwrap();
         assert!(!out.finish().contains("own code"));
+    }
+
+    // AC-0951: a state machine is stated under the area of the file that
+    // declares it, with each state and where it may move; the guard of its
+    // `onTransitionStart` hook is a row of the area's own code; with no
+    // areas the machine is listed under "State machines".
+    #[test]
+    fn a_state_machine_is_stated_under_its_area() {
+        let source = "export function configureDefaultOrderProcess(options) {
+    const orderProcess: OrderProcess<OrderState> = {
+        transitions: {
+            AddingItems: { to: ['ArrangingPayment', 'Cancelled'] },
+            ArrangingPayment: { to: ['AddingItems', 'Cancelled'] },
+            Cancelled: { to: [] },
+        },
+        async onTransitionStart(fromState, toState, { order }) {
+            if (toState === 'ArrangingPayment' && order.lines.length === 0) {
+                return 'message.cannot-transition-to-payment-when-order-is-empty';
+            }
+        },
+    };
+    return orderProcess;
+}
+";
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/config/order/default-order-process.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let order = Node {
+            id: "subsystem:1".into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": "Order" }),
+        };
+        let file = "file:repo@src/config/order/default-order-process.ts";
+        let render = |file_areas: BTreeMap<&str, &Node>| {
+            let knowledge = Stories {
+                included: Vec::new(),
+                filtered: 0,
+                areas: BTreeMap::new(),
+                file_areas,
+            };
+            let budget = Budget::new(None).unwrap();
+            let mut assertions = Assertions::new(&budget);
+            let mut asserted = BTreeSet::new();
+            let mut out = Text::new(&budget, "").unwrap();
+            rules_per_capability(
+                (&nodes, &edges),
+                &knowledge,
+                (&mut assertions, &mut asserted),
+                &mut out,
+            )
+            .unwrap();
+            (out.finish(), assertions.values.len())
+        };
+        let (text, asserted) = render([(file, &order)].into_iter().collect());
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}\n{text}"))
+        };
+        assert!(text.contains("State machines (#2067): 1."), "{text}");
+        assert!(at("### Order\n") < at("#### State machine: configureDefaultOrderProcess"));
+        assert!(
+            at("#### State machine: configureDefaultOrderProcess")
+                < at("Guards in `onTransitionStart`")
+        );
+        assert!(
+            at("Guards in `onTransitionStart`")
+                < at("| onTransitionStart | Not stated in domain terms (Gap)")
+        );
+        assert!(text.contains(
+            "when (toState === 'ArrangingPayment' &amp;&amp; order.lines.length === 0): returns"
+        ));
+        assert!(text.contains(
+            "configureDefaultOrderProcess (`OrderProcess&lt;OrderState&gt;`), in `src/config/order/default-order-process.ts`, has 3 states: AddingItems, ArrangingPayment, Cancelled."
+        ), "{text}");
+        assert!(text.contains("| AddingItems | ArrangingPayment, Cancelled | F-"));
+        assert!(text.contains("| Cancelled | nothing (final) | F-"));
+        assert_eq!(asserted, 2, "the machine and its guard");
+
+        let (plain, _) = render(BTreeMap::new());
+        assert!(
+            plain
+                .contains("### State machines\n\n#### State machine: configureDefaultOrderProcess"),
+            "{plain}"
+        );
     }
 }

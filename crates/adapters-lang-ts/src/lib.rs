@@ -3152,6 +3152,7 @@ fn extract_source_recording(
     // Guards in test code are not business rules (#2009).
     if !target_tests::in_test_tree(cx.path) {
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
+        state_machines::extract(&cx, &syntax_nodes, &mut out);
         strategies::sites(&cx, &syntax_nodes, &mut out.strategies);
     }
     if let Some(evidence) = service_worker {
@@ -3695,6 +3696,7 @@ pub(crate) mod resolution;
 mod rule_evidence;
 mod service_worker;
 mod source_expression;
+mod state_machines;
 mod strategies;
 pub mod target_tests;
 mod typeorm;
