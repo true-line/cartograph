@@ -56,7 +56,9 @@ app generates no target code. Well-run projects use it as a context hub. Goal:
 2. **Branch per change** (`feat/…`, `fix/…`, `chore/…`, `docs/…`); never commit
    to `main` directly.
 3. **Spec before code.** If behavior changes, update `docs/user_stories.md`
-   (US/AC schema at the top of that file) and `docs/US-TM.md` in the same PR.
+   (US/AC schema at the top of that file) and the traceability matrix in the
+   same PR: new ACs and ADR index rows go in a new fragment file in
+   `docs/us-tm.d/` (see its README), not in a shared `docs/US-TM.md` row.
    Architectural decisions get an ADR in `docs/adr/` (format: Status/Date/
    Deciders, Context, Decision, Consequences, Alternatives ≤3).
 4. **PR body links its issue** with a closing keyword (`Closes #N`) — merged
