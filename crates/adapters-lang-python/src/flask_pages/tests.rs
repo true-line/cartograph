@@ -364,3 +364,73 @@ def reset():
     assert_eq!(from_template.len(), 1, "{from_template:?}");
     assert!(from_template[0].ends_with("@flask:/reset"));
 }
+
+// AC-0954: a link's site records its visible text and a form's site its
+// submit control's text or value; template expressions, tags and
+// token-shaped words are not kept.
+#[test]
+fn template_sites_record_what_a_reader_sees() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app/auth.py", AUTH);
+    write(dir.path(), "app/helpers.py", HELPERS);
+    write(dir.path(), "app/dashboard.py", DASHBOARD);
+    write(dir.path(), "app/main.py", MAIN);
+    write(dir.path(), "templates/auth/login.html", LOGIN);
+    write(dir.path(), "templates/base.html", BASE);
+    write(
+        dir.path(),
+        "templates/dashboard/index.html",
+        r#"{% extends 'base.html' %}
+<form action="{{ url_for('dashboard.create_alias') }}" method="POST">
+  <input name="note">
+  <button type="submit"><i class="fa fa-plus"></i> Create {{ _("alias") }}</button>
+</form>
+<form action="{{ url_for('dashboard.create_alias') }}" method="POST">
+  <input type="submit" value="Quick create">
+</form>
+<a href="{{ url_for('auth.logout') }}">{{ user.name }}</a>
+<a href="{{ url_for('dashboard.index') }}">ghp_0123456789abcdefghijklmnopqrstuvwxyzAB</a>
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let labels = |edge: &Edge| -> Vec<Option<String>> {
+        edge.props["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["label"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let submit = edge(
+        &out.edges,
+        "dashboard/index.html",
+        "SUBMITS",
+        "/dashboard/aliases",
+    );
+    assert_eq!(
+        labels(submit),
+        [Some("Create".to_owned()), Some("Quick create".to_owned())]
+    );
+    let logout = edge(
+        &out.edges,
+        "base.html",
+        "NAVIGATES_TO",
+        "@flask:/auth/logout",
+    );
+    assert_eq!(labels(logout), [Some("Log out".to_owned())]);
+    // Only an expression, or a token: no label.
+    let own = edge(
+        &out.edges,
+        "dashboard/index.html",
+        "NAVIGATES_TO",
+        "@flask:/auth/logout",
+    );
+    assert_eq!(labels(own), [None]);
+    let token = edge(
+        &out.edges,
+        "dashboard/index.html",
+        "NAVIGATES_TO",
+        "@flask:/dashboard/",
+    );
+    assert_eq!(labels(token), [None]);
+}
