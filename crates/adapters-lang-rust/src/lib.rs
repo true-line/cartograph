@@ -213,6 +213,9 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
+        if node.label == "BusinessRule" {
+            rule_evidence::retarget(&mut node.props, commit);
+        }
     }
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
@@ -896,6 +899,8 @@ fn extract_source_inner(
     config_read::extract(&cx, root, &bindings, &functions_by_start, &mut out);
     // SQL statements as table reads and writes (#2041, AC-1015).
     sql::extract(&cx, root, &bindings, &functions_by_start, &mut out);
+    // Guarded returns as business rules (#2018, AC-1017).
+    rule_evidence::extract(&cx, root, &functions_by_start, &mut out);
     // Target tests and the requests they build (#2018, AC-1016).
     let mut test_requests = Vec::new();
     target_tests::extract(
@@ -1585,6 +1590,7 @@ mod http;
 mod module_paths;
 mod rdkafka;
 mod reqwest;
+mod rule_evidence;
 mod sql;
 mod target_tests;
 

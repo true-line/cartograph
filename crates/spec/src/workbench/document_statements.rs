@@ -26,7 +26,9 @@
 //! camel case split, known acronyms upper-cased); no expression text is
 //! copied into a statement.
 
-use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit, go_http_status};
+use core_graph::rules::{
+    BranchPolarity, GuardedExitEvidence, LocalExit, go_http_status, rust_http_status,
+};
 
 /// Words of an identifier: `can_create_new_alias` → `can create new alias`,
 /// `apiKey` → `API key`, `MAX_NB_EMAIL_FREE_PLAN` → `max nb email free plan`.
@@ -1332,6 +1334,159 @@ pub(super) fn is_java(evidence: &GuardedExitEvidence) -> bool {
     evidence.exit_source.path.ends_with(".java")
 }
 
+/// `a “login taken” error`, `an “expired” error`.
+fn an_error_named(name: &str) -> String {
+    let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} “{name}” error")
+}
+
+/// Whether a rule was recovered from Rust source (#2018).
+pub(super) fn is_rust(evidence: &GuardedExitEvidence) -> bool {
+    evidence.exit_source.path.ends_with(".rs")
+}
+
+/// The status a Rust handler returns and its literal message (#2018):
+/// `Err(StatusCode::NOT_FOUND)` gives `(404, None)`; `(StatusCode::FORBIDDEN,
+/// "not yours")`, bare or in `Err(…)`, gives `(403, Some("not yours"))`.
+/// `None` unless the value is an `http::StatusCode` constant or a tuple
+/// holding one.
+pub(super) fn rust_status(display: &str) -> Option<(u16, Option<String>)> {
+    let mut text = display.trim();
+    if let Some(inner) = text.strip_prefix("Err(").and_then(|t| t.strip_suffix(')')) {
+        text = inner.trim();
+    }
+    let constant = |part: &str| {
+        let part = part.trim();
+        let (path, name) = part.rsplit_once("::")?;
+        (path == "StatusCode" || path.ends_with("::StatusCode"))
+            .then(|| rust_http_status(name))
+            .flatten()
+    };
+    if let Some(status) = constant(text) {
+        return Some((status, None));
+    }
+    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
+    let parts = top_level_parts(inner)?;
+    let status = parts.iter().find_map(|part| constant(part))?;
+    let messages: Vec<String> = parts.iter().filter_map(|part| rust_message(part)).collect();
+    let message = match &messages[..] {
+        [one] => Some(one.clone()),
+        _ => None,
+    };
+    Some((status, message))
+}
+
+/// A Rust string literal's text, bare or made a `String` (`"x".into()`,
+/// `.to_string()`, `.to_owned()`, `String::from("x")`).
+fn rust_message(part: &str) -> Option<String> {
+    let part = part.trim();
+    let literal = [".into()", ".to_string()", ".to_owned()"]
+        .iter()
+        .find_map(|tail| part.strip_suffix(tail))
+        .or_else(|| {
+            part.strip_prefix("String::from(")
+                .and_then(|p| p.strip_suffix(')'))
+        })
+        .unwrap_or(part);
+    java_message(literal.trim())
+}
+
+/// The error a Rust `Err(…)` returns, in words (#2018): a literal message
+/// (`anyhow!("too short")`, `"too short".into()`, `Error::new("too
+/// short")`) gives `the error “too short”`; an enum variant
+/// (`ApiError::LoginTaken`, `Error::NotFound(id)`) its name in words, `a
+/// “login taken” error`; anything else, `an error`. `None` for a value
+/// that is not `Err(…)`.
+pub(super) fn rust_error(display: &str) -> Option<String> {
+    let inner = display
+        .trim()
+        .strip_prefix("Err(")?
+        .strip_suffix(')')?
+        .trim();
+    let message = |args: &str| {
+        top_level_parts(args).and_then(|parts| parts.first().and_then(|first| rust_message(first)))
+    };
+    for maker in [
+        "anyhow!(",
+        "anyhow::anyhow!(",
+        "eyre!(",
+        "eyre::eyre!(",
+        "format_err!(",
+    ] {
+        if let Some(args) = inner.strip_prefix(maker).and_then(|a| a.strip_suffix(')')) {
+            return Some(match message(args) {
+                Some(m) => format!("the error “{m}”"),
+                None => "an error".to_owned(),
+            });
+        }
+    }
+    if let Some(m) = rust_message(inner) {
+        return Some(format!("the error “{m}”"));
+    }
+    // `Error::new("…")`, `Error::msg("…")`, `ApiError::NotFound(id)`.
+    let head_len = inner
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+        .unwrap_or(inner.len());
+    let (head, rest) = inner.split_at(head_len);
+    let rest = rest.trim();
+    let segments: Vec<&str> = head.split("::").collect();
+    if segments.len() < 2 || segments.iter().any(|s| s.is_empty()) {
+        return Some("an error".to_owned());
+    }
+    let last = *segments.last()?;
+    if matches!(last, "new" | "msg" | "custom" | "from")
+        && let Some(args) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')'))
+    {
+        return Some(match message(args) {
+            Some(m) => format!("the error “{m}”"),
+            None => "an error".to_owned(),
+        });
+    }
+    // The variant's own fields, nothing after them (`.context(…)`).
+    let wraps = |open: char, close: char| {
+        let mut depth = 0usize;
+        let mut quote = false;
+        let mut escaped = false;
+        for (at, c) in rest.char_indices() {
+            if quote {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => quote = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => quote = true,
+                _ if c == open => depth += 1,
+                _ if c == close => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(at + c.len_utf8() == rest.len());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let wraps = |open, close| rest.starts_with(open) && wraps(open, close) == Some(true);
+    let shaped = rest.is_empty() || wraps('(', ')') || wraps('{', '}');
+    if !shaped || !last.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Some("an error".to_owned());
+    }
+    let name = last
+        .strip_suffix("Error")
+        .filter(|n| !n.is_empty())
+        .unwrap_or(last);
+    Some(an_error_named(&words(name)))
+}
+
 /// The error a Java `throw new X(…)` raises, in words (#2020): its literal
 /// message when its first argument is one (`new BadRequestAlertException("Invalid
 /// id", ENTITY_NAME, "idnull")` gives `the error “Invalid id”`), else the
@@ -1363,7 +1518,7 @@ pub(super) fn java_thrown(display: &str) -> Option<String> {
     if name.is_empty() || matches!(name, "Runtime" | "IllegalState" | "IllegalArgument") {
         return Some("an error".to_owned());
     }
-    Some(format!("a “{}” error", words(name)))
+    Some(an_error_named(&words(name)))
 }
 
 /// The status a Go response call writes and its literal message (#2009):
@@ -1866,6 +2021,17 @@ fn rendered(
         } else {
             format!("it fails with the error “{message}”")
         }));
+    }
+    // A Rust status or error returned (#2018).
+    if let LocalExit::Return { value: Some(value) } = &evidence.effect
+        && is_rust(evidence)
+    {
+        if let Some((status, message)) = rust_status(value.display.as_str()) {
+            return Some(sentence(refused(status, message)));
+        }
+        if let Some(error) = rust_error(value.display.as_str()) {
+            return Some(sentence(format!("it fails with {error}")));
+        }
     }
     // A state change or a call (#1998, AC-0910).
     let changed = match &evidence.effect {
@@ -2728,6 +2894,91 @@ mod tests {
         assert_eq!(said("foo().bar", t, None), None);
         assert_eq!(words("MAX_NB_EMAIL_FREE_PLAN"), "max nb email free plan");
         assert_eq!(words("apiKeyId"), "API key ID");
+    }
+
+    // AC-1017 (#2018): a Rust guarded return reads as the status it refuses
+    // with or the error it fails with.
+    #[test]
+    fn rust_guarded_returns_are_said_in_words() {
+        assert_eq!(rust_status("Err(StatusCode::NOT_FOUND)"), Some((404, None)));
+        assert_eq!(
+            rust_status("Err(StatusCode::IM_A_TEAPOT)"),
+            Some((418, None))
+        );
+        assert_eq!(
+            rust_status("(StatusCode::FORBIDDEN, \"not yours\")"),
+            Some((403, Some("not yours".to_owned())))
+        );
+        assert_eq!(
+            rust_status("Err((http::StatusCode::BAD_REQUEST, \"bad id\".to_string()))"),
+            Some((400, Some("bad id".to_owned())))
+        );
+        assert_eq!(rust_status("Ok(StatusCode::OK).map(f)"), None);
+        assert_eq!(rust_status("Err(ApiError::NotFound)"), None);
+        for (display, expected) in [
+            ("Err(ApiError::LoginTaken)", "a “login taken” error"),
+            ("Err(Error::NotFound(id))", "a “not found” error"),
+            ("Err(AuthError::Expired { at })", "an “expired” error"),
+            (
+                "Err(anyhow!(\"password too short\"))",
+                "the error “password too short”",
+            ),
+            ("Err(anyhow::anyhow!(\"bad {id}\", id))", "an error"),
+            (
+                "Err(\"can't be empty\".into())",
+                "the error “can't be empty”",
+            ),
+            ("Err(Error::new(\"locked\"))", "the error “locked”"),
+            ("Err(Error::NotFound(id).context(x))", "an error"),
+            ("Err(e)", "an error"),
+        ] {
+            assert_eq!(rust_error(display).as_deref(), Some(expected), "{display}");
+        }
+        assert_eq!(rust_error("Ok(1)"), None);
+
+        let out = adapters_lang_rust::extract_source(
+            br#"use axum::http::StatusCode;
+pub struct Accounts;
+impl Accounts {
+    pub fn register(&self, password: &str) -> Result<u64, ApiError> {
+        if password.is_empty() {
+            return Err(ApiError::PasswordMissing);
+        }
+        Ok(1)
+    }
+}
+pub async fn remove(id: u64) -> Result<(), StatusCode> {
+    if id == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(())
+}
+"#,
+            "src/accounts.rs",
+            &adapters_lang_rust::SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let said = |owner: &str| {
+            let rule = out
+                .nodes
+                .iter()
+                .filter(|n| n.label == "BusinessRule")
+                .map(|n| GuardedExitEvidence::from_value(n.props["rule"].clone()).unwrap())
+                .find(|r| r.owner_id.ends_with(owner))
+                .unwrap();
+            statement(&rule, owner, None, &[])
+        };
+        assert_eq!(
+            said("Accounts.register").as_deref(),
+            Some("When the password is empty, it fails with a “password missing” error.")
+        );
+        assert_eq!(
+            said("remove").as_deref(),
+            Some("When the ID is 0, the request is refused with status 404.")
+        );
     }
 
     // AC-0956: a TypeScript answer stating how a value is chosen is said in
