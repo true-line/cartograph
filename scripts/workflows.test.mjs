@@ -721,4 +721,7 @@ test('the privacy guard keeps its terms in a secret and never runs PR code with 
   assert.doesNotMatch(workflow, /grep -q/u);
   assert.match(workflow, /read -r -d '' file/u);
   assert.match(workflow, /context=privacy-guard/u);
+  // A push to main also starts CI; one shared group would let the skipped
+  // workflow_run cancel the push scan.
+  assert.match(workflow, /group: privacy-guard-\$\{\{ github\.event_name \}\}-/u);
 });
