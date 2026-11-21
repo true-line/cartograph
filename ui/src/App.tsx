@@ -144,6 +144,8 @@ export default function App() {
     preflightProgress,
     clearBusy,
     clearError,
+    newProjectBusy,
+    newProjectError,
     findings,
     registerFindings,
     escalationEdgeLabels,
@@ -159,6 +161,7 @@ export default function App() {
     refresh,
     clearFinishedJobs,
     clearGraph,
+    startNewProject,
     setSpecMode,
     readSpecArtifact,
     readSpecArtifacts,
@@ -727,6 +730,15 @@ export default function App() {
                 clearing={clearBusy}
                 error={clearError}
                 onClear={() => void clearGraph()}
+                newProject={{
+                  can:
+                    backend === 'up' &&
+                    !ingestBusy &&
+                    !jobs.some((job) => job.status === 'queued' || job.status === 'running'),
+                  starting: newProjectBusy,
+                  error: newProjectError,
+                  onStart: () => void startNewProject(),
+                }}
               />
             </div>
             <div className="card-grid artifacts">

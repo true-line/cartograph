@@ -36,6 +36,7 @@ mod paths;
 mod primary_source;
 #[cfg(test)]
 mod primary_source_tests;
+mod project_reset;
 mod proposals;
 mod provider_checks;
 mod provider_credentials;
@@ -1120,6 +1121,29 @@ fn clear_graph(state: State<'_, AppState>) -> Result<GraphStats, String> {
         .repos
         .clear();
     Ok(stats)
+}
+
+/// Start a new project (#1994, AC-1012): ask the next launch to remove
+/// everything tied to the loaded system, keeping the application's
+/// settings, then restart. Refused while a job is queued or running.
+#[tauri::command]
+fn start_new_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let busy = state
+        .jobs
+        .lock()
+        .map_err(|e| e.to_string())?
+        .list()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|job| matches!(job.status.as_str(), "queued" | "running"));
+    if busy {
+        return Err(
+            "Work is still running. Cancel it or let it finish, then start a new project.".into(),
+        );
+    }
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    project_reset::request(&data_dir).map_err(|e| e.to_string())?;
+    app.restart()
 }
 
 #[tauri::command]
@@ -7743,6 +7767,95 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Every store the application keeps under `data_dir`, opened and
+/// recovered as one launch does. A pending new project (#1994) is applied
+/// first, before any store is open.
+fn open_app_state(data_dir: &std::path::Path) -> Result<AppState, Box<dyn std::error::Error>> {
+    let data_dir = data_dir.to_path_buf();
+    project_reset::apply(&data_dir, |state_path| {
+        settings::SettingsStore::open(state_path).map_err(|e| e.to_string())?;
+        JobStore::open(state_path).map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    let embedding_cache = Arc::new(Mutex::new(
+        semantic::embedding_cache::EmbeddingCache::open_disposable(&data_dir)?,
+    ));
+    // ADR-0051 knowledge overlay (#1440): derived facts, discarded
+    // with the cached vectors before any destructive graph lifecycle.
+    let knowledge_overlay = Arc::new(Mutex::new(
+        core_graph::overlay::OverlayStore::open_disposable(&data_dir)
+            .map_err(std::io::Error::other)?,
+    ));
+    let invalidator = Arc::clone(&embedding_cache);
+    let overlay_invalidator = Arc::clone(&knowledge_overlay);
+    let graph = SqliteGraphStore::open_with_reset_hook(
+        data_dir.join("graph.db"),
+        Box::new(move || {
+            overlay_invalidator
+                .lock()
+                .map_err(|e| e.to_string())?
+                .invalidate()
+                .map_err(|e| e.to_string())?;
+            invalidator
+                .lock()
+                .map_err(|e| e.to_string())?
+                .invalidate()
+                .map_err(|e| e.to_string())
+        }),
+    )?;
+    embedding_cache
+        .lock()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .bind_instance(&graph.instance_id()?)?;
+    knowledge_overlay
+        .lock()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .bind_instance(&graph.instance_id()?)
+        .map_err(std::io::Error::other)?;
+    let state_path = data_dir.join("state.db");
+    let work_packets = work_packets::PacketRuntime::open(&state_path)?;
+    let jobs = JobStore::open(&state_path)?;
+    let job_execution_locks = JobExecutionLocks::open(&data_dir, jobs.execution_namespace())?;
+    let jobs = Mutex::new(jobs);
+    // Only unchanged recorded attempts whose OS ownership is available
+    // are interrupted. Live and legacy-unknown jobs remain untouched.
+    recover_jobs(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
+    investigations::recover(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
+    let findings = FindingStore::open(&state_path)?;
+    let sources = SourceRegistry::open(&state_path, &data_dir).map_err(std::io::Error::other)?;
+    let tier_settings = settings::SettingsStore::open(&state_path)?;
+    // Extraction reads the worker count process-wide (#236).
+    source_walk::parallel::set_parallelism(settings::IngestParallelism::parallelism(
+        tier_settings.ingest_parallelism()?.setting,
+    ));
+    let decisions = agents::DecisionLog::open(&state_path)?;
+    let staged_proposals = agents::ProposalStore::open(data_dir.join("proposals.sqlite"))?;
+    let section_drafts =
+        agents::draft_store::DraftStore::open(data_dir.join("section-drafts.sqlite"))
+            .map_err(std::io::Error::other)?;
+    let recovery_metrics = metrics::MetricsStore::open(&state_path)?;
+    Ok(AppState {
+        graph: Mutex::new(graph),
+        jobs,
+        investigations: crate::investigations::InvestigationRuntime::default(),
+        job_execution_locks,
+        findings: Mutex::new(findings),
+        settings: Mutex::new(tier_settings),
+        decisions: Mutex::new(decisions),
+        proposals: Mutex::new(staged_proposals),
+        drafts: Mutex::new(section_drafts),
+        work_packets,
+        extraction_caches: Mutex::new(ExtractionCaches::default()),
+        embedding_cache: Some(embedding_cache),
+        knowledge_overlay: Some(knowledge_overlay),
+        sources: Arc::new(Mutex::new(sources)),
+        primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
+            .map_err(std::io::Error::other)?,
+        metrics: Mutex::new(recovery_metrics),
+        curated_settled: Arc::default(),
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -7753,88 +7866,10 @@ fn main() {
             let model_debug_log = Arc::new(model_debug::ModelDebugLog::new(&data_dir.join("logs")));
             model_debug_log.clone().install();
             app.manage(model_debug_log);
-            let embedding_cache = Arc::new(Mutex::new(
-                semantic::embedding_cache::EmbeddingCache::open_disposable(&data_dir)?,
-            ));
-            // ADR-0051 knowledge overlay (#1440): derived facts, discarded
-            // with the cached vectors before any destructive graph lifecycle.
-            let knowledge_overlay = Arc::new(Mutex::new(
-                core_graph::overlay::OverlayStore::open_disposable(&data_dir)
-                    .map_err(std::io::Error::other)?,
-            ));
-            let invalidator = Arc::clone(&embedding_cache);
-            let overlay_invalidator = Arc::clone(&knowledge_overlay);
-            let graph = SqliteGraphStore::open_with_reset_hook(
-                data_dir.join("graph.db"),
-                Box::new(move || {
-                    overlay_invalidator
-                        .lock()
-                        .map_err(|e| e.to_string())?
-                        .invalidate()
-                        .map_err(|e| e.to_string())?;
-                    invalidator
-                        .lock()
-                        .map_err(|e| e.to_string())?
-                        .invalidate()
-                        .map_err(|e| e.to_string())
-                }),
-            )?;
-            embedding_cache
-                .lock()
-                .map_err(|e| std::io::Error::other(e.to_string()))?
-                .bind_instance(&graph.instance_id()?)?;
-            knowledge_overlay
-                .lock()
-                .map_err(|e| std::io::Error::other(e.to_string()))?
-                .bind_instance(&graph.instance_id()?)
-                .map_err(std::io::Error::other)?;
-            let state_path = data_dir.join("state.db");
-            let work_packets = work_packets::PacketRuntime::open(&state_path)?;
-            let jobs = JobStore::open(&state_path)?;
-            let job_execution_locks =
-                JobExecutionLocks::open(&data_dir, jobs.execution_namespace())?;
-            let jobs = Mutex::new(jobs);
-            // Only unchanged recorded attempts whose OS ownership is available
-            // are interrupted. Live and legacy-unknown jobs remain untouched.
-            recover_jobs(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
-            investigations::recover(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
-            let findings = FindingStore::open(&state_path)?;
-            let sources =
-                SourceRegistry::open(&state_path, &data_dir).map_err(std::io::Error::other)?;
-            let tier_settings = settings::SettingsStore::open(&state_path)?;
-            // Extraction reads the worker count process-wide (#236).
-            source_walk::parallel::set_parallelism(settings::IngestParallelism::parallelism(
-                tier_settings.ingest_parallelism()?.setting,
-            ));
-            let decisions = agents::DecisionLog::open(&state_path)?;
-            let staged_proposals = agents::ProposalStore::open(data_dir.join("proposals.sqlite"))?;
-            let section_drafts =
-                agents::draft_store::DraftStore::open(data_dir.join("section-drafts.sqlite"))
-                    .map_err(std::io::Error::other)?;
-            let recovery_metrics = metrics::MetricsStore::open(&state_path)?;
             app.manage(PreflightRuns::default());
             #[cfg(unix)]
             app.manage(mcp_reads::service::Service::default());
-            app.manage(AppState {
-                graph: Mutex::new(graph),
-                jobs,
-                investigations: crate::investigations::InvestigationRuntime::default(),
-                job_execution_locks,
-                findings: Mutex::new(findings),
-                settings: Mutex::new(tier_settings),
-                decisions: Mutex::new(decisions),
-                proposals: Mutex::new(staged_proposals),
-                drafts: Mutex::new(section_drafts),
-                work_packets,
-                extraction_caches: Mutex::new(ExtractionCaches::default()),
-                embedding_cache: Some(embedding_cache),
-                knowledge_overlay: Some(knowledge_overlay),
-                sources: Arc::new(Mutex::new(sources)),
-                primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
-                    .map_err(std::io::Error::other)?,
-                metrics: Mutex::new(recovery_metrics),
-                curated_settled: Arc::default(),
-            });
+            app.manage(open_app_state(&data_dir)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -7889,6 +7924,7 @@ fn main() {
             ping,
             graph_stats,
             clear_graph,
+            start_new_project,
             system_contents,
             adapter_inventory,
             list_plugins,

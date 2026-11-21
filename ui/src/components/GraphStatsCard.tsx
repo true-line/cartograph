@@ -11,6 +11,14 @@ export interface GraphStatsCardProps {
   clearing: boolean;
   error: string | null;
   onClear: () => void;
+  /** New project (#1994): remove everything tied to this system and keep
+   * the application's settings. Absent where the host cannot do it. */
+  newProject?: {
+    can: boolean;
+    starting: boolean;
+    error: string | null;
+    onStart: () => void;
+  };
 }
 
 /** Node/edge counts plus a confirmed clear action, phrased in system terms
@@ -22,8 +30,10 @@ export function GraphStatsCard({
   clearing,
   error,
   onClear,
+  newProject,
 }: GraphStatsCardProps) {
   const [confirming, setConfirming] = useState(false);
+  const [confirmingNew, setConfirmingNew] = useState(false);
   const repoLabel = createRepositoryLabeler(systemContents);
 
   return (
@@ -74,6 +84,53 @@ export function GraphStatsCard({
         </div>
       )}
       {error && <p className="error-text">{error}</p>}
+      {newProject &&
+        (!confirmingNew ? (
+          <button
+            className="new-project-button secondary-button"
+            type="button"
+            disabled={!newProject.can || newProject.starting}
+            onClick={() => setConfirmingNew(true)}
+          >
+            {newProject.starting ? 'Restarting…' : 'New project…'}
+          </button>
+        ) : (
+          <div className="clear-confirmation" role="alert">
+            <p>
+              Start a new project? This removes
+              {systemContents && systemContents.length > 0
+                ? ` ${systemContents.map((entry) => repoLabel(entry.repo)).join(', ')}`
+                : ' the loaded system'}{' '}
+              with its recovered facts, findings, investigations and chats, section drafts,
+              reviews, decisions, job history and retained source.
+            </p>
+            <p>
+              Settings, provider keys, run limits, the local model and installed adapters are
+              kept. Cartograph restarts with an empty project.
+            </p>
+            <div className="clear-confirmation-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setConfirmingNew(false)}
+              >
+                Keep project
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                disabled={newProject.starting}
+                onClick={() => {
+                  setConfirmingNew(false);
+                  newProject.onStart();
+                }}
+              >
+                Start new project
+              </button>
+            </div>
+          </div>
+        ))}
+      {newProject?.error && <p className="error-text">{newProject.error}</p>}
     </section>
   );
 }

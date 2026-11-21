@@ -1175,6 +1175,9 @@ export interface AppStore {
   preflightProgress: PreflightProgress | null;
   clearBusy: boolean;
   clearError: string | null;
+  /** New project (#1994): the host is restarting into an empty project. */
+  newProjectBusy: boolean;
+  newProjectError: string | null;
   /** Register headline counts; null with no backend. */
   findings: FindingsSummary | null;
   /** Persisted unsupported/no-evidence rows for the register surface. */
@@ -1230,6 +1233,8 @@ export interface AppStore {
     options?: { exactPath?: boolean },
   ) => Promise<void>;
   clearGraph: () => Promise<void>;
+  /** Remove everything tied to the loaded system and restart (#1994). */
+  startNewProject: () => Promise<void>;
   setSpecMode: (mode: SpecExportMode) => Promise<void>;
   /** Recompile the bundle, with its views and curated projection, for the
    *  active mode: after a proposal review, or on request from the Workbench. */
@@ -1420,6 +1425,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   preflightProgress: null,
   clearBusy: false,
   clearError: null,
+  newProjectBusy: false,
+  newProjectError: null,
   findings: null,
   registerFindings: [],
   ingestHistory: [],
@@ -1653,6 +1660,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       coverageEpoch++;
       set({ clearBusy: false });
       await get().refresh();
+    }
+  },
+
+  startNewProject: async () => {
+    set({ newProjectBusy: true, newProjectError: null });
+    try {
+      // On success the host restarts and this page is replaced.
+      await invokeOr<null>('start_new_project', null);
+    } catch (e) {
+      set({ newProjectError: String(e) });
+    } finally {
+      set({ newProjectBusy: false });
     }
   },
 
