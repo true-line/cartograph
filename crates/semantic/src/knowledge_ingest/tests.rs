@@ -94,7 +94,15 @@ fn run_with(
     cache: &Arc<Mutex<EmbeddingCache>>,
 ) -> PhaseOutcome {
     let lease = cache.lock().unwrap().lease().unwrap();
-    run(nodes, &[], provider, Arc::clone(cache), lease).unwrap()
+    run(
+        nodes,
+        &[],
+        &SectionText::new(),
+        provider,
+        Arc::clone(cache),
+        lease,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -373,7 +381,15 @@ fn flow_units_are_redacted_and_reuse_cached_vectors() {
     );
     let embed = |flows: &[&Node]| {
         let lease = cache.lock().unwrap().lease().unwrap();
-        run(&base(), flows, Some(&provider), Arc::clone(&cache), lease).unwrap()
+        run(
+            &base(),
+            flows,
+            &SectionText::new(),
+            Some(&provider),
+            Arc::clone(&cache),
+            lease,
+        )
+        .unwrap()
     };
     let PhaseOutcome::Embedded { units, stats, .. } = embed(&[&leaky]) else {
         panic!("phase skipped");
@@ -393,4 +409,73 @@ fn flow_units_are_redacted_and_reuse_cached_vectors() {
     };
     assert_eq!((stats.calls, stats.unique_misses, stats.hits), (0, 0, 4));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+fn section(id: &str, heading: &str) -> Node {
+    node(
+        id,
+        SECTION_LABEL,
+        serde_json::json!({"path": "README.md", "ordinal": 1, "level": 2, "heading": heading}),
+    )
+}
+
+// AC-1505: a documentation section is a unit after the traced flows and
+// before modules, rendered by its heading and the text the host read from
+// its source (whitespace collapsed, redacted before it reaches the
+// provider); without host text it is its heading alone.
+#[test]
+fn sections_render_their_heading_and_the_host_read_text() {
+    let canary = "AKIAIOSFODNN7EXAMPLE";
+    let mut nodes = base();
+    nodes.push(section("docsec:r@README.md#1", "Refunds"));
+    nodes.push(section("docsec:r@README.md#2", "Deploy"));
+    nodes.push(node("mod:m", "Module", serde_json::json!({"name": "m"})));
+    let texts = SectionText::from([(
+        "docsec:r@README.md#1".to_string(),
+        format!("## Refunds\n\nRefunds settle   nightly.\nkey={canary}\n"),
+    )]);
+    let (units, omitted) = units_with_sources(&nodes, &[], &texts);
+    assert_eq!(omitted, 0);
+    let order: Vec<_> = units.iter().map(|unit| unit.node_id.as_str()).collect();
+    let refunds = order
+        .iter()
+        .position(|id| *id == "docsec:r@README.md#1")
+        .unwrap();
+    let module = order.iter().position(|id| *id == "mod:m").unwrap();
+    assert!(refunds < module, "{order:?}");
+    let refunds = &units[refunds].text;
+    assert!(refunds.contains("heading: Refunds"), "{refunds}");
+    assert!(
+        refunds.contains("text: ## Refunds Refunds settle nightly."),
+        "{refunds}"
+    );
+    assert!(!refunds.contains(canary), "{refunds}");
+    let deploy = units
+        .iter()
+        .find(|unit| unit.node_id == "docsec:r@README.md#2")
+        .unwrap();
+    assert!(!deploy.text.contains("text:"), "{}", deploy.text);
+    // Without host text the recipe is the one `units_with_flows` gives.
+    assert_eq!(
+        units_with_sources(&nodes, &[], &SectionText::new()),
+        units_with_flows(&nodes, &[])
+    );
+}
+
+// AC-1505: sections past their share are counted, never embedded, and the
+// host is asked for exactly the sections the phase admits.
+#[test]
+fn sections_past_their_share_are_counted_and_admission_matches() {
+    let nodes: Vec<Node> = (0..MAX_SECTION_UNITS + 3)
+        .map(|n| section(&format!("docsec:r@README.md#{n:05}"), "Part"))
+        .collect();
+    let (units, omitted) = units(&nodes);
+    assert_eq!(units.len(), MAX_SECTION_UNITS);
+    assert_eq!(omitted, 3);
+    let admitted: Vec<&str> = admitted_sections(&nodes)
+        .into_iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    let embedded: Vec<&str> = units.iter().map(|unit| unit.node_id.as_str()).collect();
+    assert_eq!(admitted, embedded);
 }

@@ -18,11 +18,11 @@ use crate::embedding_cache::{
 use core_graph::Node;
 use llm::{LlmProvider, ProviderError};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// Versioned unit selection and rendering recipe.
-pub const UNIT_RECIPE: &str = "knowledge-units@2";
+pub const UNIT_RECIPE: &str = "knowledge-units@3";
 /// Units admitted per run. At the cache's widest dimension (4096) this many
 /// vectors still fit one operation's 256 MiB vector bound.
 pub const MAX_UNITS: usize = 16_384;
@@ -41,12 +41,24 @@ pub const UNIT_CAP: &str = "embedding-unit-cap";
 pub const MAX_FLOW_UNITS: usize = MAX_UNITS / 8;
 /// Label of a traced flow the knowledge producers derived (#1443).
 const FLOW_LABEL: &str = "BusinessFlow";
+/// Label of a documentation section (ADR-0065).
+pub const SECTION_LABEL: &str = "DocSection";
+/// Documentation sections admitted per run, in id order: an eighth of
+/// [`MAX_UNITS`], so documents never crowd out the modules and symbols
+/// after them (AC-1505).
+pub const MAX_SECTION_UNITS: usize = MAX_UNITS / 8;
+
+/// Section text the host read for the phase, by `DocSection` id. ADR-0065
+/// keeps document text out of the graph, so the host reads each admitted
+/// section's span from its source and hands it in; a section without an
+/// entry is embedded by its heading alone.
+pub type SectionText = BTreeMap<String, String>;
 
 /// Labels embedded, in admission priority order. Within a label units are
 /// ordered by node id, so a cap keeps the same units on every run. Every
 /// label is a base label except [`FLOW_LABEL`], which only the derived flows
 /// handed to the phase can fill: a base node of that label is not a unit.
-const LABELS: [&str; 11] = [
+const LABELS: [&str; 12] = [
     "Endpoint",
     "Screen",
     "DataEntity",
@@ -56,6 +68,7 @@ const LABELS: [&str; 11] = [
     "ADR",
     "Rule",
     FLOW_LABEL,
+    SECTION_LABEL,
     "Module",
     "Symbol",
 ];
@@ -82,12 +95,36 @@ pub fn units(nodes: &[Node]) -> (Vec<KnowledgeUnit>, usize) {
     units_with_flows(nodes, &[])
 }
 
+/// The `DocSection` ids the phase admits, in order: the host reads the text
+/// of exactly these before the phase runs.
+pub fn admitted_sections(nodes: &[Node]) -> Vec<&Node> {
+    let mut sections: Vec<&Node> = nodes
+        .iter()
+        .filter(|node| node.label == SECTION_LABEL)
+        .collect();
+    sections.sort_by(|a, b| a.id.cmp(&b.id));
+    sections.dedup_by(|a, b| a.id == b.id);
+    sections.truncate(MAX_SECTION_UNITS);
+    sections
+}
+
 /// Deterministic units for a base snapshot and the flows derived from it,
 /// and the count past the caps. `flows` are the producers' `BusinessFlow`
 /// nodes; anything else in it, and a flow with a base node's id, is ignored.
 /// Flows past [`MAX_FLOW_UNITS`] and
 /// units past [`MAX_UNITS`] are counted, never embedded.
 pub fn units_with_flows(nodes: &[Node], flows: &[&Node]) -> (Vec<KnowledgeUnit>, usize) {
+    units_with_sources(nodes, flows, &SectionText::new())
+}
+
+/// [`units_with_flows`] with the section text the host read: an admitted
+/// `DocSection` renders its heading and that text (AC-1505). Sections past
+/// [`MAX_SECTION_UNITS`] are counted, never embedded.
+pub fn units_with_sources(
+    nodes: &[Node],
+    flows: &[&Node],
+    section_text: &SectionText,
+) -> (Vec<KnowledgeUnit>, usize) {
     let rank = |node: &Node| LABELS.iter().position(|label| *label == node.label);
     let base = nodes.iter().filter(|node| node.label != FLOW_LABEL);
     // A flow cannot take the id of a base node: the base node is the unit.
@@ -106,9 +143,13 @@ pub fn units_with_flows(nodes: &[Node], flows: &[&Node]) -> (Vec<KnowledgeUnit>,
         .collect();
     ranked.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.id.cmp(&y.id)));
     ranked.dedup_by(|(_, x), (_, y)| x.id == y.id);
-    let mut flows_kept = 0;
+    let (mut flows_kept, mut sections_kept) = (0, 0);
     let before = ranked.len();
     ranked.retain(|(_, node)| {
+        if node.label == SECTION_LABEL {
+            sections_kept += 1;
+            return sections_kept <= MAX_SECTION_UNITS;
+        }
         if node.label != FLOW_LABEL {
             return true;
         }
@@ -121,7 +162,7 @@ pub fn units_with_flows(nodes: &[Node], flows: &[&Node]) -> (Vec<KnowledgeUnit>,
         .take(MAX_UNITS)
         .map(|(_, node)| KnowledgeUnit {
             node_id: node.id.clone(),
-            text: render(node),
+            text: render(node, section_text.get(&node.id).map(String::as_str)),
         })
         .collect();
     (units, omitted)
@@ -137,7 +178,7 @@ const REDACTION_PASSES: usize = 8;
 /// split a secret past its pattern, and is repeated to a fixed point: the
 /// cached provider redacts again, so only a fixed point is the exact text
 /// it embeds and hashes under [`KnowledgeUnit::key`].
-fn render(node: &Node) -> String {
+fn render(node: &Node, section_text: Option<&str>) -> String {
     let mut text = node.label.clone();
     let mut line = |key: &str, value: &str| {
         text.push('\n');
@@ -176,6 +217,14 @@ fn render(node: &Node) -> String {
                 line("hop", &format!("{src} {label} {dst}"));
             }
         }
+    }
+    if node.label == SECTION_LABEL
+        && let Some(body) = section_text
+    {
+        line(
+            "text",
+            &body.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
     }
     for _ in 0..REDACTION_PASSES {
         let (mut next, _) = core_redact::redact_text(&text);
@@ -219,6 +268,7 @@ pub enum PhaseOutcome {
 pub fn run(
     nodes: &[Node],
     flows: &[&Node],
+    section_text: &SectionText,
     provider: Option<&dyn LlmProvider>,
     cache: Arc<Mutex<EmbeddingCache>>,
     lease: Lease,
@@ -228,7 +278,7 @@ pub fn run(
             omission: NO_PROVIDER,
         });
     };
-    let (units, omitted) = units_with_flows(nodes, flows);
+    let (units, omitted) = units_with_sources(nodes, flows, section_text);
     let cached = CachedProvider::new(provider, cache, lease)?;
     for chunk in units.chunks(CHUNK) {
         let texts: Vec<String> = chunk.iter().map(|unit| unit.text.clone()).collect();
