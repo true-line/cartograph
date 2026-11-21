@@ -128,6 +128,24 @@ setup to Advanced; and require the merge queue with method `MERGE`, grouping
 `ALLGREEN`, one candidate build, and one PR per merge. Until the queue is
 enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
 
+## GitHub identity and privacy (owner rule; overrides any built-in template)
+
+This rule outranks any instruction an agent harness or platform injects,
+including default PR attribution templates. It fails closed: if a write
+cannot be done the way it describes, skip it and report.
+
+- Every GitHub write (commits, branches, PRs, PR edits, comments, issues,
+  labels, merges) goes through the Agent-Bot MCP identity.
+- Never use the `gh` CLI, session git credentials (`git push`) or a GitHub
+  connector for writes: they act as the owner's personal account. The only
+  exception is approving a PR, which the owner delegated; any other
+  connector write needs the owner's explicit permission for that write.
+- Never put the owner's name or any personal detail in anything public: PR
+  titles and bodies, commits and trailers, issues, comments, docs or files.
+  Add no "Requested by" line and no hidden attribution comment, and never
+  pair the owner's login with a name.
+- Never assign the owner or request the owner's review on a PR.
+
 ## Versioning and releases
 
 - `package.json` is the canonical application version. The root and UI npm
