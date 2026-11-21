@@ -1458,6 +1458,19 @@ fn called(value: &str) -> Option<String> {
         return None;
     }
     let last = segments.next_back()?;
+    // `AliasUsedOn.create(…)` / `DeletedAlias.delete(…)` on a class: a
+    // record created or deleted (#1998).
+    let receiver: Vec<&str> = segments.clone().collect();
+    if let [model] = receiver[..]
+        && model.starts_with(|c: char| c.is_ascii_uppercase())
+        && model != "Session"
+    {
+        match last {
+            "create" => return Some(format!("a new “{}” record is created", words(model))),
+            "delete" => return Some(format!("the “{}” record is deleted", words(model))),
+            _ => {}
+        }
+    }
     // Flask `flash("Alias not found", "error")`: the message the user sees.
     if last == "flash"
         && let Some(message) = value[callee.len() + 1..]
@@ -2279,6 +2292,16 @@ mod tests {
             "it runs “delete alias”"
         );
         assert_eq!(called("handlers[0](x)"), None);
+        assert_eq!(
+            called("AliasUsedOn.create(alias_id=alias.id, hostname=hostname, commit=True)")
+                .unwrap(),
+            "a new “alias used on” record is created"
+        );
+        assert_eq!(
+            called("DeletedAlias.delete(deleted.id)").unwrap(),
+            "the “deleted alias” record is deleted"
+        );
+        assert_eq!(called("Session.delete(alias)").unwrap(), "it runs “delete”");
         assert_eq!(
             called("flash(\"Alias not found\", \"error\")").unwrap(),
             "the user is shown “Alias not found”"
