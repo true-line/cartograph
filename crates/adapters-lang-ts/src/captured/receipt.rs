@@ -32,10 +32,10 @@ struct Contract {
 }
 
 /// The producer contract a receipt of `version` and `grammar` was minted
-/// under. Python (AC-1024), Go (AC-1026), Java (AC-1031) and Rust (AC-1033)
-/// receipts exist only in the v3 shape and carry primary provenance alone;
-/// each lane's own prefix and domain keep it distinct from every TypeScript
-/// receipt.
+/// under. Python (AC-1024), Go (AC-1026), Java (AC-1031), Rust (AC-1033) and
+/// Kotlin (AC-1035) receipts exist only in the v3 shape and carry primary
+/// provenance alone; each lane's own prefix and domain keep it distinct from
+/// every TypeScript receipt.
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
     let lane = match grammar {
         Grammar::Python => Some(Contract {
@@ -67,6 +67,14 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.adapter-rust/direct-lexical-v1",
             domain: b"cartograph:rs-primary-receipt:v1\0",
             grammar_package: RUST_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        Grammar::Kotlin => Some(Contract {
+            prefix: "kt-primary-v1:",
+            producer: "t0.adapter-kotlin/direct-lexical-v1",
+            domain: b"cartograph:kt-primary-receipt:v1\0",
+            grammar_package: KOTLIN_GRAMMAR_PACKAGE,
             parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
@@ -136,6 +144,8 @@ const GO_GRAMMAR_PACKAGE: &str = "tree-sitter-go@0.25.0";
 const JAVA_GRAMMAR_PACKAGE: &str = "tree-sitter-java@0.23.5";
 // The Rust adapter's exact grammar pin (crates/adapters-lang-rust).
 const RUST_GRAMMAR_PACKAGE: &str = "tree-sitter-rust@0.24.2";
+// The Kotlin adapter's exact grammar pin (crates/adapters-lang-kotlin).
+const KOTLIN_GRAMMAR_PACKAGE: &str = "tree-sitter-kotlin-ng@1.1.0";
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,12 +164,17 @@ pub enum Grammar {
     Java,
     /// `.rs` files, parsed by the Rust adapter (AC-1033).
     Rust,
+    /// `.kt` and `.kts` files, parsed by the Kotlin adapter (AC-1035).
+    Kotlin,
 }
 
 impl Grammar {
     /// A non-TypeScript lane whose receipts bind primary provenance alone.
     pub(super) fn provenance_only(self) -> bool {
-        matches!(self, Self::Python | Self::Go | Self::Java | Self::Rust)
+        matches!(
+            self,
+            Self::Python | Self::Go | Self::Java | Self::Rust | Self::Kotlin
+        )
     }
 
     pub(super) fn for_path(path: &str) -> Self {
@@ -173,6 +188,8 @@ impl Grammar {
             Self::Java
         } else if path.ends_with(".rs") {
             Self::Rust
+        } else if path.ends_with(".kt") || path.ends_with(".kts") {
+            Self::Kotlin
         } else {
             Self::Tsx
         }
@@ -637,7 +654,9 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
             || file.path.ends_with(".py")
             || file.path.ends_with(".go")
             || file.path.ends_with(".java")
-            || file.path.ends_with(".rs"))
+            || file.path.ends_with(".rs")
+            || file.path.ends_with(".kt")
+            || file.path.ends_with(".kts"))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
@@ -708,7 +727,7 @@ fn inventory(
         push(RangeRole::Provenance, index, evidence)?;
     }
     if let Some(value) = props.get("rule") {
-        // The Python, Go, Java and Rust lanes carry primary provenance alone.
+        // The non-TS lanes carry primary provenance alone.
         if grammar.provenance_only() {
             return Err(CapturedError::Invalid("rule source inventory"));
         }

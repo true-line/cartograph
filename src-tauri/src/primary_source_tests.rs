@@ -3798,3 +3798,111 @@ fn rust_facts_are_parsed_from_the_capture_and_cited() {
         FactKey::Node { id } if id.contains("handler")
     )));
 }
+
+// AC-1035: a source's `.kt` and `.kts` files join its capture; the Kotlin
+// pass parses the retained bytes, not the checkout, and each surviving Kotlin fact whose
+// provenance lies in one captured file gets a provenance-only Kotlin receipt
+// that reads back its captured span.
+#[test]
+fn kotlin_facts_are_parsed_from_the_capture_and_cited() {
+    const KOTLIN: &str = "fun handler() {}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("App.kt"), KOTLIN).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let paths: Vec<_> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["App.kt", "source.ts"]);
+    // The checkout changes after capture; the parse must not see it.
+    std::fs::write(root.join("App.kt"), "fun other() {}\n").unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    assert!(
+        extraction
+            .nodes
+            .iter()
+            .any(|node| node.id.contains("handler")),
+        "the captured Kotlin bytes were parsed"
+    );
+    assert!(
+        !extraction
+            .nodes
+            .iter()
+            .any(|node| node.id.contains("other"))
+    );
+    let kotlin: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.file().path == "App.kt")
+        .collect();
+    assert!(!kotlin.is_empty());
+    let file = capture.file("App.kt").unwrap();
+    for minted in &kotlin {
+        assert!(minted.id().starts_with("kt-primary-v1:"), "{}", minted.id());
+        let receipt = minted.to_receipt().unwrap();
+        assert_eq!(
+            receipt.grammar(),
+            adapters_lang_ts::captured::Grammar::Kotlin
+        );
+        assert_eq!(
+            Receipt::from_json(&receipt.to_json().unwrap()).unwrap(),
+            receipt
+        );
+        for range in receipt.ranges() {
+            assert_eq!(
+                range.role,
+                adapters_lang_ts::captured::RangeRole::Provenance
+            );
+            assert_eq!(range.captured.file, *file.reference());
+            assert!(
+                file.span(range.evidence.byte_start, range.evidence.byte_end)
+                    .is_ok()
+            );
+        }
+    }
+    // Every Kotlin receipt binds a fact the recovery publishes.
+    let bound = crate::primary_source::matching_bindings(&extraction, &receipts);
+    assert!(kotlin.iter().all(|receipt| {
+        bound
+            .iter()
+            .any(|binding| binding.receipt_id == receipt.id())
+    }));
+    // A function node carries one.
+    assert!(kotlin.iter().any(|receipt| matches!(
+        receipt.fact_key(),
+        FactKey::Node { id } if id.contains("handler")
+    )));
+}

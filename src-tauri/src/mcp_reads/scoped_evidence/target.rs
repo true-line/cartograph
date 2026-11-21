@@ -101,7 +101,8 @@ impl ScopedEvidenceTarget {
                 || prefixed(&self.receipt_id, "py-primary-v1:")
                 || prefixed(&self.receipt_id, "go-primary-v1:")
                 || prefixed(&self.receipt_id, "java-primary-v1:")
-                || prefixed(&self.receipt_id, "rs-primary-v1:"))
+                || prefixed(&self.receipt_id, "rs-primary-v1:")
+                || prefixed(&self.receipt_id, "kt-primary-v1:"))
             || self.receipt_inventory_index >= 1024
             || self.index >= 1024
             || !text(&self.source.repo, 256)

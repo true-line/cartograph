@@ -263,3 +263,17 @@ wholly in that file gets a receipt under its own contract: prefix
 ranges only, under the same per-file minting, survivor check and budget
 admission as the other lanes. Crate discovery still reads `Cargo.toml` files
 from the checkout, outside closure.
+
+## Kotlin lane (AC-1035, #385)
+
+A source's `.kt` and `.kts` files (the Kotlin adapter's own selection) join the
+same capture as the other non-TS lanes'. With a capture, the Kotlin pass reads
+each file's retained bytes, and each fact a captured file emits whose primary
+provenance lies wholly in that file gets a receipt under its own contract:
+prefix `kt-primary-v1:`, producer `t0.adapter-kotlin/direct-lexical-v1`, grammar
+`kotlin` (`tree-sitter-kotlin-ng@1.1.0`, pinned exactly), in the v3 shape with
+provenance ranges only, under the same per-file minting, survivor check and
+budget admission as the other lanes. Java type discovery for Kotlin/Java
+interop still reads `.java` files from the checkout, outside closure; facts
+the directory join derives (unresolved-call gaps, modules, navigation
+screens) carry no receipt.

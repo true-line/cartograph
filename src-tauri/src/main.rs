@@ -2210,13 +2210,55 @@ fn extract_tree_packed(
 
         let kotlin_id = adapters_lang_kotlin::SourceId { repo, commit };
         let mut kotlin_progress = |path: &str| on_file(&format!("Reading Kotlin sources — {path}"));
-        let (kotlin, stats) = adapters_lang_kotlin::extract_dir_incremental_with_progress(
-            root,
-            &kotlin_id,
-            &mut cache.kotlin,
-            &mut kotlin_progress,
-        )
-        .map_err(|error| error.to_string())?;
+        // As for the other lanes, a capture holding the Kotlin selection is
+        // parsed from its retained bytes with provenance-only Kotlin receipts
+        // (AC-1035); Java type discovery for interop still reads `root`.
+        let mut captured_kotlin = captured_lane_paths(primary, ".kt");
+        captured_kotlin.extend(captured_lane_paths(primary, ".kts"));
+        captured_kotlin.sort();
+        let (kotlin, stats) = if let (Some(capture), false) = (primary, captured_kotlin.is_empty())
+        {
+            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
+            let kotlin = adapters_lang_kotlin::extract_dir_from_sources(
+                root,
+                &kotlin_id,
+                &captured_kotlin,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| std::io::Error::other("captured Kotlin file is unavailable"))
+                },
+                &mut kotlin_progress,
+                &mut |path, parsed| {
+                    if let Ok(file) = capture.file(path)
+                        && let Ok(receipts) = adapters_lang_ts::captured::mint_kotlin_file_receipts(
+                            file,
+                            &ts_id,
+                            &parsed.nodes,
+                            &parsed.edges,
+                        )
+                    {
+                        stage.extend(receipts);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            admit_surviving_lane_receipts(&kotlin.nodes, &kotlin.edges, stage, receipts);
+            let stats = adapters_lang_kotlin::IncrementalStats {
+                recomputed_files: captured_kotlin.len() as u64,
+                ..Default::default()
+            };
+            (kotlin, stats)
+        } else {
+            adapters_lang_kotlin::extract_dir_incremental_with_progress(
+                root,
+                &kotlin_id,
+                &mut cache.kotlin,
+                &mut kotlin_progress,
+            )
+            .map_err(|error| error.to_string())?
+        };
         delta.add(
             stats.recomputed_files,
             stats.reused_files,

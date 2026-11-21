@@ -1960,8 +1960,8 @@ impl PrimarySourceStore {
                 source_capture::capture_working_tree(root, &id, paths, CaptureLimits::default())
             }
         };
-        // The Python (AC-1024), Go (AC-1026), Java (AC-1031) and Rust
-        // (AC-1033) lanes' files join the same capture. A lane whose files
+        // The Python (AC-1024), Go (AC-1026), Java (AC-1031), Rust (AC-1033)
+        // and Kotlin (AC-1035) lanes' files join the same capture. A lane whose files
         // cannot be listed is left out; when the combined set cannot be
         // retained, those lanes keep their ordinary uncaptured reads and the
         // TS/JS capture stands alone.
@@ -1971,11 +1971,13 @@ impl PrimarySourceStore {
             let go = adapters_lang_go::go_paths(root).unwrap_or_default();
             let java = adapters_lang_java::java_paths(root).unwrap_or_default();
             let rust = adapters_lang_rust::rust_paths(root).unwrap_or_default();
+            let kotlin = adapters_lang_kotlin::kotlin_paths(root).unwrap_or_default();
             python
                 .into_iter()
                 .chain(go)
                 .chain(java)
                 .chain(rust)
+                .chain(kotlin)
                 .collect()
         } else {
             Vec::new()
