@@ -22,7 +22,9 @@
 /// cache keys, receipt source sizes, consent fingerprints) is recomputed.
 pub const TEXT_POLICY_VERSION: &str = "redact-text@2";
 
+mod env_values;
 mod source_size;
+pub use env_values::{env_secret_reason, is_env_template, without_userinfo};
 pub use source_size::{DirectSourceJsonContentSizes, measure_direct_source_json_content};
 
 use regex::Regex;
