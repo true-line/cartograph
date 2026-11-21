@@ -6,7 +6,7 @@
 | Doc ID | SPEC-00 |
 | Version | 0.1.4 (draft — §17 per ADR-0007; §4.4/§15 graph store per ADR-0008; §14 M3 gate wording at M3 open; §4.1 BACKS edge + §15 OTel verify at M6) |
 | Status | Ready-for-build planning |
-| Owner | Chris Kane |
+| Owner | Project owner |
 | Purpose | Single source of truth for design/architecture/requirements. Intended to answer ~95% of build-time questions for the author and for Claude Code. |
 | Consumers | Human author + Claude Code (implementation agent) |
 | Companion files | `user_stories.md`, `US-TM.md`, `tracker.csv`, `adr/ADR-00xx.md` |

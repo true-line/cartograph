@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-21
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 Cross-platform (macOS primary, Windows) desktop app whose value is a deterministic

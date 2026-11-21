@@ -2,7 +2,7 @@
 
 - **Status:** Accepted; the graph-store choice is superseded by [ADR-0008](ADR-0008-sqlite-graph-store-kuzu-archived.md) (2026-07-05), which settled the store on SQLite/WAL with recursive-CTE traversal after the M0 check found Kuzu archived upstream. The SQLite/WAL spine and content-addressed determinism decisions stand.
 - **Date:** 2026-06-21
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 Desktop, no server process. Need fast cross-layer path queries plus durable jobs,
