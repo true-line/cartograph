@@ -95,6 +95,17 @@ pub(super) fn record_on_stop(
     ) {
         return Ok(());
     }
+    record_rejected(tx, task, rejected)
+}
+
+/// Write the record of a response the store itself rejected while admitting
+/// it (a refused finish, AC-1404). The task's terminal diagnostic must already
+/// be set, so a sensitive or replayed response keeps no text.
+pub(super) fn record_rejected(
+    tx: &Transaction<'_>,
+    task: &StoredTask,
+    rejected: &RejectedCompletion,
+) -> Result<(), InvestigationStoreError> {
     let Ok(record) = RejectedResponse::capture(
         &rejected.step_id,
         &rejected.text,

@@ -24,7 +24,14 @@ impl JobStore {
         expected_revision: u64,
         input: &NextPromptFinish<'_>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
-        self.admit_next_prompt_finish_with_patch(execution, expected_revision, input, None, None)
+        self.admit_next_prompt_finish_with_patch(
+            execution,
+            expected_revision,
+            input,
+            None,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn admit_next_prompt_finish_with_patch(
@@ -34,6 +41,7 @@ impl JobStore {
         input: &NextPromptFinish<'_>,
         held: Option<agents::investigation::finish_patch::VolatileFinish>,
         raw_patch: Option<&str>,
+        rejected: Option<&super::RejectedCompletion>,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
         if input.response.finish_feedback_witness.is_some()
@@ -468,6 +476,11 @@ impl JobStore {
                                 reason: error.into(),
                             },
                         );
+                        // AC-1404 (ADR-0076): keep the refused response's
+                        // bounded redacted record; never decisive.
+                        if let Some(rejected) = rejected {
+                            super::rejected_responses::record_rejected(&tx, &task, rejected)?;
+                        }
                         if error == InvestigationError::InvalidCitation {
                             invalid_citation(&tx, &mut task, &input.response.step_id)?;
                         } else {

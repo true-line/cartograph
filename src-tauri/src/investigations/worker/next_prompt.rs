@@ -161,6 +161,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 },
                 held,
                 is_patch.then_some(completion.text.as_str()),
+                Some(&crate::jobs::investigations::RejectedCompletion {
+                    step_id: step_id.into(),
+                    text: completion.text.clone(),
+                }),
             )?;
             let patch = jobs.investigation_pending_patch(self.execution, self.id)?;
             (detail, patch)
