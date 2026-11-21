@@ -1385,12 +1385,22 @@ fn state_machine<'a>(
         if guards.is_empty() {
             continue;
         }
-        writeln!(
-            out,
-            "Guards in `{}`, which the framework runs before a move (`fromState`, `toState`); a \
-             returned message or a throw refuses the move:\n",
-            Literal(hook_name)
-        )?;
+        // Only `onTransitionStart` runs before a move and can refuse it;
+        // `onTransitionEnd` runs after it (AC-1032).
+        if hook_name == "onTransitionEnd" {
+            writeln!(
+                out,
+                "Effects in `{}`, which the framework runs after a move (`fromState`, `toState`):\n",
+                Literal(hook_name)
+            )?;
+        } else {
+            writeln!(
+                out,
+                "Guards in `{}`, which the framework runs before a move (`fromState`, `toState`); \
+                 a returned message or a throw refuses the move:\n",
+                Literal(hook_name)
+            )?;
+        }
         out.push_str(HEADER)?;
         for row in &guards {
             write_row(row, assertions, asserted, out)?;
@@ -2397,6 +2407,88 @@ def handle_reply(contact):
         assert_eq!(printed, 4, "{text}");
     }
 
+    // AC-1030 (T-1030): a check the receiver runs, a sum compared with a
+    // method's value, a flag bit, membership in a method's value and the
+    // last answer of a boolean method without a predicate prefix are stated
+    // in domain terms, not as Gap rows.
+    #[test]
+    fn receiver_checks_sums_flags_and_last_answers_are_stated() {
+        let source = r#"
+from flask import jsonify
+
+class User:
+    def lifetime_or_active_subscription(self):
+        if self.lifetime:
+            return True
+        return self.get_active_subscription() is not None
+
+    def max_alias_for_free_account(self):
+        if self.FLAG_FREE_OLD_ALIAS_LIMIT == self.flags & self.FLAG_FREE_OLD_ALIAS_LIMIT:
+            return config.MAX_NB_EMAIL_OLD_FREE_PLAN
+        else:
+            return config.MAX_NB_EMAIL_FREE_PLAN
+
+    def can_create_num_aliases(self, num_aliases):
+        if self.disabled:
+            return False
+        if self.lifetime_or_active_subscription():
+            return True
+        else:
+            active_alias_count = 3
+            return (active_alias_count + num_aliases) <= self.max_alias_for_free_account()
+
+    def can_create_new_alias(self):
+        return self.can_create_num_aliases(1)
+
+def verify_prefix_suffix(user, alias_prefix, alias_suffix):
+    if alias_domain not in user.available_alias_domains(alias_options=alias_options):
+        return False
+    return True
+
+def found_alias(missing, result):
+    if missing:
+        return False
+    return result
+
+def update_alias(alias_id, user):
+    if not user.can_create_new_alias():
+        return jsonify(error="quota"), 400
+    if not user.can_create_num_aliases(2):
+        return jsonify(error="quota"), 400
+    if not found_alias(alias_id, user):
+        return jsonify(error="no"), 400
+    if not verify_prefix_suffix(user, 1, 2):
+        return jsonify(error="no"), 400
+    return jsonify(ok=True)
+"#;
+        let (text, _) = python_rows(source, "update_alias");
+        assert!(!text.contains(NOT_STATED), "{text}");
+        for line in [
+            "| ↳ User.can\\_create\\_new\\_alias | A user can create new alias when the user can create num aliases (1). |",
+            "| ↳ User.can\\_create\\_num\\_aliases | A user can create num aliases when the check “lifetime or active subscription” holds for the user. |",
+            "| ↳ User.can\\_create\\_num\\_aliases | A user can create num aliases when the check “lifetime or active subscription” does not hold for the user, and the active alias count plus the num aliases is at most the user's max alias for free account. |",
+            "| ↳ User.lifetime\\_or\\_active\\_subscription | Otherwise, the user's lifetime or active subscription is true when the user's active subscription is set. |",
+            "| ↳ User.max\\_alias\\_for\\_free\\_account | When the user's flags include the “free old alias limit” flag, the user's max alias for free account is the configured max nb email old free plan. |",
+            "| ↳ User.max\\_alias\\_for\\_free\\_account | When the user's flags do not include the “free old alias limit” flag, the user's max alias for free account is the configured max nb email free plan. |",
+            "| ↳ verify\\_prefix\\_suffix | When the alias domain is not one of the user's available alias domains, the verify prefix suffix is false. |",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        // A named receiver's predicate keeps its number.
+        assert!(
+            text.contains("the user cannot create num aliases (2)"),
+            "{text}"
+        );
+        // A free function's last answer after a guard is no unconditional
+        // rule.
+        assert!(!text.contains("returns the result"), "{text}");
+        // A constant last answer with no exit before it is still no rule.
+        assert!(
+            !text.contains("verify\\_prefix\\_suffix | Otherwise"),
+            "{text}"
+        );
+    }
+
     // AC-0886: a function a rejection's condition calls is followed by name
     // into its guarded exits and those of the method it calls on `self`; a
     // name no repository function has is named as not followed.
@@ -2982,7 +3074,9 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         );
         assert!(
             at("Guards in `onTransitionStart`")
-                < at("| onTransitionStart | Not stated in domain terms (Gap)")
+                < at(
+                    "| onTransitionStart | When the to state is “ArrangingPayment” and the lines's length is 0, the move is refused with a message the export withholds. |"
+                )
         );
         assert!(text.contains(
             "when (toState === 'ArrangingPayment' &amp;&amp; order.lines.length === 0): returns"
@@ -2999,6 +3093,100 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             plain
                 .contains("### State machines\n\n#### State machine: configureDefaultOrderProcess"),
             "{plain}"
+        );
+    }
+
+    // AC-1032 (T-1032): a transition guard of a state machine reads as a
+    // refused move, whatever message it returns (one the export withholds,
+    // a plain one or `false`), over conditions with optional chaining and
+    // camel-case checks.
+    #[test]
+    fn transition_guards_are_stated_as_refused_moves() {
+        let source = "export function configureDefaultOrderProcess(options) {
+    const orderProcess: OrderProcess<OrderState> = {
+        transitions: {
+            AddingItems: { to: ['ArrangingPayment', 'Cancelled'] },
+            ArrangingPayment: { to: ['PaymentSettled', 'Cancelled'] },
+            PaymentSettled: { to: ['Cancelled'] },
+            Cancelled: { to: [] },
+        },
+        async onTransitionStart(fromState, toState, { order }) {
+            if (toState === 'ArrangingPayment') {
+                if (options.arrangingPaymentRequiresContents !== false && order.lines.length === 0) {
+                    return 'message.cannot-transition-to-payment-when-order-is-empty';
+                }
+                if (options.arrangingPaymentRequiresShipping !== false && order.shippingLines?.length === 0) {
+                    return 'no shipping';
+                }
+            }
+            if (toState === 'PaymentSettled' && !orderTotalIsCovered(order, 'Settled')) {
+                return false;
+            }
+            if (toState === 'Cancelled' && !hasAnAuthorizedPayment) {
+                return ctx.translate('message.cannot-cancel');
+            }
+            if (toState === 'Shipped') {
+                return true;
+            }
+            if (toState === 'Delivered') {
+                throw new IllegalOperationError('message.cannot-deliver');
+            }
+        },
+    };
+    return orderProcess;
+}
+";
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/config/order/default-order-process.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let knowledge = Stories {
+            included: Vec::new(),
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: BTreeMap::new(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        for line in [
+            "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires contents is not false and the lines's length is 0, the move is refused with a message the export withholds. |",
+            "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires shipping is not false and the shipping lines's length is 0, the move is refused with the message “no shipping”. |",
+            "| onTransitionStart | When the to state is “PaymentSettled” and the check “order total is covered” does not hold, the move is refused. |",
+            "| onTransitionStart | When the to state is “Cancelled” and the check “has no authorized payment” holds, the move is refused. |",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        assert!(!text.contains(NOT_STATED), "{text}");
+        // A throw refuses the move too.
+        assert!(
+            text.contains(
+                "| onTransitionStart | When the to state is “Delivered”, the move is refused with an error. |"
+            ),
+            "{text}"
+        );
+        // `true` lets the move happen.
+        assert!(
+            text.contains(
+                "| onTransitionStart | When the to state is “Shipped”, the move is allowed. |"
+            ),
+            "{text}"
         );
     }
 
