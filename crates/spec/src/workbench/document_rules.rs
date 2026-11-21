@@ -2397,6 +2397,71 @@ def handle_reply(contact):
         assert_eq!(printed, 4, "{text}");
     }
 
+    // AC-1030 (T-1030): a check the receiver runs, a sum compared with a
+    // method's value, a flag bit, membership in a method's value and the
+    // last answer of a boolean method without a predicate prefix are stated
+    // in domain terms, not as Gap rows.
+    #[test]
+    fn receiver_checks_sums_flags_and_last_answers_are_stated() {
+        let source = r#"
+from flask import jsonify
+
+class User:
+    def lifetime_or_active_subscription(self):
+        if self.lifetime:
+            return True
+        return self.get_active_subscription() is not None
+
+    def max_alias_for_free_account(self):
+        if self.FLAG_FREE_OLD_ALIAS_LIMIT == self.flags & self.FLAG_FREE_OLD_ALIAS_LIMIT:
+            return config.MAX_NB_EMAIL_OLD_FREE_PLAN
+        else:
+            return config.MAX_NB_EMAIL_FREE_PLAN
+
+    def can_create_num_aliases(self, num_aliases):
+        if self.disabled:
+            return False
+        if self.lifetime_or_active_subscription():
+            return True
+        else:
+            active_alias_count = 3
+            return (active_alias_count + num_aliases) <= self.max_alias_for_free_account()
+
+    def can_create_new_alias(self):
+        return self.can_create_num_aliases(1)
+
+def verify_prefix_suffix(user, alias_prefix, alias_suffix):
+    if alias_domain not in user.available_alias_domains(alias_options=alias_options):
+        return False
+    return True
+
+def update_alias(alias_id, user):
+    if not user.can_create_new_alias():
+        return jsonify(error="quota"), 400
+    if not verify_prefix_suffix(user, 1, 2):
+        return jsonify(error="no"), 400
+    return jsonify(ok=True)
+"#;
+        let (text, _) = python_rows(source, "update_alias");
+        assert!(!text.contains(NOT_STATED), "{text}");
+        for line in [
+            "| ↳ User.can\\_create\\_new\\_alias | A user can create new alias when the user can create num aliases (1). |",
+            "| ↳ User.can\\_create\\_num\\_aliases | A user can create num aliases when the check “lifetime or active subscription” holds for the user. |",
+            "| ↳ User.can\\_create\\_num\\_aliases | A user can create num aliases when the check “lifetime or active subscription” does not hold for the user, and the active alias count plus the num aliases is at most the user's max alias for free account. |",
+            "| ↳ User.lifetime\\_or\\_active\\_subscription | Otherwise, the user's lifetime or active subscription is true when the user's active subscription is set. |",
+            "| ↳ User.max\\_alias\\_for\\_free\\_account | When the user's flags include the “free old alias limit” flag, the user's max alias for free account is the configured max nb email old free plan. |",
+            "| ↳ User.max\\_alias\\_for\\_free\\_account | When the user's flags do not include the “free old alias limit” flag, the user's max alias for free account is the configured max nb email free plan. |",
+            "| ↳ verify\\_prefix\\_suffix | When the alias domain is not one of the user's available alias domains, the verify prefix suffix is false. |",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        // A constant last answer with no exit before it is still no rule.
+        assert!(
+            !text.contains("verify\\_prefix\\_suffix | Otherwise"),
+            "{text}"
+        );
+    }
+
     // AC-0886: a function a rejection's condition calls is followed by name
     // into its guarded exits and those of the method it calls on `self`; a
     // name no repository function has is named as not followed.
