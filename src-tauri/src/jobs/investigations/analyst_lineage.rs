@@ -4,27 +4,16 @@
 //! selected per-call response schema). Every host rule that admits @27 admits
 //! @28 through these predicates and `SpecialistId::uses_finish_patch`, so the
 //! two identities cannot drift apart site by site. @27 keeps its exact rules.
-use agents::investigation::SpecialistId;
+use agents::investigation::{Capability, SpecialistId};
 
 /// Saved `LocalFinish4096V1` generation for new local desktop starts.
 pub(super) fn uses_local_finish_generation(id: SpecialistId) -> bool {
-    matches!(
-        id,
-        SpecialistId::DomainAnalystV26
-            | SpecialistId::DomainAnalystV27
-            | SpecialistId::DomainAnalystV28
-    )
+    id.has(Capability::LocalFinishGeneration)
 }
 
 /// Host-only finding withholding after one authenticated correction.
 pub(super) fn uses_finding_withholding(id: SpecialistId) -> bool {
-    matches!(
-        id,
-        SpecialistId::DomainAnalystV25
-            | SpecialistId::DomainAnalystV26
-            | SpecialistId::DomainAnalystV27
-            | SpecialistId::DomainAnalystV28
-    )
+    id.has(Capability::FindingWithholding)
 }
 
 #[cfg(test)]

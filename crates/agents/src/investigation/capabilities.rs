@@ -95,11 +95,15 @@ pub enum Capability {
     FinishFeedbackWitness,
     /// Typed citation correction.
     TypedCitationCorrection,
+    /// Host-only finding withholding after one authenticated correction.
+    FindingWithholding,
+    /// The saved `LocalFinish4096V1` generation for new local desktop starts.
+    LocalFinishGeneration,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::CompactDisclosure,
         Self::TurnProgress,
         Self::InspectionRequirements,
@@ -119,6 +123,8 @@ impl Capability {
         Self::CapacityExclusions,
         Self::FinishFeedbackWitness,
         Self::TypedCitationCorrection,
+        Self::FindingWithholding,
+        Self::LocalFinishGeneration,
     ];
 
     const fn bit(self) -> u32 {
@@ -247,10 +253,10 @@ pub const SPECIALIST_TABLE: [SpecialistRow; 46] = [
     row(S::DomainAnalystV22, R::DomainAnalyst, 22, 12, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
     row(S::DomainAnalystV23, R::DomainAnalyst, 23, 13, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
     row(S::DomainAnalystV24, R::DomainAnalyst, 24, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV25, R::DomainAnalyst, 25, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV26, R::DomainAnalyst, 26, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV27, R::DomainAnalyst, 27, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV28, R::DomainAnalyst, 28, 14, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV25, R::DomainAnalyst, 25, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding]),
+    row(S::DomainAnalystV26, R::DomainAnalyst, 26, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
+    row(S::DomainAnalystV27, R::DomainAnalyst, 27, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
+    row(S::DomainAnalystV28, R::DomainAnalyst, 28, 14, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
     row(S::EvidenceAuditorV11, R::EvidenceAuditor, 11, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
     row(S::EvidenceAuditorV12, R::EvidenceAuditor, 12, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries]),
     row(S::EvidenceAuditorV13, R::EvidenceAuditor, 13, 12, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
@@ -317,3 +323,7 @@ pub fn current_specialist(role: SpecialistRole) -> Option<SpecialistId> {
 #[cfg(test)]
 #[path = "capabilities_parity_tests.rs"]
 mod parity_tests;
+
+#[cfg(test)]
+#[path = "capabilities_typescript_tests.rs"]
+mod typescript_tests;
