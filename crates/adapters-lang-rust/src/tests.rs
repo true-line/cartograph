@@ -2336,7 +2336,7 @@ fn cfg_attr_only_files_and_reused_names_get_their_own_gaps() {
         "eps/Cargo.toml",
         "[package]\nname = \"eps\"\nversion = \"0.1.0\"\n",
     );
-    write(root, "eps/src/lib.rs", "mod a;\nmod b;\n");
+    write(root, "eps/src/lib.rs", "mod a;\nmod b;\nmod c;\n");
     write(
         root,
         "eps/src/a.rs",
@@ -2347,6 +2347,12 @@ fn cfg_attr_only_files_and_reused_names_get_their_own_gaps() {
         "#[cfg(windows)]\n#[path = \"windows.rs\"]\nmod imp;\n",
     );
     write(root, "eps/src/b.rs", b);
+    // A `path` option inside the predicate sets no path: no Gap.
+    write(
+        root,
+        "eps/src/c.rs",
+        "#[cfg_attr(any(unix, path = \"generated\"), derive(Debug))]\nmod c_inner {}\n",
+    );
     write(root, "eps/src/unix.rs", "pub fn u() {}\n");
     let x = extract_dir(root, &id()).unwrap();
     let gap = |path: &str| {
@@ -2358,6 +2364,7 @@ fn cfg_attr_only_files_and_reused_names_get_their_own_gaps() {
             })
             .collect::<Vec<_>>()
     };
+    assert!(gap("eps/src/c.rs").is_empty());
     let a = gap("eps/src/a.rs");
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].props["reason"], "cfg_attr");
@@ -2369,4 +2376,238 @@ fn cfg_attr_only_files_and_reused_names_get_their_own_gaps() {
         .as_u64()
         .unwrap() as usize;
     assert_eq!(start, b.find("#[path = \"windows.rs\"]").unwrap());
+}
+
+// AC-1305 (#2163): auth extractors and axum layers are the endpoint's auth.
+#[test]
+fn auth_extractors_and_axum_layers_are_endpoint_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        root,
+        "src/extract.rs",
+        r#"
+use axum::extract::FromRequestParts;
+use axum::http::{request::Parts, StatusCode};
+
+pub struct AuthUser { pub id: i64 }
+
+impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
+    type Rejection = StatusCode;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts.headers.get("authorization").map(|_| AuthUser { id: 1 }).ok_or(StatusCode::UNAUTHORIZED)
+    }
+}
+
+pub async fn require_admin(req: axum::extract::Request, next: axum::middleware::Next) -> Result<axum::response::Response, StatusCode> {
+    if req.headers().contains_key("x-admin") { Ok(next.run(req).await) } else { Err(StatusCode::FORBIDDEN) }
+}
+
+// Inspects 401 and 403 without answering with them.
+pub async fn log_it(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let res = next.run(req).await;
+    if res.status() == StatusCode::UNAUTHORIZED { tracing::warn!("denied"); }
+    match res.status() { StatusCode::FORBIDDEN => tracing::warn!("forbidden"), _ => {} }
+    res
+}
+"#,
+    );
+    write(
+        root,
+        "src/lib.rs",
+        r#"
+mod extract;
+mod local;
+use axum::{middleware::{self, Next}, routing::get, Router};
+use axum_extra::TypedHeader;
+use headers::{authorization::Bearer, Authorization};
+use tower_http::trace::TraceLayer;
+use tower_http::validate_request::ValidateRequestHeaderLayer;
+use crate::extract::{log_it, require_admin, AuthUser};
+
+async fn me(user: AuthUser) {}
+async fn maybe(user: Option<AuthUser>) {}
+async fn token(TypedHeader(auth): TypedHeader<Authorization<Bearer>>) {}
+async fn open() {}
+async fn admin() {}
+async fn traced() {}
+async fn weird() {}
+
+pub fn app() -> Router {
+    Router::new()
+        .route("/me", get(me))
+        .route("/maybe", get(maybe))
+        .route("/token", get(token))
+        .route("/admin", get(admin))
+        .route_layer(middleware::from_fn(require_admin))
+        .route("/basic", get(open))
+        .nest("/api", Router::new().route("/inner", get(open)))
+        .layer(ValidateRequestHeaderLayer::basic("u", "p"))
+        .route("/open", get(open))
+        .route("/traced", get(traced))
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(log_it))
+        .layer((
+            tower_http::decompression::RequestDecompressionLayer::new(),
+            // A comment between layers.
+            tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(5)),
+        ))
+        .route("/weird", get(weird))
+        .layer(make_layer())
+}
+"#,
+    );
+    // Local types and functions named like the library ones are not guards.
+    write(
+        root,
+        "src/local.rs",
+        r#"
+use axum::{routing::get, Router};
+pub struct TypedHeader<T>(pub T);
+pub struct Authorization<T>(pub T);
+pub struct Bearer;
+mod tower {
+    pub struct ValidateRequestHeaderLayer;
+    impl ValidateRequestHeaderLayer { pub fn basic(_: &str, _: &str) -> Self { Self } }
+    pub fn from_fn<T>(_: T) -> ValidateRequestHeaderLayer { ValidateRequestHeaderLayer }
+}
+use tower::{from_fn, ValidateRequestHeaderLayer};
+async fn local(h: TypedHeader<Authorization<Bearer>>) {}
+async fn deny() -> axum::http::StatusCode { axum::http::StatusCode::UNAUTHORIZED }
+pub fn other() -> Router {
+    Router::new()
+        .route("/local", get(local))
+        .layer(ValidateRequestHeaderLayer::basic("u", "p"))
+        .layer(from_fn(deny))
+}
+"#,
+    );
+    let x = extract_dir(root, &id()).unwrap();
+    let auth = |endpoint: &str| {
+        x.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.id == format!("ep:local/rust-ws@{endpoint}"))
+            .unwrap_or_else(|| panic!("{endpoint}"))
+            .props["auth"]
+            .clone()
+    };
+
+    // A repository extractor that rejects with 401 guards its handlers.
+    let me = auth("GET:/me");
+    assert_eq!(me["state"], "required", "{me}");
+    assert_eq!(me["authenticated"], true);
+    assert!(
+        me["guards"]
+            .as_array()
+            .unwrap()
+            .contains(&"AuthUser".into()),
+        "{me}"
+    );
+    assert!(
+        me["basis"]
+            .as_array()
+            .unwrap()
+            .contains(&"extractor AuthUser rejects with 401".into()),
+        "{me}"
+    );
+    assert_eq!(me["prov"]["confidence_tier"], "InferredStrong");
+    let paths: BTreeSet<&str> = me["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, BTreeSet::from(["src/extract.rs", "src/lib.rs"]));
+
+    // `Option<AuthUser>` does not reject: only the layers after it count.
+    let maybe = auth("GET:/maybe");
+    assert_eq!(
+        maybe["guards"],
+        serde_json::json!([
+            "sym:local/rust-ws@src/extract.rs#require_admin",
+            "tower_http.ValidateRequestHeaderLayer::basic"
+        ]),
+        "{maybe}"
+    );
+
+    // A library extractor is a Confirmed guard on its own.
+    let token = auth("GET:/token");
+    assert!(
+        token["guards"]
+            .as_array()
+            .unwrap()
+            .contains(&"TypedHeader<Authorization<Bearer>>".into()),
+        "{token}"
+    );
+
+    // A layer wraps only the routes added before it.
+    let basic = auth("GET:/basic");
+    assert_eq!(basic["state"], "required");
+    assert_eq!(
+        basic["guards"],
+        serde_json::json!(["tower_http.ValidateRequestHeaderLayer::basic"])
+    );
+    assert_eq!(basic["prov"]["confidence_tier"], "Confirmed");
+    // A layer over a router reaches the routes nested in it.
+    assert_eq!(auth("GET:/api/inner")["guards"], basic["guards"]);
+    let admin = auth("GET:/admin");
+    assert!(
+        admin["basis"]
+            .as_array()
+            .unwrap()
+            .contains(&"middleware require_admin responds 403".into()),
+        "{admin}"
+    );
+
+    // No guard: unknown, never public; non-auth layers are listed, a
+    // from_fn without a deny status is a reason, an unreadable layer a Gap.
+    let open = auth("GET:/open");
+    assert_eq!(open["state"], "unknown", "{open}");
+    assert_eq!(
+        open["non_auth_middleware"],
+        serde_json::json!([
+            "TraceLayer::new_for_http()",
+            "tower_http::decompression::RequestDecompressionLayer::new()",
+            "tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(5))"
+        ])
+    );
+    assert_eq!(
+        open["reasons"],
+        serde_json::json!([
+            "no_deny_status:middleware::from_fn(log_it)",
+            "no_guard_recovered",
+            "unreadable_middleware:make_layer()"
+        ])
+    );
+    let weird = auth("GET:/weird");
+    assert_eq!(
+        weird["reasons"],
+        serde_json::json!(["no_guard_recovered", "unreadable_middleware:make_layer()"])
+    );
+    let gap = x
+        .nodes
+        .iter()
+        .find(|n| n.label == "Gap" && n.props["middleware"] == "make_layer()")
+        .expect("layer Gap");
+    assert!(has_edge(
+        &x,
+        "DEPENDS_ON",
+        "ep:local/rust-ws@GET:/weird",
+        &gap.id
+    ));
+    let local = auth("GET:/local");
+    assert_eq!(local["state"], "unknown", "{local}");
+    assert_eq!(
+        local["reasons"],
+        serde_json::json!([
+            "no_guard_recovered",
+            "unreadable_middleware:ValidateRequestHeaderLayer::basic(\"u\",\"p\")",
+            "unreadable_middleware:from_fn(deny)"
+        ])
+    );
 }

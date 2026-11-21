@@ -9,7 +9,7 @@
 //! `Endpoint` fact with their own provenance ([`RECOVERY`] lists the
 //! producers): `permission_site` (NestJS GraphQL `Allow(...)` decorator
 //! syntax) and `auth` (Flask and Flask-Admin guards, Spring method-security
-//! annotations, Go route middleware). No adapter records a
+//! annotations, Go route middleware, Rust auth extractors and axum layers). No adapter records a
 //! site on a fact below the endpoint, so a check made inside a handler body
 //! or in a function it calls is not recovered; the document says so.
 //!
@@ -134,6 +134,29 @@ const RECOVERY: &[Recovery] = &[
         producer: GO_PRODUCER,
     },
     Recovery {
+        framework: "axum",
+        language: "Rust",
+        property: "auth",
+        recovers: "auth extractors on the handler (axum-extra TypedHeader<Authorization<Bearer>> \
+                   or <Basic>, and repository FromRequestParts/FromRequest types that reject \
+                   with 401 or 403) and layer/route_layer on the router after the route \
+                   (tower-http ValidateRequestHeaderLayer and RequireAuthorizationLayer bearer \
+                   or basic, and middleware::from_fn functions that reject with 401 or 403). \
+                   Layers on an enclosing router are read through nest and merge",
+        absent_read: "auth extractors and router layers",
+        producer: RUST_PRODUCER,
+    },
+    Recovery {
+        framework: "actix-web",
+        language: "Rust",
+        property: "auth",
+        recovers: "auth extractors on the handler (actix-web-httpauth BearerAuth or BasicAuth, \
+                   and repository FromRequest types that reject with 401 or 403). wrap() \
+                   middleware is not read",
+        absent_read: "auth extractors",
+        producer: RUST_PRODUCER,
+    },
+    Recovery {
         framework: "nestjs-graphql",
         language: "TypeScript",
         property: "permission_site",
@@ -154,6 +177,9 @@ const GO_RECOVERS: &str = "middleware on the route: a handler wrapper, chi With,
                            an enclosing router, a server-wide wrapper and gin groups are not read";
 const GO_ABSENT_READ: &str = "route middleware";
 const GO_PRODUCER: &str = "adapters-lang-go (middleware)";
+/// The Rust adapter's producer (#2163). It never records `none`: a Rust
+/// route has no declarative public marker.
+const RUST_PRODUCER: &str = "adapters-lang-rust (auth)";
 
 fn recovery(endpoint: &Node) -> Option<&'static Recovery> {
     let framework = endpoint.props["framework"].as_str()?;
@@ -565,7 +591,17 @@ fn role(endpoint: &Node, guards: &[&str]) -> String {
         "flask_jwt_extended.jwt_required" | "jwtauth.Authenticator" => {
             Some("caller with a valid JWT")
         }
-        "gin.BasicAuth" | "gin.BasicAuthForRealm" | "chi.middleware.BasicAuth" => {
+        "TypedHeader<Authorization<Bearer>>"
+        | "actix_web_httpauth.BearerAuth"
+        | "tower_http.ValidateRequestHeaderLayer::bearer"
+        | "tower_http.RequireAuthorizationLayer::bearer" => Some("caller with a bearer token"),
+        "gin.BasicAuth"
+        | "gin.BasicAuthForRealm"
+        | "chi.middleware.BasicAuth"
+        | "TypedHeader<Authorization<Basic>>"
+        | "actix_web_httpauth.BasicAuth"
+        | "tower_http.ValidateRequestHeaderLayer::basic"
+        | "tower_http.RequireAuthorizationLayer::basic" => {
             Some("caller with HTTP Basic credentials")
         }
         _ => None,
