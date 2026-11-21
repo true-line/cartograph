@@ -86,7 +86,7 @@ pub(super) fn extract(
     functions: &HashMap<usize, String>,
     out: &mut Extraction,
 ) {
-    let Some(file_framework) = framework(cx, bindings) else {
+    let Some(file_framework) = framework(cx, root, bindings) else {
         return;
     };
     let constants = constants(cx, root);
@@ -197,18 +197,34 @@ pub(super) fn extract(
 }
 
 /// The SQL crate a method-call statement in the file belongs to, the first
-/// of [`CRATES`] it names; `None` when it names none.
-fn framework(cx: &FileCx<'_>, bindings: &Bindings) -> Option<&'static str> {
-    let source = String::from_utf8_lossy(cx.source);
+/// of [`CRATES`] a `use` or a parsed qualified path names (never a comment
+/// or a string); `None` when it names none.
+fn framework(cx: &FileCx<'_>, root: TsNode<'_>, bindings: &Bindings) -> Option<&'static str> {
+    let mut named: BTreeSet<&str> = bindings
+        .map
+        .values()
+        .filter(|(_, external)| *external)
+        .filter_map(|(path, _)| path.first().map(String::as_str))
+        .collect();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        stack.extend(named_children(node));
+        if !matches!(node.kind(), "scoped_identifier" | "scoped_type_identifier") {
+            continue;
+        }
+        let text = cx.text(&node).trim_start_matches("::");
+        let head = text.split("::").next().unwrap_or("").trim();
+        if let Some(name) = CRATES.iter().find(|name| **name == head)
+            && !cx.workspace_crates.contains(head)
+            && !cx.declared_mods.contains(head)
+        {
+            named.insert(name);
+        }
+    }
     CRATES
         .iter()
-        .filter(|name| {
-            bindings.map.values().any(|(path, external)| {
-                *external && path.first().is_some_and(|first| first == *name)
-            }) || source.contains(&format!("{name}::"))
-        })
+        .find(|name| named.contains(**name))
         .map(|name| crate_label(name))
-        .next()
 }
 
 fn crate_label(name: &str) -> &'static str {
@@ -230,7 +246,11 @@ fn statement<'t>(
 ) -> Option<(TsNode<'t>, Option<&'static str>)> {
     match node.kind() {
         "call_expression" => {
-            let function = node.child_by_field_name("function")?;
+            let mut function = node.child_by_field_name("function")?;
+            // `conn.query_row::<T, _, _>(…)`, `sqlx::query_as::<_, T>(…)`.
+            if function.kind() == "generic_function" {
+                function = function.child_by_field_name("function")?;
+            }
             let arguments = call_arguments(node);
             let first = *arguments.first()?;
             match function.kind() {
@@ -240,12 +260,8 @@ fn statement<'t>(
                         || (ALONE.contains(&method) && arguments.len() == 1);
                     fits.then_some((first, None))
                 }
-                "identifier" | "scoped_identifier" | "generic_function" => {
-                    let callee = if function.kind() == "generic_function" {
-                        function.child_by_field_name("function")?
-                    } else {
-                        function
-                    };
+                "identifier" | "scoped_identifier" => {
+                    let callee = function;
                     let scopes = visible_scopes(cx, node);
                     let paths =
                         resolve_external_paths(cx, bindings, &scopes, cx.text(&callee), None);
@@ -490,8 +506,9 @@ fn placeholders(format: &str) -> (String, bool) {
     (out, computed)
 }
 
-/// The values the function around `at` binds to `name` with `let` before
-/// `before`, in source order.
+/// The value of the nearest `let` binding `name` before `before` in a block
+/// that encloses `at` (a binding in a block that already closed is not
+/// visible).
 fn let_values<'t>(cx: &FileCx<'_>, at: TsNode<'t>, name: &str, before: usize) -> Vec<TsNode<'t>> {
     let mut scope = at;
     while let Some(parent) = scope.parent() {
@@ -519,7 +536,10 @@ fn let_values<'t>(cx: &FileCx<'_>, at: TsNode<'t>, name: &str, before: usize) ->
         ) else {
             continue;
         };
-        if pattern.kind() == "identifier" && cx.text(&pattern) == name {
+        let visible = node.parent().is_some_and(|block| {
+            block.start_byte() <= at.start_byte() && at.end_byte() <= block.end_byte()
+        });
+        if visible && pattern.kind() == "identifier" && cx.text(&pattern) == name {
             values.push(value);
         }
     }

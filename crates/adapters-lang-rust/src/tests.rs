@@ -2037,4 +2037,28 @@ pub fn run(r: &Runner) {
     let x = extract_source(lookalike.as_bytes(), "src/lib.rs", &id()).unwrap();
     assert!(sql_facts(&x).is_empty());
     assert!(!x.nodes.iter().any(|node| node.id.contains("@sql:")));
+
+    // A crate named only in a comment or a string proves nothing.
+    let mentioned =
+        format!("// see sqlx::query\nconst DOC: &str = \"rusqlite::Connection\";\n{lookalike}");
+    let x = extract_source(mentioned.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert!(sql_facts(&x).is_empty());
+
+    // A turbofish method call is a statement; a `let` in a block that
+    // closed before the call is not the binding it reads.
+    let scoped = r#"use rusqlite::Connection;
+pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
+    let sql = "SELECT count(*) FROM outer_table";
+    {
+        let sql = "SELECT count(*) FROM inner_table";
+        let _ = sql;
+    }
+    conn.query_row::<i64, _, _>(sql, [], |row| row.get(0))
+}
+"#;
+    let x = extract_source(scoped.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert_eq!(
+        sql_facts(&x),
+        ["sym:local/rust-ws@src/lib.rs#count READS data:local/rust-ws@sql:outer_table -"]
+    );
 }
