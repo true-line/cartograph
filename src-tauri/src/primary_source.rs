@@ -2093,7 +2093,7 @@ impl PrimarySourceStore {
                 .get(&capture.manifest().source_id)
                 .copied()
                 .unwrap_or(0);
-            let total = weights.values().sum();
+            let total = receipt_weight_total(&weights);
             let mut store = self.receipts.lock().map_err(storage_error)?;
             let share = (
                 source_share(store.capacity.0, weight, total),
@@ -2106,6 +2106,20 @@ impl PrimarySourceStore {
             Ok(RetainedReceipts::default())
         }
     }
+}
+
+/// The captured bytes receipt shares are divided among: every registered
+/// source's, but not its observation inputs' (ADR-0080), which hold no
+/// receipt and would otherwise shrink their owner's share.
+fn receipt_weight_total(weights: &std::collections::BTreeMap<SourceId, u64>) -> u64 {
+    weights
+        .iter()
+        .filter(|(id, _)| {
+            !id.as_str()
+                .starts_with(crate::observation_inputs::INPUT_REPO_PREFIX)
+        })
+        .map(|(_, weight)| weight)
+        .sum()
 }
 
 /// The most one source's recovery may retain of a store-wide `capacity`:
@@ -2914,6 +2928,25 @@ mod tests {
         assert_eq!(source_share(1600, 7, 5), 1600);
         assert_eq!(source_share(1600, 0, 0), 1600);
         assert_eq!(source_share(u64::MAX, u64::MAX - 1, u64::MAX), u64::MAX - 1);
+    }
+
+    // AC-1043 (Codex on #2235): an observation input capture holds no receipt,
+    // so its bytes never shrink a registered source's receipt share.
+    #[test]
+    fn observation_input_bytes_are_outside_receipt_shares() {
+        let source = "src_0123456789abcdef0123456789abcdef";
+        let weights = std::collections::BTreeMap::from([
+            (SourceId::new(source).unwrap(), 10),
+            (
+                SourceId::new("src_fedcba9876543210fedcba9876543210").unwrap(),
+                30,
+            ),
+            (
+                SourceId::new(crate::observation_inputs::input_source_id(source)).unwrap(),
+                1_000,
+            ),
+        ]);
+        assert_eq!(receipt_weight_total(&weights), 40);
     }
 
     fn payload_bytes(store: &ReceiptStore) -> u64 {
