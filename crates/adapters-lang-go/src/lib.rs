@@ -55,6 +55,7 @@ pub struct Extraction {
     handler_functions: Vec<vercel::HandlerFunction>,
     pending_bases: Vec<base::Pending>,
     base_bindings: Vec<base::Binding>,
+    test_requests: Vec<target_tests::Request>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +143,12 @@ fn file_id(repo: &str, path: &str) -> String {
     format!("file:{repo}@{path}")
 }
 
+/// Whether a Symbol id names a function of a test file.
+fn in_test_file(id: &str) -> bool {
+    id.split_once('#')
+        .is_some_and(|(file, _)| file.ends_with("_test.go"))
+}
+
 fn symbol_id(repo: &str, path: &str, name: &str) -> String {
     format!("sym:{repo}@{path}#{name}")
 }
@@ -175,6 +182,9 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         let mut props = serde_json::json!({ "prov": function.prov.take() });
         retarget_props_commit(&mut props, commit);
         function.prov = props["prov"].take();
+    }
+    for request in &mut extraction.test_requests {
+        request.retarget(commit);
     }
     for pending in &mut extraction.pending_endpoints {
         retarget_props_commit(&mut pending.node.props, commit);
@@ -1285,14 +1295,25 @@ fn extract_source_with_module(
             continue;
         };
         if !callee.contains('.') {
-            if let Some(dst) = locals.get(callee)
-                && src != *dst
-            {
-                out.edges.push(Edge {
+            if let Some(dst) = locals.get(callee) {
+                if src != *dst {
+                    out.edges.push(Edge {
+                        src,
+                        dst: dst.clone(),
+                        label: "CALLS".into(),
+                        props: serde_json::json!({
+                            "prov": cx.prov(&call, &format!("CALLS {callee}")),
+                        }),
+                    });
+                }
+            } else if callee.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                // A function of the same package in another file (#2019).
+                out.pending_calls.push(PendingCall {
                     src,
-                    dst: dst.clone(),
-                    label: "CALLS".into(),
+                    package_dir: package_dir(path),
+                    exported: callee.to_string(),
                     props: serde_json::json!({
+                        "resolution": "go-package-directory-proven",
                         "prov": cx.prov(&call, &format!("CALLS {callee}")),
                     }),
                 });
@@ -1329,7 +1350,11 @@ fn extract_source_with_module(
     config_read::emit(&cx, &config_reads, &mut out);
     // Guarded exits and refusal responses (#2009); test code states no
     // business rules.
-    if !path.ends_with("_test.go") {
+    if path.ends_with("_test.go") {
+        // A test file states its tests, not the system (#2019).
+        target_tests::extract(&cx, root, &bindings, &mut out);
+        target_tests::keep_test_facts(&mut out);
+    } else {
         rule_evidence::extract(&cx, root, &functions_by_start, &bindings, &mut out);
     }
     Ok(out)
@@ -1371,6 +1396,7 @@ type WalkedGoFile = (String, Option<SkipReason>);
 /// repo-relative path; a break stops the walk and returns `None`.
 fn walk_go_files(
     root: &Path,
+    tests: bool,
     on_step: &mut dyn FnMut(&str) -> ControlFlow<()>,
 ) -> Result<Option<Vec<WalkedGoFile>>, ExtractError> {
     let Some(files) = source_walk::files_until(
@@ -1389,7 +1415,7 @@ fn walk_go_files(
             .extension()
             .and_then(|extension| extension.to_str())
             != Some("go")
-            || file.name.ends_with("_test.go")
+            || (!tests && file.name.ends_with("_test.go"))
         {
             continue;
         }
@@ -1415,7 +1441,7 @@ pub fn skipped_files_until(
     root: &Path,
     on_step: &mut dyn FnMut(&str) -> ControlFlow<()>,
 ) -> Result<Option<Vec<(String, SkipReason)>>, ExtractError> {
-    Ok(walk_go_files(root, on_step)?.map(|files| {
+    Ok(walk_go_files(root, false, on_step)?.map(|files| {
         files
             .into_iter()
             .filter_map(|(rel, reason)| Some((rel, reason?)))
@@ -1425,7 +1451,7 @@ pub fn skipped_files_until(
 
 fn collect_go_files(root: &Path, out: &mut Vec<String>) -> Result<(), ExtractError> {
     out.extend(
-        walk_go_files(root, &mut |_| ControlFlow::Continue(()))?
+        walk_go_files(root, true, &mut |_| ControlFlow::Continue(()))?
             .expect("a hook that never breaks walks the whole tree")
             .into_iter()
             .filter(|(_, reason)| reason.is_none())
@@ -1617,16 +1643,51 @@ pub fn extract_dir_incremental_with_progress(
             out.handler_functions.extend(extraction.handler_functions);
             out.pending_bases.extend(extraction.pending_bases);
             out.base_bindings.extend(extraction.base_bindings);
+            out.test_requests.extend(extraction.test_requests);
             Ok(())
         },
     );
     merged?;
     // By simple name (`pkg.Func`) and by qualified name (`Type.Method`, a
     // method value on a receiver, #2007).
+    // A test file's functions answer only calls from test files, and never
+    // shadow the package's own (#2019).
+    let index_of = |tests: bool| {
+        out.nodes
+            .iter()
+            .filter(|node| node.label == "Symbol")
+            .filter(move |node| tests || !in_test_file(&node.id))
+            .flat_map(|node| {
+                let dir = node.props.get("package_dir").and_then(|d| d.as_str());
+                let test = in_test_file(&node.id);
+                ["simple_name", "name"].into_iter().filter_map(move |key| {
+                    Some((
+                        (dir?.to_string(), node.props.get(key)?.as_str()?.to_string()),
+                        (test, node.id.clone()),
+                    ))
+                })
+            })
+            .fold(
+                BTreeMap::new(),
+                |mut index: BTreeMap<_, (bool, String)>, (key, value)| {
+                    match index.get(&key) {
+                        Some((false, _)) if value.0 => {}
+                        _ => {
+                            index.insert(key, value);
+                        }
+                    }
+                    index
+                },
+            )
+            .into_iter()
+            .map(|(key, (_, id))| (key, id))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let test_index = index_of(true);
     let symbol_index = out
         .nodes
         .iter()
-        .filter(|node| node.label == "Symbol")
+        .filter(|node| node.label == "Symbol" && !in_test_file(&node.id))
         .flat_map(|node| {
             let dir = node.props.get("package_dir").and_then(|d| d.as_str());
             ["simple_name", "name"].into_iter().filter_map(move |key| {
@@ -1638,7 +1699,12 @@ pub fn extract_dir_incremental_with_progress(
         })
         .collect::<BTreeMap<_, _>>();
     for pending in std::mem::take(&mut out.pending_calls) {
-        if let Some(dst) = symbol_index.get(&(pending.package_dir, pending.exported)) {
+        let index = if in_test_file(&pending.src) {
+            &test_index
+        } else {
+            &symbol_index
+        };
+        if let Some(dst) = index.get(&(pending.package_dir, pending.exported)) {
             out.edges.push(Edge {
                 src: pending.src,
                 dst: dst.clone(),
@@ -1665,6 +1731,7 @@ pub fn extract_dir_incremental_with_progress(
     out.fetch_sites.extend(joined);
     let functions = std::mem::take(&mut out.handler_functions);
     vercel::routes(root, id.repo, id.commit, &functions, &mut out);
+    target_tests::resolve(&mut out, id.repo);
     let modules = repo_modules(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
@@ -1697,6 +1764,7 @@ mod config_read;
 mod events;
 mod queries;
 mod rule_evidence;
+mod target_tests;
 mod vercel;
 
 #[cfg(test)]

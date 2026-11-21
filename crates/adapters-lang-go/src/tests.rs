@@ -225,7 +225,8 @@ fn every_fact_has_confirmed_provenance_and_spans() {
 #[test]
 fn incremental_reingest_is_deterministic_and_skips_noise() {
     // AC-0054/T-0054: unchanged Go contexts are reused, byte changes are
-    // isolated, and vendored/test/build sources never enter application facts.
+    // isolated, and vendored/build sources never enter application facts;
+    // a test file is read for its tests only (#2019).
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("a.go"),
@@ -260,8 +261,16 @@ fn incremental_reingest_is_deterministic_and_skips_noise() {
     .unwrap();
     let mut cache = IncrementalCache::default();
     let (first, first_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
-    assert_eq!(first_stats.recomputed_files, 2);
-    assert!(!first.nodes.iter().any(|node| node.id.contains("Noise")));
+    assert_eq!(first_stats.recomputed_files, 3);
+    assert!(!first.nodes.iter().any(|node| node.id.contains("noise.go")));
+    // Not `func TestX(t *testing.T)`: a function of the test file, no test.
+    assert!(
+        first
+            .nodes
+            .iter()
+            .filter(|node| node.id.contains("Noise"))
+            .all(|node| node.label == "Symbol" && node.id.contains("a_test.go#"))
+    );
     assert!(!first.nodes.iter().any(|node| node.id.contains("Ignored")));
     assert!(
         !first
@@ -271,13 +280,13 @@ fn incremental_reingest_is_deterministic_and_skips_noise() {
     );
     let (same, same_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
     assert_eq!(same_stats.recomputed_files, 0);
-    assert_eq!(same_stats.reused_files, 2);
+    assert_eq!(same_stats.reused_files, 3);
     assert_eq!(first.nodes, same.nodes);
     assert_eq!(first.edges, same.edges);
 
     std::fs::write(dir.path().join("go.mod"), "module example.com/changed\n").unwrap();
     let (_, module_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
-    assert_eq!(module_stats.recomputed_files, 2);
+    assert_eq!(module_stats.recomputed_files, 3);
     assert_eq!(module_stats.reused_files, 0);
 
     std::fs::write(
@@ -287,7 +296,7 @@ fn incremental_reingest_is_deterministic_and_skips_noise() {
     .unwrap();
     let (changed, changed_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
     assert_eq!(changed_stats.recomputed_files, 1);
-    assert_eq!(changed_stats.reused_files, 1);
+    assert_eq!(changed_stats.reused_files, 2);
     assert!(
         changed
             .nodes
@@ -1345,5 +1354,137 @@ func FromEnv() string {
         x.edges
             .iter()
             .any(|e| e.label == "USES" && e.dst == store.id && e.src.ends_with("#FromEnv"))
+    );
+}
+
+/// AC-0960 (#2019): `func TestXxx(t *testing.T)` is a TestCase implemented
+/// by its function, whose calls reach the package's code; the requests it
+/// builds with literal method and target reach the endpoint serving them,
+/// with the statuses it compares; a computed or unserved request is a Gap;
+/// nothing else in a test file is a fact about the system.
+#[test]
+fn go_tests_are_test_cases_linked_to_the_endpoints_they_request() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("server.go"),
+        r#"package app
+import "net/http"
+func Routes(mux *http.ServeMux) {
+    mux.HandleFunc("GET /api/items/{id}", GetItem)
+    mux.HandleFunc("POST /api/items", CreateItem)
+    mux.HandleFunc("GET /{$}", GetItem)
+}
+func GetItem(w http.ResponseWriter, r *http.Request) {}
+func CreateItem(w http.ResponseWriter, r *http.Request) { validate() }
+func validate() {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("server_test.go"),
+        r#"package app
+import (
+    "net/http"
+    "net/http/httptest"
+    "testing"
+)
+func TestGetItem(t *testing.T) {
+    req := httptest.NewRequest(http.MethodGet, "https://x.test/api/items/7?full=1", nil)
+    rec := httptest.NewRecorder()
+    GetItem(rec, req)
+    if rec.Code != http.StatusOK { t.Fatal() }
+    if rec.Code == 404 { t.Fatal() }
+}
+func TestCreate(t *testing.T) {
+    newHelper()
+    req := httptest.NewRequest("POST", "/api/items", nil)
+    _ = req
+    http.Get("https://external.example/should-not-be-a-fetch")
+}
+func TestComputed(t *testing.T) {
+    base := "/api"
+    _ = httptest.NewRequest("GET", base+"/items/1", nil)
+    _ = httptest.NewRequest("DELETE", "/api/items", nil)
+    _ = httptest.NewRequest("GET", "/other", nil)
+}
+func Testing(t *testing.T) {}
+func TestNotATest(x int) {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("helper_test.go"),
+        "package app\nfunc newHelper() { validate() }\n",
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let tests: BTreeSet<&str> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tests,
+        BTreeSet::from(["TestComputed", "TestCreate", "TestGetItem"])
+    );
+    let edge = |src: &str, label: &str| -> Vec<&Edge> {
+        x.edges
+            .iter()
+            .filter(|e| e.src.ends_with(src) && e.label == label)
+            .collect()
+    };
+    // Implemented by its function, whose calls reach the package's code,
+    // through a helper in another test file too.
+    let implemented = edge("server_test.go#TestGetItem", "IMPLEMENTED_BY");
+    assert_eq!(
+        implemented[0].dst,
+        "sym:local/go-service@server_test.go#TestGetItem"
+    );
+    assert!(
+        edge("server_test.go#TestGetItem", "CALLS")
+            .iter()
+            .any(|e| e.dst.ends_with("server.go#GetItem"))
+    );
+    assert!(
+        edge("helper_test.go#newHelper", "CALLS")
+            .iter()
+            .any(|e| e.dst.ends_with("server.go#validate"))
+    );
+    // Requests reach the endpoint serving them, with compared statuses.
+    let get = edge("server_test.go#TestGetItem", "REQUESTS");
+    assert_eq!(get.len(), 1);
+    assert_eq!(get[0].dst, "ep:local/go-service@GET:/api/items/{id}");
+    assert_eq!(get[0].props["statuses"], serde_json::json!([200, 404]));
+    assert_eq!(get[0].props["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(get[0].props["link"], "handler_assumed");
+    assert_eq!(
+        edge("server_test.go#TestCreate", "REQUESTS")[0].dst,
+        "ep:local/go-service@POST:/api/items"
+    );
+    // Computed and unserved requests are Gaps naming them.
+    let mut reasons: Vec<&str> = edge("server_test.go#TestComputed", "REQUESTS")
+        .iter()
+        .map(|e| e.props["reason"].as_str().unwrap())
+        .collect();
+    reasons.sort();
+    assert_eq!(
+        reasons,
+        [
+            "no recovered endpoint serves this path and method",
+            "no recovered endpoint serves this path and method",
+            "test request URL is computed"
+        ]
+    );
+    // A test file's client call, routes and the like are not system facts.
+    assert!(x.fetch_sites.iter().all(|s| !s.path.ends_with("_test.go")));
+    assert!(
+        x.nodes
+            .iter()
+            .filter(|n| n.id.contains("_test.go"))
+            .all(
+                |n| matches!(n.label.as_str(), "File" | "Symbol" | "TestCase")
+                    || n.id.starts_with("gap:test-call:")
+            )
     );
 }
