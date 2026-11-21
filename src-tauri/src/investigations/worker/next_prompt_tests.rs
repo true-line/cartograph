@@ -1237,8 +1237,6 @@ pub(in crate::investigations) fn with_public_start_fixture_then<T>(
     );
     let mut request = fixture.request.clone();
     // This callback can dispatch detached workers or return cloned handles.
-    // Opt out before even the optional inline run; its return cannot re-enable release.
-    fixture.base.app.retain_for_external_use();
     if legacy_completed {
         fixture.run(provider);
         assert_eq!(

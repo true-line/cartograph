@@ -356,7 +356,6 @@ fn an_mcp_session_starts_a_drafting_run_and_reads_its_outcome() {
         &question,
     );
     // The start below dispatches a detached worker.
-    fixture.base.app.retain_for_external_use();
     let app = fixture.base.app.handle();
     let state = app.state::<AppState>();
     // Retire the fixture's own task: the session starts its own.
