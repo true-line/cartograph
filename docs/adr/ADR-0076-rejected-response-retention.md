@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-21
 - **Deciders:** Cartograph lead (delegate); Claude implements
-- **Related:** #1616; US-0032 / AC-0725, AC-1403; ADR-0071
+- **Related:** #1616; US-0032 / AC-0725, AC-1403, AC-1404; ADR-0071
 
 ## Context
 
@@ -22,8 +22,9 @@ supplied source (`source_replay`), must not be kept.
 ## Decision
 
 1. **One record per failed task.** When the terminal cause is a rejected
-   response (`ActionDecode` or `InvalidResponse`), the terminal transaction
-   also writes `investigation-rejected-response` schema 1. It holds the step
+   response (`ActionDecode` or `InvalidResponse`, or a finish the store
+   refuses at admission, AC-1404), the terminal transaction also writes
+   `investigation-rejected-response` schema 1. It holds the step
    id, the size and content hash of the whole response, and a retention. The
    record goes in its own immutable table, `rejected_response_records`. That
    table is created on first use and isn't counted toward task or store
