@@ -1449,6 +1449,12 @@ fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
 /// name.
 fn called(value: &str) -> Option<String> {
     let value = value.trim().strip_prefix("await ").unwrap_or(value.trim());
+    // TypeScript repository writes and published events (#1998).
+    if let Some(clause) = repository_write(value).or_else(|| published(value)) {
+        return Some(clause);
+    }
+    // `this.historyService.createEntry(…)`: the method is the action.
+    let value = value.strip_prefix("this.").unwrap_or(value);
     let callee = &value[..value.find('(')?];
     let mut segments = callee.split('.');
     if !segments
@@ -1483,6 +1489,78 @@ fn called(value: &str) -> Option<String> {
         return Some(format!("the user is shown “{message}”"));
     }
     Some(format!("it runs “{}”", words(last.trim_start_matches('_'))))
+}
+
+/// A TypeORM repository write as a clause (#1998):
+/// `this.connection.getRepository(ctx, Order).save(order)` is "the “order”
+/// record is saved", `this.orderItemRepository.delete(id)` is "the “order
+/// item” record is deleted". `None` for another call.
+fn repository_write(value: &str) -> Option<String> {
+    // A chain split over lines (`this.connection\n  .getRepository(…)`).
+    let mut compact = String::with_capacity(value.len());
+    for part in value.split('.') {
+        if !compact.is_empty() {
+            compact.truncate(compact.trim_end().len());
+            compact.push('.');
+        }
+        compact.push_str(if compact.is_empty() {
+            part
+        } else {
+            part.trim_start()
+        });
+    }
+    let value = compact.as_str();
+    let (entity, rest) = if let Some(at) = value.find(".getRepository(") {
+        let args = &value[at + ".getRepository(".len()..];
+        let close = args.find(')')?;
+        let entity = args[..close].rsplit(',').next()?.trim();
+        (entity, &args[close + 1..])
+    } else {
+        // A `this.…Repository` field: only TypeScript evidence has `this`.
+        let callee = &value[..value.find('(')?];
+        let (object, _) = callee.rsplit_once('.')?;
+        if !object.starts_with("this.") {
+            return None;
+        }
+        let entity = object.rsplit('.').next()?.strip_suffix("Repository")?;
+        (entity, &value[object.len()..])
+    };
+    if entity.is_empty()
+        || !entity
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let verb = rest.strip_prefix('.')?.split('(').next()?;
+    let noun = words(entity);
+    Some(match verb {
+        "save" | "upsert" => format!("the “{noun}” record is saved"),
+        "insert" => format!("a new “{noun}” record is created"),
+        "update" | "increment" | "decrement" => format!("the “{noun}” record is updated"),
+        "delete" | "remove" | "softDelete" | "softRemove" => {
+            format!("the “{noun}” record is deleted")
+        }
+        _ => return None,
+    })
+}
+
+/// `this.eventBus.publish(new OrderStateTransitionEvent(…))` is "the “order
+/// state transition” event is published" (#1998).
+fn published(value: &str) -> Option<String> {
+    let args = value
+        .strip_prefix("this.eventBus.publish(")?
+        .trim_start()
+        .strip_prefix("new ")?;
+    let class = &args[..args.find('(')?];
+    if class.is_empty() || !class.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let name = class
+        .strip_suffix("Event")
+        .filter(|n| !n.is_empty())
+        .unwrap_or(class);
+    Some(format!("the “{}” event is published", words(name)))
 }
 
 /// A guarded exit's conditions with a given outcome clause (#2027): "When
@@ -2302,6 +2380,38 @@ mod tests {
             "the “deleted alias” record is deleted"
         );
         assert_eq!(called("Session.delete(alias)").unwrap(), "it runs “delete”");
+        // TypeScript (#1998).
+        assert_eq!(
+            called("await this.connection.getRepository(ctx, OrderLine).save(line)").unwrap(),
+            "the “order line” record is saved"
+        );
+        assert_eq!(
+            called("this.connection\n   .getRepository(ctx, User)\n   .update(user.id, x)")
+                .unwrap(),
+            "the “user” record is updated"
+        );
+        assert_eq!(
+            called("this.orderItemRepository.delete(item.id)").unwrap(),
+            "the “order item” record is deleted"
+        );
+        // A Python `userRepository` alias is not a TypeORM field.
+        assert_eq!(
+            called("userRepository.delete(x)").unwrap(),
+            "it runs “delete”"
+        );
+        assert_eq!(
+            called("this.connection.getRepository(ctx, Payment).insert(p)").unwrap(),
+            "a new “payment” record is created"
+        );
+        assert_eq!(
+            called("this.eventBus.publish(new OrderStateTransitionEvent(from, to, ctx, order))")
+                .unwrap(),
+            "the “order state transition” event is published"
+        );
+        assert_eq!(
+            called("this.historyService.createHistoryEntryForOrder({ ctx })").unwrap(),
+            "it runs “create history entry for order”"
+        );
         assert_eq!(
             called("flash(\"Alias not found\", \"error\")").unwrap(),
             "the user is shown “Alias not found”"

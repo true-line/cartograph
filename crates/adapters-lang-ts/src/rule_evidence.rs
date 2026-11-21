@@ -606,6 +606,7 @@ pub(super) fn extract<'tree>(
     let mut exits: BTreeMap<String, Vec<TsNode<'tree>>> = BTreeMap::new();
     let mut controls: BTreeMap<String, BTreeMap<String, (RuleGapReason, TsNode<'tree>)>> =
         BTreeMap::new();
+    let mut effects: BTreeMap<String, Vec<(TsNode<'tree>, EffectKind<'tree>)>> = BTreeMap::new();
     for node in nodes.iter().copied() {
         if node.is_error()
             || node.is_missing()
@@ -619,6 +620,10 @@ pub(super) fn extract<'tree>(
             if let Some(owner) = callable::enclosing(cx, node) {
                 exits.entry(owner).or_default().push(node);
             }
+        } else if let Some(kind) = effect_statement(cx, node)
+            && let Some(owner) = callable::enclosing(cx, node)
+        {
+            effects.entry(owner).or_default().push((node, kind));
         } else if let Some(reason) = control_reason(node.kind())
             && let Some(owner) = callable::enclosing(cx, node)
         {
@@ -631,7 +636,8 @@ pub(super) fn extract<'tree>(
     }
     let mut rule_count = 0;
     let mut file_bytes = 0;
-    for (owner_id, owner_exits) in exits {
+    for (owner_id, owner_exits) in &exits {
+        let owner_id = owner_id.clone();
         if !targets.contains(&owner_id) {
             continue;
         }
@@ -822,6 +828,307 @@ pub(super) fn extract<'tree>(
             }
         }
     }
+
+    // Guarded effects (#1998): a repository write, a published event, a
+    // service call or a field change under at least one branch condition.
+    let mut effect_count = 0;
+    for (owner_id, owner_effects) in effects {
+        if !targets.contains(&owner_id) {
+            continue;
+        }
+        let owner_exits = exits.get(&owner_id).map_or(&[][..], Vec::as_slice);
+        for (order, (at, kind)) in owner_effects.into_iter().enumerate() {
+            let (ancestors, limited, recovered) = branches(at);
+            if recovered || ancestors.is_empty() {
+                continue;
+            }
+            if limited || effect_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
+                omission_gap(cx, at, &owner_id, RuleGapReason::AnalysisLimit, out);
+                return;
+            }
+            let rule_id = format!("rule:{}@{}#effect@{}", cx.id.repo, cx.path, at.start_byte());
+            let mut builder = RuleBuilder {
+                cx,
+                // One set of interpretation Gaps per callable's effects.
+                rule_id: format!("{owner_id}#effects"),
+                gaps: BTreeMap::new(),
+                dependencies: Vec::new(),
+                definition_seeds: Vec::new(),
+                seed_values: false,
+            };
+            builder.control_gap(RuleGapReason::ExecutionPredicateUnknown, at);
+            builder.control_gap(RuleGapReason::ConsumerSemanticsUnknown, at);
+            // The last exit before the effect may leave the callable first.
+            if let Some(prior) = owner_exits
+                .iter()
+                .rev()
+                .find(|exit| exit.end_byte() <= at.start_byte())
+            {
+                builder.control_gap(RuleGapReason::PrecedingExit, *prior);
+            }
+            if let Some(controls) = controls.get(&owner_id) {
+                for (reason, at) in controls.values() {
+                    builder.control_gap(*reason, *at);
+                }
+            }
+            let mut redactions = Vec::new();
+            let mut conditions = Vec::new();
+            for (branch, condition, polarity) in ancestors {
+                let (expression, mut withheld) = capture(cx, condition);
+                if expression.capture != ExpressionCapture::CompleteSyntax {
+                    builder.control_gap(RuleGapReason::RedactedExpression, condition);
+                }
+                redactions.append(&mut withheld);
+                if condition.byte_range().len() <= MAX_EXPRESSION_BYTES {
+                    builder.dependencies(condition, DependencyRole::Condition, bindings, &targets);
+                } else {
+                    builder.control_gap(RuleGapReason::AnalysisLimit, condition);
+                }
+                conditions.push(BranchCondition {
+                    branch_source: source(cx, branch),
+                    expression,
+                    polarity,
+                });
+            }
+            let mut captured = |node: TsNode<'tree>, builder: &mut RuleBuilder<'_, 'tree>| {
+                let (expression, mut withheld) = capture(cx, node);
+                if expression.capture != ExpressionCapture::CompleteSyntax {
+                    builder.control_gap(RuleGapReason::RedactedExpression, node);
+                }
+                redactions.append(&mut withheld);
+                expression
+            };
+            let (effect, read) = match kind {
+                EffectKind::Assign { target, value } => (
+                    LocalExit::Assign {
+                        target: captured(target, &mut builder),
+                        value: captured(value, &mut builder),
+                    },
+                    value,
+                ),
+                EffectKind::Call { call } => (
+                    LocalExit::Call {
+                        value: captured(call, &mut builder),
+                    },
+                    call,
+                ),
+            };
+            if read.byte_range().len() <= MAX_EXPRESSION_BYTES {
+                builder.dependencies(read, DependencyRole::ExitValue, bindings, &targets);
+            } else {
+                builder.control_gap(RuleGapReason::AnalysisLimit, read);
+            }
+            let evidence = GuardedExitEvidence {
+                schema_version: RULE_EVIDENCE_SCHEMA_VERSION,
+                kind: RuleKind::GuardedEffect,
+                owner_id: owner_id.clone(),
+                exit_source: source(cx, at),
+                source_order: order as u32,
+                conditions,
+                effect,
+                dependencies: builder.dependencies,
+                local_definitions: Some(Vec::new()),
+                interpretation: Interpretation {
+                    execution_predicate: InterpretationStatus::NotEstablished,
+                    consumer_effect: InterpretationStatus::NotEstablished,
+                    gap_ids: builder.gaps.values().map(|(id, _)| id.clone()).collect(),
+                },
+                redactions,
+            };
+            if let Err(error) = evidence.validate() {
+                omission_gap(
+                    cx,
+                    at,
+                    &owner_id,
+                    if matches!(error, RuleValidationError::Limit(_)) {
+                        RuleGapReason::AnalysisLimit
+                    } else {
+                        RuleGapReason::UnsupportedRuleSyntax
+                    },
+                    out,
+                );
+                return;
+            }
+            let payload = serde_json::to_value(evidence).expect("rule serializes");
+            let canonical = serde_json::to_string(&payload).expect("rule serializes");
+            if canonical.len() > MAX_RULE_BYTES
+                || file_bytes + canonical.len() > MAX_FILE_RULE_BYTES
+            {
+                omission_gap(cx, at, &owner_id, RuleGapReason::AnalysisLimit, out);
+                return;
+            }
+            file_bytes += canonical.len();
+            effect_count += 1;
+            let rule_node = Node {
+                id: rule_id.clone(),
+                label: "BusinessRule".into(),
+                props: serde_json::json!({
+                    "name": format!("Guarded local effect at {}:{}", cx.path, at.start_position().row + 1),
+                    "observation": "guarded_effect",
+                    "rule": payload,
+                    "prov": cx.prov(&at, &canonical),
+                }),
+            };
+            let governs = Edge {
+                src: rule_id.clone(),
+                dst: owner_id.clone(),
+                label: "GOVERNS".into(),
+                props: serde_json::json!({"observation": "lexical_owner", "prov": cx.prov(&at, &format!("GOVERNS {rule_id} -> {owner_id}"))}),
+            };
+            if let Some(direct) = direct.as_deref_mut() {
+                direct.rules.push((rule_node.clone(), governs.clone()));
+            }
+            out.nodes.push(rule_node);
+            out.edges.push(governs);
+            for (reason, (gap_id, at)) in builder.gaps {
+                // Shared by the callable's effects: emitted once.
+                if !out.nodes.iter().any(|node| node.id == gap_id) {
+                    out.nodes.push(Node {
+                        id: gap_id.clone(),
+                        label: "Gap".into(),
+                        props: serde_json::json!({
+                            "rule_evidence_gap": true,
+                            "reason_code": reason,
+                            "reason": reason_description(&reason),
+                            "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+                        }),
+                    });
+                }
+                let props = serde_json::json!({
+                    "rule_evidence_gap": true,
+                    "reason_code": reason,
+                    "reason": reason_description(&reason),
+                    "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {gap_id}")),
+                });
+                out.edges.push(Edge {
+                    src: rule_id.clone(),
+                    dst: gap_id,
+                    label: "DEPENDS_ON".into(),
+                    props,
+                });
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EffectKind<'t> {
+    Assign {
+        target: TsNode<'t>,
+        value: TsNode<'t>,
+    },
+    Call {
+        call: TsNode<'t>,
+    },
+}
+
+/// Repository methods that write (`getRepository(ctx, Order).save(order)`).
+const REPOSITORY_WRITES: &[&str] = &[
+    "save",
+    "insert",
+    "update",
+    "upsert",
+    "delete",
+    "remove",
+    "softDelete",
+    "softRemove",
+    "increment",
+    "decrement",
+];
+
+/// Service method prefixes that read rather than act.
+const SERVICE_READS: &[&str] = &[
+    "get", "find", "is", "has", "can", "count", "list", "check", "validate", "assert",
+];
+
+/// A statement that is a guarded effect (#1998), optionally awaited: an
+/// assignment through a member not on `this` (`order.active = false`), a repository write
+/// (`getRepository(ctx, Order).save(…)`, `this.orderRepository.delete(…)`),
+/// `this.eventBus.publish(…)`, or a call of a `this.…Service` method that is
+/// not a read (`this.historyService.createHistoryEntryForOrder(…)`).
+/// Constructor bodies are not effects.
+fn effect_statement<'t>(cx: &FileCx<'_>, node: TsNode<'t>) -> Option<EffectKind<'t>> {
+    if node.kind() != "expression_statement" || node.named_child_count() != 1 {
+        return None;
+    }
+    let mut inner = unparenthesized(node.named_child(0)?);
+    if inner.kind() == "await_expression" {
+        inner = unparenthesized(inner.named_child(0)?);
+    }
+    let kind = match inner.kind() {
+        "assignment_expression" => {
+            let target = inner.child_by_field_name("left")?;
+            let value = inner.child_by_field_name("right")?;
+            // `this.cache = …` is the object's own bookkeeping.
+            let own = target
+                .child_by_field_name("object")
+                .is_some_and(|object| object.kind() == "this");
+            (target.kind() == "member_expression" && !own)
+                .then_some(EffectKind::Assign { target, value })?
+        }
+        "call_expression" => effect_call(cx, inner).then_some(EffectKind::Call { call: inner })?,
+        _ => return None,
+    };
+    let mut up = node;
+    while let Some(parent) = up.parent() {
+        if callable::is_callable(parent) {
+            let constructor = parent.kind() == "method_definition"
+                && parent
+                    .child_by_field_name("name")
+                    .is_some_and(|name| cx.text(&name) == "constructor");
+            return (!constructor).then_some(kind);
+        }
+        up = parent;
+    }
+    None
+}
+
+fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
+    let Some(callee) = call
+        .child_by_field_name("function")
+        .filter(|callee| callee.kind() == "member_expression")
+    else {
+        return false;
+    };
+    let (Some(object), Some(property)) = (
+        callee.child_by_field_name("object"),
+        callee.child_by_field_name("property"),
+    ) else {
+        return false;
+    };
+    let verb = cx.text(&property);
+    if REPOSITORY_WRITES.contains(&verb) {
+        let repository = object.kind() == "call_expression"
+            && object
+                .child_by_field_name("function")
+                .filter(|f| f.kind() == "member_expression")
+                .and_then(|f| f.child_by_field_name("property"))
+                .is_some_and(|p| cx.text(&p) == "getRepository");
+        let named = object.kind() == "member_expression"
+            && object
+                .child_by_field_name("property")
+                .is_some_and(|p| cx.text(&p).ends_with("Repository"));
+        if repository || named {
+            return true;
+        }
+    }
+    if object.kind() != "member_expression"
+        || !object
+            .child_by_field_name("object")
+            .is_some_and(|o| o.kind() == "this")
+    {
+        return false;
+    }
+    let Some(field) = object.child_by_field_name("property").map(|p| cx.text(&p)) else {
+        return false;
+    };
+    (field == "eventBus" && verb == "publish")
+        || (field.ends_with("Service")
+            && !SERVICE_READS.iter().any(|read| {
+                verb.strip_prefix(read).is_some_and(|rest| {
+                    rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase())
+                })
+            }))
 }
 
 /// Cached unchanged source still belongs to the revision being ingested now.
