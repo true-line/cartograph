@@ -26,17 +26,21 @@ fn fills(store: &SqliteGraphStore) -> Vec<(String, String)> {
 fn name_unique_fills_are_recomputed_on_every_load() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
-    // `./index` re-exports, so the import proof finds no `isObservable` in
-    // index.ts and the call stays a Gap; the name is unique tree-wide.
+    // `./index` re-exports only `other`, so no re-export proves the import
+    // (AC-1504) and the call stays a Gap; the name is unique tree-wide.
     std::fs::write(
         dir.path().join("src/main.ts"),
         "import { isObservable } from './index';\nexport function main(x) {\n  return isObservable(x);\n}\n",
     )
     .unwrap();
-    std::fs::write(dir.path().join("src/index.ts"), "export * from './obs';\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "export { other } from './obs';\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("src/obs.ts"),
-        "export function isObservable(x) {\n  return !!x;\n}\n",
+        "export function isObservable(x) {\n  return !!x;\n}\nexport function other() {\n  return 0;\n}\n",
     )
     .unwrap();
     let mut store = SqliteGraphStore::open_in_memory().unwrap();
