@@ -78,6 +78,19 @@ fn mint_lane_file_receipts(
     nodes: &[Node],
     edges: &[Edge],
 ) -> Result<Vec<MintedReceipt>, CapturedError> {
+    mint_lane_receipts_in(grammar, file, None, id, nodes, edges)
+}
+
+/// As [`mint_lane_file_receipts`]; with `capture`, a fact whose evidence also
+/// cites other captured files of the same grammar is bound to each (AC-1039).
+fn mint_lane_receipts_in(
+    grammar: Grammar,
+    file: &CapturedFile,
+    capture: Option<&source_capture::Capture>,
+    id: &SourceId,
+    nodes: &[Node],
+    edges: &[Edge],
+) -> Result<Vec<MintedReceipt>, CapturedError> {
     let path = &file.reference().path;
     if Grammar::for_path(path) != grammar || !valid_path(path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
@@ -88,8 +101,12 @@ fn mint_lane_file_receipts(
     let mut seen = std::collections::BTreeSet::new();
     let minted = nodes
         .iter()
-        .map(|node| Receipt::for_node(file, id, node))
-        .chain(edges.iter().map(|edge| Receipt::for_edge(file, id, edge)));
+        .map(|node| Receipt::for_node_in(file, capture, id, node))
+        .chain(
+            edges
+                .iter()
+                .map(|edge| Receipt::for_edge_in(file, capture, id, edge)),
+        );
     for receipt in minted {
         let Ok(receipt) = receipt.and_then(|receipt| MintedReceipt::compact(receipt, &mut header))
         else {
@@ -104,10 +121,12 @@ fn mint_lane_file_receipts(
 }
 
 /// Receipt candidates for a lane's final facts, after directory resolution
-/// (AC-1037). Each fact whose primary provenance lies wholly in one of the
-/// captured `files` is minted against that file, file by file in `files`
-/// order, and staged within the extraction budget; a fact citing several
-/// files, or a file outside the capture, gets none.
+/// (AC-1037). Each fact is minted against the captured file its first
+/// primary evidence entry cites, file by file in `files` order, and staged
+/// within the extraction budget. A fact whose evidence also cites other files
+/// is bound to each of them when every one is captured under the same grammar
+/// (AC-1039, at most [`super::MAX_RECEIPT_OTHER_FILES`] more); otherwise it
+/// gets none.
 pub fn stage_lane_receipts(
     grammar: Grammar,
     capture: &source_capture::Capture,
@@ -119,12 +138,12 @@ pub fn stage_lane_receipts(
     let mut by_file: std::collections::BTreeMap<&str, (Vec<&Node>, Vec<&Edge>)> =
         std::collections::BTreeMap::new();
     for node in nodes {
-        if let Some(path) = sole_evidence_path(&node.props) {
+        if let Some(path) = first_evidence_path(&node.props) {
             by_file.entry(path).or_default().0.push(node);
         }
     }
     for edge in edges {
-        if let Some(path) = sole_evidence_path(&edge.props) {
+        if let Some(path) = first_evidence_path(&edge.props) {
             by_file.entry(path).or_default().1.push(edge);
         }
     }
@@ -136,21 +155,24 @@ pub fn stage_lane_receipts(
         };
         let nodes: Vec<Node> = nodes.iter().map(|node| (*node).clone()).collect();
         let edges: Vec<Edge> = edges.iter().map(|edge| (*edge).clone()).collect();
-        if let Ok(receipts) = mint_lane_file_receipts(grammar, file, id, &nodes, &edges) {
+        if let Ok(receipts) =
+            mint_lane_receipts_in(grammar, file, Some(capture), id, &nodes, &edges)
+        {
             stage.extend(receipts);
         }
     }
     stage
 }
 
-/// The one file every primary evidence entry of a fact cites, if there is one.
-fn sole_evidence_path(props: &serde_json::Value) -> Option<&str> {
-    let evidence = props.get("prov")?.get("evidence")?.as_array()?;
-    let mut paths = evidence
-        .iter()
-        .map(|entry| entry.get("path").and_then(serde_json::Value::as_str));
-    let first = paths.next()??;
-    paths.all(|path| path == Some(first)).then_some(first)
+/// The file a fact's first primary evidence entry cites: its receipt's
+/// primary file.
+fn first_evidence_path(props: &serde_json::Value) -> Option<&str> {
+    props
+        .get("prov")?
+        .get("evidence")?
+        .get(0)?
+        .get("path")?
+        .as_str()
 }
 
 /// Python receipt candidates staged while the lane mints them, charged
@@ -511,7 +533,7 @@ mod tests {
 
     // AC-1037: final facts, including those the directory join builds from
     // several spans of one file, are bound per captured file in `files`
-    // order; a fact citing two files, or a file outside the capture, gets none.
+    // order; a fact citing a file outside the capture gets none.
     #[test]
     fn lane_receipts_bind_final_facts_citing_one_captured_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -535,8 +557,8 @@ mod tests {
         let nodes = [
             joined.clone(),
             node(
-                "ep:cross",
-                json!({ "prov": prov_spanning(&[("a.py", (0, 3)), ("b.py", (0, 3))]) }),
+                "ep:outside",
+                json!({ "prov": prov_spanning(&[("a.py", (0, 3)), ("c.py", (0, 3))]) }),
             ),
             node("sym:b", json!({ "prov": prov("b.py", (4, 11)) })),
             node("sym:c", json!({ "prov": prov("c.py", (0, 3)) })),
@@ -570,6 +592,181 @@ mod tests {
         assert!(receipt.id().starts_with("py-primary-v1:"));
         assert!(receipt.matches_node(&joined));
         assert_eq!(receipt.ranges().len(), 2);
+    }
+
+    // AC-1039: a fact the join builds from spans of several captured files of
+    // the lane's grammar gets one receipt whose primary file is the first one
+    // cited and which lists the others; each range reads back from its own
+    // file, the receipt round-trips, and its single-file shape is unchanged.
+    #[test]
+    fn lane_receipts_bind_facts_citing_several_captured_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["routes.py", "app.py", "blog.py"] {
+            std::fs::write(dir.path().join(path), SOURCE).unwrap();
+        }
+        std::fs::write(dir.path().join("view.ts"), "export const a = 1;\n").unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap(),
+            &[
+                "app.py".to_string(),
+                "blog.py".to_string(),
+                "routes.py".to_string(),
+                "view.ts".to_string(),
+            ],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let id = SourceId {
+            repo: "local/src_11111111111111111111111111111111",
+            commit: "workdir",
+        };
+        // The route in routes.py, then its mounts in app.py and blog.py.
+        let route = node(
+            "ep:route",
+            json!({ "prov": prov_spanning(&[
+                ("routes.py", (4, 11)),
+                ("blog.py", (0, 3)),
+                ("app.py", (0, 3)),
+                ("blog.py", (4, 11)),
+            ]) }),
+        );
+        let mixed = node(
+            "ep:mixed",
+            json!({ "prov": prov_spanning(&[("routes.py", (0, 3)), ("view.ts", (0, 6))]) }),
+        );
+        let files = [
+            "app.py".to_string(),
+            "blog.py".to_string(),
+            "routes.py".to_string(),
+        ];
+        let staged = stage_lane_receipts(
+            Grammar::Python,
+            &capture,
+            &files,
+            &id,
+            &[route.clone(), mixed],
+            &[],
+        )
+        .into_receipts();
+        assert_eq!(staged.len(), 1, "a file of another grammar is never cited");
+        let minted = &staged[0];
+        let receipt = minted.to_receipt().unwrap();
+        assert!(receipt.id().starts_with("py-primary-v1:"));
+        assert_eq!(receipt.file().path, "routes.py");
+        let others: Vec<_> = receipt
+            .other_files()
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(others, ["app.py", "blog.py"]);
+        assert!(receipt.matches_node(&route));
+        assert!(minted.matches_node(&route));
+        let cited: Vec<_> = receipt
+            .ranges()
+            .iter()
+            .map(|range| range.captured.file.path.as_str())
+            .collect();
+        assert_eq!(cited, ["routes.py", "blog.py", "app.py", "blog.py"]);
+        for range in receipt.ranges() {
+            let file = capture.file(&range.captured.file.path).unwrap();
+            assert_eq!(range.captured.file, *file.reference());
+            assert!(
+                file.span(range.captured.byte_start, range.captured.byte_end)
+                    .is_ok()
+            );
+        }
+        let spans: Vec<_> = minted.captured_spans().collect();
+        assert_eq!(
+            spans,
+            receipt
+                .ranges()
+                .iter()
+                .map(|range| range.captured.clone())
+                .collect::<Vec<_>>()
+        );
+        let json = receipt.to_json().unwrap();
+        assert_eq!(minted.to_json().unwrap(), json);
+        assert_eq!(Receipt::from_json(&json).unwrap(), receipt);
+        // Compact ranges name the other file by position; the primary by none.
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let indices: Vec<_> = wire["content"]["ranges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|range| range.get("file").cloned())
+            .collect();
+        assert_eq!(
+            indices,
+            [None, Some(json!(1)), Some(json!(0)), Some(json!(1))]
+        );
+        // A single-file receipt carries no file list at all.
+        let single = mint_python_file_receipts(
+            capture.file("app.py").unwrap(),
+            &id,
+            &[node("sym:a", json!({ "prov": prov("app.py", (0, 3)) }))],
+            &[],
+        )
+        .unwrap();
+        assert!(!single[0].to_json().unwrap().contains("other_files"));
+    }
+
+    // AC-1039: every alternate or inconsistent spelling of the file list is
+    // rejected, so a receipt has one wire form.
+    #[test]
+    fn receipts_citing_several_files_have_one_wire_form() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["a.py", "b.py", "c.py"] {
+            std::fs::write(dir.path().join(path), SOURCE).unwrap();
+        }
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap(),
+            &["a.py".to_string(), "b.py".to_string(), "c.py".to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let id = SourceId {
+            repo: "local/src_11111111111111111111111111111111",
+            commit: "workdir",
+        };
+        let fact = node(
+            "ep:x",
+            json!({ "prov": prov_spanning(&[("a.py", (0, 3)), ("b.py", (4, 11))]) }),
+        );
+        let staged = stage_lane_receipts(
+            Grammar::Python,
+            &capture,
+            &["a.py".to_string()],
+            &id,
+            &[fact],
+            &[],
+        )
+        .into_receipts();
+        let json = staged[0].to_json().unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let tampered = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = wire.clone();
+            edit(&mut value);
+            Receipt::from_json(&value.to_string())
+        };
+        let c = serde_json::to_value(capture.file("c.py").unwrap().reference()).unwrap();
+        // An empty list, a null index, an index past the list, an uncited
+        // extra file, and a list naming the primary file are all refused.
+        assert!(tampered(&|value| value["content"]["other_files"] = json!([])).is_err());
+        assert!(tampered(&|value| value["content"]["ranges"][0]["file"] = json!(null)).is_err());
+        assert!(tampered(&|value| value["content"]["ranges"][1]["file"] = json!(1)).is_err());
+        assert!(
+            tampered(&|value| value["content"]["other_files"]
+                .as_array_mut()
+                .unwrap()
+                .push(c.clone()))
+            .is_err()
+        );
+        let a = wire["content"]["file"].clone();
+        assert!(tampered(&|value| value["content"]["other_files"] = json!([a.clone()])).is_err());
+        // The untampered receipt still decodes.
+        assert!(Receipt::from_json(&json).is_ok());
     }
 
     // AC-1024: Python receipts are admitted after those already held, within
