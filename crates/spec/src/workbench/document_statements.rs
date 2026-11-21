@@ -1071,6 +1071,56 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
     }
 }
 
+/// Which of an exit's conditions an `elif` chain implies (#2083, AC-1004):
+/// a test that a value differs from a literal, when another condition pins
+/// the same source expression to another literal. "the form name is not
+/// “cancel”, and the form name is “change-yearly”" says only the second,
+/// which a reader (and a small model) cannot misread as no option matching.
+/// Values are matched by their parsed source, so two inputs that read alike
+/// (a form field and a query parameter) are never taken for one.
+fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
+    let equality = |display: &str, polarity: BranchPolarity| -> Option<(Expr, bool, Lit)> {
+        let mut expr = parse(display)?;
+        let mut negated = polarity == BranchPolarity::FalsyBranch;
+        while let Expr::Not(inner) = expr {
+            expr = *inner;
+            negated = !negated;
+        }
+        let Expr::Cmp(left, op, right) = expr else {
+            return None;
+        };
+        let equal = match op.as_str() {
+            "==" => !negated,
+            "!=" => negated,
+            _ => return None,
+        };
+        match (*left, *right) {
+            (left @ (Expr::Ref(_) | Expr::Call(_) | Expr::Apply(..)), Expr::Lit(lit))
+                if !matches!(lit, Lit::None) =>
+            {
+                Some((left, equal, lit))
+            }
+            _ => None,
+        }
+    };
+    let tests: Vec<Option<(Expr, bool, Lit)>> = conditions
+        .iter()
+        .map(|&(display, polarity)| equality(display, polarity))
+        .collect();
+    tests
+        .iter()
+        .map(|test| {
+            test.as_ref().is_some_and(|(value, equal, lit)| {
+                !equal
+                    && tests
+                        .iter()
+                        .flatten()
+                        .any(|(other, pinned, to)| *pinned && other == value && to != lit)
+            })
+        })
+        .collect()
+}
+
 /// One stored condition in domain terms, with its branch polarity.
 pub(super) fn condition(
     display: &str,
@@ -1401,10 +1451,18 @@ pub(super) fn with_outcome(
         .rsplit_once('.')
         .and_then(|(class, _)| class.rsplit('.').next())
         .filter(|c| c.starts_with(|f: char| f.is_ascii_uppercase()));
+    let implied = implied_by_pin(
+        &evidence
+            .conditions
+            .iter()
+            .map(|c| (c.expression.display.as_str(), c.polarity))
+            .collect::<Vec<_>>(),
+    );
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
         .enumerate()
+        .filter(|(i, _)| !implied[*i])
         .map(|(i, c)| {
             let cx = Context {
                 class,
@@ -1484,10 +1542,18 @@ fn rendered(
     {
         return Some(said);
     }
+    let implied = implied_by_pin(
+        &evidence
+            .conditions
+            .iter()
+            .map(|c| (c.expression.display.as_str(), c.polarity))
+            .collect::<Vec<_>>(),
+    );
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
         .enumerate()
+        .filter(|(i, _)| !implied[*i])
         .map(|(i, c)| {
             let cx = Context {
                 class,
@@ -1836,6 +1902,47 @@ mod tests {
                 "the “X-Sl-Allowcookies” header is set".to_owned(),
             ],
         );
+    }
+
+    // AC-1004 (#2083): in an `elif` chain the value the branch takes is said
+    // alone: a test that a value differs from a literal is dropped when the
+    // same source value is pinned to another literal; one on another source
+    // that reads alike, or with no pin, is kept.
+    #[test]
+    fn a_value_pinned_by_its_branch_is_not_also_said_to_differ() {
+        let (t, f) = (BranchPolarity::TruthyBranch, BranchPolarity::FalsyBranch);
+        let form = |value: &str| format!("request.form.get(\"form-name\") == \"{value}\"");
+        let (cancel, monthly, yearly) = (
+            form("cancel"),
+            form("change-monthly"),
+            form("change-yearly"),
+        );
+        assert_eq!(
+            implied_by_pin(&[
+                ("request.method == \"POST\"", t),
+                (cancel.as_str(), f),
+                (monthly.as_str(), f),
+                (yearly.as_str(), t),
+                ("success", t),
+            ]),
+            vec![false, true, true, false, false]
+        );
+        assert_eq!(
+            implied_by_pin(&[("count != 0", t), ("count == 3", t)]),
+            vec![true, false]
+        );
+        for kept in [
+            // Another source that reads alike pins nothing here.
+            vec![
+                ("request.form.get(\"mode\") != \"cancel\"", t),
+                ("request.args.get(\"mode\") == \"yearly\"", t),
+            ],
+            vec![(cancel.as_str(), f), ("plan == \"yearly\"", t)],
+            vec![(cancel.as_str(), f), ("request.form.get(\"form-name\")", t)],
+            vec![(cancel.as_str(), f), (form("cancel").as_str(), t)],
+        ] {
+            assert_eq!(implied_by_pin(&kept), vec![false; kept.len()], "{kept:?}");
+        }
     }
 
     // AC-0912: membership, calls with arguments, type tests, lengths,
