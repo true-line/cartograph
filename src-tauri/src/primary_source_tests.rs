@@ -3979,3 +3979,88 @@ fn directory_built_lane_facts_are_cited_from_the_capture() {
             .any(|binding| binding.receipt_id == receipt.id())
     );
 }
+
+// AC-1037: a lane relation repeated across occurrences, and a node id emitted
+// twice, are minted in the form publication keeps (merged evidence, last
+// value), so the receipt binds the published fact.
+#[test]
+fn lane_receipts_cite_published_merged_relations() {
+    const SOURCE: &str = "def a():\n    b()\n    b()\n\ndef b():\n    pass\n";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.py"), SOURCE).unwrap();
+    let source_id = source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap();
+    let capture = source_capture::capture_working_tree(
+        dir.path(),
+        &source_id,
+        &["a.py".to_string()],
+        source_capture::CaptureLimits::default(),
+    )
+    .unwrap();
+    let repo = "local/src_11111111111111111111111111111111";
+    let prov = |span: (u64, u64)| {
+        serde_json::to_value(
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                vec![core_prov::EvidenceRef {
+                    repo: repo.into(),
+                    path: "a.py".into(),
+                    byte_start: span.0,
+                    byte_end: span.1,
+                    commit_sha: "workdir".into(),
+                }],
+                "t0.adapter-python",
+                b"fact",
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let node = |id: &str, span, name: &str| core_graph::Node {
+        id: id.into(),
+        label: "Symbol".into(),
+        props: json!({ "name": name, "prov": prov(span) }),
+    };
+    let call = |span| core_graph::Edge {
+        src: "sym:a".into(),
+        dst: "sym:b".into(),
+        label: "CALLS".into(),
+        props: json!({ "prov": prov(span) }),
+    };
+    let nodes = [
+        node("sym:a", (0, 9), "stale"),
+        node("sym:b", (29, 38), "b"),
+        node("sym:a", (0, 9), "a"),
+    ];
+    let edges = [call((14, 17)), call((22, 25))];
+    let id = adapters_lang_ts::SourceId {
+        repo,
+        commit: "workdir",
+    };
+    let mut receipts = Vec::new();
+    stage_lane_publication_receipts(
+        adapters_lang_ts::captured::Grammar::Python,
+        &capture,
+        &["a.py".to_string()],
+        &id,
+        &nodes,
+        &edges,
+        &mut receipts,
+    );
+    let edge = receipts
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Edge { .. }))
+        .expect("the merged relation carries a receipt")
+        .to_receipt()
+        .unwrap();
+    // Both call sites are cited, as the published relation unions them.
+    assert_eq!(edge.ranges().len(), 2);
+    let node_a = receipts
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Node { id } if id == "sym:a"))
+        .expect("the last value of a repeated node carries a receipt")
+        .to_receipt()
+        .unwrap();
+    assert!(node_a.matches_node(&nodes[2]));
+    assert_eq!(receipts.len(), 3);
+}
