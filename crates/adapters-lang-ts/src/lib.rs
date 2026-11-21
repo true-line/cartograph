@@ -102,6 +102,9 @@ pub struct Extraction {
     /// Barrel re-exports (AC-1504), followed at directory completion so a
     /// call through `index.ts` reaches the declaring file.
     reexports: Vec<reexports::ReExport>,
+    /// `(file, name)` of each top-level binding a file exports itself; an
+    /// `export *` hop only reaches these (AC-1504).
+    exported: Vec<(String, String)>,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -352,6 +355,7 @@ impl Extraction {
         self.next_routes.clear();
         self.strategies = strategies::Pending::default();
         self.reexports.clear();
+        self.exported.clear();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -468,18 +472,41 @@ impl FileCx<'_> {
     }
 }
 
-/// The re-export one top-level `export` statement makes, if any.
-fn reexport_of(
+/// What one top-level `export` statement re-exports and which of the
+/// file's own bindings it exports, appended to `reexports` / `exported`.
+fn record_exports(
     cx: &FileCx<'_>,
     stmt: TsNode<'_>,
     imported: &HashMap<String, String>,
     imported_names: &HashMap<String, String>,
-) -> Option<reexports::ReExport> {
+    reexports: &mut Vec<reexports::ReExport>,
+    exported: &mut Vec<(String, String)>,
+) {
     let span = (stmt.start_byte() as u64, stmt.end_byte() as u64);
+    let file = cx.path.to_string();
     let unquote = |node: TsNode<'_>| {
         let text = cx.text(&node);
         text.get(1..text.len().checked_sub(1)?).map(str::to_string)
     };
+    // `export class A`, `export function f`, `export const a = …, b = …`.
+    if let Some(declaration) = stmt.child_by_field_name("declaration") {
+        if let Some(name) = declaration.child_by_field_name("name") {
+            exported.push((file.clone(), cx.text(&name).to_string()));
+        }
+        let mut cursor = declaration.walk();
+        for declarator in declaration
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() == "variable_declarator")
+        {
+            if let Some(name) = declarator
+                .child_by_field_name("name")
+                .filter(|name| name.kind() == "identifier")
+            {
+                exported.push((file.clone(), cx.text(&name).to_string()));
+            }
+        }
+        return;
+    }
     let source = stmt.child_by_field_name("source").and_then(unquote);
     let mut cursor = stmt.walk();
     let children: Vec<_> = stmt.children(&mut cursor).collect();
@@ -487,7 +514,7 @@ fn reexport_of(
         .iter()
         .any(|child| child.kind() == "namespace_export")
     {
-        return None; // `export * as ns from`: a namespace, not a re-export
+        return; // `export * as ns from`: a namespace, not a re-export
     }
     let clause = children
         .iter()
@@ -507,45 +534,56 @@ fn reexport_of(
     match (source, names) {
         (Some(source), names) => {
             if names.is_none() && !children.iter().any(|child| child.kind() == "*") {
-                return None;
+                return;
             }
-            Some(reexports::ReExport {
-                file: cx.path.to_string(),
-                target: resolve_relative(cx.path, &source)
-                    .filter(|_| !escapes_root(cx.path, &source))?,
-                names,
-                span,
-            })
+            if escapes_root(cx.path, &source) {
+                return;
+            }
+            if let Some(target) = resolve_relative(cx.path, &source) {
+                reexports.push(reexports::ReExport {
+                    file,
+                    target,
+                    names,
+                    span,
+                });
+            }
         }
-        // `import { a } from './x'; export { a as b }`: one re-export per
-        // imported binding, whose target is the importing declaration's file.
+        // `export { a, b as c }` with no source: an imported binding is a
+        // re-export of its module (one record per module); a local binding
+        // is exported from this file, under a new name through a record that
+        // targets this file itself.
         (None, Some(names)) => {
             let prefix = format!("sym:{}@", cx.id.repo);
             let mut targets: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-            for (exported, local) in names {
-                let Some(foreign) = imported.get(&local) else {
-                    continue;
-                };
-                let Some((file, _)) = foreign.strip_prefix(&prefix)?.split_once('#') else {
-                    continue;
-                };
-                let original = imported_names.get(&local).cloned().unwrap_or(local);
-                targets
-                    .entry(file.to_string())
-                    .or_default()
-                    .push((exported, original));
+            for (alias, local) in names {
+                let foreign = imported.get(&local).and_then(|foreign| {
+                    foreign
+                        .strip_prefix(&prefix)
+                        .and_then(|rest| rest.split_once('#'))
+                        .map(|(target, _)| target.to_string())
+                });
+                match foreign {
+                    Some(target) => {
+                        let original = imported_names.get(&local).cloned().unwrap_or(local);
+                        targets.entry(target).or_default().push((alias, original));
+                    }
+                    None if alias == local => exported.push((file.clone(), local)),
+                    None => targets
+                        .entry(file.clone())
+                        .or_default()
+                        .push((alias, local)),
+                }
             }
-            // Several imported files in one clause: keep the first only; the
-            // rest stay unfollowed, never merged into one wrong target.
-            let (target, names) = targets.into_iter().next()?;
-            Some(reexports::ReExport {
-                file: cx.path.to_string(),
-                target,
-                names: Some(names),
-                span,
-            })
+            for (target, names) in targets {
+                reexports.push(reexports::ReExport {
+                    file: file.clone(),
+                    target,
+                    names: Some(names),
+                    span,
+                });
+            }
         }
-        (None, None) => None,
+        (None, None) => {}
     }
 }
 
@@ -2671,9 +2709,14 @@ fn extract_source_recording(
         .children(&mut w)
         .filter(|c| c.kind() == "export_statement")
     {
-        if let Some(reexport) = reexport_of(&cx, stmt, &imported, &imported_names) {
-            out.reexports.push(reexport);
-        }
+        record_exports(
+            &cx,
+            stmt,
+            &imported,
+            &imported_names,
+            &mut out.reexports,
+            &mut out.exported,
+        );
     }
 
     // --- Client side (US-0005, .tsx only, and every Vue component): screens,
@@ -3444,6 +3487,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.next_routes.extend(ex.next_routes);
     out.strategies.extend(ex.strategies);
     out.reexports.extend(ex.reexports);
+    out.exported.extend(ex.exported);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3565,10 +3609,11 @@ fn complete_directory(
     let index = resolution::ResolutionIndex::load(root)?;
     resolution::resolve_bare_imports(&mut *facts, &index, id, &known_files)?;
     let reexports = std::mem::take(&mut out.reexports);
+    let exported = std::mem::take(&mut out.exported);
     complete_pending_calls(
         std::mem::take(&mut out.pending_calls),
         &known_symbols,
-        &reexports::Index::new(&reexports),
+        &reexports::Index::new(&reexports, &exported),
         id,
         &mut *facts,
     )?;

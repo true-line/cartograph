@@ -157,3 +157,69 @@ fn named_reexport_shadows_star_reexport() {
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].dst, sym("b/run.ts#run"));
 }
+
+// AC-1504: `export *` forwards only exported bindings. A private helper of
+// the same name in one star target is neither a rival to the exported one
+// in another target nor, alone, a call target.
+#[test]
+fn star_reexport_skips_private_bindings() {
+    let out = extract(&[
+        (
+            "a/run.ts",
+            "function run() { return 1; }\nexport function helper() { return run(); }\n",
+        ),
+        ("b/run.ts", "export function run() { return 2; }\n"),
+        (
+            "c/only.ts",
+            "function hidden() { return 3; }\nexport const visible = 1;\n",
+        ),
+        (
+            "lib/index.ts",
+            "export * from '../a/run';\nexport * from '../b/run';\nexport * from '../c/only';\n",
+        ),
+        (
+            "app/main.ts",
+            "import { run, hidden } from '../lib';\nexport function main() { run(); hidden(); }\n",
+        ),
+    ]);
+    let mut dsts: Vec<_> = calls_from(&out, &sym("app/main.ts#main"))
+        .into_iter()
+        .map(|edge| edge.dst.clone())
+        .collect();
+    dsts.sort();
+    assert_eq!(dsts.len(), 2, "{dsts:?}");
+    assert_eq!(dsts[1], sym("b/run.ts#run"));
+    assert!(dsts[0].starts_with("gap:call:"), "{dsts:?}");
+}
+
+// AC-1504: one `export { … }` clause re-exporting bindings imported from
+// several modules, and a local binding exported under a new name, all
+// resolve.
+#[test]
+fn local_export_clause_keeps_every_source() {
+    let out = extract(&[
+        ("lib/a.ts", "export function a() { return 1; }\n"),
+        ("lib/b.ts", "export function b() { return 2; }\n"),
+        (
+            "lib/index.ts",
+            "import { a } from './a';\nimport { b } from './b';\nfunction local() { return 3; }\nexport { a, b, local as renamed };\n",
+        ),
+        (
+            "app/main.ts",
+            "import { a, b, renamed } from '../lib';\nexport function main() { a(); b(); renamed(); }\n",
+        ),
+    ]);
+    let mut dsts: Vec<_> = calls_from(&out, &sym("app/main.ts#main"))
+        .into_iter()
+        .map(|edge| edge.dst.clone())
+        .collect();
+    dsts.sort();
+    assert_eq!(
+        dsts,
+        [
+            sym("lib/a.ts#a"),
+            sym("lib/b.ts#b"),
+            sym("lib/index.ts#local")
+        ]
+    );
+}

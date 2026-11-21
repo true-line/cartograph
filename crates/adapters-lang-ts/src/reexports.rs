@@ -35,6 +35,8 @@ pub(crate) struct ReExport {
 #[derive(Debug, Default)]
 pub(crate) struct Index<'a> {
     by_file: BTreeMap<&'a str, Vec<&'a ReExport>>,
+    /// `(file, name)` bindings each file exports itself.
+    exported: BTreeSet<(&'a str, &'a str)>,
 }
 
 /// A call target proven through one or more barrels.
@@ -46,12 +48,16 @@ pub(crate) struct Resolved {
 }
 
 impl<'a> Index<'a> {
-    pub(crate) fn new(reexports: &'a [ReExport]) -> Self {
+    pub(crate) fn new(reexports: &'a [ReExport], exported: &'a [(String, String)]) -> Self {
         let mut by_file: BTreeMap<&str, Vec<&ReExport>> = BTreeMap::new();
         for reexport in reexports {
             by_file.entry(&reexport.file).or_default().push(reexport);
         }
-        Self { by_file }
+        let exported = exported
+            .iter()
+            .map(|(file, name)| (file.as_str(), name.as_str()))
+            .collect();
+        Self { by_file, exported }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -81,6 +87,7 @@ impl<'a> Index<'a> {
             name,
             member,
             known_symbols,
+            false,
             &mut Vec::new(),
             &mut visited,
             &mut found,
@@ -102,6 +109,7 @@ impl<'a> Index<'a> {
         name: &str,
         member: Option<&str>,
         known: &HashSet<String>,
+        through_star: bool,
         via: &mut Vec<(String, (u64, u64))>,
         visited: &mut BTreeSet<(String, String)>,
         found: &mut BTreeSet<Resolved>,
@@ -118,7 +126,11 @@ impl<'a> Index<'a> {
                 None => name.to_string(),
             };
             let candidate = format!("sym:{repo}@{file}#{qualified}");
-            if known.contains(&candidate) {
+            // `export *` forwards only what the target file itself exports
+            // (or re-exports); a private helper of the same name is no rival.
+            if known.contains(&candidate)
+                && (!through_star || self.exported.contains(&(file.as_str(), name)))
+            {
                 found.insert(Resolved {
                     dst: candidate,
                     via: via.clone(),
@@ -149,6 +161,7 @@ impl<'a> Index<'a> {
                         original,
                         member,
                         known,
+                        false,
                         via,
                         visited,
                         found,
@@ -165,6 +178,7 @@ impl<'a> Index<'a> {
                     name,
                     member,
                     known,
+                    true,
                     via,
                     visited,
                     found,
