@@ -226,3 +226,26 @@ fn a_subsection_over_its_share_keeps_the_rows_that_fit() {
         .sum();
     assert!(used + 3 * row >= 30 * row - 200, "{used}");
 }
+
+// AC-0952: a cut counts only the data rows it leaves out (never a later
+// table's header or separator), and keeps a subsection when just its first
+// data row fits.
+#[test]
+fn a_cut_counts_only_the_data_rows_left_out() {
+    let block = "### Order\n\n#### Manage orders\n\n| Rule | Citation |\n|---|---|\n\
+| rule one | F-01 |\n| rule two | F-02 |\n\nChanges:\n\n| Where | Change |\n|---|---|\n\
+| here | F-03 |\n";
+    let head = heading_len(block);
+    let one_row = block.find("| rule two").unwrap();
+    let fit = fitted(block, one_row - head);
+    assert_eq!(fit.text, &block[..one_row]);
+    assert_eq!(fit.left_out, 0);
+    // `rule two` and `here`: the second table's header and separator are
+    // not rows.
+    assert_eq!(fit.rows_cut, 2);
+    // Room for the heading and table header only keeps no partial row.
+    let header_only = block.find("| rule one").unwrap();
+    let fit = fitted(block, header_only - head);
+    assert_eq!(fit.text, &block[..block.find("#### ").unwrap()]);
+    assert_eq!((fit.left_out, fit.rows_cut), (1, 0));
+}

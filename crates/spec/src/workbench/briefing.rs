@@ -156,6 +156,35 @@ struct Fitted<'a> {
 /// heading, the blank line, a table's header and separator, and one row.
 const MIN_CUT_LINES: usize = 5;
 
+/// The offsets of a subsection's table data rows: table lines that are
+/// neither a header (the line before a `|---` separator) nor a separator.
+fn data_rows(text: &str) -> Vec<usize> {
+    let separator = |line: &str| {
+        line.starts_with('|')
+            && line.contains('-')
+            && line
+                .trim_end()
+                .chars()
+                .all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    };
+    let mut lines = Vec::new();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        lines.push((at, line));
+        at += line.len();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, line))| {
+            line.starts_with("| ")
+                && !separator(line)
+                && !lines.get(i + 1).is_some_and(|(_, next)| separator(next))
+        })
+        .map(|(_, (at, _))| *at)
+        .collect()
+}
+
 /// `block` with at most `budget` bytes after its heading. A block over
 /// budget keeps its heading, its leading subsections that fit, and of the
 /// next one as many leading lines as fit (#2068): its heading, its table
@@ -198,12 +227,13 @@ fn fitted(block: &str, budget: usize) -> Fitted<'_> {
         end += line.len();
         lines += 1;
     }
-    let rows = |text: &str| text.lines().filter(|l| l.starts_with("| ")).count();
-    if lines >= MIN_CUT_LINES && rows(&block[from..end]) > 2 {
+    let rows = data_rows(&block[from..to]);
+    let kept_rows = rows.iter().filter(|at| **at < end - from).count();
+    if lines >= MIN_CUT_LINES && kept_rows >= 1 {
         Fitted {
             text: &block[..end],
             left_out: subsections - whole - 1,
-            rows_cut: rows(&block[end..to]),
+            rows_cut: rows.len() - kept_rows,
         }
     } else {
         Fitted {
