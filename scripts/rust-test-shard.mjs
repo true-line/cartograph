@@ -16,7 +16,8 @@
 // Usage: rust-test-shard.mjs <index>/<count> -- <cargo test target arguments>
 //   e.g. rust-test-shard.mjs 2/4 -- -p app --bin app
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export function parseShard(text) {
@@ -42,10 +43,11 @@ export function parseTestList(output) {
 
 // Measured seconds per test of the app binary (#1924), so the slow replay
 // tests spread across shards instead of landing together by name order.
-// Tests absent from the file weigh DEFAULT_WEIGHT. Regenerate with
-//   RUSTC_BOOTSTRAP=1 target/debug/deps/app-<hash> -Z unstable-options \
-//     --report-time --format json > report.json   (from src-tauri/)
-//   node scripts/rust-test-shard.mjs --weights-from report.json > scripts/rust-test-weights.json
+// Tests absent from the file weigh DEFAULT_WEIGHT. Each CI shard writes the
+// times libtest reported for its tests to SHARD_TIMES_FILE, which ci.yml keeps
+// as an `app-test-times-*` artifact; regenerate the weights from one run's
+// four files with
+//   node scripts/rust-test-shard.mjs --weights-from times-1.json times-2.json ... > scripts/rust-test-weights.json
 export const WEIGHTS_PATH = fileURLToPath(new URL('./rust-test-weights.json', import.meta.url));
 export const DEFAULT_WEIGHT = 0.2;
 // Faster tests stay at the default: listing them would only grow the file.
@@ -55,14 +57,21 @@ export function loadWeights(file = WEIGHTS_PATH) {
   return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).seconds : {};
 }
 
-// libtest's JSON report (one event per line) to a weights file.
-export function weightsFromReport(report) {
+// libtest's `--report-time` lines: `test <name> ... ok <1.234s>`.
+export function parseTimes(output) {
+  const times = {};
+  for (const [, name, seconds] of output.matchAll(/^test (\S+) \.\.\. ok <(\d+(?:\.\d+)?)s>$/gmu)) {
+    times[name] = Number(seconds);
+  }
+  return times;
+}
+
+// Shard time files ({name: seconds}) to a weights file.
+export function weightsFromTimes(files) {
   const seconds = {};
-  for (const line of report.split('\n')) {
-    if (!line.trim().startsWith('{')) continue;
-    const event = JSON.parse(line);
-    if (event.type === 'test' && event.event === 'ok' && event.exec_time >= MIN_LISTED_SECONDS) {
-      seconds[event.name] = Math.round(event.exec_time * 10) / 10;
+  for (const times of files) {
+    for (const [name, value] of Object.entries(times)) {
+      if (value >= MIN_LISTED_SECONDS) seconds[name] = Math.round(value * 10) / 10;
     }
   }
   const sorted = Object.fromEntries(Object.keys(seconds).sort().map((name) => [name, seconds[name]]));
@@ -110,7 +119,7 @@ export function verifyRun(selected, output, status) {
     return `selected ${selected.length} tests but libtest accounted for ${totals.ran}`;
   }
   if (status !== 0 || totals.failed !== 0) {
-    return `cargo test exited ${status} with ${totals.failed} failed`;
+    return `the test binary exited ${status} with ${totals.failed} failed`;
   }
   return null;
 }
@@ -125,11 +134,43 @@ function list(cargoArguments) {
   return parseTestList(listed.stdout);
 }
 
-function run(cargoArguments, selected) {
+// The one test executable `cargo test` built for these arguments, and the
+// package directory cargo runs it from. `--list` built it already, so this
+// compiles nothing.
+export function parseExecutable(messages) {
+  const found = [];
+  for (const line of messages.split('\n')) {
+    if (!line.startsWith('{')) continue;
+    const message = JSON.parse(line);
+    if (message.reason === 'compiler-artifact' && message.profile?.test && message.executable) {
+      found.push({ executable: message.executable, directory: path.dirname(message.manifest_path) });
+    }
+  }
+  if (found.length !== 1) throw new Error(`expected one test executable, cargo built ${found.length}`);
+  return found[0];
+}
+
+function executable(cargoArguments) {
+  const built = spawnSync('cargo', ['test', ...cargoArguments, '--no-run', '--message-format=json'], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (built.status !== 0) throw new Error(`cargo test --no-run exited ${built.status}`);
+  return parseExecutable(built.stdout);
+}
+
+// The binary runs directly, from its package directory as cargo would run it,
+// so that RUSTC_BOOTSTRAP reaches only libtest: given to cargo, it would
+// change the build and recompile every crate. libtest needs it for
+// `--report-time`, which times each test for the shard weights.
+function run({ executable: binary, directory }, selected) {
   // libtest takes each selected name as an exact filter. A shard of a few
   // hundred names is tens of kilobytes, far inside Linux's argument limit.
   return new Promise((resolve, reject) => {
-    const child = spawn('cargo', ['test', ...cargoArguments, '--', '--exact', ...selected], {
+    const child = spawn(binary, ['-Z', 'unstable-options', '--report-time', '--exact', ...selected], {
+      cwd: directory,
+      env: { ...process.env, RUSTC_BOOTSTRAP: '1' },
       stdio: ['ignore', 'pipe', 'inherit'],
     });
     let output = '';
@@ -144,8 +185,8 @@ function run(cargoArguments, selected) {
 }
 
 async function main(argv) {
-  if (argv[0] === '--weights-from' && argv.length === 2) {
-    process.stdout.write(weightsFromReport(readFileSync(argv[1], 'utf8')));
+  if (argv[0] === '--weights-from' && argv.length >= 2) {
+    process.stdout.write(weightsFromTimes(argv.slice(1).map((file) => JSON.parse(readFileSync(file, 'utf8')))));
     return;
   }
   const separator = argv.indexOf('--');
@@ -158,7 +199,10 @@ async function main(argv) {
   const selected = selectShard(names, shard, loadWeights());
   if (selected.length === 0) throw new Error(`shard ${shard.index}/${shard.count} selects no test of ${names.length}`);
   console.log(`shard ${shard.index}/${shard.count}: ${selected.length} of ${names.length} tests`);
-  const { output, status } = await run(cargoArguments, selected);
+  const { output, status } = await run(executable(cargoArguments), selected);
+  if (process.env.SHARD_TIMES_FILE) {
+    writeFileSync(process.env.SHARD_TIMES_FILE, `${JSON.stringify(parseTimes(output), null, 2)}\n`);
+  }
   const problem = verifyRun(selected, output, status);
   if (problem) throw new Error(`shard ${shard.index}/${shard.count}: ${problem}`);
 }
