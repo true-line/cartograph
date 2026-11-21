@@ -32,6 +32,55 @@ pub enum StitchError {
     /// Filesystem failure while scanning for config files.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Env files hold values that look like secrets, so the ingest is
+    /// refused until they are removed (#933, AC-0990). Each entry names the
+    /// file, line and key; no value is ever carried.
+    #[error("{}", refusal_message(.0))]
+    SecretsInEnvFiles(Vec<EnvSecret>),
+}
+
+/// One secret-shaped env-file value that refused an ingest (AC-0990).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvSecret {
+    /// Repo-relative env file.
+    pub file: String,
+    /// 1-based line.
+    pub line: usize,
+    /// The key; never the value.
+    pub key: String,
+    /// Why the value counts as a secret.
+    pub why: &'static str,
+}
+
+/// Most refused values a refusal lists by name; the rest are counted.
+const MAX_LISTED_SECRETS: usize = 20;
+
+fn refusal_message(found: &[EnvSecret]) -> String {
+    let mut message = format!(
+        "ingest refused: {} env-file value{} look{} like secrets. Cartograph does not ingest a \
+         checkout whose env files hold secrets (#933).",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+        if found.len() == 1 { "s" } else { "" },
+    );
+    for secret in found.iter().take(MAX_LISTED_SECRETS) {
+        message.push_str(&format!(
+            "\n- {}:{} {} ({})",
+            secret.file, secret.line, secret.key, secret.why
+        ));
+    }
+    if found.len() > MAX_LISTED_SECRETS {
+        message.push_str(&format!(
+            "\n- and {} more",
+            found.len() - MAX_LISTED_SECRETS
+        ));
+    }
+    message.push_str(
+        "\nTo proceed: remove these values (or the files) from the checkout and ingest again. \
+         A value the resolver needs that is not a secret, such as a queue name or a base URL \
+         without credentials, can be declared in cartograph.system.toml under [env].",
+    );
+    message
 }
 
 /// Facts stitched from event sites (same shape as the extractor outputs).
@@ -75,11 +124,16 @@ impl ConfigIndex {
     /// dot-directories) and index their `KEY=VALUE` lines. Files are
     /// visited in sorted order and the first definition of a key wins, so
     /// the index is deterministic regardless of walk order (US-0014).
+    ///
+    /// Fails closed with [`StitchError::SecretsInEnvFiles`] when any line
+    /// holds a secret-shaped value (AC-0990), listing every one in file and
+    /// line order, so one refusal names everything to remove.
     pub fn from_dir(root: &Path) -> Result<Self, StitchError> {
         let mut index = ConfigIndex::default();
+        let mut secrets = Vec::new();
         for rel in env_files(root)? {
             let content = std::fs::read_to_string(root.join(&rel))?;
-            for line in content.lines() {
+            for (number, line) in content.lines().enumerate() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
                     continue;
@@ -92,11 +146,23 @@ impl ConfigIndex {
                 if key.is_empty() || key.contains(char::is_whitespace) {
                     continue;
                 }
+                if let Some(why) = secret_reason(key, value) {
+                    secrets.push(EnvSecret {
+                        file: rel.clone(),
+                        line: number + 1,
+                        key: key.to_string(),
+                        why,
+                    });
+                    continue;
+                }
                 index
                     .env
                     .entry(key.to_string())
                     .or_insert_with(|| (value.to_string(), rel.clone()));
             }
+        }
+        if !secrets.is_empty() {
+            return Err(StitchError::SecretsInEnvFiles(secrets));
         }
         Ok(index)
     }
@@ -150,6 +216,93 @@ pub fn env_files(root: &Path) -> std::io::Result<Vec<String>> {
             .collect();
     files.sort();
     Ok(files)
+}
+
+/// Why an env-file value counts as a secret, or none (#933, AC-0990):
+/// a recognized secret pattern (provider tokens, private keys, cloud access
+/// keys), a token-shaped value, a URL carrying a password, or a value under
+/// a credential key name that is not an obvious placeholder.
+fn secret_reason(key: &str, value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        return None;
+    }
+    if !core_redact::recognized_secrets(value).is_empty() {
+        return Some("recognized secret pattern");
+    }
+    if core_redact::is_token_shaped(value) {
+        return Some("token-shaped value");
+    }
+    if url_password(value) {
+        return Some("URL with a password");
+    }
+    let credential_key = core_redact::is_sensitive_name(key) || credential_suffix(key);
+    if credential_key && !placeholder(value) {
+        return Some("value under a credential key");
+    }
+    None
+}
+
+/// Whether `value` is a `scheme://user:password@host` URL.
+fn url_password(value: &str) -> bool {
+    let Some((_, rest)) = value.split_once("://") else {
+        return false;
+    };
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    authority.rsplit_once('@').is_some_and(|(userinfo, _)| {
+        userinfo
+            .split_once(':')
+            .is_some_and(|(_, pass)| !pass.is_empty())
+    })
+}
+
+/// Whether `key` ends in a credential word (`DB_PASSWORD`, `APP_SECRET`,
+/// `GITHUB_TOKEN`, `STRIPE_API_KEY`), whatever the value's length.
+fn credential_suffix(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "api-key",
+        "private_key",
+        "secret_key",
+        "access_key",
+        "credentials",
+    ]
+    .iter()
+    .any(|word| lower.ends_with(word))
+}
+
+/// Whether a credential value is an explicit template placeholder rather
+/// than a secret: a reference (`${VAR}`, `<your-key>`), one repeated
+/// character (`xxxx`), a whole placeholder word (`changeme`), or a
+/// `your-...` / `your_...` fill-in. A value merely containing such a word
+/// (`mydummyPass!42`) is not one.
+fn placeholder(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    (value.starts_with("${") && value.ends_with('}'))
+        || (value.starts_with('<') && value.ends_with('>'))
+        || value.chars().all(|c| value.starts_with(c))
+        || lower.starts_with("your-")
+        || lower.starts_with("your_")
+        || [
+            "changeme",
+            "change-me",
+            "change_me",
+            "example",
+            "placeholder",
+            "replaceme",
+            "replace-me",
+            "replace_me",
+            "todo",
+            "dummy",
+            "fixme",
+        ]
+        .contains(&lower.as_str())
 }
 
 fn prov(
