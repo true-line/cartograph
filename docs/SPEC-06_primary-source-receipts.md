@@ -237,3 +237,16 @@ budget admission as Python. Directory resolution still reads `go.mod`, module
 layout and Vercel configuration from the checkout, outside closure, so facts
 it derives or rewrites carry no receipt. Inspection, task evidence and MCP
 reads accept the prefix like any v3 receipt.
+
+## Java lane (AC-1031, #385)
+
+A source's `.java` files (the Java adapter's own selection) join the same
+capture as the Python and Go lanes'. With a capture, the Java pass parses each
+file's retained bytes, and each fact a captured file emits whose primary
+provenance lies wholly in that file gets a receipt under its own contract:
+prefix `java-primary-v1:`, producer `t0.adapter-java/direct-lexical-v1`,
+grammar `java` (`tree-sitter-java@0.23.5`, pinned exactly), in the v3 shape
+with provenance ranges only, under the same per-file minting, survivor check
+and budget admission as Python and Go. Directory resolution (Spring endpoint
+joins, modules, configuration and build files) still reads the checkout,
+outside closure, so facts it derives or rewrites carry no receipt.
