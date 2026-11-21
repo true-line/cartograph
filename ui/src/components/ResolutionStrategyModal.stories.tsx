@@ -4,7 +4,7 @@ import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { ResolutionStrategyModal } from './ResolutionStrategyModal';
 import { useAppStore, type BasisAssessment, type StagedProposal, type EscalationState, type GapStrategyReport } from '../store';
 import { mixedTaskBasis } from '../taskBasisFixtures';
-import { UNVERIFIED_RECORD } from '../curatedFixtures';
+import { STALE_RECORD, UNVERIFIED_RECORD } from '../curatedFixtures';
 
 const REPORT: GapStrategyReport = {
   gap_id: 'gap:sync',
@@ -264,6 +264,48 @@ export const AcceptedReviewAwaitsReconciliation: Story = {
     await expect(canvas.getByText(/Acceptance does not certify evidence freshness/)).toBeInTheDocument();
     await expect(canvas.getByText('Inferred (weak)')).toBeInTheDocument();
     await expect(canvas.queryByRole('button', { name: /Accept as/ })).not.toBeInTheDocument();
+  },
+};
+
+export const StaleAcceptedRecordCanBeReconciled: Story = {
+  // AC-1020 (#1746): an accepted record offers the reconciliation steps:
+  // resolve its gap again on the current source, and withdraw it by
+  // rejecting it (ADR-0061 decision 9). Neither changes the saved record.
+  args: {
+    state: state({
+      proposal: { ...PROPOSAL, review_revision: 1, review_decision: 'accepted', reviewed_at: '2026-09-10T13:00:00Z' },
+      decided: 'accepted',
+    }),
+    recordState: { state: 'stale', reason_sentence: STALE_RECORD.reason_sentence },
+    onWithdraw: fn(),
+    onResolveAgain: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('decision-recorded')).toHaveTextContent('State: stale.');
+    await expect(canvas.getByTestId('proposal-reconcile')).toHaveTextContent(/withdraw this one/);
+    await userEvent.click(canvas.getByRole('button', { name: 'Resolve gap again on current source' }));
+    await expect(args.onResolveAgain).toHaveBeenCalledWith('gap:sync');
+    await userEvent.click(canvas.getByRole('button', { name: 'Withdraw acceptance' }));
+    await expect(args.onWithdraw).toHaveBeenCalledOnce();
+    await expect(canvas.queryByRole('button', { name: /Accept as/ })).not.toBeInTheDocument();
+  },
+};
+
+export const RejectedRecordOffersNoWithdrawal: Story = {
+  // AC-1020: only an accepted record can be withdrawn.
+  args: {
+    state: state({
+      proposal: { ...PROPOSAL, review_revision: 1, review_decision: 'rejected', reviewed_at: '2026-09-10T13:00:00Z' },
+      decided: 'rejected',
+    }),
+    onWithdraw: fn(),
+    onResolveAgain: fn(),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByTestId('proposal-reconcile')).not.toBeInTheDocument();
+    await expect(canvas.queryByRole('button', { name: 'Withdraw acceptance' })).not.toBeInTheDocument();
   },
 };
 
