@@ -183,3 +183,22 @@ this specification's primary-source or incomplete-input-closure boundaries.
 through a coherent graph/association basis and records immutable per-item source
 origins in staging v2. It preserves this specification's primary-source-only and
 incomplete-input-closure boundaries; legacy receipts and proposals are unchanged.
+
+## Gap task supporting facts (AC-1019, #385)
+
+A gap task (SPEC-09) also reads the unresolved-call `Gap` it resolves, the
+file's own `File` node and its `TestCase` facts. The same captured invocation
+records each at emission: the `File` node and `TestCase` facts as the parser
+writes them, and the `Gap` from the parser's own pending call, whose exact call
+span it read. Directory completion decides whether the call stays unresolved
+and may enrich the others, so these receipts are minted per file but kept only
+by the directory lane, and only when the complete emitted fact survives
+completion unchanged; the single-file lane mints none. They are admitted after
+every rule and declaration receipt, and one that does not fit is left out
+unnamed, so its fact stays uncaptured. A `Gap` receipt attests the call span
+only: that no target was found is a directory-resolution outcome, outside the
+receipt's `primary_source_only` / `input_closure_not_established` scope.
+
+Task assembly omits a captured span longer than one span or past the combined
+evidence cap (`captured_span_over_limit`) instead of failing the task, as it
+omits an uncarriable working-tree span (#1635).

@@ -50,3 +50,17 @@ export const LegacyOriginsAreNotRetrospectivelyCaptured: Story = {
     await expect(canvas.queryByText(/retained parser span/)).not.toBeInTheDocument();
   },
 };
+
+export const CapturedSpanOverLimitIsNotALegacyRead: Story = {
+  // AC-1019: a captured span past the payload limit is named as such, not as
+  // an unavailable working-tree read.
+  args: { basis: { ...mixedTaskBasis, selection: { ...mixedTaskBasis.selection,
+    omissions: [{ request_index: 2, fact: { kind: 'node', id: 'file:src/capture.ts' }, reason: 'captured_span_over_limit' }],
+  } } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByText('Selection details'));
+    await expect(canvas.getByText('Request 2: Captured span over the payload limit.')).toBeVisible();
+    await expect(canvas.queryByText(/Legacy working-tree read unavailable/)).not.toBeInTheDocument();
+  },
+};

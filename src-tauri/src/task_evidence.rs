@@ -257,6 +257,9 @@ impl std::fmt::Display for TaskPreparationError {
                     SelectionOmissionReason::LegacyReadUnavailable => {
                         "unverified source unreadable"
                     }
+                    SelectionOmissionReason::CapturedSpanOverLimit => {
+                        "captured span over the task limit"
+                    }
                 };
                 // Arbitrary fact identifiers are intentionally omitted from the
                 // error display; the internal bounded report retains them.
@@ -508,6 +511,13 @@ fn assemble_from_snapshot(
             });
             continue;
         };
+        // A span the task cannot carry (longer than one span, or past the
+        // combined evidence cap) is omitted instead of failing the whole task
+        // later (#1635), captured or not (AC-1019).
+        let carried: usize = evidence
+            .iter()
+            .map(|item: &AgentEvidence| item.text.len())
+            .sum();
         let (text, origin) = if let Some(binding) = &entry.binding {
             let (source, guard) = guards
                 .captured(&binding.repo_key)
@@ -536,13 +546,19 @@ fn assemble_from_snapshot(
                 .captured
                 .byte_end
                 .checked_sub(range.captured.byte_start)
-                .filter(|bytes| *bytes > 0 && *bytes <= selection_report.limits.span_bytes as u64)
-                .ok_or_else(|| {
-                    failure(
-                        &selection_report,
-                        "The original captured span exceeds the task limit.",
-                    )
-                })?;
+                .filter(|bytes| *bytes > 0)
+                .ok_or_else(|| failure(&selection_report, INVALID))?;
+            let limits = &selection_report.limits;
+            if span_bytes > limits.span_bytes as u64
+                || carried as u64 + span_bytes > limits.total_evidence_bytes as u64
+            {
+                selection_report.omissions.push(SelectionOmission {
+                    request_index,
+                    fact: task_fact(&request.fact),
+                    reason: SelectionOmissionReason::CapturedSpanOverLimit,
+                });
+                continue;
+            }
             let charged = selection_report
                 .captured_validation_bytes
                 .checked_add(range.captured.file.byte_len)
@@ -583,13 +599,7 @@ fn assemble_from_snapshot(
             };
             (text, origin)
         } else {
-            // A working-tree span the task cannot carry (longer than one span,
-            // or past the combined evidence cap) is omitted like an unreadable
-            // one instead of failing the whole task later (#1635).
-            let carried: usize = evidence
-                .iter()
-                .map(|item: &AgentEvidence| item.text.len())
-                .sum();
+            // An uncarriable working-tree span is omitted like an unreadable one.
             let limits = &selection_report.limits;
             let Some(text) = guards.legacy_text(reference).filter(|text| {
                 text.len() <= limits.span_bytes

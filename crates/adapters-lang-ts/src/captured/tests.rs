@@ -206,13 +206,17 @@ fn captured_directory_preserves_completion_but_excludes_eval_and_derived_facts()
             .any(|node| node.props["via"] == "eval")
     );
     assert!(captured.nodes.iter().any(|node| node.label == "Screen"));
-    assert_eq!(receipts.len(), 3);
+    // The rule, its owner, GOVERNS and the file's own File node (AC-1019).
+    assert_eq!(receipts.len(), 4);
     for receipt in &receipts {
         match receipt.fact_key() {
             FactKey::Node { id } => {
                 let node = captured.nodes.iter().find(|node| &node.id == id).unwrap();
                 assert!(node.props.get("via").is_none());
-                assert!(matches!(node.label.as_str(), "BusinessRule" | "Component"));
+                assert!(matches!(
+                    node.label.as_str(),
+                    "BusinessRule" | "Component" | "File"
+                ));
             }
             FactKey::Edge { label, .. } => assert_eq!(label, "GOVERNS"),
         }
@@ -768,10 +772,19 @@ fn captured_parser_emits_the_same_const_unproven_eval_gap() {
         && edge.src.ends_with("#run")));
 }
 
-/// Directory receipts in full form, in fact-key order.
+/// Whether a receipt is one only the directory lane mints: a File, TestCase
+/// or unresolved-call Gap fact decided by completion (AC-1019).
+fn completed(receipt: &impl Citable) -> bool {
+    matches!(receipt.fact_key(), FactKey::Node { id }
+        if id.starts_with("file:") || id.starts_with("test:") || id.starts_with("gap:call:"))
+}
+
+/// The directory lane's lexical receipts in full form, in fact-key order,
+/// comparable with the single-file lane.
 fn by_fact(receipts: Vec<MintedReceipt>) -> Vec<Receipt> {
     let mut receipts: Vec<_> = receipts
         .iter()
+        .filter(|receipt| !completed(*receipt))
         .map(|receipt| receipt.to_receipt().unwrap())
         .collect();
     receipts.sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
@@ -1630,5 +1643,80 @@ fn captured_directory_measurement_budget_diagnostic() {
             serde_json::json!({}),
             "declarations dropped"
         );
+    }
+}
+
+// AC-1019: an unresolved relative-import call's Gap, each File node and each
+// TestCase cite their spans through receipts the directory lane keeps only
+// when the complete fact survives completion; a resolved call leaves no Gap
+// receipt, and the single-file lane, with no completion, mints none.
+#[test]
+fn captured_gap_task_supporting_facts_are_citable_only_when_they_survive() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("caller.ts"),
+        br#"import { missing, present } from "./callee";
+export function run() {
+  present();
+  return missing();
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("callee.ts"),
+        b"export function present() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("caller.test.ts"),
+        b"import { run } from \"./caller\";\nit(\"runs\", () => { run(); });\n",
+    )
+    .unwrap();
+    let paths = enumerate_paths(directory.path()).unwrap();
+    let capture = capture(directory.path(), &paths);
+    let (facts, receipts, _) = extract_captured_dir(
+        directory.path(),
+        &parser_id(),
+        &capture,
+        Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let gaps: Vec<_> = facts
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:call:"))
+        .collect();
+    assert_eq!(gaps.len(), 1, "only `missing()` stays unresolved");
+    let gap = gaps[0];
+    let gap_receipts: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| {
+            matches!(receipt.fact_key(), FactKey::Node { id } if id.starts_with("gap:call:"))
+        })
+        .collect();
+    assert_eq!(gap_receipts.len(), 1);
+    let receipt = gap_receipts[0].to_receipt().unwrap();
+    assert!(receipt.matches_node(gap));
+    let range = &receipt.ranges()[0];
+    assert_eq!(range.role, RangeRole::Provenance);
+    assert_eq!(capture.read_span(&range.captured).unwrap(), b"missing()");
+    for label in ["File", "TestCase"] {
+        let nodes: Vec<_> = facts.nodes.iter().filter(|n| n.label == label).collect();
+        assert!(!nodes.is_empty(), "{label}");
+        for node in nodes {
+            let receipt = receipts
+                .iter()
+                .find(|receipt| receipt.fact_key() == &FactKey::from_node(node))
+                .unwrap_or_else(|| panic!("{} is not citable", node.id))
+                .to_receipt()
+                .unwrap();
+            assert!(receipt.matches_node(node));
+        }
+    }
+    for path in &paths {
+        let (_, single) = extract_file(capture.file(path).unwrap(), &parser_id()).unwrap();
+        assert!(!single.iter().any(completed));
     }
 }

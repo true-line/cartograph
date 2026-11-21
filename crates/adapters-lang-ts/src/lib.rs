@@ -1504,11 +1504,17 @@ fn extract_source_recording(
     let mut out = Extraction::default();
 
     // File node spans the whole file.
-    out.nodes.push(Node {
+    let file_node = Node {
         id: file_id(id.repo, path),
         label: "File".into(),
         props: serde_json::json!({ "path": path, "prov": cx.prov(&root, &format!("File {path}")) }),
-    });
+    };
+    if let Some(direct) = direct.as_deref_mut() {
+        direct
+            .supporting
+            .insert(file_node.id.clone(), file_node.clone());
+    }
+    out.nodes.push(file_node);
 
     // One lexical identity implementation serves emitted symbols and every
     // consumer that needs an owner (calls, events, fetches, and later rules).
@@ -2143,6 +2149,7 @@ fn extract_source_recording(
     );
 
     // --- Target tests and their GraphQL requests (#968) ---------------------
+    let emitted = out.nodes.len();
     target_tests::extract(
         &cx,
         root,
@@ -2157,6 +2164,13 @@ fn extract_source_recording(
         &mut out.edges,
         &mut out.target_tests,
     );
+    if let Some(direct) = direct.as_deref_mut() {
+        for node in &out.nodes[emitted..] {
+            if node.label == "TestCase" {
+                direct.supporting.insert(node.id.clone(), node.clone());
+            }
+        }
+    }
 
     // --- Event sites: SDK producer/consumer calls (US-0004) ------------------
     // Receiver proof mirrors the endpoint extractor: a site only matches when

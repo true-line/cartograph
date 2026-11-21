@@ -151,6 +151,9 @@ impl Default for SelectionLimits {
 pub enum SelectionOmissionReason {
     MissingCitation,
     LegacyReadUnavailable,
+    /// A captured span longer than one span or past the combined evidence
+    /// cap (AC-1019); only a fact with a captured binding has one.
+    CapturedSpanOverLimit,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -389,6 +392,11 @@ impl TaskSourceBasisV2 {
             }
             if omission.reason == SelectionOmissionReason::LegacyReadUnavailable
                 && facts[&omission.fact].binding.is_some()
+            {
+                return Err(invalid());
+            }
+            if omission.reason == SelectionOmissionReason::CapturedSpanOverLimit
+                && facts[&omission.fact].binding.is_none()
             {
                 return Err(invalid());
             }

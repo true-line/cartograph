@@ -916,7 +916,7 @@ export interface TaskSelectionReport {
     total_evidence_bytes: number;
     captured_validation_bytes: number;
   };
-  omissions: { request_index: number; fact: FactKey; reason: 'missing_citation' | 'legacy_read_unavailable' }[];
+  omissions: { request_index: number; fact: FactKey; reason: 'missing_citation' | 'legacy_read_unavailable' | 'captured_span_over_limit' }[];
   metadata_preselected_not_read: number;
   unread_tail: boolean;
   stop_reason: 'candidate_limit' | 'neighborhood_exhausted' | 'attempt_limit' |
