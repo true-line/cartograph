@@ -460,3 +460,52 @@ fn a_draft_citing_an_overlay_capability_resolves_against_the_overlay() {
     let without = counts(&[]);
     assert_eq!((without.eligible, without.unresolvable), (0, 1));
 }
+
+// AC-1011 (T-1011): the overlay a draft resolves against is the one D1
+// prints. A derived Capability the export withholds (here, rejected by a
+// reviewer) is withheld from both, so a draft citing it is not eligible.
+#[test]
+fn a_withheld_overlay_capability_resolves_no_draft() {
+    let fixture = fixture();
+    let (revision, ((nodes, edges), _)) = read_graph(&fixture.graph.lock().unwrap()).unwrap();
+    let base = core_graph::RevisionedSnapshot {
+        revision,
+        graph: (nodes, edges),
+    };
+    let prov = Provenance::new(
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+        vec![EvidenceRef {
+            repo: "fixture/repo".into(),
+            path: "src/app.ts".into(),
+            byte_start: 0,
+            byte_end: 8,
+            commit_sha: "fixed".into(),
+        }],
+        "t2.knowledge.capabilities",
+        b"returns",
+    )
+    .unwrap()
+    .with_method(core_prov::ProducingMethod::Rule {
+        rule: "capabilities".into(),
+        version: "1".into(),
+    });
+    let rejected = BTreeSet::from([prov.content_hash.clone()]);
+    let derived = [core_graph::overlay::OverlayFact {
+        item: core_graph::overlay::OverlayItem::Node(Node {
+            id: "capability:returns".into(),
+            label: "Capability".into(),
+            props: json!({ "name": "Returns", "prov": prov }),
+        }),
+        cites: [core_graph::overlay::BaseRef::Node("cap:checkout".into())].into(),
+    }];
+    let printed = overlay_nodes(&base, &derived, &[], &BTreeSet::new());
+    assert_eq!(
+        printed
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        ["capability:returns"]
+    );
+    assert!(overlay_nodes(&base, &derived, &[], &rejected).is_empty());
+}
