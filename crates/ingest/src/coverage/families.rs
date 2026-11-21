@@ -82,7 +82,10 @@ pub const PRODUCERS: &[(&str, &[Family])] = &[
         "Go",
         &[TargetTests, Persistence, RuleEvidence, EndpointAuth],
     ),
-    ("Rust", &[TargetTests, Persistence, RuleEvidence]),
+    (
+        "Rust",
+        &[TargetTests, Persistence, RuleEvidence, EndpointAuth],
+    ),
     (
         "Java",
         &[TargetTests, Persistence, RuleEvidence, EndpointAuth],
