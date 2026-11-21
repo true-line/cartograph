@@ -34,7 +34,7 @@ Binds: **US ↔ AC ↔ Crate(module) ↔ Milestone ↔ Flow ↔ ADR ↔ Test**.
 
 | US-0027 | AC-0140..0147 | app, ingest, core-graph, ui | H3 | — | ADR-0019, ADR-0023 | T-0140..0147 |
 
-| US-0028 | AC-0148..0155, AC-0280, AC-1019, AC-1022, AC-1024, AC-1026, AC-1029, AC-1031, AC-1033, AC-0282, AC-0283, AC-0292, AC-0299, AC-0301, AC-0314, AC-0319, AC-0373, AC-0497, AC-0503, AC-0838, AC-0839, AC-0822, AC-0836, AC-0837 | adapters-lang-ts, source-capture, core-graph, ingest, app (retained path identity and no-follow revalidation), ui | H3 | — | ADR-0024, ADR-0030, ADR-0039, ADR-0046 | T-0148..0155, T-0280, T-1019, T-1022, T-1024, T-1026, T-1029, T-1031, T-1033, T-0282, T-0283, T-0292, T-0299, T-0301, T-0314, T-0319, T-0373, T-0497, T-0503, T-0838, T-0839, T-0822, T-0836, T-0837 |
+| US-0028 | AC-0148..0155, AC-0280, AC-1019, AC-1022, AC-1024, AC-1026, AC-1029, AC-1031, AC-1033, AC-1035, AC-0282, AC-0283, AC-0292, AC-0299, AC-0301, AC-0314, AC-0319, AC-0373, AC-0497, AC-0503, AC-0838, AC-0839, AC-0822, AC-0836, AC-0837 | adapters-lang-ts, source-capture, core-graph, ingest, app (retained path identity and no-follow revalidation), ui | H3 | — | ADR-0024, ADR-0030, ADR-0039, ADR-0046 | T-0148..0155, T-0280, T-1019, T-1022, T-1024, T-1026, T-1029, T-1031, T-1033, T-1035, T-0282, T-0283, T-0292, T-0299, T-0301, T-0314, T-0319, T-0373, T-0497, T-0503, T-0838, T-0839, T-0822, T-0836, T-0837 |
 | US-0029 | AC-0156..0163, AC-0823 | app (durable Windows NTFS job storage), ui | post-M10 | — | ADR-0025 | T-0156..0163, T-0823 |
 
 | US-0030 | AC-0164..0171 | adapters-lang-ts, core-graph, spec, context-hub, app, ui | H2 | — | ADR-0020, ADR-0024, ADR-0026 | T-0164..0171 |
