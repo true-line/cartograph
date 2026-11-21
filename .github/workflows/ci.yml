@@ -348,7 +348,8 @@ jobs:
       - name: Use a fixed cargo home
         run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
 
-      # Each group builds its own dependency set, so each keeps its own cache.
+      # Each group builds its own dependency set, so each keeps its own cache:
+      # a shared key would keep only the first saver's dependencies.
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
