@@ -134,9 +134,11 @@ fn registered_sources_isolate_intake_findings_and_recovery() {
             "import { helper } from './helper';\nexport function run() { helper(); eval(getCode()); }\n").unwrap();
         std::fs::write(root.join("helper.ts"), "export function helper() {}\n").unwrap();
     }
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     let state = app_state(&app_data);
     for root in [&first_root, &second_root] {
         let report =
@@ -1102,9 +1104,11 @@ fn managed_plugin_gate_retains_source_guards_through_verdict() {
         .to_string(),
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(state);
     let state = app.state::<AppState>();
     let hash = core_prov::content_hash(WASM);
@@ -1755,12 +1759,14 @@ fn captured_ingest_names_declaration_receipt_omissions_in_coverage() {
         .map(|index| format!("export const value{index} = {index};\n"))
         .collect();
     std::fs::write(root.join("many.ts"), source).unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -1803,12 +1809,14 @@ fn captured_ingest_skips_symlinks_and_names_them_in_coverage() {
     std::fs::write(root.join("AGENTS.md"), "notes").unwrap();
     std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
     std::os::unix::fs::symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -1856,9 +1864,11 @@ fn recorded_coverage_survives_relaunch_and_clear_removes_it_for_good() {
     let root = directory(dir.path(), "project");
     std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
     let launch = || {
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         app.manage(app_state(&app_data));
         app.manage(crate::PreflightRuns::default());
         app
@@ -1872,7 +1882,7 @@ fn recorded_coverage_survives_relaunch_and_clear_removes_it_for_good() {
     };
     let stored = {
         let app = launch();
-        let state = tauri::Manager::state::<AppState>(&app);
+        let state = tauri::Manager::state::<AppState>(&*app);
         let registered = register_local_source(&state, &root).unwrap();
         let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
         let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -1899,14 +1909,14 @@ fn recorded_coverage_survives_relaunch_and_clear_removes_it_for_good() {
         )
     );
     {
-        let state = tauri::Manager::state::<AppState>(&app);
+        let state = tauri::Manager::state::<AppState>(&*app);
         crate::clear_graph_store(&mut state.graph.lock().unwrap()).unwrap();
         assert!(restored(&app).is_empty());
     }
     drop(app);
 
     let app = launch();
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     assert_eq!(state.sources.lock().unwrap().list().unwrap().len(), 1);
     assert!(!state.jobs.lock().unwrap().list().unwrap().is_empty());
     assert!(restored(&app).is_empty());
@@ -1927,12 +1937,14 @@ fn export_carries_the_stored_coverage_inventory_in_both_modes() {
     std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
     std::fs::write(root.join("report.rb"), "puts 'report'\n").unwrap();
     std::os::unix::fs::symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -2042,12 +2054,14 @@ fn mcp_coverage_read_equals_the_desktop_export_and_states_a_stale_inventory() {
     let root = directory(dir.path(), "project");
     std::fs::write(root.join("app.ts"), "export function app() { return 1; }\n").unwrap();
     std::fs::write(root.join("report.rb"), "puts 'report'\n").unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -2188,12 +2202,14 @@ fn export_carries_a_fact_index_resolving_every_assertion() {
         r#"{"name":"shop","dependencies":{"express":"^4.19.0"},"scripts":{"build":"tsc"}}"#,
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -2338,12 +2354,14 @@ fn export_projects_ingested_endpoints_against_permission_sites() {
         r#"{"name":"shop","dependencies":{"express":"^4.19.0"}}"#,
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -2486,12 +2504,14 @@ fn export_projects_ingested_pipelines_in_dependency_order() {
     )
     .unwrap();
     std::fs::write(root.join(".gitlab-ci.yml"), "build:\n  script: make\n").unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -2649,12 +2669,14 @@ fn export_projects_ingested_environments() {
         "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n",
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let ingest = || {
         let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
@@ -2967,12 +2989,14 @@ fn export_projects_ingested_kustomize_environments() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     }
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let ingest = || {
         let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
@@ -3371,12 +3395,14 @@ fn export_projects_ingested_configuration_keys() {
     std::fs::write(root.join("src/config.ts"), config).unwrap();
     let settings = "import os\n\nHOST = os.getenv(\"SMTP_HOST\")\n";
     std::fs::write(root.join("settings.py"), settings).unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -3533,12 +3559,14 @@ fn export_lists_ingested_third_party_calls_as_outside() {
     let root = directory(dir.path(), "web");
     std::fs::write(root.join("client.tsx"), EXTERNAL_CLIENT).unwrap();
     std::fs::write(root.join("worker.py"), EXTERNAL_WORKER).unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
     let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
@@ -3689,9 +3717,11 @@ fn export_does_not_list_a_call_bound_into_another_repository() {
          repo = \"api\"\nbase_urls = [\"https://orders.example.com\"]\n",
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
     crate::add_system_blocking(
@@ -3700,7 +3730,7 @@ fn export_does_not_list_a_call_bound_into_another_repository() {
     )
     .unwrap();
 
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     let graph = state.graph.lock().unwrap();
     let decisions = state.decisions.lock().unwrap();
     // The bound call is a relation into the other repository.
@@ -3805,12 +3835,14 @@ fn captured_ingest_records_per_fact_store_capacity_omissions_and_retains_bound_f
          export function beta() { return 2; }\n",
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&app_data));
     app.manage(crate::PreflightRuns::default());
-    let state = tauri::Manager::state::<AppState>(&app);
+    let state = tauri::Manager::state::<AppState>(&*app);
     state.primary_sources.receipts.lock().unwrap().capacity.0 = 1;
     let registered = register_local_source(&state, &root).unwrap();
     let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
@@ -3881,9 +3913,11 @@ fn graph_hash_is_recorded_per_registration_and_carried_by_the_export() {
         .unwrap();
         std::fs::write(root.join("helper.ts"), "export function helper() {}\n").unwrap();
     }
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     let state = app_state(&app_data);
     let mut sources = Vec::new();
     for root in [&first_root, &second_root] {
@@ -4245,9 +4279,11 @@ fn relinked_documentation_references_resolve_against_the_whole_graph() {
     let root = directory(dir.path(), "shop");
     std::fs::write(root.join("app.ts"), "export function handle() {}\n").unwrap();
     std::fs::write(root.join("README.md"), "# Shop\n\nSee `app.ts`.\n").unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     let state = app_state(&app_data);
     crate::preflight_uncancelled(root.to_str().unwrap(), app.handle(), &state).unwrap();
     let source = state
