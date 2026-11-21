@@ -324,6 +324,16 @@ fn reached_actions(
     Ok(cited)
 }
 
+/// §1.3's user actions whose target is not recovered, when no derived
+/// Capability is listed (so [`actions_per_capability`] does not run).
+pub(super) fn unresolved_actions_only(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    cited: (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    unresolved_actions(&Index::new(nodes, edges), cited, out)
+}
+
 /// §1.3's user actions whose target is not recovered: each Gap a page's
 /// link or form points at, with the name it gives and why nothing answers
 /// it (AC-0976).
@@ -640,6 +650,17 @@ app.register_blueprint(auth_bp, url_prefix="/auth")
             .collect();
         let (cited, text) = render(&nodes, &resolved);
         assert_eq!((cited, text.as_str()), (0, ""));
+        // Without derived Capabilities the block is still rendered.
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        let cited =
+            unresolved_actions_only((&nodes, &edges), (&mut assertions, &mut asserted), &mut out)
+                .unwrap();
+        let only = out.finish();
+        assert_eq!(cited, 1, "{only}");
+        assert!(only.contains("Forgot password?"), "{only}");
     }
 
     #[test]
