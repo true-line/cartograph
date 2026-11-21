@@ -208,7 +208,7 @@ pub fn extract_dir(
     }
     // A Kotlin Spring Boot main serves HTTP when Kotlin or Java sources
     // declare Spring web endpoints (AC-1104).
-    let web = kotlin::spring_web(&kotlin_files).or_else(|| kotlin::spring_web(&java_files));
+    let web = kotlin::spring_web(&kotlin_files, &java_files);
     starts.extend(kotlin::starts(id.repo, &kotlin_files, web, symbols));
     starts.extend(java::starts(id.repo, &java_files, symbols));
     let mut out = EntryPointExtraction::default();

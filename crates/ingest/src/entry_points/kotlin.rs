@@ -89,26 +89,52 @@ pub(super) fn candidate(rel: &str) -> bool {
             .any(|dir| NOT_SYSTEM_DIRS.contains(&dir))
 }
 
-/// The first import of Spring web annotations among `files`, as evidence
-/// that the repository serves Spring endpoints.
-pub(super) fn spring_web(files: &[(String, String)]) -> Option<(String, (u64, u64))> {
-    files.iter().find_map(|(rel, text)| {
-        let mut offset = 0u64;
-        for line in text.split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            if let Some(rest) = trimmed.strip_prefix("import ")
-                && rest.trim_start().starts_with(SPRING_WEB)
-            {
-                let start = offset + (line.len() - trimmed.len()) as u64;
-                return Some((
-                    rel.clone(),
-                    (start, start + trimmed.trim_end().len() as u64),
-                ));
-            }
-            offset += line.len() as u64;
-        }
-        None
+/// The first import of Spring web annotations among the Kotlin and Java
+/// sources, as evidence that the repository serves Spring endpoints: an
+/// import of the package or one of its members, read from the parsed
+/// imports so a commented-out line or a longer package states nothing.
+pub(super) fn spring_web(
+    kotlin: &[(String, String)],
+    java: &[(String, String)],
+) -> Option<(String, (u64, u64))> {
+    let first = |files: &[(String, String)], language: tree_sitter::Language, kind: &str| {
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar");
+        files.iter().find_map(|(rel, text)| {
+            let tree = parser.parse(text, None)?;
+            let root = tree.root_node();
+            let mut walk = root.walk();
+            root.named_children(&mut walk)
+                .filter(|n| n.kind() == kind)
+                .find(|n| imports_spring_web(&text[n.byte_range()]))
+                .map(|n| (rel.clone(), span(n)))
+        })
+    };
+    first(kotlin, tree_sitter_kotlin_ng::LANGUAGE.into(), "import").or_else(|| {
+        first(
+            java,
+            tree_sitter_java::LANGUAGE.into(),
+            "import_declaration",
+        )
     })
+}
+
+/// Whether an import names `org.springframework.web.bind.annotation` or
+/// one of its members.
+fn imports_spring_web(import: &str) -> bool {
+    let Some(body) = import.trim().strip_prefix("import") else {
+        return false;
+    };
+    let body = body.trim().trim_end_matches(';');
+    let body = body.strip_prefix("static ").unwrap_or(body);
+    let body = body.split(" as ").next().unwrap_or(body);
+    let path: String = body.split_whitespace().collect();
+    let path = path.strip_suffix(".*").unwrap_or(&path);
+    path == SPRING_WEB
+        || path
+            .strip_prefix(SPRING_WEB)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|member| !member.is_empty() && !member.contains('.'))
 }
 
 /// The starts every Kotlin source in `files` declares. `web` is the
@@ -385,7 +411,8 @@ impl Cx<'_> {
             target: self.target(&key),
         };
         let handler = ("handler", serde_json::Value::from(key.clone()));
-        if name == "main" && self.is_main(function, scope, &annotations) {
+        if name == "main" && !has_receiver(function) && self.is_main(function, scope, &annotations)
+        {
             let mut kind = Kind {
                 kind: operator_or_process(self.rel),
                 evidence: None,
@@ -555,13 +582,19 @@ impl Cx<'_> {
                 return;
             }
             let name = self.text(n);
-            if self.proves(name, "embeddedServer", KTOR_ENGINE)
-                || self.proves(name, "EngineMain", KTOR_ENGINE_MAINS)
+            // Only a call starts a server: `embeddedServer(…)`,
+            // `runApplication<App>(…)`, `SpringApplicationBuilder(…)`,
+            // `SpringApplication.run(…)` or `EngineMain.main(…)`; a type or
+            // callable reference does not.
+            let called = called(n);
+            let member = member_called(n).map(|member| self.text(member));
+            if (called && self.proves(name, "embeddedServer", KTOR_ENGINE))
+                || (member == Some("main") && self.proves(name, "EngineMain", KTOR_ENGINE_MAINS))
             {
                 found = Some(Runs::Ktor(span(n)));
-            } else if self.proves(name, "runApplication", BOOT)
-                || self.proves(name, "SpringApplication", BOOT)
-                || self.proves(name, "SpringApplicationBuilder", BOOT_BUILDER)
+            } else if (called && self.proves(name, "runApplication", BOOT))
+                || (member == Some("run") && self.proves(name, "SpringApplication", BOOT))
+                || (called && self.proves(name, "SpringApplicationBuilder", BOOT_BUILDER))
             {
                 found = Some(Runs::Spring);
             }
@@ -655,6 +688,60 @@ fn header_end(function: TsNode) -> u64 {
         .into_iter()
         .find(|c| c.kind() == "function_body")
         .map_or(function.end_byte(), |b| b.start_byte()) as u64
+}
+
+/// Whether a function declares an extension receiver (`fun T.main()`):
+/// its compiled method takes the receiver as a parameter.
+fn has_receiver(function: TsNode) -> bool {
+    let Some(name) = function.child_by_field_name("name") else {
+        return false;
+    };
+    named_children(function).into_iter().any(|c| {
+        c.end_byte() <= name.start_byte() && !matches!(c.kind(), "modifiers" | "type_parameters")
+    })
+}
+
+/// Whether `name` is the callee of a call: `name(…)`, `name(…) { … }` or,
+/// as the grammar reads a call with type arguments, `name<T>(…)`.
+fn called(name: TsNode) -> bool {
+    let Some(parent) = name.parent() else {
+        return false;
+    };
+    if parent.kind() == "call_expression" {
+        return parent.named_child(0) == Some(name);
+    }
+    parent.kind() == "binary_expression"
+        && parent.named_child(0) == Some(name)
+        && operator_is(parent, "<")
+        && parent.parent().is_some_and(|outer| {
+            outer.kind() == "binary_expression"
+                && outer.named_child(0) == Some(parent)
+                && operator_is(outer, ">")
+                && outer
+                    .named_child(1)
+                    .is_some_and(|args| args.kind() == "parenthesized_expression")
+        })
+}
+
+/// The member called on `receiver`: `m` in `receiver.m(…)`.
+fn member_called(receiver: TsNode) -> Option<TsNode> {
+    let navigation = receiver
+        .parent()
+        .filter(|p| p.kind() == "navigation_expression" && p.named_child(0) == Some(receiver))?;
+    navigation
+        .parent()
+        .filter(|c| c.kind() == "call_expression" && c.named_child(0) == Some(navigation))?;
+    navigation
+        .named_child(1)
+        .filter(|member| member.kind() == "identifier")
+}
+
+/// Whether a binary expression's operator token is `op`.
+fn operator_is(node: TsNode, op: &str) -> bool {
+    let mut walk = node.walk();
+    node.children(&mut walk)
+        .find(|c| !c.is_named())
+        .is_some_and(|c| c.kind() == op)
 }
 
 fn visit(node: TsNode, f: &mut dyn FnMut(TsNode)) {
