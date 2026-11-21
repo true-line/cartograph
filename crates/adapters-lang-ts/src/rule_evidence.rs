@@ -322,8 +322,8 @@ const STRATEGY_SUFFIXES: [&str; 4] = ["Strategy", "Handler", "Calculator", "Proc
 
 /// Whether an unguarded `return` states how a value is chosen (AC-0956),
 /// so it is a rule though no branch guards it:
-/// - the answer of a predicate, a method named `isX`, `hasX`, `canX`,
-///   `shouldX` or `mustX` or declared `: boolean`
+/// - the answer of a non-private predicate, a method named `isX`, `hasX`,
+///   `canX`, `shouldX` or `mustX` or declared `: boolean`
 ///   (`test(zone, category): boolean { return … && … }`), unless a constant;
 /// - a pick with a fallback, `return found || fallback` (or `??`) where
 ///   `found` is, or is declared as, a `.find(…)` (`rate || this.defaultTaxRate`);
@@ -359,7 +359,8 @@ fn answers_a_choice(cx: &FileCx<'_>, exit: TsNode<'_>) -> bool {
     }) || callable
         .child_by_field_name("return_type")
         .is_some_and(|ty| cx.text(&ty).trim_start_matches(':').trim() == "boolean");
-    if predicate {
+    let private = cx.text(&callable).starts_with("private") || name.starts_with('#');
+    if predicate && !private {
         return true;
     }
     let value = unparenthesized(value);
@@ -392,9 +393,7 @@ fn answers_a_choice(cx: &FileCx<'_>, exit: TsNode<'_>) -> bool {
             }
         }
     }
-    callable.kind() == "method_definition"
-        && !cx.text(&callable).starts_with("private")
-        && implements_a_strategy(cx, callable)
+    callable.kind() == "method_definition" && !private && implements_a_strategy(cx, callable)
 }
 
 fn unparenthesized(mut node: TsNode<'_>) -> TsNode<'_> {

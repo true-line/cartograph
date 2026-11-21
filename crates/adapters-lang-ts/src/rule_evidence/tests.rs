@@ -593,6 +593,7 @@ fn an_unguarded_choice_is_a_rule() {
     }
     isActive() { return this.enabled; }
     alwaysTrue(): boolean { return true; }
+    private isId(x: unknown): boolean { return typeof x === 'string'; }
     label() { return this.name; }
 }
 export class TaxRateService {

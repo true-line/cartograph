@@ -242,7 +242,21 @@ fn holds(shown: &str, polarity: BranchPolarity, alone: bool) -> String {
 }
 
 fn rejection<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
-    guarded(rule, owner, false, constant)
+    guarded(rule, owner, false, constant).or_else(|| choice(rule, owner, constant))
+}
+
+/// An unguarded answer that states how a value is chosen (a predicate's
+/// answer, a pick with a fallback, a strategy's answer: AC-0956, AC-0915)
+/// as a row beside the rejections: the adapters record an exit with no
+/// branch around it only for these.
+fn choice<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
+    let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+    if !parsed.conditions.is_empty()
+        || !matches!(parsed.effect, LocalExit::Return { value: Some(_) })
+    {
+        return None;
+    }
+    guarded(rule, owner, true, constant)
 }
 
 /// A guarded effect (an assignment or a call statement, #1998) as a row.
