@@ -572,8 +572,11 @@ proposals against distinct source spans, plus an unaccepted control proposal.
 3. Change only the first proposal's cited source in a disposable fixture revision
    and re-ingest it. Inspect both proposals through all three curated surfaces.
    Attempt to reuse the first proposal without reconciling its changed evidence.
-4. Perform the documented reconciliation/review flow against the new source and
-   read all three surfaces again. Reopen the original revision and review history.
+4. Perform the documented reconciliation/review flow against the new source
+   (SPEC-12 §Reconciliation: in the stale record's review dialog, choose
+   "Resolve gap again on current source", accept the new proposal, then reopen
+   the stale record and choose "Withdraw acceptance") and read all three
+   surfaces again. Reopen the original revision and review history.
 
 **Pass:** the same accepted projection appears consistently where the export
 policy permits it; T3 remains InferredWeak and is excluded from verified-only.

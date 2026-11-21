@@ -215,6 +215,25 @@ inputs.
   A `verified-only` session gets no item, only the count. Notes, timestamps,
   and pending or rejected records are not served.
 
+## Reconciliation (AC-1020)
+
+Reconciliation is a review flow, not a new state (ADR-0061 decision 9). The
+review dialog of an accepted record offers two steps beside its state:
+
+1. **Resolve gap again on current source.** This opens the record's Gap in
+   the Resolution Strategy dialog, so a new task is assembled from the
+   current capture and a new proposal is staged for its own review. Nothing
+   in the old record changes, and re-accepting the old record is not
+   offered: acceptance never re-certifies changed evidence (#385 AC 7).
+2. **Withdraw acceptance.** This rejects the old record at its current
+   review revision (compare-and-set, SPEC-03), so it leaves the projection
+   at the next curated revision. Its saved basis and review history stay
+   readable in proposal history.
+
+A rejected record offers neither step. Until it is withdrawn, an old record
+for the same Gap keeps its own state, and a new accepted record with a
+different edge makes both `conflicted`.
+
 ## Slices
 
 Each slice is one PR with its own acceptance criteria, reserved in that PR.
