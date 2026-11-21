@@ -6901,18 +6901,32 @@ impl SpecRead {
             .filter(|record| record.decision == agents::AssertionDecision::Rejected)
             .map(|record| record.assertion.provenance.content_hash.clone())
             .collect();
+        let base = core_graph::RevisionedSnapshot {
+            revision,
+            graph: (nodes, edges),
+        };
         let (curated, graph_basis) = match review {
             Some(review) => {
-                let graph_basis = graph_basis_of(&nodes, &edges);
+                let (nodes, edges) = &base.graph;
+                let graph_basis = graph_basis_of(nodes, edges);
+                // The derived facts D1 prints, so the projection and the
+                // document agree on which drafts resolve (#2040).
+                let overlay = curated::overlay_nodes(
+                    &base,
+                    &knowledge.capabilities,
+                    &knowledge.actors,
+                    &rejected_hashes,
+                );
                 let projection = curated::project(
                     review,
                     &curated::Snapshot {
-                        nodes: &nodes,
-                        edges: &edges,
+                        nodes,
+                        edges,
+                        overlay: &overlay,
                         derived_decisions: curated::DerivedDecisions::Compile(&flows),
                         coverage: &coverage,
                         content_hash: &graph_basis.content_hash,
-                        revision: &revision,
+                        revision: &base.revision,
                     },
                     &assertion_decisions,
                 );
@@ -6925,10 +6939,7 @@ impl SpecRead {
             None => (CuratedInput::NotRead, None),
         };
         SpecInputs {
-            base: core_graph::RevisionedSnapshot {
-                revision,
-                graph: (nodes, edges),
-            },
+            base,
             knowledge,
             coverage,
             flows,

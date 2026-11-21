@@ -740,6 +740,9 @@ pub(crate) enum DerivedDecisions<'a> {
 pub(crate) struct Snapshot<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [Edge],
+    /// The knowledge overlay's Capabilities and Actors current for
+    /// `revision` (#2040): a draft may cite them beside the base facts.
+    pub overlay: &'a [&'a Node],
     pub derived_decisions: DerivedDecisions<'a>,
     pub coverage: &'a [core_graph::coverage::StoredCoverage],
     /// `spec::graph_content_hash` of `nodes` and `edges`.
@@ -785,17 +788,19 @@ pub(crate) fn project(
         .collect();
     let current = current_assertion_hashes(snapshot, &decided, &review.settled)?;
     // The current hash of each fact an accepted draft cites, over the
-    // snapshot's nodes and edges (ADR-0064 decision 8). One pass, and none
-    // when no draft is accepted. A fact that lives only in the knowledge
-    // overlay is not in the snapshot the export compiles, so a draft citing
-    // one is `unresolvable` (SPEC-15 open items).
+    // snapshot's nodes and edges, then the overlay's Capabilities and Actors
+    // (ADR-0064 decision 8, #2040). One pass, and none when no draft is
+    // accepted. A base fact keeps its own hash.
     let cited: BTreeSet<String> = review
         .drafts
         .iter()
         .filter(|draft| draft.decision == Some(core::DraftReview::Accepted))
         .flat_map(|draft| draft.cited_hashes.keys().cloned())
         .collect();
-    let cited_hashes = spec::cited_fact_hashes(snapshot.nodes, snapshot.edges, &cited);
+    let mut cited_hashes = spec::cited_fact_hashes(snapshot.nodes, snapshot.edges, &cited);
+    for (id, hash) in spec::cited_node_hashes(snapshot.overlay.iter().copied(), &cited) {
+        cited_hashes.entry(id).or_insert(hash);
+    }
     // The current digest of each fact an accepted finding cites, the same
     // way (ADR-0074 decision 5): one pass, and none when no finding is
     // accepted.
@@ -827,6 +832,44 @@ pub(crate) fn project(
         }
         core::ProjectionError::Encoding => CuratedFailure::RevisionNotEncoded,
     })
+}
+
+/// The overlay Capabilities and Actors a `best-effort` export of `base`
+/// prints, for [`Snapshot::overlay`] (#2040): the knowledge stories
+/// validated as the export validates them, so a story the export withholds
+/// (it, or a fact it rests on, was rejected) resolves no draft. A refused
+/// overlay resolves none.
+pub(crate) fn overlay_nodes<'a>(
+    base: &'a core_graph::RevisionedSnapshot,
+    capabilities: &'a [core_graph::overlay::OverlayFact],
+    actors: &'a [core_graph::overlay::OverlayFact],
+    rejected: &BTreeSet<String>,
+) -> Vec<&'a Node> {
+    let Some(candidates) = capabilities
+        .iter()
+        .map(|fact| match &fact.item {
+            core_graph::overlay::OverlayItem::Node(capability) => Some(spec::CapabilityStory {
+                capability,
+                cites: &fact.cites,
+            }),
+            core_graph::overlay::OverlayItem::Edge(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    if candidates.is_empty() && actors.is_empty() {
+        return Vec::new();
+    }
+    spec::validate_knowledge_stories(
+        base,
+        &candidates,
+        actors,
+        spec::ExportMode::BestEffort,
+        rejected,
+    )
+    .map(|stories| stories.included_nodes().collect())
+    .unwrap_or_default()
 }
 
 /// The snapshot with its inventories and the store revision of the same

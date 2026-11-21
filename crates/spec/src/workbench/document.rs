@@ -223,6 +223,16 @@ pub fn cited_fact_hashes(
     hashes_of(nodes.iter(), edges.iter(), cited)
 }
 
+/// [`cited_fact_hashes`] over `nodes` alone: the knowledge overlay's
+/// derived Capabilities and Actors, which a draft may cite beside the base
+/// facts (#2040).
+pub fn cited_node_hashes<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
+    cited: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    hashes_of(nodes.into_iter(), std::iter::empty(), cited)
+}
+
 /// The current digest of each fact `cited` names, by citation id: the
 /// canonical digest of every field of the node or edge, which an
 /// investigation records for each fact it reads and the curated projection
@@ -990,8 +1000,18 @@ pub(super) fn d1(
          for the team. A citation id resolves in `fact-index.md`.\n",
     )?;
 
+    // A draft may cite a derived Capability or Actor this document prints
+    // (#2040), so the included stories are looked up beside the base facts.
+    let citable: Vec<&Node> = match knowledge {
+        Some(knowledge) => nodes
+            .iter()
+            .copied()
+            .chain(knowledge.included.iter().map(|story| story.node))
+            .collect(),
+        None => nodes.to_vec(),
+    };
     let facts = match mode {
-        ExportMode::BestEffort => cited_facts(&drafts, nodes, edges),
+        ExportMode::BestEffort => cited_facts(&drafts, &citable, edges),
         // No claim is printed, so no cited fact is looked for.
         ExportMode::VerifiedOnly => BTreeMap::new(),
     };

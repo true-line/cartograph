@@ -289,12 +289,14 @@ committed there.
 
 ## Open items
 
-- The export compiles the base graph. `Capability`, `Actor` and
-  `BusinessFlow` facts that live only in the knowledge overlay (ADR-0051)
-  are not in it, so §1.2 and §1.3 list only base-graph facts. A draft that
-  cites an overlay fact is `unresolvable` and is not printed: its citation
-  would have no row in the export's fact index. Printing it needs the export
-  to compile the overlay facts, which is not built.
+- The export compiles the base graph and, when the knowledge overlay is
+  current for it, the overlay's `Capability` and `Actor` facts (ADR-0051).
+  A draft may cite one of those (AC-1011, #2040): the composer is handed it
+  as citable, staging records its hash, the curated projection resolves it
+  against the overlay, and D1 prints the draft with the fact's row in
+  `fact-index.md`. With no current overlay the draft is `unresolvable`.
+  `BusinessFlow` and other overlay facts are not read by the export, so a
+  draft citing one stays `unresolvable`.
 - The D1 header does not yet carry the system name or the source revisions
   the catalogue asks of every document; the bundle holds them as
   `graph_basis`. §1.4 and §1.5 are not yet arranged per capability or rule.
