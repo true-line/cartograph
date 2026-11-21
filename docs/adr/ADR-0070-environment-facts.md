@@ -57,6 +57,20 @@ source does not state.
    states what the patch writes; nothing is merged, and transformers are
    named, not applied.
 
+9. **Helm (increment 3).** A chart's `Chart.yaml` is a `Workload` of kind
+   `helm-chart` (name, version, appVersion, type, dependency names) carrying
+   the sorted key paths of its default `values.yaml`, never a value.
+   Templates are not rendered, so the objects a chart creates are not
+   listed. A helmfile release is an `Environment` with id
+   `env:{repo}@{helmfile}#{release}`, named only by a namespace the release
+   states, with `DECLARES` to the local chart it installs; the edge lists
+   each values file the release names with that file's key paths. A
+   templated helmfile, `bases`, `helmfiles`, a remote or missing chart,
+   inline values, `set`, `setString`, `secrets` and `valuesTemplate` are
+   Gaps naming the construct. A chart values file no release names whose
+   file name names an environment (`values-prod.yaml`) is a name-only Gap
+   (decision 3).
+
 ## Consequences
 
 - A repository with a Compose file gains `Environment`, `Workload` and
