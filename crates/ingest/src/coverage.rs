@@ -5,8 +5,13 @@
 //! The inventory is built only from facts the ingest already recorded; it
 //! runs no producer. "Completed" always means the declared repo, revision,
 //! layer hints and inputs, never global completeness.
+//!
+//! A language present in the run whose adapter has no producer for an
+//! extractor family (target tests, persistence, rule evidence, endpoint
+//! auth) is a not-covered capability too (#2164, [`families`]).
 
 use crate::preflight::PreflightReport;
+pub use families::{Family, MISSING_FAMILY_CAPABILITY, PRODUCERS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -741,7 +746,8 @@ impl RepoCoverage {
     }
 
     /// Add the constructs no installed producer covers, grouped by uncovered
-    /// language or finding kind in first-seen order, followed by the files
+    /// language or finding kind in first-seen order, then the extractor
+    /// families no producer covers for a detected language, then the files
     /// gated plugins were refused on.
     pub fn with_unsupported(mut self, report: &PreflightReport) -> Self {
         let mut unsupported: Vec<UnsupportedCapability> = Vec::new();
@@ -776,6 +782,7 @@ impl RepoCoverage {
                 first_site: format!("{}:{}", finding.path, finding.line),
             });
         }
+        unsupported.extend(families::missing(&report.languages));
         unsupported.extend(self.refused_capabilities());
         self.unsupported = unsupported;
         self.refresh_limited();
@@ -905,5 +912,6 @@ impl RepoCoverage {
     }
 }
 
+mod families;
 #[cfg(test)]
 mod tests;
