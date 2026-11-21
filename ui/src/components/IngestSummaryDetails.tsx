@@ -116,6 +116,34 @@ export function IngestSummaryDetails({
               {summary.layers.tools.edges} edges
             </dd>
           </div>
+          {summary.layers.schedules && (
+            <div>
+              <dt>Schedules</dt>
+              <dd data-testid="schedules-layer-summary">
+                {summary.layers.schedules.files} files · {summary.layers.schedules.nodes} nodes ·{' '}
+                {summary.layers.schedules.edges} edges
+              </dd>
+            </div>
+          )}
+          {summary.layers.pipelines && (
+            <div>
+              <dt>Pipelines</dt>
+              <dd data-testid="pipelines-layer-summary">
+                {summary.layers.pipelines.files} files · {summary.layers.pipelines.nodes} nodes ·{' '}
+                {summary.layers.pipelines.edges} edges
+              </dd>
+            </div>
+          )}
+          {summary.layers.environments && (
+            <div>
+              <dt>Environments</dt>
+              <dd data-testid="environments-layer-summary">
+                {summary.layers.environments.files} files ·{' '}
+                {summary.layers.environments.nodes} nodes · {summary.layers.environments.edges}{' '}
+                edges
+              </dd>
+            </div>
+          )}
           {summary.layers.events && (
             <div>
               <dt>Events and calls</dt>

@@ -58,6 +58,38 @@ export const WithSummary: Story = {
   },
 };
 
+// Schedules, pipelines and environments add to the totals, so the breakdown
+// names them whenever the backend reports them.
+export const OptionalLayers: Story = {
+  args: {
+    summary: {
+      job_id: 4,
+      files: 6,
+      nodes: 12,
+      edges: 15,
+      merged: { nodes: 0, edges: 0, node_collisions: 0 },
+      layers: {
+        ...EMPTY_LAYERS,
+        schedules: { files: 1, nodes: 2, edges: 2 },
+        pipelines: { files: 2, nodes: 6, edges: 8 },
+        environments: { files: 1, nodes: 4, edges: 5 },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('schedules-layer-summary').textContent).toBe(
+      '1 files · 2 nodes · 2 edges',
+    );
+    await expect(canvas.getByTestId('pipelines-layer-summary').textContent).toBe(
+      '2 files · 6 nodes · 8 edges',
+    );
+    await expect(canvas.getByTestId('environments-layer-summary').textContent).toBe(
+      '1 files · 4 nodes · 5 edges',
+    );
+  },
+};
+
 // AC-0196 (#242): totals are the distinct facts stored; what was collapsed to
 // reach them is stated next to the totals.
 export const MergedOccurrencesAreStated: Story = {
