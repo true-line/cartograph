@@ -987,6 +987,10 @@ fn module_imports(cx: &FileCx<'_>, root: TsNode<'_>) -> BTreeSet<String> {
         .collect()
 }
 
+/// Class methods that create or delete a record (`Model.create(…)`): a call
+/// statement of one on an imported upper-case name is an effect (#1998).
+const MODEL_WRITE_VERBS: &[&str] = &["create", "delete"];
+
 /// Logging receivers and verbs: a call to one is a diagnostic, not an effect.
 const LOGGING: &[&str] = &[
     "LOG", "log", "logger", "logging", "LOGGER", "_logger", "_log",
@@ -1145,7 +1149,8 @@ fn function_imports(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
 /// A statement that is a guarded effect (#1998): `x.attr = value` (one
 /// attribute target), or a call statement (optionally awaited) to a
 /// function name that is not a builtin, to a method on `self` or `cls`, or
-/// to a function of an imported lowercase module (`alias_utils.delete(…)`).
+/// to a function of an imported lowercase module (`alias_utils.delete(…)`),
+/// or to `create`/`delete` on an imported class (`AliasUsedOn.create(…)`).
 /// Logging calls and `__init__` bodies are not effects.
 fn effect_statement<'t>(
     cx: &FileCx<'_>,
@@ -1202,10 +1207,19 @@ fn effect_statement<'t>(
                         && (modules.contains(receiver)
                             || function.is_some_and(|f| function_imports(cx, f).contains(receiver)))
                 };
+                // `AliasUsedOn.create(…)` / `DeletedAlias.delete(…)` on an
+                // imported class: a record created or deleted (#1998).
+                let model_write = || {
+                    MODEL_WRITE_VERBS.contains(&verb)
+                        && receiver.starts_with(|c: char| c.is_ascii_uppercase())
+                        && receiver != "Session"
+                        && function.is_none_or(|f| !bound_locally(cx, f, receiver))
+                        && modules.contains(receiver)
+                };
                 object.kind() == "identifier"
                     && !LOGGING.contains(&receiver)
                     && !LOG_VERBS.contains(&verb)
-                    && (matches!(receiver, "self" | "cls") || module())
+                    && (matches!(receiver, "self" | "cls") || module() || model_write())
             }
             _ => false,
         };

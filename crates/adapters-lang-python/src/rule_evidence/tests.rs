@@ -174,6 +174,62 @@ class Box:
 }
 
 #[test]
+fn record_creates_and_deletes_on_imported_classes_are_guarded_effects() {
+    // AC-0910 (T-0910, #1998): `create`/`delete` on an imported upper-case
+    // class is an effect with its branches; another verb, the SQLAlchemy
+    // `Session`, a class that is not imported, or a name rebound in the
+    // function is not.
+    let code = r#"
+from app.models import AliasUsedOn, DeletedAlias, Alias
+from app.db import Session
+
+def new_random_alias(alias, hostname):
+    if hostname and not AliasUsedOn.get_by(alias_id=alias.id, hostname=hostname):
+        AliasUsedOn.create(alias_id=alias.id, hostname=hostname, commit=True)
+    DeletedAlias.delete(alias.id)
+    Alias.filter_by(id=1)
+    Session.delete(alias)
+    Local.create(x=1)
+
+def rebound(Alias):
+    Alias.create(x=1)
+"#;
+    let out = recover(code);
+    type Found = (String, String, Vec<(String, BranchPolarity)>);
+    let found: Vec<Found> = rules(&out)
+        .into_iter()
+        .filter(|(_, r)| r.kind == RuleKind::GuardedEffect)
+        .map(|(_, r)| {
+            (
+                r.owner_id.rsplit('#').next().unwrap().to_owned(),
+                value(&r).1,
+                shown(&r),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "new_random_alias".to_owned(),
+                "AliasUsedOn.create(alias_id=alias.id, hostname=hostname, commit=True)".to_owned(),
+                vec![(
+                    "hostname and not AliasUsedOn.get_by(alias_id=alias.id, hostname=hostname)"
+                        .to_owned(),
+                    BranchPolarity::TruthyBranch
+                )],
+            ),
+            (
+                "new_random_alias".to_owned(),
+                "DeletedAlias.delete(alias.id)".to_owned(),
+                vec![],
+            ),
+        ],
+        "{found:?}"
+    );
+}
+
+#[test]
 fn guarded_returns_and_raises_are_owned_by_their_function() {
     // AC-0852: if / elif / else branches, outermost first; a nested function
     // and a lambda own their own exits; an unguarded or bare exit is none.
