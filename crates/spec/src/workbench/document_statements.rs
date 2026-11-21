@@ -1516,12 +1516,13 @@ fn called(value: &str) -> Option<String> {
 /// a doubled brace or no literal text.
 fn flashed(arguments: &str) -> Option<String> {
     let rest = arguments.trim_start();
-    let (formatted, rest) = match rest.strip_prefix('f') {
+    let (formatted, rest) = match rest.strip_prefix(['f', 'F']) {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    let (message, _) = rest.strip_prefix('"')?.split_once('"')?;
-    if message.contains(['\\', '\'']) || message.contains("{{") || message.contains("}}") {
+    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let (message, _) = rest[1..].split_once(quote)?;
+    if message.contains(['\\', '"', '\'']) || message.contains("{{") || message.contains("}}") {
         return None;
     }
     if !formatted {
@@ -2485,6 +2486,18 @@ mod tests {
         assert_eq!(
             called("flash(f\"Deleted {count} aliases\", \"success\")").unwrap(),
             "the user is shown “Deleted … aliases”"
+        );
+        assert_eq!(
+            called("flash(F\"Deleted {count} aliases\", \"success\")").unwrap(),
+            "the user is shown “Deleted … aliases”"
+        );
+        assert_eq!(
+            called("flash(f'Deleted {count} aliases', 'success')").unwrap(),
+            "the user is shown “Deleted … aliases”"
+        );
+        assert_eq!(
+            called("flash('Alias not found', 'error')").unwrap(),
+            "the user is shown “Alias not found”"
         );
         assert_eq!(
             called("flash(f\"{name}\", \"success\")").unwrap(),
