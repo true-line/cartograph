@@ -48,7 +48,7 @@ pub(in super::super) struct CaptureManifest {
     pub auditor_wire_hash: String,
 }
 pub(in super::super) struct PreparedState {
-    pub app: tauri::App<tauri::test::MockRuntime>,
+    pub app: crate::test_app::TestApp,
     pub app_data: PathBuf,
     pub analyst_request: StagedObligationRequest,
     pub auditor_request: StagedObligationRequest,
@@ -181,10 +181,12 @@ fn inventory(repo: &str) -> Result<String, String> {
         missing_inputs: vec![MissingInput { input: "synthetic_control_input".into(), producer: "harness-generated-synthetic-control@1".into(), reason: "Optional synthetic control input was not declared for this recorded scope.".into() }], unsupported: vec![], limited: true, documents: None,
     }).map_err(|error| error.to_string())
 }
-fn app(state: AppState) -> Result<tauri::App<tauri::test::MockRuntime>, String> {
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .map_err(|error| error.to_string())?;
+fn app(state: AppState) -> Result<crate::test_app::TestApp, String> {
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .map_err(|error| error.to_string())?,
+    );
     app.manage(state);
     Ok(app)
 }

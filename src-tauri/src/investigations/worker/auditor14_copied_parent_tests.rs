@@ -132,7 +132,7 @@ fn auditor14_copied_real_parent_whole_run() {
     let mut config = tauri::test::mock_context(tauri::test::noop_assets());
     config.config_mut().identifier = "com.qwtm.cartograph.acceptance598.frontierf1".into();
     config.config_mut().app.app_directories_override=Some(serde_json::from_value(json!({"data":base.join("profile/data"),"config":base.join("profile/config"),"localData":base.join("profile/local-data"),"cache":base.join("profile/cache"),"log":base.join("profile/logs")})).unwrap());
-    let app = tauri::test::mock_builder().build(config).unwrap();
+    let app = crate::test_app::TestApp::new(tauri::test::mock_builder().build(config).unwrap());
     app.manage(crate::registered_source_tests::app_state(
         &base.join("profile/data"),
     ));

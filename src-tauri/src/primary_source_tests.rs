@@ -2811,9 +2811,11 @@ fn mcp_real_store_capacity_omission_is_positive_guarded_and_stale_safe() {
     let private = directory(temp.path(), "private");
     let root = directory(temp.path(), "project");
     std::fs::write(root.join("rules.ts"), "export function alpha(ok: boolean) { if (!ok) return false; return true; }\nexport function beta() { return 2; }\n").unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&private));
     app.manage(crate::PreflightRuns::default());
     let state = app.state::<AppState>();
@@ -3072,9 +3074,11 @@ fn second_recovery_reclaims_the_first_recoverys_superseded_receipts() {
     let private = directory(temp.path(), "private");
     let root = directory(temp.path(), "project");
     std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(app_state(&private));
     app.manage(crate::PreflightRuns::default());
     let state = app.state::<AppState>();

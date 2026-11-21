@@ -318,9 +318,11 @@ fn exercise(cancel: Option<llm::bounded::InvocationOutcome>, decline: bool) {
             })
         },
         |(request, client, id, expected), root| {
-            let fresh = tauri::test::mock_builder()
-                .build(tauri::test::mock_context(tauri::test::noop_assets()))
-                .unwrap();
+            let fresh = crate::test_app::TestApp::new(
+                tauri::test::mock_builder()
+                    .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                    .unwrap(),
+            );
             fresh.manage(crate::registered_source_tests::app_state(root));
             let state = fresh.state::<AppState>();
             let dir = tempfile::tempdir().unwrap();

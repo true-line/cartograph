@@ -18,7 +18,7 @@ fn scoped_worker_opens_large_graph_while_complete_mode_refuses_without_fallback(
         "test.cartograph.{}",
         dir.path().file_name().unwrap().to_string_lossy()
     );
-    let app = tauri::test::mock_builder().build(context).unwrap();
+    let app = crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
     let state = crate::registered_source_tests::app_state(dir.path());
     let patch = GraphPatch {
         upsert_nodes: (0..60_001)
@@ -136,7 +136,7 @@ fn scoped_native_socket_reads_large_graph_and_refuses_stale_continuation() {
         "test.cartograph.{}",
         dir.path().file_name().unwrap().to_string_lossy()
     );
-    let app = tauri::test::mock_builder().build(context).unwrap();
+    let app = crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
     let state = crate::registered_source_tests::app_state(dir.path());
     let mut patch = GraphPatch {
         upsert_nodes: (0..60_001)

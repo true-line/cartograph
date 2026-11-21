@@ -1445,9 +1445,11 @@ fn export_commands_do_their_work_off_the_calling_thread() {
     use tauri::Manager;
     let (_dir, state, _) = accepted_captured_records(0, 1);
     record_unmatched_decision(&state, "sym:gone CALLS sym:nowhere");
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(state);
     let state = app.state::<AppState>();
     fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {

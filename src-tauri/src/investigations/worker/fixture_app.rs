@@ -1,27 +1,16 @@
-//! Private synchronous ownership boundary around Tauri 2.12.5's AppHandle cycles.
+//! Synchronous worker fixture over a test app. The app's state is freed when
+//! the fixture drops (#1621), unless a handle was handed out: then the app is
+//! retained, because that handle may still be in use.
 use super::*;
-use std::cell::Cell;
 use tauri::Manager;
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lifetime {
-    Retain,
-    SynchronousReturn,
-    ExternalUse,
-}
 pub(super) struct FixtureApp {
-    app: tauri::App<tauri::test::MockRuntime>,
-    lifetime: Cell<Lifetime>,
+    app: crate::test_app::TestApp,
 }
 impl FixtureApp {
     pub(super) fn new(state: AppState) -> Self {
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::mock_app();
         app.manage(state);
-        Self {
-            app,
-            lifetime: Cell::new(Lifetime::Retain),
-        }
+        Self { app }
     }
     pub(super) fn state<T: Send + Sync + 'static>(&self) -> tauri::State<'_, T> {
         self.app.state()
@@ -34,20 +23,8 @@ impl FixtureApp {
         self.app.handle()
     }
     pub(super) fn retain_for_external_use(&self) {
-        self.lifetime.set(Lifetime::ExternalUse);
+        self.app.retain_with_escaped_handles();
     }
-    fn begin(&self) {
-        if self.lifetime.get() != Lifetime::ExternalUse {
-            self.lifetime.set(Lifetime::Retain);
-        }
-    }
-    fn end(&self) {
-        if self.lifetime.get() != Lifetime::ExternalUse {
-            self.lifetime.set(Lifetime::SynchronousReturn);
-        }
-    }
-    // These concrete inline calls do not expose App or State to callbacks.
-    // All external handle access opts out permanently, including setup.
     pub(super) fn run_legacy(
         &self,
         id: String,
@@ -57,7 +34,6 @@ impl FixtureApp {
         live: Arc<LiveTask>,
         started: Instant,
     ) {
-        self.begin();
         super::run(
             self.app.handle().clone(),
             id,
@@ -67,7 +43,6 @@ impl FixtureApp {
             live,
             started,
         );
-        self.end();
     }
     pub(super) fn run_completion(
         &self,
@@ -95,7 +70,6 @@ impl FixtureApp {
         dispatch_audit: bool,
         auditor: Option<ConfiguredAuditor>,
     ) {
-        self.begin();
         super::run_completion_with_clock(
             self.app.handle().clone(),
             id,
@@ -108,10 +82,8 @@ impl FixtureApp {
             dispatch_audit,
             auditor,
         );
-        self.end();
     }
-    // AuditProbe receives execution/DTO references only. A captured handle must
-    // already have opted out through handle(); a panic never reaches end().
+    // AuditProbe receives execution/DTO references only.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run_gated_completion_inner(
         &self,
@@ -124,7 +96,6 @@ impl FixtureApp {
         audit_probe: Option<&AuditProbe<'_>>,
         dispatch_audit: bool,
     ) {
-        self.begin();
         {
             let app = self.app.handle();
             let state = app.state::<AppState>();
@@ -175,7 +146,6 @@ impl FixtureApp {
                 );
             }
         }
-        self.end();
     }
     // FrozenContext owns snapshots/DTOs/archive/static policy, never App/State.
     pub(super) fn prepare_context(
@@ -192,25 +162,11 @@ impl FixtureApp {
         )
     }
 }
-impl Drop for FixtureApp {
-    fn drop(&mut self) {
-        if self.lifetime.get() != Lifetime::SynchronousReturn {
-            return;
-        }
-        // SAFETY: the only eligibility setters wrap concrete synchronous workers;
-        // their normal return drops worker State and runs Cleanup. Forwarded
-        // State borrows are tied to this owner. Raw App is private and no Deref
-        // exposes it: every handle-out permanently disables release, so detached
-        // workers/callbacks cannot coexist with unmanage. Panic keeps Retain.
-        #[allow(deprecated)]
-        drop(self.app.unmanage::<AppState>());
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn synchronous_worker_fixture_releases_stores_only_after_normal_return() {
+    fn worker_fixture_releases_stores_after_return_and_after_panic() {
         let provider = Arc::new(Scripted::new(Mode::Finish));
         let fixture = Fixture::new(provider.as_ref());
         let sources = Arc::downgrade(&fixture.app.try_state::<AppState>().unwrap().sources);
@@ -218,31 +174,33 @@ mod tests {
         drop(fixture);
         assert!(
             sources.upgrade().is_none(),
-            "synchronous AppState was retained"
+            "returned fixture retained AppState"
         );
 
         let provider = Arc::new(Scripted::new(Mode::Finish));
         let fixture = Fixture::new(provider.as_ref());
         let sources = Arc::downgrade(&fixture.app.state::<AppState>().sources);
-        fixture.run(provider);
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            fixture.app.begin();
-            panic!("unfinished second inline run");
+            let _fixture = fixture;
+            panic!("unfinished inline run");
         }));
         assert!(unwind.is_err());
         assert!(
-            sources.upgrade().is_some(),
-            "unfinished run must retain state"
+            sources.upgrade().is_none(),
+            "panicked fixture retained AppState"
         );
     }
 
     #[test]
-    fn escaped_handle_permanently_prevents_release_after_inline_worker() {
+    fn escaped_handle_permanently_retains_state() {
         let provider = Arc::new(Scripted::new(Mode::Finish));
         let fixture = Fixture::new(provider.as_ref());
+        let sources = Arc::downgrade(&fixture.app.state::<AppState>().sources);
         let escaped = fixture.app.handle().clone();
         fixture.run(provider);
         drop(fixture);
         assert!(escaped.try_state::<AppState>().is_some());
+        drop(escaped);
+        assert!(sources.upgrade().is_some());
     }
 }

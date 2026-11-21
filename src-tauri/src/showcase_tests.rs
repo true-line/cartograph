@@ -16,7 +16,7 @@ fn required(name: &str) -> String {
 
 /// An isolated profile under the output directory, so a run never touches the
 /// user's app data and every database it produced stays inspectable.
-fn showcase_app(profile: &Path) -> tauri::App<tauri::test::MockRuntime> {
+fn showcase_app(profile: &Path) -> crate::test_app::TestApp {
     let dirs = ["data", "config", "local-data", "cache", "logs"].map(|name| profile.join(name));
     for dir in &dirs {
         std::fs::create_dir_all(dir).unwrap();
@@ -29,7 +29,7 @@ fn showcase_app(profile: &Path) -> tauri::App<tauri::test::MockRuntime> {
         }))
         .unwrap(),
     );
-    let app = tauri::test::mock_builder().build(context).unwrap();
+    let app = crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
     assert_eq!(app.path().app_data_dir().unwrap(), dirs[0]);
     let mut state = crate::registered_source_tests::app_state(&dirs[0]);
     // T2 off, so the post-ingest background phase the stores below enable
@@ -159,7 +159,7 @@ fn write_briefings(state: &AppState, output: &Path) {
 }
 
 /// A new output directory and the isolated app that writes into it.
-fn showcase_output() -> (PathBuf, tauri::App<tauri::test::MockRuntime>) {
+fn showcase_output() -> (PathBuf, crate::test_app::TestApp) {
     let output = PathBuf::from(required("CARTOGRAPH_SHOWCASE_OUTPUT"));
     assert!(output.is_absolute(), "output must be absolute");
     std::fs::create_dir(&output).expect("output directory must be new");

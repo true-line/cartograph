@@ -141,9 +141,11 @@ fn qualified_preparation_keeps_zero_fact_repos_and_exact_scoped_proof() {
         anchor: "mod:0".into(),
         hops: 1,
     };
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(fixture.state);
     let state = app.state::<AppState>();
     let prepared = FrozenContext::prepare_with_app(

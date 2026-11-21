@@ -320,9 +320,11 @@ mod tests {
         }
         .normalized()
         .unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         app.manage(state);
         let error = start(request, app.handle().clone(), Instant::now()).unwrap_err();
         assert!(

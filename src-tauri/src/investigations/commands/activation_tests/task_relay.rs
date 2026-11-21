@@ -529,9 +529,11 @@ fn exercise_task_relay(
         if !reconstruct {
             return;
         }
-        let fresh = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let fresh = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         fresh.manage(crate::registered_source_tests::app_state(app_data));
         let state = fresh.state::<AppState>();
         assert!(

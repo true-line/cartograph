@@ -129,7 +129,7 @@ impl NativeProfile {
         ]
     }
 
-    pub(super) fn app(&self) -> Result<tauri::App<tauri::test::MockRuntime>, String> {
+    pub(super) fn app(&self) -> Result<crate::test_app::TestApp, String> {
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
         context.config_mut().identifier = self.identifier.clone();
         context.config_mut().app.app_directories_override = Some(
@@ -139,9 +139,11 @@ impl NativeProfile {
             )
             .map_err(|_| "invalid Tauri directory map")?,
         );
-        let app = tauri::test::mock_builder()
-            .build(context)
-            .map_err(|_| "cannot build mock app")?;
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(context)
+                .map_err(|_| "cannot build mock app")?,
+        );
         let resolved = [
             app.path().app_data_dir(),
             app.path().app_config_dir(),

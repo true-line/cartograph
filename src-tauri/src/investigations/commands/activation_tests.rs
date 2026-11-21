@@ -481,9 +481,11 @@ fn public_completion_consent_requires_exact_preview_for_approval_and_decline() {
 fn mcp_coordinator_legacy_retry_precedes_provider_and_checks_grant() {
     let directory = tempfile::tempdir().unwrap();
     let state = crate::registered_source_tests::app_state(directory.path());
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(state);
     let state = app.state::<AppState>();
     let capacity = std::num::NonZeroUsize::new(1).unwrap();
