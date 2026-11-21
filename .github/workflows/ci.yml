@@ -320,11 +320,12 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      # The runners share one user's home. rust-cache's post-job cleanup
-      # prunes registry sources under CARGO_HOME, which deleted crates out
-      # from under a concurrent build on another runner (#634).
-      - name: Isolate cargo home per runner
-        run: echo "CARGO_HOME=$HOME/.cargo-runners/$RUNNER_NAME" >> "$GITHUB_ENV"
+      # A fixed path, never one per runner: rust-cache hashes CARGO_HOME's
+      # value into its key, and a hosted RUNNER_NAME is unique per job, so a
+      # per-runner home missed the cache on every job and compiled cold
+      # (#1924). Each hosted job is its own VM, so nothing shares the home.
+      - name: Use a fixed cargo home
+        run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -534,8 +535,9 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Isolate cargo home per runner
-        run: echo "CARGO_HOME=$HOME/.cargo-runners/$RUNNER_NAME" >> "$GITHUB_ENV"
+      # Fixed, so the cache key is stable across jobs (see the Rust lane).
+      - name: Use a fixed cargo home
+        run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
 
       # The shards build the same binary, so they share one cache entry and
       # only the first shard writes it.
