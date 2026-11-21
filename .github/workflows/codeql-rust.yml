@@ -1,0 +1,101 @@
+# Rust CodeQL for main (#634, #1373). A Rust extraction takes most of an hour,
+# so one runs at a time repo-wide and the newest pending commit replaces an
+# older pending one (codeql.yml). That replacement cancels the older commit's
+# analysis; inside ci.yml it failed the commit's CI gate, so a Version packages
+# merge followed by another merge was never tagged. Its own workflow run keeps
+# the replacement out of CI: the newest commit's analysis covers the older ones.
+name: CodeQL Rust
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Jobs run on the organisation's own runners: the Linux runner group holds one
+# x86-64 runner, the MacOS group one arm64 runner. No job runs on a
+# GitHub-hosted runner: hosted minutes are billed.
+jobs:
+  policy:
+    name: Action Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The organisation's Linux runner does not carry Node on its default PATH.
+      # This step reaches for `node`, or runs an action that does, so the
+      # runtime is installed first, with the same pinned action the rest of
+      # the workflow already uses.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Authorize direct workflow event
+        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          authorization-only: 'true'
+
+  # The same image ci.yml names for this commit, by digest; built here when
+  # this run gets to it first.
+  ci-image:
+    name: Linux CI image
+    needs: policy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Name the image
+        id: tag
+        run: echo "image=$(node scripts/ci-image-tag.mjs)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Build and push the image when its tag is missing
+        id: image
+        env:
+          IMAGE: ${{ steps.tag.outputs.image }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "Reusing $IMAGE"
+          else
+            tar -c ci/linux.Dockerfile rust-toolchain.toml |
+              docker build --label "org.opencontainers.image.source=$SOURCE" -f ci/linux.Dockerfile -t "$IMAGE" -
+            docker push "$IMAGE"
+          fi
+          digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE")
+          case "$digest" in sha256:*) ;; *) echo "::error::No digest for $IMAGE"; exit 1 ;; esac
+          echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+
+  codeql:
+    name: Advanced CodeQL
+    needs: [policy, ci-image]
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+    with:
+      image: ${{ needs.ci-image.outputs.image }}
+      rust: true

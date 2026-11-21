@@ -1,5 +1,6 @@
-# Advanced CodeQL is invoked only by the governed CI lifecycle so the runtime
-# actor is the authorized caller, not default setup's unselectable bot actor.
+# Advanced CodeQL is invoked only by governed callers (ci.yml for every lane,
+# codeql-rust.yml for Rust on main) so the runtime actor is the authorized
+# caller, not default setup's unselectable bot actor.
 name: CodeQL
 
 on:
@@ -9,6 +10,11 @@ on:
         description: Digest reference of the Linux CI image (ci.yml ci-image)
         required: true
         type: string
+      rust:
+        description: Analyze Rust alone (codeql-rust.yml) instead of the per-run languages
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -54,8 +60,10 @@ jobs:
       fail-fast: false
       matrix:
         # Rust runs only after merge to main until the org runners stop losing
-        # long jobs' working directories (#634); pull requests keep the rest.
-        language: ${{ fromJSON(github.event_name == 'push' && '["actions", "javascript-typescript", "rust"]' || '["actions", "javascript-typescript"]') }}
+        # long jobs' working directories (#634), and in its own workflow run
+        # (codeql-rust.yml): a superseded Rust analysis must never turn a main
+        # commit's CI red and so block its version tag.
+        language: ${{ fromJSON(inputs.rust && '["rust"]' || '["actions", "javascript-typescript"]') }}
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
