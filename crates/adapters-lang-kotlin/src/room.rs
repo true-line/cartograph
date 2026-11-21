@@ -1,0 +1,754 @@
+//! Android Room persistence (#2021, AC-1025).
+//!
+//! An import-proven `@Entity` class is a `DataEntity` table (`storage:
+//! "sql"`, framework `room`): its table is the `tableName` literal, else
+//! the class name, and its columns are the constructor and body
+//! properties, named by a literal `@ColumnInfo(name = …)` where one is
+//! given (`@Ignore`, `@Embedded` and `@Relation` properties are not
+//! columns). In an import-proven `@Dao` type:
+//!
+//! - a function's `@Query` literal is read as SQL by the shared reader
+//!   ([`adapters_fw::sql`]), each table it touches a `READS` or `WRITES`
+//!   edge from the function Symbol (InferredStrong, resolution
+//!   `sql-literal`);
+//! - `@Insert`, `@Update`, `@Delete` and `@Upsert` write the entity their
+//!   first parameter's type names (through `List`, `Set`, `Collection`,
+//!   `Iterable`, `Array` or `vararg`), a Confirmed `WRITES` edge
+//!   (resolution `room-entity-parameter`).
+//!
+//! The table a query names, and the class a parameter names, resolve at
+//! the directory join against the repository's `@Entity` classes. A query
+//! that is not one pure string literal, one that names a computed table,
+//! a table or class no entity declares, a computed `tableName`, and a
+//! write annotation with an `entity =` argument are Gaps (R-INT-4). A
+//! star-imported Room annotation that a same-package declaration of that
+//! name obscures proves nothing, and its facts become Gaps at the join.
+
+use adapters_fw::sql::{entity_id, parse_with_gaps};
+use core_graph::{Edge, Node};
+use core_prov::ConfidenceTier;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use tree_sitter::Node as TsNode;
+
+use super::rest_template::named_children;
+use super::{
+    AnnotationUse, FileCx, Imports, ShadowName, declaration_annotations, enclosing_type_chain,
+    preceding_expression_annotations, pure_string_literal, retarget_props_commit,
+};
+
+/// The Room annotation packages: AndroidX and the pre-AndroidX one.
+const PACKAGES: &[&str] = &["androidx.room", "android.arch.persistence.room"];
+const FRAMEWORK: &str = "room";
+
+/// An `@Entity` class awaiting the join.
+#[derive(Debug, Clone)]
+pub(crate) struct Entity {
+    fqn: String,
+    path: String,
+    /// Same-package names that would obscure the star-imported proof.
+    shadows: Vec<String>,
+    node: Node,
+}
+
+#[derive(Debug, Clone)]
+enum Target {
+    /// A table a query names, folded to lower case.
+    Table(String),
+    /// The FQNs a parameter's type name can denote.
+    Class(Vec<String>),
+}
+
+/// A DAO function's read or write awaiting the join.
+#[derive(Debug, Clone)]
+pub(crate) struct Access {
+    path: String,
+    shadows: Vec<String>,
+    src: String,
+    target: Target,
+    label: &'static str,
+    props: serde_json::Value,
+    gap: (Node, Edge),
+}
+
+/// One file's Room facts awaiting the directory join.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Pending {
+    entities: Vec<Entity>,
+    accesses: Vec<Access>,
+}
+
+impl Pending {
+    pub(crate) fn extend(&mut self, other: Pending) {
+        self.entities.extend(other.entities);
+        self.accesses.extend(other.accesses);
+    }
+
+    pub(crate) fn retarget(&mut self, commit: &str) {
+        for entity in &mut self.entities {
+            retarget_props_commit(&mut entity.node.props, commit);
+        }
+        for access in &mut self.accesses {
+            retarget_props_commit(&mut access.props, commit);
+            retarget_props_commit(&mut access.gap.0.props, commit);
+            retarget_props_commit(&mut access.gap.1.props, commit);
+        }
+    }
+}
+
+/// Whether a Room annotation is proven, and if so the same-package names
+/// that would obscure a star-import proof (empty for a direct proof).
+fn proof(
+    annotation: &AnnotationUse<'_>,
+    imports: &Imports,
+    package: Option<&str>,
+    name: &str,
+) -> Option<Vec<String>> {
+    if annotation.simple != name {
+        return None;
+    }
+    if annotation.spelled.contains('.') {
+        return PACKAGES
+            .iter()
+            .any(|room| annotation.spelled == format!("{room}.{name}"))
+            .then(Vec::new);
+    }
+    if let Some(bound) = imports.bindings.get(name) {
+        return PACKAGES
+            .iter()
+            .any(|room| *bound == format!("{room}.{name}"))
+            .then(Vec::new);
+    }
+    imports
+        .wildcard_packages
+        .iter()
+        .any(|wildcard| PACKAGES.contains(&wildcard.as_str()))
+        .then(|| {
+            vec![match package {
+                Some(package) => format!("{package}.{name}"),
+                None => name.to_string(),
+            }]
+        })
+}
+
+/// The first annotation among `annotations` proven as Room's `name`.
+fn find<'a, 't>(
+    annotations: &'a [AnnotationUse<'t>],
+    imports: &Imports,
+    package: Option<&str>,
+    name: &str,
+) -> Option<(&'a AnnotationUse<'t>, Vec<String>)> {
+    annotations.iter().find_map(|annotation| {
+        proof(annotation, imports, package, name).map(|shadows| (annotation, shadows))
+    })
+}
+
+/// An annotation's arguments as `(name, value)` pairs, the name `None` for
+/// a positional one; `Some(empty)` without parentheses, `None` when its
+/// arguments are not where the grammar normally puts them.
+fn arguments<'t>(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'t>,
+) -> Option<Vec<(Option<String>, TsNode<'t>)>> {
+    let Some(invocation) = named_children(annotation)
+        .into_iter()
+        .find(|child| child.kind() == "constructor_invocation")
+    else {
+        return (!cx.text(&annotation).contains('(')).then(Vec::new);
+    };
+    let Some(list) = named_children(invocation)
+        .into_iter()
+        .find(|child| child.kind() == "value_arguments")
+    else {
+        return Some(Vec::new());
+    };
+    let mut found = Vec::new();
+    for argument in named_children(list) {
+        match named_children(argument)[..] {
+            [value] => found.push((None, value)),
+            [name, value] if name.kind() == "identifier" => {
+                found.push((Some(cx.text(&name).to_string()), value));
+            }
+            _ => return None,
+        }
+    }
+    Some(found)
+}
+
+/// The value of the argument named `key`, or of the first positional one
+/// when `positional` is set. `Err` when the arguments cannot be read.
+fn argument<'t>(
+    cx: &FileCx<'_>,
+    annotation: TsNode<'t>,
+    key: &str,
+    positional: bool,
+) -> Result<Option<TsNode<'t>>, ()> {
+    let found = arguments(cx, annotation).ok_or(())?;
+    Ok(found.iter().find_map(|(name, value)| match name {
+        Some(name) if name == key => Some(*value),
+        None if positional => Some(*value),
+        _ => None,
+    }))
+}
+
+/// A query's SQL: a pure string literal, or a raw (`"""`) one with no
+/// template.
+fn sql_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+    if node.kind() != "multiline_string_literal" {
+        return pure_string_literal(cx, node);
+    }
+    let text = cx.text(&node);
+    if named_children(node)
+        .iter()
+        .any(|child| child.kind() != "string_content")
+        || text.contains('$')
+    {
+        return None;
+    }
+    text.strip_prefix("\"\"\"")?
+        .strip_suffix("\"\"\"")
+        .map(str::to_string)
+}
+
+fn short(cx: &FileCx<'_>, node: TsNode<'_>) -> String {
+    let mut text = cx.text(&node).to_string();
+    if text.len() > 160 {
+        let mut cut = 160;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
+fn gap_pair(cx: &FileCx<'_>, at: TsNode<'_>, src: &str, label: &str, reason: &str) -> (Node, Edge) {
+    let gap = format!("gap:room:{}@{}@{}", cx.id.repo, cx.path, at.start_byte());
+    (
+        Node {
+            id: gap.clone(),
+            label: "Gap".into(),
+            props: serde_json::json!({
+                "reason": reason,
+                "framework": FRAMEWORK,
+                "language": "kotlin",
+                "expression": short(cx, at),
+                "attempted_tiers": ["T0"],
+                "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {gap}")),
+            }),
+        },
+        Edge {
+            src: src.to_string(),
+            dst: gap.clone(),
+            label: label.into(),
+            props: serde_json::json!({
+                "reason": reason,
+                "prov": cx.prov_with_confidence(
+                    &at,
+                    ConfidenceTier::Gap,
+                    &format!("{label} {src} -> {gap}"),
+                ),
+            }),
+        },
+    )
+}
+
+/// The annotations on a class, including those the grammar attaches to a
+/// preceding expression statement.
+fn class_annotations<'t>(cx: &FileCx<'_>, declaration: TsNode<'t>) -> Vec<AnnotationUse<'t>> {
+    let mut found = declaration_annotations(cx, declaration);
+    found.extend(preceding_expression_annotations(cx, declaration));
+    found
+}
+
+/// The column a property declares, or `None` when it is not one.
+fn column(
+    cx: &FileCx<'_>,
+    property: TsNode<'_>,
+    name: &str,
+    imports: &Imports,
+    package: Option<&str>,
+) -> Option<String> {
+    let annotations = declaration_annotations(cx, property);
+    if ["Ignore", "Embedded", "Relation"]
+        .iter()
+        .any(|skip| find(&annotations, imports, package, skip).is_some())
+    {
+        return None;
+    }
+    if let Some((info, _)) = find(&annotations, imports, package, "ColumnInfo")
+        && let Ok(Some(value)) = argument(cx, info.node, "name", true)
+        && let Some(literal) = pure_string_literal(cx, value)
+    {
+        return Some(literal);
+    }
+    Some(name.to_string())
+}
+
+/// The property columns of an entity class, in declaration order.
+fn columns(
+    cx: &FileCx<'_>,
+    class: TsNode<'_>,
+    imports: &Imports,
+    package: Option<&str>,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for child in named_children(class) {
+        match child.kind() {
+            "primary_constructor" => {
+                for parameters in named_children(child) {
+                    for parameter in named_children(parameters) {
+                        if parameter.kind() != "class_parameter" {
+                            continue;
+                        }
+                        // `val`/`var` are the grammar's anonymous tokens.
+                        let mut walk = parameter.walk();
+                        let is_property = parameter
+                            .children(&mut walk)
+                            .any(|part| matches!(part.kind(), "val" | "var"));
+                        let Some(name) = named_children(parameter)
+                            .into_iter()
+                            .find(|part| part.kind() == "identifier")
+                        else {
+                            continue;
+                        };
+                        if is_property
+                            && let Some(column) =
+                                column(cx, parameter, cx.text(&name), imports, package)
+                        {
+                            found.push(column);
+                        }
+                    }
+                }
+            }
+            "class_body" => {
+                for member in named_children(child) {
+                    if member.kind() != "property_declaration" {
+                        continue;
+                    }
+                    let Some(name) = named_children(member)
+                        .into_iter()
+                        .find(|part| part.kind() == "variable_declaration")
+                        .and_then(|declaration| {
+                            named_children(declaration)
+                                .into_iter()
+                                .find(|part| part.kind() == "identifier")
+                        })
+                    else {
+                        continue;
+                    };
+                    // A getter-only property has no backing field.
+                    if named_children(member)
+                        .iter()
+                        .any(|part| part.kind() == "getter")
+                    {
+                        continue;
+                    }
+                    if let Some(column) = column(cx, member, cx.text(&name), imports, package) {
+                        found.push(column);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// The entity type a write function's first parameter names, unwrapped
+/// from a collection or array, as its simple name.
+fn parameter_entity<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> Option<(String, TsNode<'t>)> {
+    let parameters = named_children(function)
+        .into_iter()
+        .find(|child| child.kind() == "function_value_parameters")?;
+    let parameter = named_children(parameters)
+        .into_iter()
+        .find(|child| child.kind() == "parameter")?;
+    let mut ty = named_children(parameter)
+        .into_iter()
+        .find(|child| matches!(child.kind(), "user_type" | "nullable_type"))?;
+    loop {
+        if ty.kind() == "nullable_type" {
+            ty = named_children(ty)
+                .into_iter()
+                .find(|child| child.kind() == "user_type")?;
+        }
+        let parts = named_children(ty);
+        let identifiers: Vec<TsNode<'_>> = parts
+            .iter()
+            .copied()
+            .filter(|part| part.kind() == "identifier")
+            .collect();
+        let name = cx.text(identifiers.last()?).to_string();
+        let arguments = parts.iter().find(|part| part.kind() == "type_arguments");
+        match (name.as_str(), arguments) {
+            (
+                "List" | "MutableList" | "Set" | "MutableSet" | "Collection" | "Iterable" | "Array",
+                Some(arguments),
+            ) => {
+                let projection = named_children(*arguments).into_iter().next()?;
+                ty = named_children(projection)
+                    .into_iter()
+                    .find(|child| matches!(child.kind(), "user_type" | "nullable_type"))?;
+            }
+            (_, None) => {
+                let spelled: Vec<&str> = identifiers.iter().map(|part| cx.text(part)).collect();
+                return Some((spelled.join("."), ty));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The FQNs a type name written in this file can denote.
+fn candidates(name: &str, imports: &Imports, package: Option<&str>) -> Vec<String> {
+    let (head, rest) = match name.split_once('.') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (name, None),
+    };
+    if let Some(bound) = imports.bindings.get(head) {
+        return vec![match rest {
+            Some(rest) => format!("{bound}.{rest}"),
+            None => bound.clone(),
+        }];
+    }
+    let mut found = vec![match package {
+        Some(package) => format!("{package}.{name}"),
+        None => name.to_string(),
+    }];
+    found.extend(
+        imports
+            .wildcard_packages
+            .iter()
+            .map(|wildcard| format!("{wildcard}.{name}")),
+    );
+    if rest.is_some() {
+        found.push(name.to_string());
+    }
+    found
+}
+
+/// This file's Room entities and DAO accesses.
+pub(crate) fn extract(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    functions_by_start: &HashMap<usize, String>,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) -> Pending {
+    let mut pending = Pending::default();
+    if !cx.text(&root).contains("room") {
+        return pending;
+    }
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        stack.extend(named_children(node));
+        if !matches!(node.kind(), "class_declaration" | "object_declaration") {
+            continue;
+        }
+        let Some(name) = node.child_by_field_name("name") else {
+            continue;
+        };
+        let mut chain = enclosing_type_chain(cx, node);
+        chain.push(cx.text(&name).to_string());
+        let qualified = chain.join(".");
+        let fqn = match package {
+            Some(package) => format!("{package}.{qualified}"),
+            None => qualified.clone(),
+        };
+        let annotations = class_annotations(cx, node);
+        if let Some((entity, shadows)) = find(&annotations, imports, package, "Entity") {
+            let class = super::symbol_id(cx.id.repo, cx.path, &qualified);
+            let table = match argument(cx, entity.node, "tableName", false) {
+                Ok(None) => Some(cx.text(&name).to_string()),
+                Ok(Some(value)) => pure_string_literal(cx, value),
+                Err(()) => None,
+            };
+            let Some(table) = table else {
+                let (gap, edge) = gap_pair(
+                    cx,
+                    entity.node,
+                    &class,
+                    "REFERENCES",
+                    "computed Room entity table name",
+                );
+                nodes.push(gap);
+                edges.push(edge);
+                continue;
+            };
+            let id = entity_id(cx.id.repo, &table.to_lowercase());
+            let columns: Vec<serde_json::Value> = columns(cx, node, imports, package)
+                .into_iter()
+                .map(|name| serde_json::json!({ "name": name }))
+                .collect();
+            pending.entities.push(Entity {
+                fqn: fqn.clone(),
+                path: cx.path.to_string(),
+                shadows,
+                node: Node {
+                    id: id.clone(),
+                    label: "DataEntity".into(),
+                    props: serde_json::json!({
+                        "name": table,
+                        "storage": "sql",
+                        "store": table,
+                        "table": table,
+                        "class": fqn,
+                        "columns": columns,
+                        "framework": FRAMEWORK,
+                        "language": "kotlin",
+                        "resolution": "room-entity",
+                        "prov": cx.prov(&node, &format!("DataEntity {id}")),
+                    }),
+                },
+            });
+        }
+        let Some((_, dao_shadows)) = find(&annotations, imports, package, "Dao") else {
+            continue;
+        };
+        let Some(body) = named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "class_body")
+        else {
+            continue;
+        };
+        for function in named_children(body) {
+            if function.kind() != "function_declaration" {
+                continue;
+            }
+            let Some(src) = functions_by_start.get(&function.start_byte()) else {
+                continue;
+            };
+            let annotations = declaration_annotations(cx, function);
+            if let Some((query, shadows)) = find(&annotations, imports, package, "Query") {
+                let shadows: Vec<String> = dao_shadows.iter().chain(&shadows).cloned().collect();
+                let literal = match argument(cx, query.node, "value", true) {
+                    Ok(Some(value)) => sql_literal(cx, value),
+                    _ => None,
+                };
+                let Some(sql) = literal else {
+                    let (gap, edge) = gap_pair(
+                        cx,
+                        query.node,
+                        src,
+                        "READS",
+                        "Room query is not a string literal",
+                    );
+                    nodes.push(gap);
+                    edges.push(edge);
+                    continue;
+                };
+                let (accesses, computed) = parse_with_gaps(&sql);
+                if computed || accesses.is_empty() {
+                    let (gap, edge) =
+                        gap_pair(cx, query.node, src, "READS", "Room query names no table");
+                    nodes.push(gap);
+                    edges.push(edge);
+                    continue;
+                }
+                let mut seen: BTreeMap<(String, &'static str), BTreeSet<&'static str>> =
+                    BTreeMap::new();
+                for access in accesses {
+                    let label = if access.write.is_some() {
+                        "WRITES"
+                    } else {
+                        "READS"
+                    };
+                    let operations = seen
+                        .entry((access.table.to_lowercase(), label))
+                        .or_default();
+                    if let Some(operation) = access.write {
+                        operations.insert(operation);
+                    }
+                }
+                for ((table, label), operations) in seen {
+                    let mut props = serde_json::json!({
+                        "resolution": "sql-literal",
+                        "framework": FRAMEWORK,
+                        "prov": cx.prov_with_confidence(
+                            &query.node,
+                            ConfidenceTier::InferredStrong,
+                            &format!("{label} {src} -> {}", entity_id(cx.id.repo, &table)),
+                        ),
+                    });
+                    if let Some(first) = operations.first() {
+                        props["operation"] = (*first).into();
+                        props["operations"] = operations.iter().copied().collect::<Vec<_>>().into();
+                    }
+                    pending.accesses.push(Access {
+                        path: cx.path.to_string(),
+                        shadows: shadows.clone(),
+                        src: src.clone(),
+                        target: Target::Table(table.clone()),
+                        label,
+                        props,
+                        gap: gap_pair(
+                            cx,
+                            query.node,
+                            src,
+                            label,
+                            &format!("Room query table `{table}` is not a recovered @Entity"),
+                        ),
+                    });
+                }
+                continue;
+            }
+            let write = [
+                ("Insert", &["insert"][..]),
+                ("Update", &["update"][..]),
+                ("Delete", &["delete"][..]),
+                ("Upsert", &["insert", "update"][..]),
+            ]
+            .into_iter()
+            .find_map(|(name, operations)| {
+                find(&annotations, imports, package, name)
+                    .map(|(annotation, shadows)| (annotation, shadows, operations))
+            });
+            let Some((annotation, shadows, operations)) = write else {
+                continue;
+            };
+            let shadows: Vec<String> = dao_shadows.iter().chain(&shadows).cloned().collect();
+            if !matches!(argument(cx, annotation.node, "entity", false), Ok(None)) {
+                let (gap, edge) = gap_pair(
+                    cx,
+                    annotation.node,
+                    src,
+                    "WRITES",
+                    "Room write names its entity by argument, not read at T0",
+                );
+                nodes.push(gap);
+                edges.push(edge);
+                continue;
+            }
+            let Some((ty, at)) = parameter_entity(cx, function) else {
+                let (gap, edge) = gap_pair(
+                    cx,
+                    annotation.node,
+                    src,
+                    "WRITES",
+                    "Room write parameter type not read",
+                );
+                nodes.push(gap);
+                edges.push(edge);
+                continue;
+            };
+            let props = serde_json::json!({
+                "resolution": "room-entity-parameter",
+                "framework": FRAMEWORK,
+                "operation": operations[0],
+                "operations": operations,
+                "prov": cx.prov(&function, &format!("WRITES {src} -> {ty}")),
+            });
+            pending.accesses.push(Access {
+                path: cx.path.to_string(),
+                shadows,
+                src: src.clone(),
+                target: Target::Class(candidates(&ty, imports, package)),
+                label: "WRITES",
+                props,
+                gap: gap_pair(
+                    cx,
+                    at,
+                    src,
+                    "WRITES",
+                    &format!("Room write type `{ty}` is not a recovered @Entity"),
+                ),
+            });
+        }
+    }
+    pending
+}
+
+/// Entities and accesses joined over the repository: `shadowed` holds the
+/// names product sources declare that obscure a star import.
+pub(crate) fn resolve(
+    pending: Pending,
+    shadowed: &[ShadowName],
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) {
+    let obscured = |names: &[String], path: &str| {
+        names
+            .iter()
+            .any(|name| shadowed.iter().any(|shadow| shadow.obscures(name, path)))
+    };
+    let mut by_table: BTreeMap<String, String> = BTreeMap::new();
+    let mut by_class: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut emitted: BTreeMap<String, usize> = BTreeMap::new();
+    for entity in pending.entities {
+        if obscured(&entity.shadows, &entity.path) {
+            continue;
+        }
+        let id = entity.node.id.clone();
+        let table = entity.node.props["table"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase();
+        by_table.insert(table, id.clone());
+        by_class
+            .entry(entity.fqn.clone())
+            .and_modify(|unique| *unique = None)
+            .or_insert(Some(id.clone()));
+        match emitted.get(&id) {
+            // Two classes on one table: one node, its columns the union.
+            Some(&at) => {
+                let extra = entity.node.props["columns"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(columns) = nodes[at].props["columns"].as_array_mut() {
+                    for column in extra {
+                        if !columns.contains(&column) {
+                            columns.push(column);
+                        }
+                    }
+                }
+            }
+            None => {
+                emitted.insert(id, nodes.len());
+                nodes.push(entity.node);
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for access in pending.accesses {
+        let dst = if obscured(&access.shadows, &access.path) {
+            None
+        } else {
+            match &access.target {
+                Target::Table(table) => by_table.get(table).cloned(),
+                Target::Class(candidates) => {
+                    let found: BTreeSet<&String> = candidates
+                        .iter()
+                        .filter_map(|fqn| by_class.get(fqn).and_then(Option::as_ref))
+                        .collect();
+                    match found.into_iter().collect::<Vec<_>>()[..] {
+                        [id] => Some(id.clone()),
+                        _ => None,
+                    }
+                }
+            }
+        };
+        match dst {
+            Some(dst) => {
+                if seen.insert((access.src.clone(), dst.clone(), access.label)) {
+                    edges.push(Edge {
+                        src: access.src,
+                        dst,
+                        label: access.label.into(),
+                        props: access.props,
+                    });
+                }
+            }
+            None => {
+                let (gap, edge) = access.gap;
+                if seen.insert((edge.src.clone(), gap.id.clone(), access.label)) {
+                    nodes.push(gap);
+                    edges.push(edge);
+                }
+            }
+        }
+    }
+}
