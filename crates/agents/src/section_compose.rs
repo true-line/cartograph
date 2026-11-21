@@ -129,7 +129,7 @@ pub struct ComposeFact {
 /// A derived fact the section prints, over the citable facts it rests on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComposeGroup {
-    /// The derived fact's citation id; not citable.
+    /// The derived fact's citation id; it is also a citable fact (#2040).
     pub citation_id: String,
     /// Its label.
     pub label: String,
@@ -243,8 +243,9 @@ pub(crate) fn prompt_with(input: &ComposeInput<'_>, max_claims: usize) -> String
     out.push_str("</citable_facts>\n");
     if !input.groups.is_empty() {
         out.push_str(
-            "\n<derived_facts>\nThese ids are printed in the section but are derived, not \
-             citable. Cite the facts each rests on instead.\n",
+            "\n<derived_facts>\nThese ids are printed in the section and derived from the \
+             facts each rests on. Cite a derived id for what it names, and the facts it rests \
+             on for the detail.\n",
         );
         for group in input.groups {
             let _ = writeln!(
