@@ -40,7 +40,7 @@ import { TopologyCard } from './components/TopologyCard';
 import { InvestigationsSurface } from './components/InvestigationsSurface';
 import { investigationIsActive, useInvestigationStore } from './investigationStore';
 import {
-  composeOutcomeText, runSectionCompose, sectionComposePreview, sectionDraftQuestion,
+  composeOutcomeText, gatedRunText, runSectionCompose, runSectionComposeGated, sectionComposePreview, sectionDraftQuestion,
   sectionRedraftQuestion, useSectionDocumentStore,
 } from './sectionDocument';
 import { EgressConsentDialog, type EgressPreview } from './components/EgressConsentDialog';
@@ -551,6 +551,23 @@ export default function App() {
     }
   }, [composing]);
 
+  // Gated §1.5 drafting on the local model (#2083, AC-0980): no payload
+  // leaves the machine, so it starts at once.
+  const composeGated = useCallback(async (address: SectionAddress) => {
+    setComposeBusy(true);
+    setComposeNotice(`Drafting section ${address.section} locally, ten rule rows at a time…`);
+    try {
+      const drafts = await runSectionComposeGated(address);
+      setComposeNotice(`Section ${address.section}: ${gatedRunText(drafts)}`);
+      await useSectionDocumentStore.getState().load();
+    } catch (error) {
+      setComposeNotice(null);
+      reportSpecError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setComposeBusy(false);
+    }
+  }, []);
+
   // Ask an area's expert (#2057, AC-0932): the same one-action consent.
   const areaExpert = useAreaExpert(view === 'spec' && backend === 'up');
 
@@ -809,6 +826,7 @@ export default function App() {
                 onDraft: (address) => void draftSection(address),
                 onRedraft: (draft) => void draftSection(draft),
                 onCompose: (address) => void composeSection(address),
+                onComposeGated: (address) => void composeGated(address),
               }}
               expert={{
                 areas: areaExpert.areas,

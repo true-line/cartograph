@@ -163,12 +163,26 @@ export async function sectionDraftQuestion(address: SectionAddress): Promise<str
  *  closed reason there is none, with how many claims were staged and left
  *  out. */
 export type ComposeOutcome =
-  | { outcome: 'staged'; draft_id: string; claims: number; left_out: number }
-  | { outcome: 'no_draft'; reason: string; claims: number; left_out: number };
+  | { outcome: 'staged'; draft_id: string; claims: number; left_out: number; gated?: GatedStats }
+  | { outcome: 'no_draft'; reason: string; claims: number; left_out: number; gated?: GatedStats };
+
+/** What a gated composition (`draft-rules@1`, #2083, AC-0980) did. */
+export interface GatedStats {
+  chunks: number;
+  rows: number;
+  rows_covered: number;
+  calls: number;
+  first_try_passed: number;
+  retries: number;
+  sent_back: number;
+  audit_dropped: number;
+  audit_failed: number;
+  failures: Record<string, number>;
+}
 
 /** Why a composition staged nothing, by its closed code. */
 export const COMPOSE_REFUSAL: Record<string, string> = {
-  composition_system_scope_only: 'A section is composed for the whole system only.',
+  composition_system_scope_only: 'This section is composed for the whole system only.',
   composition_d1_only: 'Only sections of the product specification (D1) are composed.',
   section_not_compiled: 'The export compiled no such section.',
   no_citable_fact: 'The compiled section cites no fact, so there is nothing to compose from.',
@@ -176,6 +190,11 @@ export const COMPOSE_REFUSAL: Record<string, string> = {
   no_admissible_claim: 'No claim in the reply kept the citation and statement rules.',
   statement_names_source: 'Every claim named a source file or code symbol, so none was staged.',
   graph_changed: 'The graph changed while the section was being composed. Compose it again.',
+  no_claim_admitted: 'No drafted claim passed the gates, so nothing was staged.',
+  gated_composition_section_unsupported: 'Only section 1.5 is drafted through the gated workflow.',
+  area_not_found: 'No current area has that scope. Re-run the knowledge step, then compose again.',
+  area_not_in_section: 'The compiled section lists nothing under that area.',
+  run_stopped: 'The run stopped here, so this draft and any after it were not staged.',
 };
 
 /** The exact payload a cloud composition of the address would send. */
@@ -207,15 +226,54 @@ export async function runSectionCompose(
   return outcome;
 }
 
+/** One draft of a gated run: its scope, the area it is of (none for the
+ *  system draft) and its outcome. */
+export type GatedDraft = ComposeOutcome & { scope: string; area: string | null };
+
+/** Draft §1.5 through the gated workflow on the configured local model
+ *  (#2083, AC-0980). Nothing leaves the machine, so there is no consent.
+ *  At the system scope the host drafts each area separately, plus one
+ *  draft of the rules that are no area's. */
+export async function runSectionComposeGated(address: SectionAddress): Promise<GatedDraft[]> {
+  const drafts = await invokeOr<GatedDraft[] | null>('run_section_compose_gated', null, {
+    catalogueVersion: address.catalogue_version,
+    document: address.document,
+    section: address.section,
+    scope: address.scope,
+  });
+  if (!drafts) throw new Error('The core did not return a composition outcome.');
+  return drafts;
+}
+
+/** One line for the user about a gated run: one draft's outcome, or the
+ *  sum over the area drafts and the areas that staged nothing. */
+export function gatedRunText(drafts: GatedDraft[]): string {
+  if (drafts.length === 1) return composeOutcomeText(drafts[0]);
+  const staged = drafts.filter((draft) => draft.outcome === 'staged');
+  const claims = staged.reduce((sum, draft) => sum + draft.claims, 0);
+  const sum = (key: 'rows' | 'rows_covered' | 'calls') =>
+    drafts.reduce((total, draft) => total + (draft.gated?.[key] ?? 0), 0);
+  const empty = drafts
+    .filter((draft) => draft.outcome === 'no_draft')
+    .map((draft) => draft.area ?? 'rules outside an area');
+  const nothing = empty.length > 0 ? ` Nothing was staged for ${empty.join(', ')}.` : '';
+  return `Composed ${claims} ${claims === 1 ? 'claim' : 'claims'} in ${staged.length} `
+    + `${staged.length === 1 ? 'draft' : 'drafts'} for review, by area.${nothing} `
+    + `${sum('rows_covered')} of ${sum('rows')} rule rows covered in ${sum('calls')} local calls.`;
+}
+
 /** One line for the user about a composition's outcome. */
 export function composeOutcomeText(outcome: ComposeOutcome): string {
   const left = outcome.left_out > 0
     ? ` ${outcome.left_out} ${outcome.left_out === 1 ? 'claim was' : 'claims were'} left out.`
     : '';
+  const gated = outcome.gated
+    ? ` ${outcome.gated.rows_covered} of ${outcome.gated.rows} rule rows covered in ${outcome.gated.calls} local calls.`
+    : '';
   if (outcome.outcome === 'staged') {
-    return `Composed ${outcome.claims} ${outcome.claims === 1 ? 'claim' : 'claims'} for review.${left}`;
+    return `Composed ${outcome.claims} ${outcome.claims === 1 ? 'claim' : 'claims'} for review.${left}${gated}`;
   }
-  return `${COMPOSE_REFUSAL[outcome.reason] ?? outcome.reason}${left}`;
+  return `${COMPOSE_REFUSAL[outcome.reason] ?? outcome.reason}${left}${gated}`;
 }
 
 /** Why the host refuses a re-draft, by its closed code (SPEC-17). */
