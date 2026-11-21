@@ -306,9 +306,9 @@ def suggest(user, hostname):
 #[test]
 fn a_local_discarded_or_cleaned_under_a_branch_is_a_guarded_effect() {
     // AC-0910 (T-0910, #1998): under an `if` branch, a local bound earlier
-    // and set to `None` or to its own `.replace("…", "…")` is an effect. A
-    // first binding, an unbranched rebinding, another value and a
-    // `.replace` of another name are not.
+    // (also by unpacking) and set to `None` or to its own
+    // `.replace("…", "…")` is an effect. A first binding, an unbranched
+    // rebinding, another value and a `.replace` of another name are not.
     let code = r#"
 def suggest(user, hostname, data):
     alias = Alias.get_by(email=hostname)
@@ -323,6 +323,11 @@ def suggest(user, hostname, data):
     alias = None
     if hostname:
         hostname = hostname.replace(old, "")
+
+def unpacked(user):
+    found, meta = load(user)
+    if found and found.user_id != user.id:
+        found = None
 "#;
     let out = recover(code);
     let found: Vec<(String, usize)> = rules(&out)
@@ -335,6 +340,7 @@ def suggest(user, hostname, data):
         [
             ("alias = None".to_owned(), 1),
             (r#"new_name = new_name.replace("\n", "")"#.to_owned(), 1),
+            ("found = None".to_owned(), 1),
         ],
         "{found:?}"
     );

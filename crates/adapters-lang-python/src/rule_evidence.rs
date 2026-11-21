@@ -1115,6 +1115,7 @@ fn bound_before(cx: &FileCx<'_>, function: TsNode<'_>, name: &str, before: usize
                         "assignment" | "augmented_assignment" | "for_statement"
                     ) && p.child_by_field_name("left") == Some(node))
                     || p.kind() == "as_pattern_target"
+                    || unpacked_target(node)
             }),
             _ => false,
         };
@@ -1123,6 +1124,24 @@ fn bound_before(cx: &FileCx<'_>, function: TsNode<'_>, name: &str, before: usize
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
+    }
+    false
+}
+
+/// Whether `node` is a name unpacked by an assignment or `for` target
+/// (`alias, meta = load()`, `for (a, b) in rows`), at any nesting.
+fn unpacked_target(node: TsNode<'_>) -> bool {
+    let mut pattern = node;
+    while let Some(parent) = pattern.parent() {
+        match parent.kind() {
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern" => {
+                pattern = parent;
+            }
+            "assignment" | "for_statement" => {
+                return pattern != node && parent.child_by_field_name("left") == Some(pattern);
+            }
+            _ => return false,
+        }
     }
     false
 }
