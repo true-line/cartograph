@@ -57,6 +57,8 @@ pub struct Extraction {
     pub fetch_sites: Vec<adapters_fw::client::FetchSite>,
     /// rdkafka producer and consumer sites (#1371).
     pub event_sites: Vec<adapters_fw::events::EventSite>,
+    /// Requests tests build, joined to endpoints once every file is read.
+    test_requests: Vec<target_tests::TestRequest>,
 }
 
 /// How a pending call resolves once every file is known.
@@ -218,6 +220,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.gap_edge.props, commit);
     }
     http::retarget_commit(extraction, commit);
+    target_tests::retarget(&mut extraction.test_requests, commit);
 }
 
 fn segs(text: &str) -> Vec<String> {
@@ -888,6 +891,10 @@ fn extract_source_inner(
     config_read::extract(&cx, root, &bindings, &functions_by_start, &mut out);
     // SQL statements as table reads and writes (#2041, AC-1015).
     sql::extract(&cx, root, &bindings, &functions_by_start, &mut out);
+    // Target tests and the requests they build (#2018, AC-1016).
+    let mut test_requests = Vec::new();
+    target_tests::extract(&cx, &function_items, &mut out, &mut test_requests);
+    out.test_requests = test_requests;
 
     let client_fields = reqwest::client_fields(&cx, root, &bindings);
     let consumer_fields = rdkafka::consumer_fields(&cx, root, &bindings);
@@ -1210,6 +1217,8 @@ fn finalize_single(out: &mut Extraction) {
         resolve_pending(pending, &index, out);
     }
     http::finalize_endpoints(out, &index);
+    let requests = std::mem::take(&mut out.test_requests);
+    target_tests::resolve(out, requests);
     close_imports(out, &index);
     adapters_fw::sql::merge(&mut out.nodes);
 }
@@ -1516,12 +1525,15 @@ pub fn extract_dir_incremental_with_progress(
         out.pending_endpoints.extend(extraction.pending_endpoints);
         out.fetch_sites.extend(extraction.fetch_sites);
         out.event_sites.extend(extraction.event_sites);
+        out.test_requests.extend(extraction.test_requests);
     }
     let index = SymbolIndex::build(&out);
     for pending in std::mem::take(&mut out.pending_calls) {
         resolve_pending(pending, &index, &mut out);
     }
     http::finalize_endpoints(&mut out, &index);
+    let requests = std::mem::take(&mut out.test_requests);
+    target_tests::resolve(&mut out, requests);
     close_imports(&mut out, &index);
     adapters_fw::sql::merge(&mut out.nodes);
     Ok((out, stats))
@@ -1539,6 +1551,7 @@ mod module_paths;
 mod rdkafka;
 mod reqwest;
 mod sql;
+mod target_tests;
 
 #[cfg(test)]
 mod tests;
