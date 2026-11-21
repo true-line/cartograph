@@ -585,6 +585,13 @@ fn source_id(value: &str) -> Result<SourceId, String> {
     SourceId::new(value).map_err(storage_error)
 }
 
+/// The capture identity of a registered source's manifest observation
+/// inputs (ADR-0080).
+fn input_id(registered: &str) -> Result<SourceId, String> {
+    source_id(registered)?;
+    SourceId::new(crate::observation_inputs::input_source_id(registered)).map_err(storage_error)
+}
+
 fn same_entry(a: &cap_std::fs::Metadata, b: &cap_std::fs::Metadata) -> bool {
     a.dev() == b.dev() && a.ino() == b.ino()
 }
@@ -2043,6 +2050,27 @@ impl PrimarySourceStore {
         })
     }
 
+    /// Retain `source`'s manifest observation input capture beside its own
+    /// captures (ADR-0080). It holds no receipt yet; it is listed and
+    /// forgotten with the source.
+    pub(crate) fn persist_input(
+        &self,
+        source: &RegisteredSource,
+        capture: &source_capture::Capture,
+    ) -> Result<(), String> {
+        if capture.manifest().source_id.as_str()
+            != crate::observation_inputs::input_source_id(&source.source_id)
+        {
+            return Err(storage_error("observation input of another source"));
+        }
+        let _guard = self.guard(&source.source_id, false)?;
+        self.captures
+            .lock()
+            .map_err(storage_error)?
+            .persist(capture)
+            .map_err(|_| "Observation input retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())
+    }
+
     /// Retain the capture and as many `receipts` as the store has room for
     /// (#722). Callers keep only [`RetainedReceipts::ids`] for bindings, so
     /// no binding cites a receipt the store does not hold.
@@ -2411,6 +2439,9 @@ pub(crate) struct RetentionPreview {
     pub repo_key: String,
     pub display_name: String,
     pub capture_ids: Vec<String>,
+    /// Retained captures of the source's manifest observation inputs
+    /// (ADR-0080), forgotten with it.
+    pub input_capture_ids: Vec<String>,
     pub captures: usize,
     pub files: u64,
     pub bytes: u64,
@@ -2441,6 +2472,13 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         .lock()
         .map_err(storage_error)?
         .source_inventory(&source_id(&source.source_id)?)
+        .map_err(storage_error)?;
+    let inputs = state
+        .primary_sources
+        .captures
+        .lock()
+        .map_err(storage_error)?
+        .source_inventory(&input_id(&source.source_id)?)
         .map_err(storage_error)?;
     let receipt_ids = state
         .primary_sources
@@ -2478,6 +2516,10 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         .iter()
         .map(|capture| capture.capture_id.clone())
         .collect();
+    let input_capture_ids: Vec<_> = inputs
+        .iter()
+        .map(|capture| capture.capture_id.clone())
+        .collect();
     let staged_references = state
         .proposals
         .lock()
@@ -2505,10 +2547,11 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         .collect();
     let fingerprint = core_prov::content_hash(
         &serde_json::to_vec(&(
-            "retained-source-preview-v4",
+            "retained-source-preview-v5",
             &source.source_id,
             &source.repo_key,
             &capture_ids,
+            &input_capture_ids,
             &receipt_ids,
             &current_bindings,
             &staged_references,
@@ -2537,9 +2580,17 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             source_id: source.source_id.clone(),
             repo_key: source.repo_key.clone(),
             display_name: source.display_name.clone(),
-            captures: inventory.len(),
-            files: inventory.iter().map(|capture| capture.file_count).sum(),
-            bytes: inventory.iter().map(|capture| capture.byte_len).sum(),
+            captures: inventory.len() + inputs.len(),
+            files: inventory
+                .iter()
+                .chain(&inputs)
+                .map(|capture| capture.file_count)
+                .sum(),
+            bytes: inventory
+                .iter()
+                .chain(&inputs)
+                .map(|capture| capture.byte_len)
+                .sum(),
             receipts: receipt_ids.len(),
             current_references: current_count,
             historical_references: receipt_ids.len().saturating_sub(current_count),
@@ -2547,6 +2598,7 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             investigation_references: investigation_references.len(),
             packet_references: packet_references.len(),
             capture_ids,
+            input_capture_ids,
             fingerprint,
         },
         pins,
@@ -2583,13 +2635,22 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
     graph_guard
         .invalidate_derived_state()
         .map_err(storage_error)?;
-    let forgotten = state
-        .primary_sources
-        .captures
-        .lock()
-        .map_err(storage_error)?
-        .forget_source(&source_id(id)?, &locked.preview.capture_ids)
-        .map_err(storage_error)?;
+    let forgotten = {
+        let mut captures = state
+            .primary_sources
+            .captures
+            .lock()
+            .map_err(storage_error)?;
+        // Inputs first: they carry no receipt, so a failure after them leaves
+        // the source's own captures and receipts intact.
+        let inputs = captures
+            .forget_source(&input_id(id)?, &locked.preview.input_capture_ids)
+            .map_err(storage_error)?;
+        inputs
+            + captures
+                .forget_source(&source_id(id)?, &locked.preview.capture_ids)
+                .map_err(storage_error)?
+    };
     state
         .primary_sources
         .receipts

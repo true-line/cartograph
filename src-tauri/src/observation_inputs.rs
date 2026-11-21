@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 /// The evidence `repo` prefix of a captured observation input.
 pub(crate) const INPUT_REPO_PREFIX: &str = "input/";
 
+/// The capture source identity of `source_id`'s observation inputs.
+pub(crate) fn input_source_id(source_id: &str) -> String {
+    format!("{INPUT_REPO_PREFIX}{source_id}")
+}
+
 /// The revision captured observation evidence cites: a working-tree capture.
 const INPUT_COMMIT: &str = "workdir";
 
@@ -83,7 +88,7 @@ impl ObservationInputs {
             .chain(pulumi_json)
             .chain(otel_jsonl.iter().map(String::as_str))
             .collect();
-        let repo = format!("{INPUT_REPO_PREFIX}{source_id}");
+        let repo = input_source_id(source_id);
         let capture = source_capture::SourceId::new(repo.clone())
             .ok()
             .and_then(|id| {
@@ -170,6 +175,12 @@ impl ObservationInputs {
                 }
             }
         }
+    }
+
+    /// The input capture, retained beside the owning source's captures
+    /// (ADR-0080 slice 2a).
+    pub(crate) fn capture(&self) -> Option<&source_capture::Capture> {
+        self.capture.as_ref()
     }
 
     /// The declared paths read without a capture, as the manifest writes
