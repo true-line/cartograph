@@ -202,3 +202,23 @@ receipt's `primary_source_only` / `input_closure_not_established` scope.
 Task assembly omits a captured span longer than one span or past the combined
 evidence cap (`captured_span_over_limit`) instead of failing the task, as it
 omits an uncarriable working-tree span (#1635).
+
+## Python lane (AC-1023, #385)
+
+A source's `.py` files (the Python adapter's own selection) join its capture.
+If they cannot be listed or retained together with the TS/JS selection, Python
+keeps its uncaptured lane and the TS/JS capture stands alone; TS/JS never loses
+its capture to Python. With a capture, the Python pass parses each file's
+retained bytes instead of the checkout, and each fact a captured file emits
+whose primary provenance lies wholly in that file gets a receipt under its own
+contract: prefix `py-primary-v1:`, producer `t0.adapter-python/direct-lexical-v1`,
+grammar `python` (`tree-sitter-python@0.25.0`, pinned exactly), in the v3 shape
+with provenance ranges only. A rule-bearing fact gets none; Python rule
+inventories are a later contract. Receipts are minted per file and kept only
+when the complete fact survives directory resolution unchanged, then admitted
+after every TS/JS receipt within the same extraction budget; one that does not
+fit is left out and its fact stays uncaptured. Directory resolution still reads
+templates, requirement pins, Alembic migrations and module names from the
+checkout, outside closure, so facts it derives (routes, migrations, screens)
+carry no receipt. Inspection, task evidence and MCP reads accept the prefix
+like any v3 receipt.
