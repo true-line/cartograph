@@ -2142,6 +2142,15 @@ describe('role-based specialist choice (AC-1402)', () => {
       id: 'domain-analyst@28' as const, version: 28, prompt_fingerprint: 'fixture-domain-analyst@28' }],
     policies: desktopAnalystCatalog.policies!.map((policy) => ({ ...policy, specialist_ids: [...policy.specialist_ids, 'domain-analyst@28' as const] })) };
 
+  it('gives a programmatic role selection the profile its version runs under', async () => {
+    mockIPC((command) => { if (command === 'investigation_specialists') return withCurrent; throw new Error('Unexpected command.'); });
+    await useInvestigationStore.getState().loadCatalog();
+    expect(useInvestigationStore.getState().composer.limitProfile).toBe('investigation-v2');
+    // The Workbench's Draft this section path names only the specialist.
+    useInvestigationStore.getState().updateComposer({ specialistId: 'section-writer@1', question: 'Draft it.' });
+    expect(useInvestigationStore.getState().composer).toMatchObject({ specialistId: 'section-writer@1', limitProfile: 'investigation-v1' });
+  });
+
   it('defaults to the current analyst when the host advertises it', async () => {
     mockIPC((command) => { if (command === 'investigation_specialists') return withCurrent; throw new Error('Unexpected command.'); });
     await useInvestigationStore.getState().loadCatalog();

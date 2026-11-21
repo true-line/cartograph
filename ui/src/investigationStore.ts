@@ -5,6 +5,7 @@ import { validCompletionDetail, validCompletionResult, validCompletionSummary } 
 import { investigationPolicy, obligationEnvelope, validObligation, validObligationChoices, validObligationEnvelope } from './investigationObligations';
 import { create } from 'zustand';
 import { SPECIALIST_TABLE } from './generated/specialistTable';
+import { profileFor } from './specialistRoles';
 import { invokeOr } from './tauri';
 import type {
   InvestigationCatalog, InvestigationChanged, InvestigationChat, InvestigationCitationRead,
@@ -724,10 +725,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false,
           obligationDraftError: get().draftObligations.length ? 'Scope changed. Select the evidence to inspect in this scope.' : null });
       }
-      // An explicit specialist choice also fixes the current budget (unset means
-      // Standard), so a later catalog refresh treats it as chosen (AC-0559).
-      const pinned = 'specialistId' in patch && !('limitProfile' in patch) && get().composer.limitProfile === undefined
-        ? { limitProfile: 'investigation-v1' } : {};
+      // An explicit specialist choice also fixes the budget, so a later catalog
+      // refresh treats it as chosen (AC-0559). ADR-0071: the version decides its
+      // profile, so every selection path (the composer, Draft this section)
+      // gets the profile that version runs under (AC-1402).
+      const pinned = patch.specialistId !== undefined && !('limitProfile' in patch)
+        ? { limitProfile: profileFor(get().catalog, patch.specialistId) } : {};
       if (!get().starting && !get().pendingStart) {
         set((state) => ({ composer: { ...state.composer, ...structuredClone(patch), ...pinned } }));
         // Remember an explicit budget or specialist choice across restarts (#1636).
