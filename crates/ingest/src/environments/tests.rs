@@ -678,20 +678,6 @@ fn kubernetes_kustomize_and_helm_files_are_present_and_not_read() {
         listed,
         [
             (
-                "helm-chart",
-                1,
-                "chart/Chart.yaml:1",
-                "Helm chart is present and not read: no installed producer recovers \
-                 environments from it: a tool limitation, not a system gap"
-            ),
-            (
-                "helm-values-file",
-                2,
-                "chart/values-prod.yaml:1",
-                "Helm values file is present and not read: no installed producer recovers \
-                 environments from it: a tool limitation, not a system gap"
-            ),
-            (
                 "kubernetes-manifest:Ingress",
                 1,
                 "k8s/extra.yaml:1",
@@ -725,11 +711,15 @@ fn kubernetes_kustomize_and_helm_files_are_present_and_not_read() {
     assert!(coverage.limited);
     // A file of read kinds, the CronJob file and the kustomization are not
     // named here.
+    // Helm charts and values files are read since increment 3 (AC-1502).
     for path in [
         "k8s/cron.yaml",
         "k8s/deployment.yaml",
         "k8s/mixed.yaml",
         "overlays/prod/kustomization.yaml",
+        "chart/Chart.yaml",
+        "chart/values.yaml",
+        "chart/values-prod.yaml",
     ] {
         assert!(
             report
@@ -791,3 +781,245 @@ fn the_reader_is_a_producer_in_the_coverage_inventory() {
 }
 
 mod manifests;
+
+fn helm_tree() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "charts/shop/Chart.yaml",
+            "apiVersion: v2\nname: shop\nversion: 1.2.0\nappVersion: \"3.4\"\ndependencies:\n  - name: redis\n    version: 17.x\n".into(),
+        ),
+        (
+            "charts/shop/values.yaml",
+            format!("replicaCount: 1\nimage:\n  repository: shop\n  tag: latest\nauth:\n  password: {SECRET}\nhosts: [a, b]\n"),
+        ),
+        (
+            "charts/shop/values-prod.yaml",
+            format!("replicaCount: 5\nauth:\n  password: {SECRET}\n"),
+        ),
+        (
+            "charts/shop/values-staging.yaml",
+            "replicaCount: 2\n".into(),
+        ),
+        // Named by no helmfile: the name alone names an environment.
+        ("charts/shop/values-qa.yaml", "replicaCount: 1\n".into()),
+        // A template word names no environment.
+        ("charts/shop/values.example.yaml", "replicaCount: 1\n".into()),
+        (
+            "deploy/helmfile.yaml",
+            format!(
+                r#"environments:
+  production: {{}}
+  staging: {{}}
+releases:
+  - name: shop-prod
+    namespace: shop-production
+    chart: ../charts/shop
+    values:
+      - ../charts/shop/values-prod.yaml
+    set:
+      - name: auth.password
+        value: {SECRET}
+  - name: shop-staging
+    namespace: shop-staging
+    chart: ../charts/shop
+    values:
+      - ../charts/shop/values-staging.yaml
+      - ../charts/shop/values-missing.yaml
+      - replicaCount: 3
+  - name: cache
+    chart: bitnami/redis
+"#
+            ),
+        ),
+    ]
+}
+
+fn extract_helm() -> EnvironmentExtraction {
+    let dir = tempfile::tempdir().unwrap();
+    let files = helm_tree();
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    write(dir.path(), &files);
+    extract_in(dir.path())
+}
+
+fn node_of<'a>(out: &'a EnvironmentExtraction, id: &str) -> &'a Node {
+    out.nodes
+        .iter()
+        .find(|node| node.id == id)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing {id}: {:?}",
+                out.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+            )
+        })
+}
+
+// AC-1502 (T-1502, #2167): a chart is a workload with its default values'
+// key paths; each helmfile release is an environment that declares its
+// in-repository chart with the key paths of the values files it names. No
+// value is stored, and no values file is cited by span.
+#[test]
+fn helmfile_releases_declare_their_chart_with_values_keys() {
+    let out = extract_helm();
+    let chart = node_of(&out, &format!("workload:{REPO}@charts/shop/Chart.yaml"));
+    assert_eq!(chart.label, "Workload");
+    assert_eq!(chart.props["kind"], "helm-chart");
+    assert_eq!(chart.props["name"], "shop");
+    assert_eq!(chart.props["version"], "1.2.0");
+    assert_eq!(chart.props["app_version"], "3.4");
+    assert_eq!(chart.props["dependencies"], serde_json::json!(["redis"]));
+    assert_eq!(chart.props["values_file"], "charts/shop/values.yaml");
+    assert_eq!(
+        chart.props["values_keys"],
+        serde_json::json!([
+            "auth.password",
+            "hosts[]",
+            "image.repository",
+            "image.tag",
+            "replicaCount"
+        ])
+    );
+
+    let prod = node_of(&out, &format!("env:{REPO}@deploy/helmfile.yaml#shop-prod"));
+    assert_eq!(prod.label, "Environment");
+    assert_eq!(prod.props["declared_by"], "helmfile");
+    assert_eq!(prod.props["path"], "deploy/helmfile.yaml#shop-prod");
+    assert_eq!(prod.props["file"], "deploy/helmfile.yaml");
+    assert_eq!(prod.props["release"], "shop-prod");
+    assert_eq!(prod.props["name"], "shop-production");
+    assert_eq!(prod.props["chart"], "../charts/shop");
+    assert_eq!(
+        prod.props["helmfile_environments"],
+        serde_json::json!(["production", "staging"])
+    );
+    let declares = out
+        .edges
+        .iter()
+        .find(|edge| edge.src == prod.id && edge.label == "DECLARES")
+        .unwrap();
+    assert_eq!(declares.dst, chart.id);
+    assert_eq!(
+        declares.props["values"],
+        serde_json::json!([{
+            "path": "charts/shop/values-prod.yaml",
+            "keys": ["auth.password", "replicaCount"]
+        }])
+    );
+    // Every cited span is in the helmfile, never in a values file.
+    for fact in out
+        .nodes
+        .iter()
+        .map(|node| &node.props)
+        .chain(out.edges.iter().map(|edge| &edge.props))
+    {
+        for evidence in fact["prov"]["evidence"].as_array().unwrap() {
+            let path = evidence["path"].as_str().unwrap();
+            assert!(!path.contains("values"), "{path} is cited");
+        }
+    }
+    // No value of any values file or `set` entry is stored.
+    let all = serde_json::to_string(&(&out.nodes, &out.edges)).unwrap();
+    assert!(!all.contains(SECRET));
+    assert!(!all.contains("\"latest\""));
+}
+
+// AC-1502: what a release states that is not read, a remote chart and a
+// values file named by no release are Gaps; a template word names nothing.
+#[test]
+fn helm_constructs_not_read_are_gaps() {
+    let out = extract_helm();
+    let prod_gap = node_of(
+        &out,
+        &format!("gap:environment:{REPO}@deploy/helmfile.yaml#shop-prod"),
+    );
+    assert_eq!(prod_gap.props["kind"], "helmfile-release");
+    assert!(
+        prod_gap.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("`set` is not read")
+    );
+    let staging_gap = node_of(
+        &out,
+        &format!("gap:environment:{REPO}@deploy/helmfile.yaml#shop-staging"),
+    );
+    let reason = staging_gap.props["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("values-missing.yaml` is not among the files read"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("inline `values` entry is not read"),
+        "{reason}"
+    );
+    let staging = out
+        .edges
+        .iter()
+        .find(|edge| edge.src == format!("env:{REPO}@deploy/helmfile.yaml#shop-staging"))
+        .unwrap();
+    assert_eq!(
+        staging.props["values"][0]["keys"],
+        serde_json::json!(["replicaCount"])
+    );
+    // A chart outside the repository: an environment, no DECLARES, a Gap.
+    let cache = format!("env:{REPO}@deploy/helmfile.yaml#cache");
+    node_of(&out, &cache);
+    assert!(!out.edges.iter().any(|edge| edge.src == cache));
+    let cache_gap = node_of(
+        &out,
+        &format!("gap:environment:{REPO}@deploy/helmfile.yaml#cache"),
+    );
+    assert!(
+        cache_gap.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("bitnami/redis")
+    );
+    // values-qa.yaml is named by no release: a name-only Gap with no span.
+    let qa = node_of(
+        &out,
+        &format!("gap:environment:{REPO}@charts/shop/values-qa.yaml"),
+    );
+    assert_eq!(qa.props["kind"], "name-only-environment");
+    assert!(qa.props["prov"]["evidence"].as_array().unwrap().is_empty());
+    // Named values files, the default and a template are not name-only Gaps.
+    for path in [
+        "values-prod.yaml",
+        "values-staging.yaml",
+        "values.yaml",
+        "values.example.yaml",
+    ] {
+        assert!(
+            !out.nodes
+                .iter()
+                .any(|node| node.id == format!("gap:environment:{REPO}@charts/shop/{path}")),
+            "{path}"
+        );
+    }
+}
+
+// AC-1502: a templated helmfile is a Gap and no environment; output is
+// identical across runs.
+#[test]
+fn templated_helmfiles_are_gaps_and_helm_output_is_deterministic() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[(
+            "helmfile.yaml",
+            "releases:\n  - name: app\n    chart: ./chart\n    values:\n      - values-{{ .Environment.Name }}.yaml\n",
+        )],
+    );
+    let out = extract_in(dir.path());
+    assert!(!out.nodes.iter().any(|node| node.label == "Environment"));
+    let gap = node_of(&out, &format!("gap:environment:{REPO}@helmfile.yaml"));
+    assert_eq!(gap.props["kind"], "helmfile");
+    assert!(gap.props["reason"].as_str().unwrap().contains("template"));
+
+    let a = extract_helm();
+    let b = extract_helm();
+    assert_eq!(
+        serde_json::to_string(&(&a.nodes, &a.edges)).unwrap(),
+        serde_json::to_string(&(&b.nodes, &b.edges)).unwrap()
+    );
+}
