@@ -1,6 +1,7 @@
-//! Provenance-only receipts for the captured Python lane (AC-1024, #385).
+//! Provenance-only receipts for the captured Python (AC-1024) and Go
+//! (AC-1026) lanes (#385).
 //!
-//! The Python adapter parses each captured `.py` file's retained bytes; this
+//! Each adapter parses a captured `.py` or `.go` file's retained bytes; this
 //! module binds that file's own facts to the exact captured spans their
 //! primary provenance cites. Rules and facts citing another file get none.
 //! Receipts are kept only for facts that survive directory resolution
@@ -22,8 +23,29 @@ pub fn mint_python_file_receipts(
     nodes: &[Node],
     edges: &[Edge],
 ) -> Result<Vec<MintedReceipt>, CapturedError> {
+    mint_lane_file_receipts(Grammar::Python, file, id, nodes, edges)
+}
+
+/// Receipts for the facts one captured Go file emitted (AC-1026), under the
+/// same provenance-only rules as the Python lane.
+pub fn mint_go_file_receipts(
+    file: &CapturedFile,
+    id: &SourceId,
+    nodes: &[Node],
+    edges: &[Edge],
+) -> Result<Vec<MintedReceipt>, CapturedError> {
+    mint_lane_file_receipts(Grammar::Go, file, id, nodes, edges)
+}
+
+fn mint_lane_file_receipts(
+    grammar: Grammar,
+    file: &CapturedFile,
+    id: &SourceId,
+    nodes: &[Node],
+    edges: &[Edge],
+) -> Result<Vec<MintedReceipt>, CapturedError> {
     let path = &file.reference().path;
-    if Grammar::for_path(path) != Grammar::Python || !valid_path(path) {
+    if Grammar::for_path(path) != grammar || !valid_path(path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
     }
     super::receipt::validate_identity(file.reference(), id.repo)?;
@@ -196,7 +218,58 @@ mod tests {
             source_capture::CaptureLimits::default(),
         )
         .unwrap();
-        assert!(mint_python_file_receipts(ts.file("a.ts").unwrap(), &id, &[own], &[]).is_err());
+        assert!(
+            mint_python_file_receipts(
+                ts.file("a.ts").unwrap(),
+                &id,
+                std::slice::from_ref(&own),
+                &[]
+            )
+            .is_err()
+        );
+        // Nor is a Python file a Go lane input.
+        assert!(mint_go_file_receipts(file, &id, &[own], &[]).is_err());
+    }
+
+    // AC-1026: a Go fact citing its own captured file gets a Go receipt under
+    // its own prefix; a rule-bearing fact gets none.
+    #[test]
+    fn go_receipts_bind_only_provenance_in_the_captured_file() {
+        const GO: &str = "package main\n\nfunc Handler() {}\n";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), GO).unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap(),
+            &["main.go".to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let file = capture.file("main.go").unwrap();
+        let id = SourceId {
+            repo: "local/src_11111111111111111111111111111111",
+            commit: "workdir",
+        };
+        let own = node(
+            "sym:main.go#Handler",
+            json!({ "prov": prov("main.go", (19, 26)) }),
+        );
+        let rule = node(
+            "rule:main.go#1",
+            json!({ "prov": prov("main.go", (0, 7)), "rule": {} }),
+        );
+        let receipts = mint_go_file_receipts(file, &id, &[own.clone(), rule], &[]).unwrap();
+        assert_eq!(receipts.len(), 1);
+        let receipt = receipts[0].to_receipt().unwrap();
+        assert!(receipt.id().starts_with("go-primary-v1:"));
+        assert_eq!(receipt.grammar(), Grammar::Go);
+        assert!(receipt.matches_node(&own));
+        assert_eq!(
+            Receipt::from_json(&receipt.to_json().unwrap()).unwrap(),
+            receipt
+        );
+        assert_eq!(&GO.as_bytes()[19..26], b"Handler");
+        assert!(mint_python_file_receipts(file, &id, &[own], &[]).is_err());
     }
 
     // AC-1024: Python receipts are admitted after those already held, within

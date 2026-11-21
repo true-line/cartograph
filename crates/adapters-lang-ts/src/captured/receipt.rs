@@ -32,20 +32,32 @@ struct Contract {
 }
 
 /// The producer contract a receipt of `version` and `grammar` was minted
-/// under. Python receipts (AC-1024) exist only in the v3 shape and carry
-/// primary provenance alone; their own prefix and domain keep them distinct
-/// from every TypeScript receipt.
+/// under. Python (AC-1024) and Go (AC-1026) receipts exist only in the v3
+/// shape and carry primary provenance alone; each lane's own prefix and
+/// domain keep it distinct from every TypeScript receipt.
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
-    if grammar == Grammar::Python {
+    let lane = match grammar {
+        Grammar::Python => Some(Contract {
+            prefix: "py-primary-v1:",
+            producer: "t0.adapter-python/direct-lexical-v1",
+            domain: b"cartograph:py-primary-receipt:v1\0",
+            grammar_package: PYTHON_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        Grammar::Go => Some(Contract {
+            prefix: "go-primary-v1:",
+            producer: "t0.adapter-go/direct-lexical-v1",
+            domain: b"cartograph:go-primary-receipt:v1\0",
+            grammar_package: GO_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        Grammar::TypeScript | Grammar::Tsx => None,
+    };
+    if let Some(lane) = lane {
         return match version {
-            3 => Ok(Contract {
-                prefix: "py-primary-v1:",
-                producer: "t0.adapter-python/direct-lexical-v1",
-                domain: b"cartograph:py-primary-receipt:v1\0",
-                grammar_package: PYTHON_GRAMMAR_PACKAGE,
-                parser_package: PARSER_PACKAGE,
-                parser_package_legacy: &[],
-            }),
+            3 => Ok(lane),
             _ => Err(CapturedError::Invalid("receipt contract version")),
         };
     }
@@ -94,6 +106,8 @@ const GRAMMAR_PACKAGE: &str = "tree-sitter-typescript@0.23.2";
 const PARSER_PACKAGE: &str = "tree-sitter@0.27.0";
 // The Python adapter's exact grammar pin (crates/adapters-lang-python).
 const PYTHON_GRAMMAR_PACKAGE: &str = "tree-sitter-python@0.25.0";
+// The Go adapter's exact grammar pin (crates/adapters-lang-go).
+const GO_GRAMMAR_PACKAGE: &str = "tree-sitter-go@0.25.0";
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,14 +120,23 @@ pub enum Grammar {
     Tsx,
     /// `.py` files, parsed by the Python adapter (AC-1024).
     Python,
+    /// `.go` files, parsed by the Go adapter (AC-1026).
+    Go,
 }
 
 impl Grammar {
+    /// A non-TypeScript lane whose receipts bind primary provenance alone.
+    pub(super) fn provenance_only(self) -> bool {
+        matches!(self, Self::Python | Self::Go)
+    }
+
     pub(super) fn for_path(path: &str) -> Self {
         if path.ends_with(".ts") {
             Self::TypeScript
         } else if path.ends_with(".py") {
             Self::Python
+        } else if path.ends_with(".go") {
+            Self::Go
         } else {
             Self::Tsx
         }
@@ -574,7 +597,9 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
         || !hash_has_prefix(&file.digest, "")
         || file.byte_len > source_capture::MAX_FILE_BYTES
         || !super::valid_path(&file.path)
-        || !(super::supported(&file.path) || file.path.ends_with(".py"))
+        || !(super::supported(&file.path)
+            || file.path.ends_with(".py")
+            || file.path.ends_with(".go"))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
@@ -645,8 +670,8 @@ fn inventory(
         push(RangeRole::Provenance, index, evidence)?;
     }
     if let Some(value) = props.get("rule") {
-        // The Python lane carries primary provenance alone (AC-1024).
-        if grammar == Grammar::Python {
+        // The Python and Go lanes carry primary provenance alone.
+        if grammar.provenance_only() {
             return Err(CapturedError::Invalid("rule source inventory"));
         }
         let rule = GuardedExitEvidence::from_value(value.clone())
@@ -986,7 +1011,7 @@ impl Receipt {
             return Err(CapturedError::Limit("receipt ranges"));
         }
         if !valid_inventory_shape(&content.ranges, content.schema_version)
-            || (content.grammar == Grammar::Python
+            || (content.grammar.provenance_only()
                 && content
                     .ranges
                     .iter()
