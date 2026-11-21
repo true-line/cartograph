@@ -6397,3 +6397,159 @@ class NotPersistent(val id: Long)
         ]
     );
 }
+
+// AC-1028: one JPA entity name two classes declare is one duplicate Gap and
+// resolves nothing, to or from it; JPA relations resolve among JPA entities
+// only (a Room entity class is no target, and a Room query does not read a
+// JPA table); two relations to one target are one edge listing both fields;
+// a same-package `Transient` keeps the property a field.
+#[test]
+fn jpa_duplicates_frameworks_and_merged_relations() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/p/Model.kt",
+        r#"package p
+
+import jakarta.persistence.Entity
+import jakarta.persistence.Id
+import jakarta.persistence.ManyToOne
+import jakarta.persistence.OneToOne
+import jakarta.persistence.Table
+
+annotation class Transient
+
+@Entity
+@Table(name = "people")
+class Person(
+    @Id val id: Long,
+    @ManyToOne val referrer: Person?,
+    @OneToOne val mentor: Person?,
+    @ManyToOne val note: p.room.Note?,
+    @Transient val kept: String,
+)
+
+@Entity(name = "Twin")
+class TwinA(@Id val id: Long, @ManyToOne val person: Person)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/p/other/Twin.kt",
+        r#"package p.other
+
+import jakarta.persistence.Entity
+import jakarta.persistence.Id
+import jakarta.persistence.OneToOne
+import p.Person
+
+@Entity(name = "Twin")
+class TwinB(@Id val id: Long)
+
+@Entity
+class Holder(@Id val id: Long, @OneToOne val twin: TwinB)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/p/room/Note.kt",
+        r#"package p.room
+
+import androidx.room.Dao
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+import androidx.room.Query
+
+@Entity
+class Note(@PrimaryKey val id: Long)
+
+@Dao
+interface NoteDao {
+    @Query("SELECT * FROM people")
+    fun people(): List<Note>
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut entities: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    entities.sort();
+    assert_eq!(
+        entities,
+        [
+            "data:local/demo@jpa:Holder",
+            "data:local/demo@jpa:Person",
+            "data:local/demo@sql:note"
+        ]
+    );
+    let duplicate = node(&out.nodes, "gap:jpa:duplicate:data:local/demo@jpa:Twin");
+    assert_eq!(
+        duplicate.props["fqns"],
+        serde_json::json!(["p.TwinA", "p.other.TwinB"])
+    );
+    let person = node(&out.nodes, "data:local/demo@jpa:Person");
+    let fields: Vec<&str> = person.props["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(fields, ["id", "referrer", "mentor", "note", "kept"]);
+    assert!(person.props["fields"][4].get("unless_obscured").is_none());
+
+    let selfie = edge(
+        &out.edges,
+        "data:local/demo@jpa:Person",
+        "data:local/demo@jpa:Person",
+        "REFERENCES",
+    );
+    assert_eq!(
+        selfie.props["relations"],
+        serde_json::json!([
+            {"field": "mentor", "relation": "OneToOne", "cardinality": "one-to-one", "owning": true},
+            {"field": "referrer", "relation": "ManyToOne", "cardinality": "many-to-one", "owning": true},
+        ])
+    );
+    assert_eq!(
+        selfie.props["prov"]["evidence"].as_array().unwrap().len(),
+        2
+    );
+    // A relation to a colliding entity, and one from it, fail closed.
+    for src in ["data:local/demo@jpa:Holder", "data:local/demo@jpa:Twin"] {
+        assert!(out.edges.iter().any(|edge| edge.src == src
+            && edge.label == "REFERENCES"
+            && edge.dst.starts_with("gap:jpa:local/demo@")));
+    }
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.dst == "data:local/demo@sql:note" && edge.src.contains("jpa"))
+    );
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.dst == "data:local/demo@jpa:Person" && edge.label == "READS")
+    );
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] != "kotlin")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "JPA entity name is declared by more than one class",
+            "JPA relation target `Person` is not a recovered entity",
+            "JPA relation target `TwinB` is not a recovered entity",
+            "JPA relation target `p.room.Note` is not a recovered entity",
+            "Room query table `people` is not a recovered @Entity",
+        ]
+    );
+}
