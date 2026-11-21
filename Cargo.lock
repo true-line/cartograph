@@ -55,6 +55,7 @@ dependencies = [
  "adapters-lang-java",
  "core-graph",
  "core-prov",
+ "core-redact",
  "serde_json",
  "source-walk",
  "streaming-iterator",

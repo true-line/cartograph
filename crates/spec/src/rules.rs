@@ -246,6 +246,7 @@ const RULE_LANGUAGES: &[&str] = &[
     "jsx",
     "go",
     "java",
+    "kotlin",
     "rust",
 ];
 
@@ -282,6 +283,7 @@ pub fn unread_rule_sentence(unread: &BTreeMap<&str, usize>) -> Option<String> {
                 "rust" => "Rust".to_owned(),
                 "java" => "Java".to_owned(),
                 "kotlin" => "Kotlin".to_owned(),
+                "swift" => "Swift".to_owned(),
                 other => other.to_owned(),
             };
             let noun = if *files == 1 { "file" } else { "files" };
@@ -294,7 +296,7 @@ pub fn unread_rule_sentence(unread: &BTreeMap<&str, usize>) -> Option<String> {
         [] => unreachable!(),
     };
     Some(format!(
-        "Rule evidence is recovered from Python, TypeScript/JavaScript, Go, Java and Rust source only. \
+        "Rule evidence is recovered from Python, TypeScript/JavaScript, Go, Java, Kotlin and Rust source only. \
          It is not extracted from the {listed} in this export, so the guards in them are \
          not listed here and these rules do not cover them.\n\n"
     ))
@@ -1431,10 +1433,10 @@ mod tests {
 
     #[test]
     fn rule_inventory_states_the_source_it_reads_no_rules_from() {
-        // AC-0922 (#2009): Kotlin files in the export are named as source no
+        // AC-0922 (#2009): Swift files in the export are named as source no
         // rule evidence was read from, so the rules are not taken to cover
-        // them; Python, Go (AC-0923), Java (AC-0967) and Rust (AC-1017)
-        // files are not.
+        // them; Python, Go (AC-0923), Java (AC-0967), Kotlin (AC-1106) and
+        // Rust (AC-1017) files are not.
         let mut nodes = base();
         nodes.push(rule_node(
             "rule:guard",
@@ -1442,8 +1444,9 @@ mod tests {
             ConfidenceTier::Confirmed,
         ));
         for (id, language) in [
-            ("file:A.kt", "kotlin"),
-            ("file:B.kt", "kotlin"),
+            ("file:A.swift", "swift"),
+            ("file:B.swift", "swift"),
+            ("file:g.kt", "kotlin"),
             ("file:c.py", "python"),
             ("file:d.go", "go"),
             ("file:E.java", "java"),
@@ -1457,7 +1460,7 @@ mod tests {
         let output = artifact(&bundle);
         assert!(
             output.content.contains(
-                "It is not extracted from the 2 Kotlin files in this export, so the guards in \
+                "It is not extracted from the 2 Swift files in this export, so the guards in \
                  them are not listed here"
             ),
             "{}",
@@ -1478,15 +1481,20 @@ mod tests {
             .and_then(|rest| rest.split("## 1.6 ").next())
             .expect("D1 has §1.5");
         assert!(
-            rules_section.contains("not extracted from the 2 Kotlin files"),
+            rules_section.contains("not extracted from the 2 Swift files"),
             "{rules_section}"
         );
         assert!(!output.content.contains("Go file"), "{}", output.content);
         assert!(!output.content.contains("Java file"), "{}", output.content);
         assert!(!output.content.contains("Rust file"), "{}", output.content);
+        assert!(
+            !output.content.contains("Kotlin file"),
+            "{}",
+            output.content
+        );
         let only_python: Vec<Node> = nodes
             .into_iter()
-            .filter(|n| n.props["language"] != "kotlin")
+            .filter(|n| n.props["language"] != "swift")
             .collect();
         let bundle = compile_spec(
             &only_python,
