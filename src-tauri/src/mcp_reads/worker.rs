@@ -453,6 +453,24 @@ impl Worker {
     }
 }
 
+/// A test worker's thread holds an app handle. Dropping the worker closes its
+/// request channel and waits for that thread to leave, so the handle is gone
+/// before the test's app is freed (#1621).
+#[cfg(test)]
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let Some(exit) = self.test_exit.take() else {
+            return;
+        };
+        let (closed, _) = mpsc::channel(1);
+        drop(std::mem::replace(&mut self.requests, closed));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !exit.inner().is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
 fn response_cap(
     tool: ReadTool,
     arguments: &serde_json::Map<String, Value>,
