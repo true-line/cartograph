@@ -1334,6 +1334,9 @@ export interface AppStore {
   dismissPreview: () => void;
   /** Record the human verdict on a staged proposal (R-INT-3). */
   decideProposal: (decision: 'accepted' | 'rejected') => Promise<void>;
+  /** Withdraw an accepted proposal by rejecting it (ADR-0061 decision 9):
+   *  the reconciliation step for a record that is no longer eligible. */
+  withdrawProposal: () => Promise<void>;
   /** Batch-escalate one gap class locally (#167); one durable job. */
   runClassEscalation: (gapIds: string[]) => Promise<ClassEscalationOutcome | null>;
   /** Record accept/reject for one staged proposal (batch triage path). */
@@ -2416,6 +2419,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }));
       return false;
     }
+  },
+
+  withdrawProposal: async () => {
+    const current = get().escalation;
+    if (!current?.proposal || current.reviewing || current.decided !== 'accepted') return;
+    const proposalId = current.proposal.proposal_id;
+    set({ escalation: { ...current, reviewing: true, error: null } });
+    await get().recordProposalDecision(current.proposal, 'rejected');
+    set((state) => state.escalation?.proposal?.proposal_id === proposalId
+      ? { escalation: { ...state.escalation, reviewing: false } } : {});
   },
 
   decideProposal: async (decision) => {

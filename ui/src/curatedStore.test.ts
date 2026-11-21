@@ -116,3 +116,42 @@ describe('record states from a curated read (AC-0655)', () => {
     expect(curatedRecordStatuses(null).size).toBe(0);
   });
 });
+
+describe('withdrawing an accepted proposal (AC-1020)', () => {
+  const accepted: StagedProposal = {
+    schema_version: 1, proposal_id: STALE_RECORD.record_id, gap_id: 'gap', source_id: 'source', target_id: 'target',
+    edge_label: 'CALLS', annotation: 'Saved rationale.', basis_hash: 'b'.repeat(64),
+    evidence_binding: 'working_tree_unverified', context_status: 'awaiting_reconciliation',
+    review_revision: 1, review_decision: 'accepted', review_note: null, created_at: 'created', reviewed_at: 'reviewed',
+    provenance: { tier: 'Agentic', confidence_tier: 'InferredWeak', evidence: [], extractor_id: 'broker', content_hash: 'c'.repeat(64) },
+  };
+
+  it('rejects the opened accepted record at its current revision and reloads the views', async () => {
+    const calls: { command: string; args: unknown }[] = [];
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      if (command === 'record_agent_decision') {
+        return { ...accepted, review_revision: 2, review_decision: 'rejected' };
+      }
+      return { bundle: bundle(CURATED_REVISION), views: null, curated: curatedReadFixture() };
+    });
+    useAppStore.getState().openStagedProposal(accepted);
+    await useAppStore.getState().withdrawProposal();
+    await vi.waitFor(() => expect(calls.map((call) => call.command)).toEqual(['record_agent_decision', 'export_spec_with_views']));
+    expect(calls[0].args).toMatchObject({ proposalId: accepted.proposal_id, expectedRevision: 1, decision: 'rejected' });
+    const escalation = useAppStore.getState().escalation;
+    expect(escalation?.decided).toBe('rejected');
+    expect(escalation?.reviewing).toBe(false);
+  });
+
+  it('does nothing for a record that is not accepted', async () => {
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      return null;
+    });
+    useAppStore.getState().openStagedProposal({ ...accepted, review_revision: 0, review_decision: null, reviewed_at: null });
+    await useAppStore.getState().withdrawProposal();
+    expect(calls).toEqual([]);
+  });
+});

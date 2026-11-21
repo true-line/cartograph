@@ -18,6 +18,10 @@ export interface ResolutionStrategyModalProps {
   onDecide: (decision: 'accepted' | 'rejected') => void;
   onClose: () => void;
   onAssessBasis?: () => void;
+  /** Reject an accepted record, withdrawing it from curated content. */
+  onWithdraw?: () => void;
+  /** Run the record's Gap again on the current source, for a new proposal. */
+  onResolveAgain?: (gapId: string) => void;
 }
 
 /** Resolution Strategy modal (handoff §Resolution Strategy, screenshot 11):
@@ -34,6 +38,8 @@ export function ResolutionStrategyModal({
   onDecide,
   onClose,
   onAssessBasis,
+  onWithdraw,
+  onResolveAgain,
 }: ResolutionStrategyModalProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -193,7 +199,29 @@ export function ResolutionStrategyModal({
                   : ' Its state is listed under Curated items in the Spec Workbench.')}
                 {proposal.source_basis ? ' Saved evidence origins remain unchanged.' : ' Source binding remains unverified.'}
               </p>
-            ) : (
+            ) : null}
+            {state.decided === 'accepted' && (onWithdraw || onResolveAgain) && (
+              <div className="proposal-reconcile" data-testid="proposal-reconcile">
+                <p className="muted">
+                  To reconcile this record with the current source, resolve its gap again and
+                  review the new proposal, then withdraw this one. Withdrawing rejects it, so it
+                  leaves curated content at the next revision; its history stays.
+                </p>
+                <footer className="egress-actions">
+                  {onWithdraw && (
+                    <button type="button" className="secondary-button" disabled={state.reviewing} onClick={onWithdraw}>
+                      {state.reviewing ? 'Saving review…' : 'Withdraw acceptance'}
+                    </button>
+                  )}
+                  {onResolveAgain && (
+                    <button type="button" disabled={state.reviewing} onClick={() => onResolveAgain(proposal.gap_id)}>
+                      Resolve gap again on current source
+                    </button>
+                  )}
+                </footer>
+              </div>
+            )}
+            {!state.decided && (
               <footer className="egress-actions">
                 <button type="button" className="secondary-button" disabled={state.reviewing} onClick={() => onDecide('rejected')}>
                   Reject
