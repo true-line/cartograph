@@ -145,8 +145,9 @@ reads (AC-0845, implemented) and the screens (AC-0846, implemented).
   `subject_changed`, `conflict` with the current revision, `busy` or
   `storage_unavailable`. A committed review emits
   `investigation-curation://changed`. The host reads at most 4,096
-  reviewed findings and 256 accepted ones; more leaves the projection not
-  computed, with the reason.
+  reviewed findings, and accepted ones up to 16 MiB of encoded payload
+  (256 findings of the largest size the store admits; many smaller ones
+  fit, #2040); more leaves the projection not computed, with the reason.
 - **Current digests.** `spec::cited_fact_digests` gives, for the cited ids,
   the canonical digest of every field of each node or edge of the snapshot
   the read took. It is the digest an investigation records for a fact it

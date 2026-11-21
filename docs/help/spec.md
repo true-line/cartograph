@@ -530,6 +530,10 @@ Limits today:
   succeeds: **curated.md** says that the curated projection was not computed
   and why, it shows no accepted proposal, the bundle has no `curated_basis`,
   and every other document is unchanged. It never lists a part of them.
+- Accepted section drafts and accepted findings are limited by their size,
+  not their number: up to 64 MiB of drafts and 16 MiB of findings, which is
+  256 of the largest each store admits and many more small ones. Past that
+  the curated projection is not computed, the same way.
 - If the graph changes between the check of a proposal's evidence and the
   export's own read of the graph, the proposal is listed as stale for that
   export. Export again.

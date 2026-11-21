@@ -123,6 +123,13 @@ pub enum CuratedFailure {
         /// The most accepted records one read takes.
         limit: usize,
     },
+    /// The accepted section drafts or curated findings hold more bytes
+    /// than one read takes (#2040).
+    AcceptedTooLarge {
+        /// The most bytes of accepted drafts, or of accepted findings, one
+        /// read takes.
+        limit_bytes: usize,
+    },
     /// Two reviewed proposals share one record identity.
     DuplicateRecord,
     /// Two Workbench decisions share one content hash.
@@ -171,6 +178,14 @@ impl CuratedFailure {
                 format!(
                     "More than {limit} proposals are accepted, which is the most one export \
                      reads. A part of them is never shown as if it were all."
+                ),
+            ),
+            Self::AcceptedTooLarge { limit_bytes } => (
+                "accepted_too_large",
+                format!(
+                    "The accepted section drafts or curated findings hold more than \
+                     {limit_bytes} bytes, which is the most one export reads. A part of them \
+                     is never shown as if it were all."
                 ),
             ),
             Self::DuplicateRecord => (
