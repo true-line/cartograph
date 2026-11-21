@@ -338,9 +338,17 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   // `core` group excludes besides those three (#1924).
   assert.match(rust, /env:\n +PACKAGES: \$\{\{ matrix\.packages \}\}\n(?: +#.*\n)* +run: cargo test \$PACKAGES\n/u);
   assert.match(rust, /fail-fast: false/u);
-  const groups = [...rust.matchAll(/- group: ([a-z]+)\n +packages: (?:>-\n)?((?:.*\S.*\n)+?)(?= +- group:| {4}#| {4}[a-z])/gu)].map(
-    ([, name, packages]) => ({ name, args: packages.trim().split(/\s+/u) }),
-  );
+  // Each group is a `- group:` line, then `packages:` and the folded lines
+  // indented deeper than it.
+  const groups = [];
+  const lines = (rust.match(/^ {8}include:\n((?: {10}.*\n)+)/mu)?.[1] ?? '').split('\n');
+  for (const line of lines) {
+    const group = /^ {10}- group: ([a-z]+)$/u.exec(line);
+    if (group) groups.push({ name: group[1], args: [] });
+    else if (line.startsWith('            packages: ')) {
+      groups.at(-1).args.push(...line.slice('            packages: '.length).split(' ').filter((arg) => arg !== '>-'));
+    } else if (line.startsWith('              ')) groups.at(-1).args.push(...line.trim().split(' '));
+  }
   assert.deepEqual(groups.map(({ name }) => name), ['adapters', 'ingest', 'core']);
   const named = groups.filter(({ name }) => name !== 'core').flatMap(({ args }) => {
     assert.equal(args.length % 2, 0);
