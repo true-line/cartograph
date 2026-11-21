@@ -203,7 +203,7 @@ Task assembly omits a captured span longer than one span or past the combined
 evidence cap (`captured_span_over_limit`) instead of failing the task, as it
 omits an uncarriable working-tree span (#1635).
 
-## Python lane (AC-1023, #385)
+## Python lane (AC-1024, #385)
 
 A source's `.py` files (the Python adapter's own selection) join its capture.
 If they cannot be listed or retained together with the TS/JS selection, Python
