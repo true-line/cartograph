@@ -1803,6 +1803,11 @@ func Upsert(db *gorm.DB, c Category) {
 func Dynamic(db *gorm.DB, value any) {
     db.Model(value).Create(&Category{})
 }
+func Pair(db *gorm.DB) {
+    var plain, cat = Plain{}, Category{}
+    _ = plain
+    db.Create(&cat)
+}
 "#,
     )
     .unwrap();
@@ -1916,6 +1921,8 @@ func Authors(db *gorm.DB) {
             row("Authors", "WRITES", "UserModel", "insert"),
             row("Rename", "WRITES", "UserModel", "update"),
             row("Upsert", "WRITES", "Category", "update,insert"),
+            // Each name of `var a, b = A{}, B{}` takes its own value's type.
+            row("Pair", "WRITES", "Category", "insert"),
         ])
     );
     // An explicit table is cited from its `TableName()` method as well.

@@ -701,8 +701,22 @@ fn declaration<'t>(cx: &FileCx<'_>, node: TsNode<'t>, name: &str) -> Option<Opti
             Some(node.child_by_field_name("type"))
         }
         "var_spec" if named(node) => Some(node.child_by_field_name("type").or_else(|| {
+            // `var a, b = A{}, B{}` infers each name from its own value.
+            let mut cursor = node.walk();
+            let position = node
+                .children_by_field_name("name", &mut cursor)
+                .position(|n| cx.text(&n) == name)?;
             let value = node.child_by_field_name("value")?;
-            value_type(cx, value.named_child(0)?)
+            let mut cursor = value.walk();
+            let values: Vec<_> = value.named_children(&mut cursor).collect();
+            let names = {
+                let mut cursor = node.walk();
+                node.children_by_field_name("name", &mut cursor).count()
+            };
+            if values.len() != names {
+                return None;
+            }
+            value_type(cx, values[position])
         })),
         "for_clause" => declaration(cx, node.child_by_field_name("initializer")?, name),
         "short_var_declaration" | "range_clause" => {
