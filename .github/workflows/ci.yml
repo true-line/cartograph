@@ -333,6 +333,20 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      # rust-cache keeps dependencies only; sccache serves the workspace
+      # crates from the GitHub Actions cache by content hash (#1924). The
+      # wrapper is exported after rust-cache computed its key, so that key and
+      # the cached target directory stay as they were.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+        with:
+          version: v0.19.0
+
+      - name: Compile through sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
 
@@ -551,6 +565,17 @@ jobs:
         with:
           shared-key: app-tests
           save-if: ${{ matrix.shard == 1 }}
+
+      # As in the Rust lane.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+        with:
+          version: v0.19.0
+
+      - name: Compile through sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Enable Rust problem matcher
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
