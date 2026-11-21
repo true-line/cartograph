@@ -201,7 +201,7 @@ fn legacy_guarded_exit_receipt_keeps_all_v1_roles_and_rejects_v2_rules() {
     assert!(restored.matches_node(&legacy_node));
     assert!(!restored.matches_node(new_node));
     assert!(!restored.matches_inventory(&new_node.props));
-    assert!(inventory(&new_node.props, 1).is_err());
+    assert!(inventory(&new_node.props, 1, Grammar::Tsx).is_err());
 }
 
 #[test]

@@ -45,7 +45,7 @@ fn as_v2(v3: &Receipt) -> Receipt {
 }
 
 fn sign_wire(mut wire: serde_json::Value, version: u32) -> String {
-    let contract = contract(version).unwrap();
+    let contract = contract(version, Grammar::Tsx).unwrap();
     let mut input = contract.domain.to_vec();
     input.extend(serde_json::to_vec(&canonical(wire["content"].clone())).unwrap());
     wire["receipt_id"] = serde_json::Value::String(format!(
@@ -330,7 +330,11 @@ fn fact_match_workspace_covers_real_match_and_rejected_inventories() {
     assert!(!receipt.matches_node(&corrupt));
     assert!(GuardedExitEvidence::from_value(corrupt.props["rule"].clone()).is_err());
     assert!(matches!(
-        inventory(&corrupt.props, receipt.content.schema_version),
+        inventory(
+            &corrupt.props,
+            receipt.content.schema_version,
+            receipt.content.grammar
+        ),
         Err(CapturedError::Invalid(_))
     ));
     assert!(fact_match_workspace_bytes(serde_json::to_vec(&corrupt).unwrap().len()).is_some());
@@ -340,7 +344,11 @@ fn fact_match_workspace_covers_real_match_and_rejected_inventories() {
     let evidence = large.props["prov"]["evidence"][0].clone();
     large.props["prov"]["evidence"] = vec![evidence; MAX_RECEIPT_RANGES + 1].into();
     assert!(matches!(
-        inventory(&large.props, receipt.content.schema_version),
+        inventory(
+            &large.props,
+            receipt.content.schema_version,
+            receipt.content.grammar
+        ),
         Err(CapturedError::Limit(_))
     ));
     assert!(!receipt.matches_node(&large));
@@ -399,7 +407,11 @@ fn fact_match_value_bound_tightens_the_wire_model_on_real_inputs() {
     malformed.props["rule"]["untrusted"] = vec![row; 1_000].into();
     assert!(!receipt.matches_node(&malformed));
     assert!(matches!(
-        inventory(&malformed.props, receipt.content.schema_version),
+        inventory(
+            &malformed.props,
+            receipt.content.schema_version,
+            receipt.content.grammar
+        ),
         Err(CapturedError::Invalid(_))
     ));
     let fact = serde_json::to_value(&malformed).unwrap();
