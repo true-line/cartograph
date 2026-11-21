@@ -777,7 +777,9 @@ fn eval_axum_expr(
                     let resolve = |node: TsNode<'_>| {
                         resolve_handler_expr(cx, node, bindings, locals, value_shadows).target
                     };
-                    items.push(AxumRouterItem::Layer(auth::layers(cx, arg, &resolve)));
+                    items.push(AxumRouterItem::Layer(auth::layers(
+                        cx, arg, bindings, &resolve,
+                    )));
                 }
                 Some(items)
             }

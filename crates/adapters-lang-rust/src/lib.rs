@@ -512,6 +512,20 @@ fn parse_imports(cx: &FileCx<'_>, root: TsNode<'_>, out: &mut Extraction) -> Bin
                     .clone()
                     .or_else(|| item.written.last().cloned())
                     .unwrap_or_default();
+                // `use a::b::{self}` binds `b` (#2163); the edge keeps the
+                // path as written.
+                if item.alias.is_none()
+                    && local == "self"
+                    && let [.., module, _] = item.written.as_slice()
+                {
+                    let mut path = resolved.clone();
+                    if path.last().is_some_and(|last| last == "self") {
+                        path.pop();
+                    }
+                    bindings
+                        .map
+                        .insert((scope_key.clone(), module.clone()), (path, external));
+                }
                 if !local.is_empty() {
                     props["binds"] = serde_json::json!(local);
                     bindings

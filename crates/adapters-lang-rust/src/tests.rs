@@ -2422,7 +2422,8 @@ pub async fn log_it(req: axum::extract::Request, next: axum::middleware::Next) -
         "src/lib.rs",
         r#"
 mod extract;
-use axum::{middleware, routing::get, Router};
+mod local;
+use axum::{middleware::{self, Next}, routing::get, Router};
 use axum_extra::TypedHeader;
 use headers::{authorization::Bearer, Authorization};
 use tower_http::trace::TraceLayer;
@@ -2458,6 +2459,31 @@ pub fn app() -> Router {
         ))
         .route("/weird", get(weird))
         .layer(make_layer())
+}
+"#,
+    );
+    // Local types and functions named like the library ones are not guards.
+    write(
+        root,
+        "src/local.rs",
+        r#"
+use axum::{routing::get, Router};
+pub struct TypedHeader<T>(pub T);
+pub struct Authorization<T>(pub T);
+pub struct Bearer;
+mod tower {
+    pub struct ValidateRequestHeaderLayer;
+    impl ValidateRequestHeaderLayer { pub fn basic(_: &str, _: &str) -> Self { Self } }
+    pub fn from_fn<T>(_: T) -> ValidateRequestHeaderLayer { ValidateRequestHeaderLayer }
+}
+use tower::{from_fn, ValidateRequestHeaderLayer};
+async fn local(h: TypedHeader<Authorization<Bearer>>) {}
+async fn deny() -> axum::http::StatusCode { axum::http::StatusCode::UNAUTHORIZED }
+pub fn other() -> Router {
+    Router::new()
+        .route("/local", get(local))
+        .layer(ValidateRequestHeaderLayer::basic("u", "p"))
+        .layer(from_fn(deny))
 }
 "#,
     );
@@ -2574,4 +2600,14 @@ pub fn app() -> Router {
         "ep:local/rust-ws@GET:/weird",
         &gap.id
     ));
+    let local = auth("GET:/local");
+    assert_eq!(local["state"], "unknown", "{local}");
+    assert_eq!(
+        local["reasons"],
+        serde_json::json!([
+            "no_guard_recovered",
+            "unreadable_middleware:ValidateRequestHeaderLayer::basic(\"u\",\"p\")",
+            "unreadable_middleware:from_fn(deny)"
+        ])
+    );
 }

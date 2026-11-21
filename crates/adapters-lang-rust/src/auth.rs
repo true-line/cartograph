@@ -3,8 +3,10 @@
 //!
 //! - `required`: the route has a guard. A guard is
 //!   - a handler parameter whose type is an auth extractor: axum-extra
-//!     `TypedHeader<Authorization<Bearer>>` / `<Basic>`, actix-web-httpauth
-//!     `BearerAuth` / `BasicAuth` bound by `use` (Confirmed), or a repository
+//!     `TypedHeader<Authorization<Bearer>>` / `<Basic>` (`TypedHeader` from
+//!     axum-extra or axum, `Authorization` and the scheme from headers,
+//!     axum-extra or axum), actix-web-httpauth `BearerAuth` / `BasicAuth`,
+//!     each bound by `use` or written from its crate (Confirmed), or a repository
 //!     type with an `impl FromRequestParts` / `impl FromRequest` whose body
 //!     names a 401 or 403 (`StatusCode::UNAUTHORIZED`, `ErrorForbidden`,
 //!     `HttpResponse::Unauthorized`, an `…::Unauthorized` variant;
@@ -13,7 +15,8 @@
 //!     (`match` arm, `if let` pattern) is not a denial.
 //!   - an axum `layer` / `route_layer` on the router after the route was
 //!     added: tower-http `ValidateRequestHeaderLayer::bearer` / `::basic` or
-//!     `RequireAuthorizationLayer::bearer` / `::basic` (Confirmed), or
+//!     `RequireAuthorizationLayer::bearer` / `::basic` from tower-http
+//!     (Confirmed), or axum's
 //!     `middleware::from_fn(f)` / `from_fn_with_state(s, f)` whose `f` is a
 //!     repository function naming a 401 or 403 (InferredStrong). The layers of
 //!     a `ServiceBuilder` are read one by one.
@@ -177,6 +180,52 @@ fn only_inspected(node: TsNode<'_>) -> bool {
     false
 }
 
+/// Crates `TypedHeader` is taken from.
+const TYPED_HEADER_CRATES: &[&str] = &["axum_extra", "axum"];
+/// Crates `Authorization`, `Bearer` and `Basic` are taken from.
+const HEADER_CRATES: &[&str] = &["headers", "axum_extra", "axum"];
+
+/// Whether the path written as `segments` at `node` names an item of one of
+/// `crates`: written from the crate (`tower_http::...`), or its first
+/// segment bound by a `use` of that crate. A local type of the same name is
+/// neither.
+fn from_crate(
+    cx: &FileCx<'_>,
+    node: TsNode<'_>,
+    bindings: &Bindings,
+    segments: &[&str],
+    crates: &[&str],
+) -> bool {
+    let Some(first) = segments.first().map(|s| s.trim_start_matches("::")) else {
+        return false;
+    };
+    if segments.len() > 1 && crates.contains(&first) {
+        return true;
+    }
+    bindings
+        .get(&visible_scopes(cx, node), first)
+        .is_some_and(|(path, external)| {
+            *external && path.first().is_some_and(|c| crates.contains(&c.as_str()))
+        })
+}
+
+/// Whether a `TypedHeader<Authorization<scheme>>` parameter type names the
+/// library types: each of `TypedHeader`, `Authorization` and `scheme` is
+/// taken from its crate.
+fn library_typed_header(
+    cx: &FileCx<'_>,
+    ty: TsNode<'_>,
+    bindings: &Bindings,
+    compact: &str,
+    scheme: &str,
+) -> bool {
+    let outer = compact.split('<').next().unwrap_or("");
+    let outer: Vec<&str> = outer.split("::").filter(|s| !s.is_empty()).collect();
+    from_crate(cx, ty, bindings, &outer, TYPED_HEADER_CRATES)
+        && from_crate(cx, ty, bindings, &["Authorization"], HEADER_CRATES)
+        && from_crate(cx, ty, bindings, &[scheme], HEADER_CRATES)
+}
+
 /// The base type of a parameter type: `&`, `mut` and a `Path<...>` wrapper's
 /// generics stripped, last segment only.
 fn base_name(text: &str) -> String {
@@ -211,9 +260,14 @@ pub(super) fn handler_params(
             .join(" ");
         let compact: String = text.split_whitespace().collect();
         let name = base_name(&text);
-        let library = if name == "TypedHeader" && compact.contains("Authorization<Bearer>") {
+        let typed = |scheme: &str| {
+            name == "TypedHeader"
+                && compact.contains(&format!("Authorization<{scheme}>"))
+                && library_typed_header(cx, ty, bindings, &compact, scheme)
+        };
+        let library = if typed("Bearer") {
             Some("TypedHeader<Authorization<Bearer>>")
-        } else if name == "TypedHeader" && compact.contains("Authorization<Basic>") {
+        } else if typed("Basic") {
             Some("TypedHeader<Authorization<Basic>>")
         } else if matches!(name.as_str(), "BearerAuth" | "BasicAuth")
             && bindings
@@ -235,7 +289,8 @@ pub(super) fn handler_params(
             text,
             evidence: cx.evidence(&parameter),
         });
-        if params.len() >= 12 {
+        // axum handlers take at most 16 extractors.
+        if params.len() >= 16 {
             break;
         }
     }
@@ -349,6 +404,7 @@ fn compact(cx: &FileCx<'_>, node: TsNode<'_>) -> String {
 pub(super) fn layers(
     cx: &FileCx<'_>,
     expr: TsNode<'_>,
+    bindings: &Bindings,
     resolve_fn: &dyn Fn(TsNode<'_>) -> http::HandlerTargetRef,
 ) -> Vec<Layer> {
     let text = compact(cx, expr);
@@ -358,7 +414,7 @@ pub(super) fn layers(
         return expr
             .named_children(&mut walk)
             .filter(|c| !matches!(c.kind(), "line_comment" | "block_comment"))
-            .flat_map(|c| layers(cx, c, resolve_fn))
+            .flat_map(|c| layers(cx, c, bindings, resolve_fn))
             .collect();
     }
     // `ServiceBuilder::new().layer(a).layer(b)`.
@@ -377,7 +433,7 @@ pub(super) fn layers(
                 .is_some_and(|f| cx.text(&f) == "layer")
                 && let Some(argument) = http::call_arguments(node).first()
             {
-                found.extend(layers(cx, *argument, resolve_fn));
+                found.extend(layers(cx, *argument, bindings, resolve_fn));
             }
             let Some(value) = function.child_by_field_name("value") else {
                 break;
@@ -396,12 +452,22 @@ pub(super) fn layers(
         .map(|c| strip_generic_args(cx.text(&c)))
         .unwrap_or_default();
     let segments: Vec<&str> = callee_text.split("::").map(str::trim).collect();
+    // The path to the type a `Type::bearer` call names, and to the module (or
+    // the function) a `from_fn` call names, must reach the library crate.
+    let owner = &segments[..segments.len().saturating_sub(1)];
+    let tower = from_crate(cx, expr, bindings, owner, &["tower_http"]);
+    let axum = if owner.is_empty() {
+        from_crate(cx, expr, bindings, &segments, &["axum"])
+    } else {
+        from_crate(cx, expr, bindings, owner, &["axum"])
+    };
     let kind = match segments.as_slice() {
         [.., ty, "bearer"]
-            if matches!(
-                *ty,
-                "ValidateRequestHeaderLayer" | "RequireAuthorizationLayer"
-            ) =>
+            if tower
+                && matches!(
+                    *ty,
+                    "ValidateRequestHeaderLayer" | "RequireAuthorizationLayer"
+                ) =>
         {
             LayerKind::Guard(if *ty == "ValidateRequestHeaderLayer" {
                 "tower_http.ValidateRequestHeaderLayer::bearer"
@@ -410,10 +476,11 @@ pub(super) fn layers(
             })
         }
         [.., ty, "basic"]
-            if matches!(
-                *ty,
-                "ValidateRequestHeaderLayer" | "RequireAuthorizationLayer"
-            ) =>
+            if tower
+                && matches!(
+                    *ty,
+                    "ValidateRequestHeaderLayer" | "RequireAuthorizationLayer"
+                ) =>
         {
             LayerKind::Guard(if *ty == "ValidateRequestHeaderLayer" {
                 "tower_http.ValidateRequestHeaderLayer::basic"
@@ -421,7 +488,7 @@ pub(super) fn layers(
                 "tower_http.RequireAuthorizationLayer::basic"
             })
         }
-        [.., "from_fn" | "from_fn_with_state"] => match http::call_arguments(expr).last() {
+        [.., "from_fn" | "from_fn_with_state"] if axum => match http::call_arguments(expr).last() {
             Some(f) => LayerKind::FromFn(resolve_fn(*f)),
             None => LayerKind::Unreadable,
         },
