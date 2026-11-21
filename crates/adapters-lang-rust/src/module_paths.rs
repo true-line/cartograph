@@ -114,7 +114,9 @@ pub(super) fn scan(source: &[u8]) -> Vec<Declaration> {
 fn path_attribute(attr: &str) -> Option<Result<String, &'static str>> {
     let inner = attr.trim().strip_prefix("#[")?.strip_suffix(']')?.trim();
     if let Some(rest) = inner.strip_prefix("cfg_attr") {
-        let sets_path = rest.split(',').skip(1).any(|part| {
+        // Only the attributes after the whole predicate are emitted: a
+        // `path = ...` option inside `any(...)` sets no path.
+        let sets_path = top_level_arguments(rest).into_iter().skip(1).any(|part| {
             part.trim()
                 .strip_prefix("path")
                 .is_some_and(|after| after.trim_start().starts_with('='))
@@ -126,6 +128,40 @@ fn path_attribute(attr: &str) -> Option<Result<String, &'static str>> {
         return None;
     }
     Some(path_literal(attr).ok_or("non_literal"))
+}
+
+/// The comma-separated arguments of `( ... )`, split only at depth zero and
+/// outside string literals.
+fn top_level_arguments(group: &str) -> Vec<&str> {
+    let group = group.trim();
+    let Some(body) = group.strip_prefix('(').and_then(|g| g.strip_suffix(')')) else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut quoted, mut escaped) = (0usize, 0usize, false, false);
+    for (at, c) in body.char_indices() {
+        if quoted {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&body[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&body[start..]);
+    parts
 }
 
 /// At most 160 bytes of an attribute, cut at a character boundary.

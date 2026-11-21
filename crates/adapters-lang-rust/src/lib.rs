@@ -59,6 +59,9 @@ pub struct Extraction {
     pub event_sites: Vec<adapters_fw::events::EventSite>,
     /// Requests tests build, joined to endpoints once every file is read.
     test_requests: Vec<target_tests::TestRequest>,
+    handler_params: Vec<auth::HandlerParams>,
+    extractors: Vec<auth::Extractor>,
+    deny_fns: Vec<auth::DenyFn>,
 }
 
 /// How a pending call resolves once every file is known.
@@ -226,6 +229,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         retarget_props_commit(&mut pending.gap_edge.props, commit);
     }
     http::retarget_commit(extraction, commit);
+    auth::retarget(extraction, commit);
     target_tests::retarget(&mut extraction.test_requests, commit);
 }
 
@@ -914,7 +918,10 @@ fn extract_source_inner(
 
     let client_fields = reqwest::client_fields(&cx, root, &bindings);
     let consumer_fields = rdkafka::consumer_fields(&cx, root, &bindings);
+    auth::extract(&cx, root, &function_items, &mut out);
     for (fn_node, fn_sym) in &function_items {
+        out.handler_params
+            .extend(auth::handler_params(&cx, *fn_node, fn_sym, &bindings));
         http::extract_actix_fn_attrs(&cx, *fn_node, fn_sym, &bindings, &mut out);
         http::extract_function_routes(&cx, *fn_node, fn_sym, &bindings, &locals, &mut out);
         reqwest::extract_function_calls(&cx, *fn_node, fn_sym, &bindings, &client_fields, &mut out);
@@ -1626,6 +1633,9 @@ fn extract_dir_with(
         out.fetch_sites.extend(extraction.fetch_sites);
         out.event_sites.extend(extraction.event_sites);
         out.test_requests.extend(extraction.test_requests);
+        out.handler_params.extend(extraction.handler_params);
+        out.extractors.extend(extraction.extractors);
+        out.deny_fns.extend(extraction.deny_fns);
     }
     path_gaps(id, &scanned, &declared, &active, &mut out);
     let index = SymbolIndex::build(&out);
@@ -1708,6 +1718,7 @@ pub fn extract_dir(root: &Path, id: &SourceId<'_>) -> Result<Extraction, Extract
         .map(|(extraction, _)| extraction)
 }
 
+mod auth;
 mod config_read;
 mod http;
 mod module_paths;
