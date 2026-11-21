@@ -340,6 +340,20 @@ public class Toggle {
         java.util.function.IntUnaryOperator f = x -> { x = x + 1; return x; };
         return count;
     }
+    public int scoped(boolean force) {
+        if (!force) { return 0; }
+        enabled = true;
+        { boolean enabled = false; }
+        java.util.function.IntUnaryOperator g = enabled -> enabled;
+        for (int i = 0; i < 1; i++) { boolean later = true; }
+        return 1;
+    }
+    public int shadowed(boolean force) {
+        if (!force) { return 0; }
+        boolean enabled = false;
+        enabled = true;
+        return 1;
+    }
 }
 "#;
     let out = extract(source, "src/main/java/com/acme/Toggle.java");
@@ -357,4 +371,7 @@ public class Toggle {
     assert!(mutation("Toggle.enable(boolean)"));
     assert!(!mutation("Toggle.rebind(boolean)"));
     assert!(!mutation("Toggle.local(int)"));
+    // Only bindings in scope at the assignment make it a local rebind.
+    assert!(mutation("Toggle.scoped(boolean)"));
+    assert!(!mutation("Toggle.shadowed(boolean)"));
 }
