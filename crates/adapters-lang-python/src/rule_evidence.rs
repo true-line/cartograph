@@ -1169,6 +1169,17 @@ fn effect_statement<'t>(
         "assignment" => {
             let target = inner.child_by_field_name("left")?;
             let value = inner.child_by_field_name("right")?;
+            // `alias = Alias.create(…)`: the record created is the effect,
+            // whatever local it is kept in (#1998).
+            if target.kind() == "identifier"
+                && inner.child_by_field_name("type").is_none()
+                && let Some(create) = record_create(cx, node, value, modules)
+            {
+                return Some(Effect {
+                    statement: node,
+                    kind: EffectKind::Call { call: create },
+                });
+            }
             if target.kind() != "attribute" || inner.child_by_field_name("type").is_some() {
                 return None;
             }
@@ -1274,6 +1285,32 @@ fn imported_class(
         && function.is_none_or(|f| !bound_locally(cx, f, text))
         && (modules.contains(text)
             || function.is_some_and(|f| function_imports(cx, f).contains(text)))
+}
+
+/// `Alias.create(…)` (optionally awaited) on an imported class: the value
+/// of an assignment that creates a record (#1998).
+fn record_create<'t>(
+    cx: &FileCx<'_>,
+    statement: TsNode<'t>,
+    value: TsNode<'t>,
+    modules: &BTreeSet<String>,
+) -> Option<TsNode<'t>> {
+    let call = if value.kind() == "await" {
+        value.named_child(0)?
+    } else {
+        value
+    };
+    let callee = call
+        .child_by_field_name("function")
+        .filter(|_| call.kind() == "call")?;
+    (callee.kind() == "attribute"
+        && callee
+            .child_by_field_name("attribute")
+            .is_some_and(|a| cx.text(&a) == "create")
+        && callee
+            .child_by_field_name("object")
+            .is_some_and(|model| imported_class(cx, statement, model, modules)))
+    .then_some(call)
 }
 
 /// The constructor call of the record `Session.add(…)` adds (#1998): its
