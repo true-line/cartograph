@@ -1932,10 +1932,14 @@ impl PrimarySourceStore {
         layers: &[String],
         commit: Option<&str>,
     ) -> Result<PrimaryInput, String> {
+        // A managed clone's commit is captured whenever the TS pass runs,
+        // including for Pulumi infrastructure alone (AC-1022).
         let wanted = layers.is_empty()
             || layers
                 .iter()
-                .any(|layer| ["server", "events", "client"].contains(&layer.as_str()));
+                .any(|layer| ["server", "events", "client"].contains(&layer.as_str()))
+            || (commit.is_some()
+                && ingest::coverage::wants(layers, ingest::coverage::INFRA_LAYERS));
         if !wanted {
             return Ok(PrimaryInput {
                 capture: None,

@@ -1828,10 +1828,13 @@ fn extract_tree_packed(
         facts.extend(webext.nodes, webext.edges).map_err(pack_err)?;
         // Chrome runtime messaging sites join the same channel stitch as
         // SDK event sites: literals confirm, computed identities gap.
-        extraction.event_sites.extend(
-            adapters_lang_ts::chrome_messaging::extract_dir(root, &ts_id)
+        // A capture's bytes, never the checkout, when one exists (AC-1022).
+        extraction.event_sites.extend(match primary {
+            Some(capture) => adapters_lang_ts::chrome_messaging::extract_captured(capture, &ts_id)
                 .map_err(|e| e.to_string())?,
-        );
+            None => adapters_lang_ts::chrome_messaging::extract_dir(root, &ts_id)
+                .map_err(|e| e.to_string())?,
+        });
         // Table-driven HTTP clients (#737): a joined call replaces the
         // generic computed-URL site the TS pass recorded at the same call.
         let joined = match primary {
@@ -1850,8 +1853,13 @@ fn extract_tree_packed(
         extraction.fetch_sites.extend(joined);
         // IndexedDB schema/store declarations and repository operations
         // become the cited data model (DataEntity + READS/WRITES).
-        let idb =
-            adapters_lang_ts::indexeddb::extract_dir(root, &ts_id).map_err(|e| e.to_string())?;
+        let idb = match primary {
+            Some(capture) => adapters_lang_ts::indexeddb::extract_captured(capture, &ts_id)
+                .map_err(|e| e.to_string())?,
+            None => {
+                adapters_lang_ts::indexeddb::extract_dir(root, &ts_id).map_err(|e| e.to_string())?
+            }
+        };
         layers.webext.nodes += distinct_node_count(&idb.nodes);
         layers.webext.edges += distinct_edge_count(&idb.edges);
         facts.extend(idb.nodes, idb.edges).map_err(pack_err)?;

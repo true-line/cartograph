@@ -3344,6 +3344,24 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
         assert_eq!(receipt.file().digest, file.reference().digest);
     }
     drop(input);
+    // Infrastructure alone still runs the TS pass for Pulumi, so a commit is
+    // captured for it; a local folder's infra-only recovery stays uncaptured.
+    let infra = vec!["infra".to_string()];
+    let input = state
+        .primary_sources
+        .prepare_at(&source, source.root(), &infra, Some(&commit))
+        .unwrap();
+    assert!(matches!(
+        input.capture.as_ref().unwrap().manifest().kind,
+        source_capture::CaptureKind::Git { .. }
+    ));
+    drop(input);
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &infra)
+        .unwrap();
+    assert!(input.capture.is_none());
+    drop(input);
     // An untracked selected file is no blob of the commit.
     std::fs::write(root.join("extra.ts"), STABLE_B).unwrap();
     let error = state
