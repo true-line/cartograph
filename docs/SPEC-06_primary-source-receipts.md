@@ -277,3 +277,20 @@ budget admission as the other lanes. Java type discovery for Kotlin/Java
 interop still reads `.java` files from the checkout, outside closure; facts
 the directory join derives (unresolved-call gaps, modules, navigation
 screens) carry no receipt.
+
+## Directory-built lane facts (AC-1037, #385)
+
+The Python, Go, Java, Rust and Kotlin lanes mint their receipts from each
+lane's final facts, after directory resolution, rather than from each file's
+own extraction. A fact whose every primary evidence entry cites one captured
+lane file is minted against that file under the lane's contract, whether the
+file's own pass or the directory join built it, so a Spring endpoint composed
+from a class and a method mapping, or a module built from a file's package, is
+covered; files are taken in capture order and candidates are staged within the
+extraction budget as before. The publication check still drops a receipt whose
+fact publication does not materialize as minted. A fact citing more than one
+file (a Flask route and the Blueprint mount in another module) or a file
+outside the capture still carries no receipt, nor does a rule-bearing fact. As
+before, the receipt binds the cited captured spans only; input closure is not
+established, and earlier lane sections' "facts the join derives carry no
+receipt" applies only to multi-file facts from here on.
