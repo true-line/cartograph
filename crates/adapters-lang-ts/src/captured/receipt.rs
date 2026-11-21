@@ -42,7 +42,7 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.adapter-python/direct-lexical-v1",
             domain: b"cartograph:py-primary-receipt:v1\0",
             grammar_package: PYTHON_GRAMMAR_PACKAGE,
-            parser_package: LANE_PARSER_PACKAGE,
+            parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
         Grammar::Go => Some(Contract {
@@ -50,7 +50,7 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.adapter-go/direct-lexical-v1",
             domain: b"cartograph:go-primary-receipt:v1\0",
             grammar_package: GO_GRAMMAR_PACKAGE,
-            parser_package: LANE_PARSER_PACKAGE,
+            parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
         Grammar::TypeScript | Grammar::Tsx => None,
@@ -78,8 +78,9 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             grammar_package: GRAMMAR_PACKAGE,
             parser_package: PARSER_PACKAGE,
             // Receipts minted before the tree-sitter 0.27 upgrade recorded
-            // this pin under the same v2 contract; they must keep validating.
-            parser_package_legacy: &["tree-sitter@0.26.12"],
+            // this pin under the same v2 contract, and later ones recorded
+            // 0.27.0 while 0.27.2 was linked; they must keep validating.
+            parser_package_legacy: &["tree-sitter@0.26.12", "tree-sitter@0.27.0"],
         }),
         3 => Ok(Contract {
             prefix: "ts-primary-v3:",
@@ -87,7 +88,9 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             domain: b"cartograph:ts-primary-receipt:v3\0",
             grammar_package: GRAMMAR_PACKAGE,
             parser_package: PARSER_PACKAGE,
-            parser_package_legacy: &[],
+            // Receipts minted while the recorded pin lagged the linked
+            // 0.27.2 parser (AC-1029) must keep validating.
+            parser_package_legacy: &["tree-sitter@0.27.0"],
         }),
         _ => Err(CapturedError::Invalid("receipt contract version")),
     }
@@ -103,14 +106,15 @@ fn rule_schema_version(version: u32) -> Result<u32, CapturedError> {
 }
 // Exact dependency pins in Cargo.toml keep these producer inputs truthful.
 const GRAMMAR_PACKAGE: &str = "tree-sitter-typescript@0.23.2";
-const PARSER_PACKAGE: &str = "tree-sitter@0.27.0";
+// The parser every adapter links, pinned exactly in each manifest;
+// `lane_pins_match_the_adapter_manifests` keeps them in step. Receipts
+// minted while this read `tree-sitter@0.27.0` (the code linked 0.27.2) stay
+// valid through each contract's legacy list (AC-1029).
+const PARSER_PACKAGE: &str = "tree-sitter@0.27.2";
 // The Python adapter's exact grammar pin (crates/adapters-lang-python).
 const PYTHON_GRAMMAR_PACKAGE: &str = "tree-sitter-python@0.25.0";
 // The Go adapter's exact grammar pin (crates/adapters-lang-go).
 const GO_GRAMMAR_PACKAGE: &str = "tree-sitter-go@0.25.0";
-// The parser the Python and Go adapters link, pinned exactly in their
-// manifests; `lane_pins_match_the_adapter_manifests` keeps them in step.
-const LANE_PARSER_PACKAGE: &str = "tree-sitter@0.27.2";
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
