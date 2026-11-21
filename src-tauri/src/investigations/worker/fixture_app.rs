@@ -1,5 +1,6 @@
 //! Synchronous worker fixture over a test app. The app's state is freed when
-//! the fixture drops (#1621); a handle cloned out of it keeps the app alive.
+//! the fixture drops (#1621), unless a handle was handed out: then the app is
+//! retained, because that handle may still be in use.
 use super::*;
 use tauri::Manager;
 pub(super) struct FixtureApp {
@@ -18,7 +19,11 @@ impl FixtureApp {
         self.app.try_state()
     }
     pub(super) fn handle(&self) -> &tauri::AppHandle<tauri::test::MockRuntime> {
+        self.retain_for_external_use();
         self.app.handle()
+    }
+    pub(super) fn retain_for_external_use(&self) {
+        self.app.retain_with_escaped_handles();
     }
     pub(super) fn run_legacy(
         &self,
@@ -186,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn escaped_handle_keeps_state_until_it_is_dropped() {
+    fn escaped_handle_permanently_retains_state() {
         let provider = Arc::new(Scripted::new(Mode::Finish));
         let fixture = Fixture::new(provider.as_ref());
         let sources = Arc::downgrade(&fixture.app.state::<AppState>().sources);
@@ -195,6 +200,6 @@ mod tests {
         drop(fixture);
         assert!(escaped.try_state::<AppState>().is_some());
         drop(escaped);
-        assert!(sources.upgrade().is_none());
+        assert!(sources.upgrade().is_some());
     }
 }
