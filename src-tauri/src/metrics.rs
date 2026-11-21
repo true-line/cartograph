@@ -81,127 +81,180 @@ pub struct GraphMetrics {
 /// `coverage_repos` — otherwise a managed repo with no extracted facts (or
 /// whose new commit only touches unextracted files) would record the same
 /// scoped hash across different commits (#466 follow-up).
+///
+/// Production reads the graph packed through [`compute_packed`]; this decoded
+/// form is the reference the packed one must equal.
+#[cfg(test)]
 pub fn compute(
     nodes: &[Node],
     edges: &[Edge],
     scope: &BTreeMap<String, u64>,
     coverage_repos: &BTreeSet<String>,
 ) -> GraphMetrics {
-    let mut confirmed = 0u64;
-    let mut inferred_strong = 0u64;
-    let mut inferred_weak = 0u64;
-    let mut gap = 0u64;
-    let mut facts_by_extractor: BTreeMap<String, u64> = BTreeMap::new();
-    let mut files_by_extractor: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut tally = Tally::new(coverage_repos);
+    nodes.iter().for_each(|node| tally.node(node));
+    edges.iter().for_each(|edge| tally.edge(edge));
+    tally.finish(scope)
+}
+
+/// [`compute`] over a packed snapshot: each fact is decoded, tallied and
+/// dropped before the next, so recording an ingest never holds the whole
+/// graph as props trees (AC-1201). Same metrics, same content hash.
+pub fn compute_packed(
+    snapshot: &core_graph::packed::PackedSnapshot,
+    scope: &BTreeMap<String, u64>,
+    coverage_repos: &BTreeSet<String>,
+) -> Result<GraphMetrics, core_graph::GraphError> {
+    let mut tally = Tally::new(coverage_repos);
+    for node in &snapshot.nodes {
+        tally.node(&node.unpack()?);
+    }
+    for edge in &snapshot.edges {
+        tally.edge(&edge.unpack()?);
+    }
+    Ok(tally.finish(scope))
+}
+
+/// The running counts behind [`compute`], fed one fact at a time.
+struct Tally<'a> {
+    coverage_repos: &'a BTreeSet<String>,
+    confirmed: u64,
+    inferred_strong: u64,
+    inferred_weak: u64,
+    gap: u64,
+    facts: u64,
+    facts_by_extractor: BTreeMap<String, u64>,
+    files_by_extractor: BTreeMap<String, BTreeSet<String>>,
     // Canonical fact lines, sorted before hashing so store order is
     // irrelevant: identity + per-fact content hash.
-    let mut lines: Vec<String> = Vec::with_capacity(nodes.len() + edges.len());
+    lines: Vec<String>,
+}
 
-    let mut tally = |provenance: &core_prov::Provenance| {
-        use core_prov::ConfidenceTier::*;
-        match provenance.confidence_tier {
-            Confirmed => confirmed += 1,
-            InferredStrong => inferred_strong += 1,
-            InferredWeak => inferred_weak += 1,
-            Gap => gap += 1,
+impl<'a> Tally<'a> {
+    fn new(coverage_repos: &'a BTreeSet<String>) -> Self {
+        Self {
+            coverage_repos,
+            confirmed: 0,
+            inferred_strong: 0,
+            inferred_weak: 0,
+            gap: 0,
+            facts: 0,
+            facts_by_extractor: BTreeMap::new(),
+            files_by_extractor: BTreeMap::new(),
+            lines: Vec::new(),
         }
-    };
+    }
+
     // An empty `coverage_repos` means "no registration to scope to" (every
     // production call site passes at least one repo; only whole-graph-hash
     // callers with no registration of their own pass the empty set) — the
     // hash then spans everything given, same as before #466.
-    let in_recorded_scope = |provenance: &core_prov::Provenance| -> bool {
-        coverage_repos.is_empty()
+    fn in_recorded_scope(&self, provenance: &core_prov::Provenance) -> bool {
+        self.coverage_repos.is_empty()
             || provenance
                 .evidence
                 .iter()
-                .any(|evidence| coverage_repos.contains(&evidence.repo))
-    };
-    // The registration's own `repo:<key>` node (see doc comment above): no
-    // evidence spans, but its content hash is bound to the commit it was
-    // recorded at, so it must stay in the scoped hash by id.
-    let is_own_registration_node = |node: &Node| -> bool {
-        node.id
-            .strip_prefix("repo:")
-            .is_some_and(|key| coverage_repos.contains(key))
-    };
-    let mut cover = |provenance: &core_prov::Provenance| {
-        if !in_recorded_scope(provenance) {
+                .any(|evidence| self.coverage_repos.contains(&evidence.repo))
+    }
+
+    fn count(&mut self, provenance: &core_prov::Provenance) {
+        use core_prov::ConfidenceTier::*;
+        self.facts += 1;
+        match provenance.confidence_tier {
+            Confirmed => self.confirmed += 1,
+            InferredStrong => self.inferred_strong += 1,
+            InferredWeak => self.inferred_weak += 1,
+            Gap => self.gap += 1,
+        }
+        if !self.in_recorded_scope(provenance) {
             return;
         }
-        *facts_by_extractor
+        *self
+            .facts_by_extractor
             .entry(provenance.extractor_id.clone())
             .or_default() += 1;
         for evidence in &provenance.evidence {
-            if coverage_repos.contains(&evidence.repo) {
-                files_by_extractor
+            if self.coverage_repos.contains(&evidence.repo) {
+                self.files_by_extractor
                     .entry(provenance.extractor_id.clone())
                     .or_default()
                     .insert(format!("{}:{}", evidence.repo, evidence.path));
             }
         }
-    };
+    }
 
-    for node in nodes {
+    fn node(&mut self, node: &Node) {
         let provenance = spec::provenance(&node.props, &node.id);
-        tally(&provenance);
-        cover(&provenance);
-        if in_recorded_scope(&provenance) || is_own_registration_node(node) {
-            lines.push(spec::node_fact_line(node, &provenance));
+        self.count(&provenance);
+        // The registration's own `repo:<key>` node (see `compute`): no
+        // evidence spans, but its content hash is bound to the commit it was
+        // recorded at, so it must stay in the scoped hash by id.
+        let own_registration = node
+            .id
+            .strip_prefix("repo:")
+            .is_some_and(|key| self.coverage_repos.contains(key));
+        if self.in_recorded_scope(&provenance) || own_registration {
+            self.lines.push(spec::node_fact_line(node, &provenance));
         }
     }
-    for edge in edges {
+
+    fn edge(&mut self, edge: &Edge) {
         let identity = format!("{} {} {}", edge.src, edge.label, edge.dst);
         let provenance = spec::provenance(&edge.props, &identity);
-        tally(&provenance);
-        cover(&provenance);
-        if in_recorded_scope(&provenance) {
-            lines.push(spec::edge_fact_line(edge, &provenance));
+        self.count(&provenance);
+        if self.in_recorded_scope(&provenance) {
+            self.lines.push(spec::edge_fact_line(edge, &provenance));
         }
     }
-    // One definition of the graph content hash, shared with the export
-    // manifest (#1765, AC-0593): sorted lines, so store order is irrelevant.
-    let content_hash = spec::hash_fact_lines(lines);
 
-    // Scope-declared extractors always appear — a covering adapter that
-    // produced zero facts is a 0% row, not a missing row.
-    let mut extractors: BTreeSet<String> = scope.keys().cloned().collect();
-    extractors.extend(facts_by_extractor.keys().cloned());
-    let coverage = extractors
-        .into_iter()
-        .map(|extractor| {
-            let files_with_facts = files_by_extractor
-                .get(&extractor)
-                .map(|files| files.len() as u64)
-                .unwrap_or(0);
-            let files_in_scope = scope.get(&extractor).copied().unwrap_or(0);
-            let coverage_pct = if scope.contains_key(&extractor) {
-                Some(if files_in_scope == 0 {
-                    0.0
+    fn finish(self, scope: &BTreeMap<String, u64>) -> GraphMetrics {
+        // One definition of the graph content hash, shared with the export
+        // manifest (#1765, AC-0593): sorted lines, so store order is irrelevant.
+        let content_hash = spec::hash_fact_lines(self.lines);
+        // Scope-declared extractors always appear — a covering adapter that
+        // produced zero facts is a 0% row, not a missing row.
+        let mut extractors: BTreeSet<String> = scope.keys().cloned().collect();
+        extractors.extend(self.facts_by_extractor.keys().cloned());
+        let coverage = extractors
+            .into_iter()
+            .map(|extractor| {
+                let files_with_facts = self
+                    .files_by_extractor
+                    .get(&extractor)
+                    .map(|files| files.len() as u64)
+                    .unwrap_or(0);
+                let files_in_scope = scope.get(&extractor).copied().unwrap_or(0);
+                let coverage_pct = if scope.contains_key(&extractor) {
+                    Some(if files_in_scope == 0 {
+                        0.0
+                    } else {
+                        (files_with_facts as f64 / files_in_scope as f64) * 100.0
+                    })
                 } else {
-                    (files_with_facts as f64 / files_in_scope as f64) * 100.0
-                })
-            } else {
-                None
-            };
-            ExtractorCoverage {
-                facts: facts_by_extractor.get(&extractor).copied().unwrap_or(0),
-                files_with_facts,
-                files_in_scope,
-                coverage_pct,
-                extractor,
-            }
-        })
-        .collect();
-
-    GraphMetrics {
-        confirmed,
-        inferred_strong,
-        inferred_weak,
-        gap,
-        graph_facts: (nodes.len() + edges.len()) as u64,
-        content_hash,
-        coverage,
+                    None
+                };
+                ExtractorCoverage {
+                    facts: self
+                        .facts_by_extractor
+                        .get(&extractor)
+                        .copied()
+                        .unwrap_or(0),
+                    files_with_facts,
+                    files_in_scope,
+                    coverage_pct,
+                    extractor,
+                }
+            })
+            .collect();
+        GraphMetrics {
+            confirmed: self.confirmed,
+            inferred_strong: self.inferred_strong,
+            inferred_weak: self.inferred_weak,
+            gap: self.gap,
+            graph_facts: self.facts,
+            content_hash,
+            coverage,
+        }
     }
 }
 
@@ -456,6 +509,71 @@ mod tests {
         assert_eq!(metrics.confirmed, 4);
         assert_eq!(metrics.inferred_strong, 1);
         assert_eq!(metrics.graph_facts, 5);
+    }
+
+    #[test]
+    // AC-1201/T-1201: metrics over a packed snapshot, decoded one fact at a
+    // time, equal the metrics over the decoded graph: tallies, coverage and
+    // the scoped content hash, foreign, registration and fallback facts included.
+    fn packed_metrics_equal_decoded_metrics() {
+        let mut foreign = node("z", "t0.adapter-ts", "Confirmed", "src/old.ts");
+        foreign.props["prov"]["evidence"][0]["repo"] = json!("local/previous");
+        let unproven = Node {
+            id: "loose".into(),
+            label: "Symbol".into(),
+            props: json!({ "name": "loose" }),
+        };
+        let registration = Node {
+            id: "repo:local/fixture".into(),
+            label: "Repo".into(),
+            props: json!({ "commit": "abc" }),
+        };
+        let nodes = vec![
+            node("a", "t0.adapter-ts", "Confirmed", "src/a.ts"),
+            node("d", "t1.dynamic", "InferredStrong", "traces/run.json"),
+            foreign,
+            unproven,
+            registration,
+        ];
+        let edges = vec![
+            edge("a", "d", "t0.adapter-ts"),
+            edge("a", "z", "t1.dynamic"),
+        ];
+        let snapshot = core_graph::packed::PackedSnapshot {
+            nodes: nodes
+                .iter()
+                .cloned()
+                .map(|node| core_graph::packed::PackedNode::pack(node).unwrap())
+                .collect(),
+            edges: edges
+                .iter()
+                .cloned()
+                .map(|edge| core_graph::packed::PackedEdge::pack(edge).unwrap())
+                .collect(),
+        };
+        for repos in [fixture_repos(), BTreeSet::new()] {
+            let decoded = compute(&nodes, &edges, &ts_scope(3), &repos);
+            let packed = compute_packed(&snapshot, &ts_scope(3), &repos).unwrap();
+            assert_eq!(packed.content_hash, decoded.content_hash);
+            assert_eq!(packed.coverage, decoded.coverage);
+            assert_eq!(
+                (
+                    packed.confirmed,
+                    packed.inferred_strong,
+                    packed.inferred_weak
+                ),
+                (
+                    decoded.confirmed,
+                    decoded.inferred_strong,
+                    decoded.inferred_weak
+                )
+            );
+            assert_eq!(
+                (packed.gap, packed.graph_facts),
+                (decoded.gap, decoded.graph_facts)
+            );
+            assert_eq!(packed.graph_facts, 7);
+        }
     }
 
     #[test]

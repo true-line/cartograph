@@ -2091,42 +2091,94 @@ pub(crate) struct PrimaryInput {
 /// [`matching_bindings`] over packed facts: only the nodes and edges a
 /// receipt names are decoded, every occurrence of a named edge included, so
 /// the merged edge view and last-value node winners are the same (#1574).
-pub(crate) fn matching_bindings_packed(
+/// Each named fact is decoded, matched and dropped before the next one, so
+/// the publication never holds every receipted fact as a props tree at once
+/// (AC-1200): on a large repository nearly every fact carries a receipt.
+pub(crate) fn matching_bindings_packed<R: Citable>(
     facts: &core_graph::facts::FactStore,
-    receipts: &[impl Citable],
+    receipts: &[R],
 ) -> Result<Vec<SourceBinding>, String> {
     if receipts.is_empty() {
         return Ok(Vec::new());
     }
-    let mut node_ids = std::collections::BTreeSet::<&str>::new();
-    let mut edge_keys = std::collections::BTreeSet::<(&str, &str, &str)>::new();
-    for receipt in receipts {
+    // Per named fact: the receipts naming it and its occurrences, both as
+    // indices in their original order.
+    type Named<K> = std::collections::BTreeMap<K, (Vec<usize>, Vec<usize>)>;
+    let mut nodes = Named::<&str>::new();
+    let mut edges = Named::<(&str, &str, &str)>::new();
+    for (at, receipt) in receipts.iter().enumerate() {
         match receipt.fact_key() {
-            FactKey::Node { id } => {
-                node_ids.insert(id.as_str());
-            }
+            FactKey::Node { id } => nodes.entry(id.as_str()).or_default().0.push(at),
             FactKey::Edge {
                 source,
                 label,
                 destination,
-            } => {
-                edge_keys.insert((source.as_str(), destination.as_str(), label.as_str()));
-            }
+            } => edges
+                .entry((source.as_str(), destination.as_str(), label.as_str()))
+                .or_default()
+                .0
+                .push(at),
+        }
+    }
+    // Occurrence indices in extraction order: the last node occurrence is
+    // the published winner, and every edge occurrence feeds the merge.
+    for (index, node) in facts.nodes().iter().enumerate() {
+        if let Some((_, occurrences)) = nodes.get_mut(node.id.as_str()) {
+            occurrences.push(index);
+        }
+    }
+    for (index, edge) in facts.edges().iter().enumerate() {
+        let key = (edge.src.as_str(), edge.dst.as_str(), edge.label.as_str());
+        if let Some((_, occurrences)) = edges.get_mut(&key) {
+            occurrences.push(index);
         }
     }
     let error = |error: core_graph::GraphError| error.to_string();
-    let mut named = adapters_lang_ts::Extraction::default();
-    named.nodes = facts
-        .nodes_where(|node| node_ids.contains(node.id.as_str()))
-        .map_err(error)?;
-    named.edges = facts
-        .edges_where(|edge| {
-            edge_keys.contains(&(edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
-        })
-        .map_err(error)?;
-    Ok(matching_bindings(&named, receipts))
+    let mut bound = std::collections::BTreeMap::new();
+    // The last receipt that matches a fact binds it, as in `matching_bindings_in`.
+    let mut bind = |named: &[usize], matches: &dyn Fn(&R) -> bool| {
+        if let Some(receipt) = named
+            .iter()
+            .rev()
+            .map(|&at| &receipts[at])
+            .find(|receipt| matches(receipt))
+        {
+            bound.insert(
+                receipt.fact_key().clone(),
+                SourceBinding {
+                    fact: receipt.fact_key().clone(),
+                    repo_key: receipt.repo_key().to_owned(),
+                    receipt_id: receipt.id().to_owned(),
+                    emitted_fact_digest: receipt.fact_digest().to_owned(),
+                },
+            );
+        }
+    };
+    for (named, occurrences) in nodes.values() {
+        let Some(&winner) = occurrences.last() else {
+            continue;
+        };
+        let node = facts.nodes()[winner].unpack().map_err(error)?;
+        bind(named, &|receipt| receipt.matches_node(&node));
+    }
+    for (named, occurrences) in edges.values() {
+        if occurrences.is_empty() {
+            continue;
+        }
+        let decoded = occurrences
+            .iter()
+            .map(|&index| facts.edges()[index].unpack())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        let merged = crate::merged_edge_view(&decoded);
+        let edge = merged.values().next().expect("one key, one merged edge");
+        bind(named, &|receipt| receipt.matches_edge(edge));
+    }
+    Ok(bound.into_values().collect())
 }
 
+/// The decoded reference [`matching_bindings_packed`] must equal.
+#[cfg(test)]
 pub(crate) fn matching_bindings(
     extraction: &adapters_lang_ts::Extraction,
     receipts: &[impl Citable],
@@ -3115,6 +3167,38 @@ mod tests {
         assert!(store.ids(&wrong_source).is_err());
         assert!(store.get(receipts[0].id()).is_err());
         assert_eq!(receipt_count(&store), expected.len() as i64);
+    }
+
+    // AC-1200/T-1200: binding decodes one named fact at a time and still
+    // equals the decoded path when several receipts name one fact (the last
+    // match binds it) and when an edge repeats (its occurrences merge).
+    #[test]
+    fn packed_binding_decodes_one_named_fact_at_a_time() {
+        let (_directory, _, _, mut extraction, receipts) = fixture();
+        let packed = |extraction: &adapters_lang_ts::Extraction, receipts: &[Receipt]| {
+            let facts = core_graph::facts::FactStore::from_facts(
+                extraction.nodes.clone(),
+                extraction.edges.clone(),
+            )
+            .unwrap();
+            matching_bindings_packed(&facts, receipts).unwrap()
+        };
+        let doubled: Vec<Receipt> = receipts
+            .iter()
+            .chain(receipts.iter().rev())
+            .cloned()
+            .collect();
+        let before = matching_bindings(&extraction, &doubled);
+        assert!(!before.is_empty());
+        assert_eq!(packed(&extraction, &doubled), before);
+        assert_eq!(before, matching_bindings(&extraction, &receipts));
+        // Every edge occurs twice: the merged view decides what binds.
+        let repeated = extraction.edges.clone();
+        extraction.edges.extend(repeated);
+        assert_eq!(
+            packed(&extraction, &doubled),
+            matching_bindings(&extraction, &doubled)
+        );
     }
 
     // AC-0150: a later enrichment sharing an identity wins graph publication;
