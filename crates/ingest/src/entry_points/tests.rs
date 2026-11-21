@@ -722,3 +722,29 @@ fn a_spring_main_without_web_endpoints_is_a_process() {
         "http-server"
     );
 }
+
+/// AC-0966: overloaded entry methods are told apart by their signature, a
+/// runner's other `run` overloads start nothing, and an `it` package is
+/// production source.
+#[test]
+fn java_overloads_have_their_own_entries_and_it_packages_are_read() {
+    let file = "src/main/java/it/acme/Inbox.java";
+    let symbols = BTreeSet::from([format!("sym:{REPO}@{file}#Inbox.onMessage(byte[])")]);
+    let out = extract_with(
+        &[(
+            file,
+            "package it.acme;\nimport org.springframework.jms.annotation.JmsListener;\nimport org.springframework.boot.CommandLineRunner;\nclass Inbox implements CommandLineRunner {\n    @JmsListener(destination = \"a\")\n    void onMessage(String m) {}\n    @JmsListener(destination = \"b\")\n    void onMessage(byte[] m) {}\n    public void run(String[] args) {}\n    void run(int times) {}\n}\n",
+        )],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let text = entry(&out, file, "Inbox.onMessage(String)");
+    assert_eq!(text.props["handler"], "Inbox.onMessage(String)");
+    assert_eq!(
+        entry_edge(&out, file, "Inbox.onMessage(byte[])").dst,
+        format!("sym:{REPO}@{file}#Inbox.onMessage(byte[])")
+    );
+    assert_eq!(entry(&out, file, "Inbox.run").props["kind"], "startup-task");
+    let entries = out.nodes.iter().filter(|n| n.label == "EntryPoint").count();
+    assert_eq!(entries, 3, "{:#?}", out.nodes);
+}

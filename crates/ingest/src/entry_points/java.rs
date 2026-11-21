@@ -27,9 +27,8 @@ use std::collections::BTreeSet;
 use tree_sitter::{Node as TsNode, Parser};
 
 /// Directories whose programs are not part of the running system.
-const NOT_SYSTEM_DIRS: &[&str] = &[
-    "e2e", "testdata", "examples", "example", "test", "tests", "it",
-];
+/// (`src/it/` is matched as a source root only: `it` is also a package.)
+const NOT_SYSTEM_DIRS: &[&str] = &["e2e", "testdata", "examples", "example", "test", "tests"];
 
 /// Listener annotations and the packages that declare them.
 const LISTENERS: &[(&str, &[&str])] = &[
@@ -86,7 +85,7 @@ pub(super) fn starts(
         .set_language(&tree_sitter_java::LANGUAGE.into())
         .expect("tree-sitter-java grammar");
     let mut web: Option<(String, (u64, u64))> = None;
-    let mut found: Vec<(Start, bool)> = Vec::new();
+    let mut found: Vec<Found> = Vec::new();
     for (rel, text) in files {
         let Some(tree) = parser.parse(text, None) else {
             continue;
@@ -115,22 +114,43 @@ pub(super) fn starts(
             cx.type_declaration(top, &[], &mut found);
         }
     }
+    // Overloads of one entry method are told apart by their signature.
+    let mut seen: std::collections::BTreeMap<(String, String), usize> = Default::default();
+    for found in &found {
+        *seen
+            .entry((found.start.declared_in.clone(), found.start.key.clone()))
+            .or_default() += 1;
+    }
     found
         .into_iter()
-        .map(|(mut start, spring)| {
-            if spring {
-                match &web {
-                    Some(evidence) => {
-                        start.kind = Kind {
-                            kind: "http-server",
-                            evidence: Some(evidence.clone()),
-                        };
+        .map(
+            |Found {
+                 mut start,
+                 spring,
+                 signature,
+             }| {
+                if seen[&(start.declared_in.clone(), start.key.clone())] > 1 {
+                    start.key = format!("{}{signature}", start.key);
+                    for (key, value) in &mut start.extra {
+                        if *key == "handler" {
+                            *value = start.key.clone().into();
+                        }
                     }
-                    None => start.kind.kind = operator_or_process(&start.declared_in),
                 }
-            }
-            start
-        })
+                if spring {
+                    match &web {
+                        Some(evidence) => {
+                            start.kind = Kind {
+                                kind: "http-server",
+                                evidence: Some(evidence.clone()),
+                            };
+                        }
+                        None => start.kind.kind = operator_or_process(&start.declared_in),
+                    }
+                }
+                start
+            },
+        )
         .collect()
 }
 
@@ -144,6 +164,13 @@ fn operator_or_process(rel: &str) -> &'static str {
     } else {
         "process"
     }
+}
+
+/// A start, whether it runs Spring Boot, and its method's signature.
+struct Found {
+    start: Start,
+    spring: bool,
+    signature: String,
 }
 
 #[derive(Debug)]
@@ -251,7 +278,7 @@ impl Cx<'_> {
             .collect()
     }
 
-    fn type_declaration(&self, node: TsNode, outer: &[String], out: &mut Vec<(Start, bool)>) {
+    fn type_declaration(&self, node: TsNode, outer: &[String], out: &mut Vec<Found>) {
         if !matches!(
             node.kind(),
             "class_declaration" | "enum_declaration" | "record_declaration"
@@ -309,7 +336,7 @@ impl Cx<'_> {
         method: TsNode,
         class: &str,
         runner: Option<&'static str>,
-        out: &mut Vec<(Start, bool)>,
+        out: &mut Vec<Found>,
     ) {
         let Some(name) = method.child_by_field_name("name") else {
             return;
@@ -318,6 +345,8 @@ impl Cx<'_> {
         let annotations = self.annotations(method);
         let declared = (method.start_byte() as u64, header_end(method));
         let key = format!("{class}.{name}");
+        let params = self.param_types(method);
+        let signature = format!("({})", params.join(","));
         let start = |how: String, kind: &'static str, extra, extra_spans| Start {
             declared_in: self.rel.to_string(),
             span: declared,
@@ -331,13 +360,18 @@ impl Cx<'_> {
             port: None,
             extra,
             extra_spans,
-            target: self.target(class, name),
+            target: self.target(class, name, &signature),
+        };
+        let found = |start: Start, spring: bool| Found {
+            start,
+            spring,
+            signature: signature.clone(),
         };
         let handler = ("handler", serde_json::Value::from(key.clone()));
         if name == "main" && self.is_main(method) {
             let spring = self.runs_spring(method);
             let kind = operator_or_process(self.rel);
-            out.push((
+            out.push(found(
                 start(
                     "public static void main".into(),
                     kind,
@@ -358,7 +392,7 @@ impl Cx<'_> {
                 if !sources.is_empty() {
                     extra.push(("sources", serde_json::json!(sources)));
                 }
-                out.push((
+                out.push(found(
                     start(
                         format!("@{simple}"),
                         "queue-consumer",
@@ -384,7 +418,7 @@ impl Cx<'_> {
                 if !schedule.is_empty() {
                     extra.push(("schedule", schedule.into()));
                 }
-                out.push((
+                out.push(found(
                     start(
                         "@Scheduled".into(),
                         "scheduled-job",
@@ -406,15 +440,57 @@ impl Cx<'_> {
             .then_some(returned.as_deref())
             .flatten()
             .and_then(|ty| RUNNERS.iter().copied().find(|r| self.proves(ty, r, BOOT)));
+        // The interface's own `run`, not an overload of it.
+        let runs = |runner: &str| match runner {
+            "CommandLineRunner" => {
+                matches!(params.as_slice(), [p] if matches!(p.as_str(), "String..." | "String[]"))
+            }
+            _ => {
+                matches!(params.as_slice(), [p] if p.rsplit('.').next() == Some("ApplicationArguments"))
+            }
+        };
         let how = match (runner, bean_runner) {
-            (Some(runner), _) if name == "run" => runner,
+            (Some(runner), _) if name == "run" && runs(runner) => runner,
             (_, Some(runner)) => runner,
             _ => return,
         };
-        out.push((
+        out.push(found(
             start(how.into(), "startup-task", vec![handler], Vec::new()),
             false,
         ));
+    }
+
+    /// The method's parameter types as the Java adapter spells its Symbol
+    /// signature: each type as written, a varargs type with `...`.
+    fn param_types(&self, method: TsNode) -> Vec<String> {
+        let Some(params) = method.child_by_field_name("parameters") else {
+            return Vec::new();
+        };
+        let mut walk = params.walk();
+        params
+            .named_children(&mut walk)
+            .filter_map(|param| match param.kind() {
+                "formal_parameter" => param
+                    .child_by_field_name("type")
+                    .map(|ty| self.text(ty).to_string()),
+                "spread_parameter" => {
+                    let mut inner = param.walk();
+                    param
+                        .named_children(&mut inner)
+                        .find(|child| {
+                            !matches!(
+                                child.kind(),
+                                "modifiers"
+                                    | "annotation"
+                                    | "marker_annotation"
+                                    | "variable_declarator"
+                            )
+                        })
+                        .map(|ty| format!("{}...", self.text(ty)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// `public static void main` with one `String[]`/`String...` parameter.
@@ -537,9 +613,18 @@ impl Cx<'_> {
         out
     }
 
-    /// The method Symbol the adapter emitted for `class.name`, if exactly
-    /// one; else the file.
-    fn target(&self, class: &str, name: &str) -> Target {
+    /// The method Symbol the adapter emitted for `class.name` with this
+    /// signature, else the only one of that name; else the file.
+    fn target(&self, class: &str, name: &str, signature: &str) -> Target {
+        let exact = format!("sym:{}@{}#{class}.{name}{signature}", self.repo, self.rel);
+        if self.symbols.contains(&exact) {
+            return Target::File {
+                rel: self.rel.to_string(),
+                function: Some(format!("{class}.{name}{signature}")),
+                confidence: ConfidenceTier::Confirmed,
+                marker: None,
+            };
+        }
         let prefix = format!("sym:{}@{}#{class}.{name}(", self.repo, self.rel);
         let matches: Vec<&String> = self
             .symbols
