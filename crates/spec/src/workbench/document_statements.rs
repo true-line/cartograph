@@ -1537,18 +1537,49 @@ fn called(value: &str) -> Option<String> {
             _ => {}
         }
     }
-    // Flask `flash("Alias not found", "error")`: the message the user sees.
+    // Flask `flash("Alias not found", "error")`: the message the user sees;
+    // an f-string's replacement fields read as "…" (#1998).
     if last == "flash"
-        && let Some(message) = value[callee.len() + 1..]
-            .trim_start()
-            .strip_prefix('"')
-            .and_then(|rest| rest.split_once('"'))
-            .map(|(m, _)| m)
-            .filter(|m| !m.is_empty() && !m.contains(['\\', '{', '\'']))
+        && let Some(message) = flashed(&value[callee.len() + 1..])
     {
         return Some(format!("the user is shown “{message}”"));
     }
     Some(format!("it runs “{}”", words(last.trim_start_matches('_'))))
+}
+
+/// The message of `flash("…", …)` or `flash(f"Deleted {count} aliases", …)`,
+/// with each replacement field as "…". `None` for an escape, a quote inside,
+/// a doubled brace or no literal text.
+fn flashed(arguments: &str) -> Option<String> {
+    let rest = arguments.trim_start();
+    let (formatted, rest) = match rest.strip_prefix(['f', 'F']) {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let (message, _) = rest[1..].split_once(quote)?;
+    if message.contains(['\\', '"', '\'']) || message.contains("{{") || message.contains("}}") {
+        return None;
+    }
+    if !formatted {
+        return (!message.is_empty() && !message.contains(['{', '}'])).then(|| message.to_owned());
+    }
+    let mut out = String::new();
+    let mut rest = message;
+    while let Some(open) = rest.find('{') {
+        let close = rest[open..].find('}')? + open;
+        if rest[open + 1..close].contains('{') {
+            return None;
+        }
+        out.push_str(&rest[..open]);
+        out.push('…');
+        rest = &rest[close + 1..];
+    }
+    if rest.contains('}') {
+        return None;
+    }
+    out.push_str(rest);
+    out.chars().any(|c| c.is_alphabetic()).then_some(out)
 }
 
 /// A TypeORM repository write as a clause (#1998):
@@ -2503,8 +2534,32 @@ mod tests {
             "the user is shown “Alias not found”"
         );
         assert_eq!(
-            called("flash(f\"{n} deleted\", \"success\")").unwrap(),
+            called("flash(f\"Deleted {count} aliases\", \"success\")").unwrap(),
+            "the user is shown “Deleted … aliases”"
+        );
+        assert_eq!(
+            called("flash(F\"Deleted {count} aliases\", \"success\")").unwrap(),
+            "the user is shown “Deleted … aliases”"
+        );
+        assert_eq!(
+            called("flash(f'Deleted {count} aliases', 'success')").unwrap(),
+            "the user is shown “Deleted … aliases”"
+        );
+        assert_eq!(
+            called("flash('Alias not found', 'error')").unwrap(),
+            "the user is shown “Alias not found”"
+        );
+        assert_eq!(
+            called("flash(f\"{name}\", \"success\")").unwrap(),
             "it runs “flash”"
+        );
+        assert_eq!(
+            called("flash(f\"Use {{x}}\", \"error\")").unwrap(),
+            "it runs “flash”"
+        );
+        assert_eq!(
+            called("flash(f\"{n} deleted\", \"success\")").unwrap(),
+            "the user is shown “… deleted”"
         );
         assert_eq!(
             condition(
