@@ -1887,7 +1887,7 @@ fn extract_tree_packed(
         let mut python_progress = |path: &str| on_file(&format!("Reading Python sources — {path}"));
         // A capture holding the Python selection is parsed from its retained
         // bytes, and each file's own facts are bound to provenance-only
-        // receipts (AC-1023); otherwise Python reads the checkout as before.
+        // receipts (AC-1024); otherwise Python reads the checkout as before.
         let captured_python: Vec<String> = primary
             .map(|capture| {
                 capture

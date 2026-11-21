@@ -3372,7 +3372,7 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
     assert!(error.contains("cloned commit's Git objects"), "{error}");
 }
 
-// AC-1023: a source's `.py` files join its capture; the Python pass parses
+// AC-1024: a source's `.py` files join its capture; the Python pass parses
 // the retained bytes, not the checkout, and each surviving Python fact whose
 // provenance lies in one captured file gets a provenance-only Python receipt
 // that reads back its captured span.

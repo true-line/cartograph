@@ -1960,7 +1960,7 @@ impl PrimarySourceStore {
                 source_capture::capture_working_tree(root, &id, paths, CaptureLimits::default())
             }
         };
-        // The Python lane's `.py` files join the same capture (AC-1023). When
+        // The Python lane's `.py` files join the same capture (AC-1024). When
         // they cannot be listed or retained with the TS/JS selection, Python
         // keeps its ordinary uncaptured lane and the TS/JS capture stands alone.
         let wants_python = ingest::coverage::wants(layers, ingest::coverage::APPLICATION_LAYERS);
