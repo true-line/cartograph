@@ -8,10 +8,17 @@
 //! - [`area_neighbours`] names the other areas this area's code calls and
 //!   the areas that call it, from the base `CALLS` edges and the areas'
 //!   member files. Names only: a neighbour's content is its own briefing.
+//!   It also names the implementations outside the area that the area
+//!   dispatches to through configuration (#2166): the targets of inferred
+//!   `CALLS` resolved as a strategy implementation, a configured instance
+//!   or a configured lookup, whose call site is in the area or whose
+//!   interface or class the area declares.
 //! - [`area_briefing`] cuts the area's block out of each D1 section the
 //!   export arranges by area ([`AREA_SECTIONS`]), exactly as printed, and
 //!   puts the neighbours in front. Gaps the specification states inside
-//!   those blocks stay where it prints them.
+//!   those blocks stay where it prints them. The rules other blocks of
+//!   §1.5 print for the dispatched implementations follow, as inferred,
+//!   and so do other areas' state machines.
 //!
 //! **Bound.** The briefing holds at most `max_bytes` of blocks. Budget goes
 //! to the smallest blocks first, so a short section is never cut to make
@@ -43,6 +50,18 @@ const RULES_SECTION: &str = "1.5";
 /// the area's own sections.
 const MACHINES_BLOCK: &str = "1.5 state machines";
 
+/// The block of rules of the implementations the area dispatches to
+/// (#2166), which is not one of the area's own sections.
+const DISPATCH_BLOCK: &str = "1.5 dispatched implementations";
+
+/// `CALLS` resolutions that dispatch through configuration (#2069, #2165):
+/// which implementation runs is chosen by stored data or settings.
+const DISPATCH_RESOLUTIONS: &[&str] = &[
+    "strategy-implementation",
+    "configured-instance",
+    "configured-lookup",
+];
+
 /// The heading a state machine subsection of §1.5 starts with (#2067).
 const MACHINE_HEADING: &str = "#### State machine: ";
 
@@ -59,6 +78,10 @@ pub struct AreaNeighbours {
     pub calls: Vec<String>,
     /// Areas whose code calls this area's.
     pub called_by: Vec<String>,
+    /// The implementations outside the area that it dispatches to through
+    /// configuration (#2166), as a rule's `Where` names them
+    /// (`DefaultTaxZoneStrategy.determineTaxZone`), in name order.
+    pub dispatches: Vec<String>,
 }
 
 /// One area's briefing.
@@ -111,11 +134,41 @@ pub fn area_neighbours(
             owner.entry(edge.src.as_str()).or_insert(*found);
         }
     }
+    // The symbols the area declares, by repository and name (after `#`):
+    // an interface or class it holds dispatches from wherever it is called
+    // in its own repository.
+    let declared: BTreeSet<(&str, &str)> = owner
+        .iter()
+        .filter(|(_, (id, _))| *id == area)
+        .filter_map(|(symbol, _)| symbol_name(symbol))
+        .collect();
     let mut calls = BTreeSet::new();
     let mut called_by = BTreeSet::new();
+    let mut dispatches = BTreeSet::new();
     for edge in edges {
         if edge.label != "CALLS" {
             continue;
+        }
+        if edge.props["resolution"]
+            .as_str()
+            .is_some_and(|resolution| DISPATCH_RESOLUTIONS.contains(&resolution))
+            && owner
+                .get(edge.dst.as_str())
+                .is_none_or(|(to, _)| *to != area)
+            && let Some((repo, target)) = symbol_name(&edge.dst)
+        {
+            // The interface (a strategy) or the class (`Class.field`,
+            // `Class.method`) the call dispatches through.
+            let through = edge.props["interface"]
+                .as_str()
+                .or_else(|| edge.props["through"].as_str())
+                .map(|name| name.split(['.', '<']).next().unwrap_or(name));
+            let from_here = owner
+                .get(edge.src.as_str())
+                .is_some_and(|(from, _)| *from == area);
+            if from_here || through.is_some_and(|name| declared.contains(&(repo, name))) {
+                dispatches.insert(target.to_owned());
+            }
         }
         let (Some((from, from_name)), Some((to, to_name))) =
             (owner.get(edge.src.as_str()), owner.get(edge.dst.as_str()))
@@ -134,7 +187,15 @@ pub fn area_neighbours(
     Some(AreaNeighbours {
         calls: calls.into_iter().collect(),
         called_by: called_by.into_iter().collect(),
+        dispatches: dispatches.into_iter().collect(),
     })
+}
+
+/// A symbol id's repository and name: `sym:<repo>@<path>#<name>`.
+fn symbol_name(id: &str) -> Option<(&str, &str)> {
+    let (head, name) = id.rsplit_once('#')?;
+    let repo = head.strip_prefix("sym:")?.split_once('@')?.0;
+    Some((repo, name))
 }
 
 /// The state machines other areas declare (AC-1032): each `#### State
@@ -198,6 +259,81 @@ fn other_machines(section: &str, name: &str, neighbours: &AreaNeighbours) -> Str
         out.push_str(&machine);
     }
     out
+}
+
+/// The rules other blocks of §1.5 print for the implementations the area
+/// dispatches to (#2166): each table row whose `Where` is one of
+/// `dispatches`, with the `↳` rows under it, grouped by the block that
+/// prints it, in document order and once each. Empty when the area
+/// dispatches to nothing. An implementation no block prints a row for is
+/// named, so its absence is not read as having no rules.
+fn dispatched_rules(section: &str, name: &str, dispatches: &[String]) -> String {
+    if dispatches.is_empty() {
+        return String::new();
+    }
+    // Names as a rule's `Where` cell prints them.
+    let wanted: BTreeMap<String, &str> = dispatches
+        .iter()
+        .map(|target| (Literal(target).to_string(), target.as_str()))
+        .collect();
+    let own = Literal(name).to_string();
+    let mut found: BTreeSet<&str> = BTreeSet::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut out = String::new();
+    let header = "| Where | Rule | Source | Citation |\n|---|---|---|---|\n";
+    for block in section.split_inclusive("\n### ").skip(1) {
+        let Some((area, body)) = block.split_once('\n') else {
+            continue;
+        };
+        let area = area.trim();
+        if area == own || area == UNSCOPED_MACHINES {
+            continue;
+        }
+        let mut rows = String::new();
+        let mut taking = false;
+        for line in body.lines() {
+            if line.starts_with("| ↳") {
+                if taking {
+                    rows.push_str(line);
+                    rows.push('\n');
+                }
+                continue;
+            }
+            taking = false;
+            let Some(cell) = line
+                .strip_prefix("| ")
+                .and_then(|rest| rest.split(" |").next())
+            else {
+                continue;
+            };
+            if let Some(target) = wanted.get(cell)
+                && seen.insert(line)
+            {
+                found.insert(target);
+                taking = true;
+                rows.push_str(line);
+                rows.push('\n');
+            }
+        }
+        if !rows.is_empty() {
+            let _ = write!(out, "\n#### Implementations in {area}\n\n{header}{rows}");
+        }
+    }
+    let missing: Vec<String> = dispatches
+        .iter()
+        .filter(|target| !found.contains(target.as_str()))
+        .map(|target| Literal(target).to_string())
+        .collect();
+    if !missing.is_empty() {
+        let _ = write!(
+            out,
+            "\n#### Implementations with no rule printed\n\nNo block of §1.5 prints a rule for: {}.\n",
+            missing.join(", ")
+        );
+    }
+    format!(
+        "### Rules of the implementations this area dispatches to (inferred: the implementation that runs is chosen by configuration, so each is one that may run, not a direct call)\n{out}"
+    )
 }
 
 /// The block of the area named `name` in one compiled section: from its
@@ -373,8 +509,25 @@ pub fn area_briefing(
         .and_then(|section| section.lines().next())
         .map(|heading| format!("{heading}: other areas"))
         .unwrap_or_default();
+    let own_blocks = blocks.len();
     if !machines.is_empty() && !blocks.is_empty() {
         blocks.push((MACHINES_BLOCK, machines_heading.as_str(), machines.as_str()));
+    }
+    // The rules of the implementations the area dispatches to (#2166),
+    // fitted before the area's own rules.
+    let dispatched = section_text(document, RULES_SECTION)
+        .map(|section| dispatched_rules(section, name, &neighbours.dispatches))
+        .unwrap_or_default();
+    let dispatched_heading = section_text(document, RULES_SECTION)
+        .and_then(|section| section.lines().next())
+        .map(|heading| format!("{heading}: implementations dispatched to"))
+        .unwrap_or_default();
+    if !dispatched.is_empty() {
+        blocks.push((
+            DISPATCH_BLOCK,
+            dispatched_heading.as_str(),
+            dispatched.as_str(),
+        ));
     }
     // Smallest first, so what a short block does not use goes to the rest;
     // the rules (§1.5) last, so they take what every other block leaves
@@ -418,7 +571,7 @@ pub fn area_briefing(
     } else {
         let _ = writeln!(text, "- Called from: {}.", list(&neighbours.called_by));
     }
-    if blocks.is_empty() {
+    if own_blocks == 0 {
         text.push_str("\nThe product specification lists nothing under this area.\n");
     }
     let mut left_out = 0;
@@ -434,7 +587,13 @@ pub fn area_briefing(
         }
         // Other areas' machines are not this area's capabilities, so they
         // are said apart and not counted in `left_out`.
-        if fit.left_out > 0 && *number == MACHINES_BLOCK {
+        if fit.left_out > 0 && *number == DISPATCH_BLOCK {
+            let _ = writeln!(
+                text,
+                "\n{} groups of rules of dispatched implementations are left out of this briefing to keep its bound.",
+                fit.left_out
+            );
+        } else if fit.left_out > 0 && *number == MACHINES_BLOCK {
             let _ = writeln!(
                 text,
                 "\n{} state machines of other areas are left out of this briefing to keep its bound.",
@@ -454,7 +613,7 @@ pub fn area_briefing(
         sections: blocks
             .iter()
             .map(|(number, ..)| *number)
-            .filter(|number| *number != MACHINES_BLOCK)
+            .filter(|number| *number != MACHINES_BLOCK && *number != DISPATCH_BLOCK)
             .collect(),
         left_out,
     }

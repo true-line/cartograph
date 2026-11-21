@@ -43,6 +43,7 @@ fn a_briefing_holds_the_areas_block_of_each_area_section_as_printed() {
     let neighbours = AreaNeighbours {
         calls: vec!["Mailbox".into()],
         called_by: vec![],
+        dispatches: vec![],
     };
     let briefing = area_briefing(DOCUMENT, "Alias", 12, &neighbours, AREA_BRIEFING_BYTES);
     assert_eq!(briefing.sections, ["1.3", "1.5"]);
@@ -167,6 +168,7 @@ fn neighbours_are_the_areas_across_a_call_by_name() {
         Some(AreaNeighbours {
             calls: vec!["Mailbox".into()],
             called_by: vec!["Email".into()],
+            dispatches: vec![],
         })
     );
     assert_eq!(
@@ -286,6 +288,7 @@ fn a_briefing_carries_other_areas_state_machines() {
     let neighbours = AreaNeighbours {
         calls: vec!["Payment".into()],
         called_by: vec![],
+        dispatches: vec![],
     };
     let briefing = area_briefing(document, "Order", 4, &neighbours, AREA_BRIEFING_BYTES);
     let text = &briefing.text;
@@ -346,4 +349,136 @@ fn a_briefing_carries_other_areas_state_machines() {
         "{}",
         none.text
     );
+}
+
+fn dispatch(src: &str, dst: &str, props: serde_json::Value) -> Edge {
+    let mut edge = edge(src, "CALLS", dst);
+    edge.props = props;
+    edge
+}
+
+// AC-1308 (T-1308): an area's briefing carries the rules other blocks of
+// §1.5 print for the implementations it dispatches to through
+// configuration, from a call site in the area or through an interface the
+// area declares, as inferred, and names an implementation no block prints.
+#[test]
+fn a_briefing_carries_the_rules_of_the_implementations_its_area_dispatches_to() {
+    let subsystems = [
+        subsystem("subsystem:tax", "Tax", &["file:tax-strategy"]),
+        subsystem("subsystem:order", "Order", &["file:calculator"]),
+        subsystem("subsystem:config", "Config", &["file:zones"]),
+    ];
+    let edges = [
+        edge(
+            "sym:r@tax-strategy.ts#TaxZoneStrategy",
+            "DEFINED_IN",
+            "file:tax-strategy",
+        ),
+        edge(
+            "sym:r@calculator.ts#OrderCalculator.apply",
+            "DEFINED_IN",
+            "file:calculator",
+        ),
+        edge(
+            "sym:r@zones.ts#DefaultTaxZoneStrategy.determineTaxZone",
+            "DEFINED_IN",
+            "file:zones",
+        ),
+        edge(
+            "sym:r@zones.ts#AddressTaxZoneStrategy.determineTaxZone",
+            "DEFINED_IN",
+            "file:zones",
+        ),
+        edge(
+            "sym:r@zones.ts#Calculator.calculate",
+            "DEFINED_IN",
+            "file:zones",
+        ),
+        // Called from the Order area through the Tax area's interface.
+        dispatch(
+            "sym:r@calculator.ts#OrderCalculator.apply",
+            "sym:r@zones.ts#DefaultTaxZoneStrategy.determineTaxZone",
+            json!({"resolution": "strategy-implementation", "interface": "TaxZoneStrategy"}),
+        ),
+        dispatch(
+            "sym:r@calculator.ts#OrderCalculator.apply",
+            "sym:r@zones.ts#AddressTaxZoneStrategy.determineTaxZone",
+            json!({"resolution": "strategy-implementation", "interface": "TaxZoneStrategy"}),
+        ),
+        // The Order area's own call through another area's class.
+        dispatch(
+            "sym:r@calculator.ts#OrderCalculator.apply",
+            "sym:r@zones.ts#Calculator.calculate",
+            json!({"resolution": "configured-lookup", "through": "Calculator.calculate"}),
+        ),
+        // Another repository's same-named interface is not the Tax area's.
+        dispatch(
+            "sym:other@x.ts#Caller.run",
+            "sym:other@x.ts#ElsewhereZoneStrategy.determineTaxZone",
+            json!({"resolution": "strategy-implementation", "interface": "TaxZoneStrategy"}),
+        ),
+        // A direct call is not a dispatch.
+        edge(
+            "sym:r@calculator.ts#OrderCalculator.apply",
+            "CALLS",
+            "sym:r@zones.ts#Calculator.calculate",
+        ),
+    ];
+    let tax = area_neighbours(&edges, &subsystems, "subsystem:tax").unwrap();
+    assert_eq!(
+        tax.dispatches,
+        [
+            "AddressTaxZoneStrategy.determineTaxZone",
+            "DefaultTaxZoneStrategy.determineTaxZone"
+        ]
+    );
+    let order = area_neighbours(&edges, &subsystems, "subsystem:order").unwrap();
+    assert_eq!(order.dispatches.len(), 3, "{order:?}");
+    let config = area_neighbours(&edges, &subsystems, "subsystem:config").unwrap();
+    assert!(config.dispatches.is_empty(), "{config:?}");
+
+    let document = "# Product specification\n\n\
+## 1.5 Business rules (P+A)\n\n\
+### Tax\n\n#### Manage tax rates\n\n| Where | Rule | Source | Citation |\n|---|---|---|---|\n| TaxRateService.update | When the rate is negative, it fails. | when (rate < 0) | F-00000000000000a1 |\n\n\
+### Config\n\n#### Rules in the Config area's own code\n\n| Where | Rule | Source | Citation |\n|---|---|---|---|\n\
+| AddressTaxZoneStrategy.determineTaxZone | When the order has no shipping country, the channel's default zone is used. | when (!order.shippingAddress.countryCode): returns defaultZone | F-00000000000000b1 |\n\
+| ↳ | The check “zone for country” decides as follows: | zoneForCountry() | — |\n\
+| OtherStrategy.run | Unrelated. | always | F-00000000000000b2 |\n\
+| ↳ | Not under a wanted row. | x | F-00000000000000b3 |\n";
+    let briefing = area_briefing(document, "Tax", 1, &tax, AREA_BRIEFING_BYTES);
+    let text = &briefing.text;
+    assert_eq!(briefing.sections, ["1.5"], "{text}");
+    assert!(
+        text.contains("## 1.5 Business rules (P+A): implementations dispatched to\n\n### Rules of the implementations this area dispatches to (inferred"),
+        "{text}"
+    );
+    assert!(text.contains(
+        "#### Implementations in Config\n\n| Where | Rule | Source | Citation |\n|---|---|---|---|\n| AddressTaxZoneStrategy.determineTaxZone | When the order has no shipping country, the channel's default zone is used. | when (!order.shippingAddress.countryCode): returns defaultZone | F-00000000000000b1 |\n| ↳ | The check “zone for country” decides as follows: | zoneForCountry() | — |\n"
+    ), "{text}");
+    assert!(
+        !text.contains("OtherStrategy") && !text.contains("F-00000000000000b3"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "No block of §1.5 prints a rule for: DefaultTaxZoneStrategy.determineTaxZone."
+        ),
+        "{text}"
+    );
+    assert!(briefing_citation_ids(text).contains("F-00000000000000b1"));
+    // The area's own block stays first and whole.
+    assert!(
+        text.find("TaxRateService.update").unwrap()
+            < text.find("Implementations in Config").unwrap()
+    );
+
+    // No dispatches, no block.
+    let plain = area_briefing(
+        document,
+        "Tax",
+        1,
+        &AreaNeighbours::default(),
+        AREA_BRIEFING_BYTES,
+    );
+    assert!(!plain.text.contains("dispatches to"), "{}", plain.text);
 }
