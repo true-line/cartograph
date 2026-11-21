@@ -278,47 +278,48 @@ fn lookup_classes(cx: &FileCx<'_>, ty: TsNode<'_>) -> Vec<String> {
 /// The classes a `const receiver = this.field[…]` in the call's function
 /// looks up, by the field's declared type.
 fn looked_up(cx: &FileCx<'_>, call: TsNode<'_>, receiver: &str) -> Vec<String> {
-    // The function the call runs in.
-    let mut function = call;
-    loop {
-        match function.parent() {
-            Some(parent) if super::callable::is_callable(parent) => {
-                function = parent;
-                break;
-            }
-            Some(parent) => function = parent,
-            None => return Vec::new(),
-        }
-    }
-    let Some(body) = function.child_by_field_name("body") else {
-        return Vec::new();
-    };
+    // The declaration of `receiver` visible at the call: the nearest one
+    // before it in an enclosing block, up to the call's function. A nearer
+    // declaration of another value shadows the lookup.
     let mut field = None;
-    let mut stack = vec![body];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "variable_declarator"
-            && node
-                .child_by_field_name("name")
-                .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == receiver)
-            && node
-                .parent()
-                .and_then(|d| d.child(0))
-                .is_some_and(|k| cx.text(&k) == "const")
-        {
-            field = node
-                .child_by_field_name("value")
-                .filter(|v| v.kind() == "subscript_expression")
-                .and_then(|v| v.child_by_field_name("object"))
-                .and_then(|o| this_member(cx, o))
-                .map(str::to_string);
+    let mut inner = call;
+    'scopes: while let Some(scope) = inner.parent() {
+        if super::callable::is_callable(scope) {
             break;
         }
-        let mut walk = node.walk();
-        for child in node.named_children(&mut walk) {
-            if !super::callable::is_callable(child) {
-                stack.push(child);
+        if matches!(scope.kind(), "statement_block" | "program" | "switch_case") {
+            let mut walk = scope.walk();
+            let before: Vec<_> = scope
+                .named_children(&mut walk)
+                .take_while(|statement| statement.end_byte() <= inner.start_byte())
+                .collect();
+            for statement in before.iter().rev() {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    continue;
+                }
+                let mut walk = statement.walk();
+                let Some(declarator) = statement.named_children(&mut walk).find(|d| {
+                    d.kind() == "variable_declarator"
+                        && d.child_by_field_name("name")
+                            .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == receiver)
+                }) else {
+                    continue;
+                };
+                if statement.child(0).is_some_and(|k| cx.text(&k) == "const") {
+                    field = declarator
+                        .child_by_field_name("value")
+                        .filter(|v| v.kind() == "subscript_expression")
+                        .and_then(|v| v.child_by_field_name("object"))
+                        .and_then(|o| this_member(cx, o))
+                        .map(str::to_string);
+                }
+                break 'scopes;
             }
         }
+        inner = scope;
     }
     let Some(field) = field else {
         return Vec::new();
@@ -479,12 +480,23 @@ pub(crate) fn complete(
             .or_default()
             .push(path.as_str());
     }
+    for paths in classes.values_mut() {
+        paths.sort_unstable();
+        paths.dedup();
+    }
+    // A class name declared in more than one file is not resolved: which
+    // declaration a `new` or a field type names would need its import, so
+    // neither hop through it is linked.
+    let ambiguous = |name: &str| classes.get(name).is_some_and(|paths| paths.len() > 1);
     let mut edges = Vec::new();
     for call in &pending.calls {
         // (target, implementation, what the call names)
         let (resolution, mut targets): (&str, Vec<(String, String, String)>) = match &call.target {
             Target::Field { class, field } => {
                 let mut targets = Vec::new();
+                if ambiguous(class) {
+                    continue;
+                }
                 for key in keys
                     .get(&(class.as_str(), field.as_str()))
                     .into_iter()
@@ -507,6 +519,9 @@ pub(crate) fn complete(
                 method,
             } => {
                 let mut targets = Vec::new();
+                if names.iter().any(|name| ambiguous(name)) {
+                    continue;
+                }
                 for name in names {
                     for path in classes.get(name.as_str()).into_iter().flatten() {
                         targets.push((
@@ -628,9 +643,39 @@ export const freeShipping = new ShippingCalculator({
         const other = this.listed[this.calculator.code];
         return other.calculate(ctx, order, this.calculator.args);
     }
+    describe(ctx: Ctx) {
+        const calculator = this.fallback;
+        calculator.calculate(ctx);
+        {
+            const calculator = this.allCalculators[this.calculator.code];
+        }
+    }
 }
 ",
         );
+        // Two unrelated classes share a name: neither hop through it is linked.
+        for module in ["a", "b"] {
+            write(
+                &format!("src/{module}/rule.ts"),
+                "export class Rule {
+    constructor(config: RuleConfig) {
+        this.checkFn = config.check;
+    }
+    check(input: Input) {
+        return this.checkFn(input);
+    }
+}
+export const rule = new Rule({ check: (input) => input.ok });
+export class Rules {
+    private readonly all: Record<string, Rule> = {};
+    run(code: string, input: Input) {
+        const found = this.all[code];
+        return found.check(input);
+    }
+}
+",
+            );
+        }
         let out = extract_dir(
             dir.path(),
             &SourceId {
