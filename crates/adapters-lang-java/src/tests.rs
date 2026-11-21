@@ -5242,3 +5242,635 @@ class Reader { String region = System.getenv("REGION"); }
     let out = extract_dir(dir.path(), &id()).unwrap();
     assert!(config_read_ids(&out).is_empty());
 }
+
+// AC-0964: Spring method-security annotations are the endpoint's auth
+// reading, with string constants resolved across files; a method's
+// annotations replace its class's, and an endpoint without one is unknown.
+#[test]
+fn spring_method_security_reads_roles_and_constants_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    std::fs::create_dir_all(base.join("security")).unwrap();
+    std::fs::create_dir_all(base.join("web")).unwrap();
+    std::fs::write(
+        base.join("security/Authorities.java"),
+        "package com.acme.security;\npublic final class Authorities {\n    public static final String ADMIN = \"ROLE_ADMIN\";\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("web/OrderResource.java"),
+        r#"package com.acme.web;
+import com.acme.security.Authorities;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.access.annotation.Secured;
+import jakarta.annotation.security.*;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/orders")
+@RolesAllowed({"CLERK", "MANAGER"})
+public class OrderResource {
+    @GetMapping
+    public String list() { return ""; }
+    @DeleteMapping("/{id}")
+    @PreAuthorize("hasAuthority(\"" + Authorities.ADMIN + "\")")
+    public void delete() {}
+    @PostMapping("/refund")
+    @Secured("ROLE_FINANCE")
+    public void refund() {}
+    @GetMapping("/public")
+    @PermitAll
+    public String open() { return ""; }
+    @PutMapping("/{id}")
+    @PreAuthorize("isAuthenticated()")
+    public void update() {}
+    @PostMapping("/bulk")
+    @PreAuthorize(Missing.RULE)
+    public void bulk() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("web/AuditResource.java"),
+        r#"package com.acme.web;
+import static com.acme.security.Authorities.ADMIN;
+import org.springframework.security.access.annotation.Secured;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class AuditResource {
+    @GetMapping("/audit")
+    @Secured(ADMIN)
+    public String audit() { return ""; }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("web/HealthResource.java"),
+        "package com.acme.web;\nimport org.springframework.web.bind.annotation.*;\n@RestController\npublic class HealthResource {\n    @GetMapping(\"/health\")\n    public String health() { return \"ok\"; }\n}\n",
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |method: &str, path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| {
+                n.label == "Endpoint" && n.props["method"] == method && n.props["path"] == path
+            })
+            .unwrap_or_else(|| panic!("{method} {path}"))
+            .props["auth"]
+            .clone()
+    };
+    let list = auth("GET", "/orders");
+    assert_eq!(list["state"], "required");
+    assert_eq!(list["roles"], serde_json::json!(["CLERK", "MANAGER"]));
+    assert_eq!(list["prov"]["confidence_tier"], "Confirmed");
+    let delete = auth("DELETE", "/orders/{id}");
+    assert_eq!(delete["state"], "required");
+    assert_eq!(delete["authorities"], serde_json::json!(["ROLE_ADMIN"]));
+    assert_eq!(delete["caller"], "caller with authority ROLE_ADMIN");
+    assert_eq!(delete["expression"], "hasAuthority(\"ROLE_ADMIN\")");
+    assert_eq!(
+        auth("POST", "/orders/refund")["roles"],
+        serde_json::json!(["FINANCE"])
+    );
+    assert_eq!(auth("GET", "/orders/public")["state"], "none");
+    // A statically imported constant resolves like a qualified one.
+    assert_eq!(auth("GET", "/audit")["roles"], serde_json::json!(["ADMIN"]));
+    assert_eq!(auth("PUT", "/orders/{id}")["caller"], "signed-in user");
+    let bulk = auth("POST", "/orders/bulk");
+    assert_eq!(bulk["state"], "unknown");
+    assert!(
+        bulk["reasons"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("Missing.RULE"),
+        "{bulk}"
+    );
+    let health = auth("GET", "/health");
+    assert_eq!(health["state"], "unknown");
+    assert!(
+        health["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("HttpSecurity")
+    );
+}
+
+// AC-0964: HttpSecurity URL rules decide an endpoint by the first rule that
+// covers it, combined with its method security; a rule covering only some
+// of its requests, or one under a condition, leaves it unknown.
+#[test]
+fn spring_http_security_rules_decide_endpoints_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    std::fs::create_dir_all(base.join("config")).unwrap();
+    std::fs::create_dir_all(base.join("web")).unwrap();
+    std::fs::write(
+        base.join("config/Roles.java"),
+        "package com.acme.config;\npublic interface Roles {\n    String ADMIN = \"ROLE_ADMIN\";\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("config/SecurityConfiguration.java"),
+        r#"package com.acme.config;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, boolean dev) throws Exception {
+        http.authorizeHttpRequests(authz ->
+            authz
+                .requestMatchers(HttpMethod.POST, "/api/login").permitAll()
+                .requestMatchers("/api/users/me").authenticated()
+                .requestMatchers("/api/admin/**").hasAuthority(Roles.ADMIN)
+                .requestMatchers("/api/**").authenticated()
+        );
+        if (dev) {
+            http.authorizeHttpRequests(authz -> authz.requestMatchers("/h2/**").permitAll());
+        }
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("web/Resource.java"),
+        r#"package com.acme.web;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @PostMapping("/api/login") public void login() {}
+    @GetMapping("/api/login") public void loginPage() {}
+    @GetMapping("/api/users/{login}") public void user() {}
+    @GetMapping("/api/admin/stats") public void stats() {}
+    @PreAuthorize("hasRole('AUDITOR')")
+    @GetMapping("/api/admin/audit") public void audit() {}
+    @GetMapping("/h2/console") public void console() {}
+    @GetMapping("/public/info") public void info() {}
+}
+"#,
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |method: &str, path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| {
+                n.label == "Endpoint" && n.props["method"] == method && n.props["path"] == path
+            })
+            .unwrap_or_else(|| panic!("{method} {path}"))
+            .props["auth"]
+            .clone()
+    };
+    let login = auth("POST", "/api/login");
+    assert_eq!(login["state"], "none", "{login}");
+    assert_eq!(login["prov"]["confidence_tier"], "InferredStrong");
+    // The POST-only rule does not cover GET; `/api/**` does.
+    assert_eq!(auth("GET", "/api/login")["caller"], "signed-in user");
+    // `/api/users/me` covers only some `/api/users/{login}` requests.
+    let user = auth("GET", "/api/users/{login}");
+    assert_eq!(user["state"], "unknown");
+    assert!(
+        user["reasons"][1]
+            .as_str()
+            .unwrap()
+            .contains("only some requests"),
+        "{user}"
+    );
+    let stats = auth("GET", "/api/admin/stats");
+    assert_eq!(stats["caller"], "caller with authority ROLE_ADMIN");
+    assert_eq!(stats["authorities"], serde_json::json!(["ROLE_ADMIN"]));
+    // Both the URL rule and the annotation must admit the caller.
+    let audit = auth("GET", "/api/admin/audit");
+    assert_eq!(
+        audit["caller"],
+        "caller with role AUDITOR who is also caller with authority ROLE_ADMIN"
+    );
+    assert_eq!(audit["guards"].as_array().unwrap().len(), 2);
+    assert_eq!(audit["prov"]["evidence"].as_array().unwrap().len(), 3);
+    let console = auth("GET", "/h2/console");
+    assert!(
+        console["reasons"][1]
+            .as_str()
+            .unwrap()
+            .contains("under a condition"),
+        "{console}"
+    );
+    let info = auth("GET", "/public/info");
+    assert!(
+        info["reasons"][1]
+            .as_str()
+            .unwrap()
+            .contains("no HttpSecurity URL rule covers"),
+        "{info}"
+    );
+}
+
+// AC-0965: JUnit tests are TestCases, and the MockMvc requests they perform
+// join the Spring endpoints they reach through URL constants and templates.
+#[test]
+fn junit_mockmvc_tests_request_spring_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("src/main/java/com/acme/web");
+    let test = dir.path().join("src/test/java/com/acme/web");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::create_dir_all(&test).unwrap();
+    std::fs::write(
+        main.join("LabelResource.java"),
+        r#"package com.acme.web;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api")
+public class LabelResource {
+    @PostMapping("/labels") public void create() {}
+    @GetMapping("/labels/{id}") public void one() {}
+    @GetMapping("/labels/count") public void count() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("LabelResourceIT.java"),
+        r#"package com.acme.web;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+import org.junit.jupiter.api.Test;
+import org.springframework.test.web.servlet.MockMvc;
+class LabelResourceIT {
+    private static final String ENTITY_API_URL = "/api/labels";
+    private static final String ENTITY_API_URL_ID = ENTITY_API_URL + "/{id}";
+    private MockMvc mvc;
+    @Test
+    void createLabel() throws Exception {
+        mvc.perform(post(ENTITY_API_URL)).andExpect(status().isCreated());
+        mvc.perform(get(ENTITY_API_URL_ID, 1L)).andExpect(status().isOk());
+    }
+    @Test
+    void countAndMissing() throws Exception {
+        mvc.perform(get(ENTITY_API_URL + "/count?x=1")).andExpect(status().is(200));
+        mvc.perform(get("/api/nothing")).andExpect(status().isNotFound());
+    }
+    void helper() throws Exception {
+        mvc.perform(get(ENTITY_API_URL));
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let tests: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tests,
+        BTreeSet::from([
+            "LabelResourceIT.createLabel",
+            "LabelResourceIT.countAndMissing"
+        ])
+    );
+    let links: BTreeSet<(String, String, String)> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "REQUESTS")
+        .map(|e| {
+            (
+                e.src.rsplit('.').next().unwrap().to_string(),
+                e.dst.split('@').nth(1).unwrap_or(&e.dst).to_string(),
+                e.props["statuses"].to_string(),
+            )
+        })
+        .collect();
+    let gap = out
+        .nodes
+        .iter()
+        .find(|n| n.id.starts_with("gap:test-call:"))
+        .expect("the unserved request is a Gap");
+    assert_eq!(gap.props["request"], "get(\"/api/nothing\")");
+    assert!(links.contains(&(
+        "createLabel".into(),
+        "POST:/api/labels".into(),
+        "[200,201]".into()
+    )));
+    assert!(links.contains(&(
+        "createLabel".into(),
+        "GET:/api/labels/{id}".into(),
+        "[200,201]".into()
+    )));
+    // The literal `/count` route is more specific than `/{id}`.
+    assert!(links.contains(&(
+        "countAndMissing".into(),
+        "GET:/api/labels/count".into(),
+        "[200,404]".into()
+    )));
+    assert_eq!(links.len(), 4, "{links:?}");
+    let link = out
+        .edges
+        .iter()
+        .find(|e| e.label == "REQUESTS" && e.dst.ends_with("POST:/api/labels"))
+        .unwrap();
+    assert_eq!(link.props["link"], "handler_assumed");
+    assert_eq!(link.props["prov"]["confidence_tier"], "InferredStrong");
+}
+
+// AC-0964: an annotated endpoint under a URL rule that is not read is
+// partial, not its annotation's caller; rules apply in source order, so a
+// conditional rule met first decides nothing; a rule for another verb is
+// skipped whatever its matcher.
+#[test]
+fn spring_url_rules_that_are_not_read_keep_annotated_endpoints_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("SecurityConfiguration.java"),
+        r#"package com.acme;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, boolean dev) throws Exception {
+        if (dev) {
+            http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/dev/**").permitAll());
+        }
+        http.authorizeHttpRequests(authz ->
+            authz
+                .requestMatchers(HttpMethod.POST, custom()).permitAll()
+                .requestMatchers("/api/reports/**").hasRole("AUDITOR")
+                .requestMatchers(custom()).authenticated()
+                .anyRequest().authenticated()
+        );
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("Resource.java"),
+        r#"package com.acme;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @GetMapping("/api/dev/tools") public void tools() {}
+    @GetMapping("/api/reports/daily") public void daily() {}
+    @PreAuthorize("hasRole('ADMIN')")
+    @GetMapping("/api/admin/purge") public void purge() {}
+}
+"#,
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["auth"]
+            .clone()
+    };
+    let tools = auth("/api/dev/tools");
+    assert_eq!(tools["state"], "unknown", "{tools}");
+    assert!(tools.to_string().contains("under a condition"), "{tools}");
+    // The POST-only custom matcher is skipped for a GET endpoint.
+    let daily = auth("/api/reports/daily");
+    assert_eq!(daily["caller"], "caller with role AUDITOR", "{daily}");
+    // The unread matcher may cover it, so the annotation is only partial.
+    let purge = auth("/api/admin/purge");
+    assert_eq!(purge["state"], "unknown", "{purge}");
+    assert!(purge.get("caller").is_none(), "{purge}");
+    assert_eq!(
+        purge["reasons"][0],
+        "the handler's method security admits caller with role ADMIN"
+    );
+    assert!(
+        purge["reasons"][1].as_str().unwrap().contains("not read"),
+        "{purge}"
+    );
+    assert_eq!(purge["roles"], serde_json::json!(["ADMIN"]));
+}
+
+// AC-0964: a rule stated under an `if` inside the configuring lambda applies
+// only under that condition; a security annotation proven by a wildcard
+// import alone is the repository's own same-package type when one is
+// declared; overloaded JUnit tests are separate TestCases.
+#[test]
+fn spring_nested_conditional_rules_shadowed_annotations_and_overloaded_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    let own = dir.path().join("src/main/java/com/acme/own");
+    let test = dir.path().join("src/test/java/com/acme");
+    for d in [&base, &own, &test] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        base.join("SecurityConfiguration.java"),
+        r#"package com.acme;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, boolean dev) throws Exception {
+        http.authorizeHttpRequests(authz -> {
+            if (dev) {
+                authz.requestMatchers("/api/debug/**").permitAll();
+            }
+            authz.requestMatchers("/api/own/**").permitAll();
+            authz.anyRequest().authenticated();
+        });
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("Resource.java"),
+        r#"package com.acme;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @GetMapping("/api/debug/heap") public void heap() {}
+    @GetMapping("/api/open/ping") public void ping() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        own.join("PreAuthorize.java"),
+        "package com.acme.own;\npublic @interface PreAuthorize { String value(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        own.join("OwnResource.java"),
+        r#"package com.acme.own;
+import org.springframework.security.access.prepost.*;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class OwnResource {
+    @PreAuthorize("hasRole('ADMIN')")
+    @GetMapping("/api/own/thing") public void thing() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("CheckTest.java"),
+        r#"package com.acme;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+class CheckTest {
+    @Test void check() {}
+    @ParameterizedTest void check(int value) {}
+    @Test void other() {}
+}
+"#,
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["auth"]
+            .clone()
+    };
+    let heap = auth("/api/debug/heap");
+    assert_eq!(heap["state"], "unknown", "{heap}");
+    assert!(heap.to_string().contains("under a condition"), "{heap}");
+    let ping = auth("/api/open/ping");
+    assert_eq!(ping["caller"], "signed-in user", "{ping}");
+    // `@PreAuthorize` here binds to `com.acme.own.PreAuthorize`, not Spring's.
+    let thing = auth("/api/own/thing");
+    assert_eq!(thing["state"], "unknown", "{thing}");
+    assert!(
+        thing.to_string().contains("com.acme.own.PreAuthorize"),
+        "{thing}"
+    );
+    assert!(!thing.to_string().contains("ADMIN"), "{thing}");
+    let tests: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.id.rsplit('#').next().unwrap())
+        .collect();
+    assert_eq!(tests.len(), 3, "{tests:?}");
+    assert!(tests.contains("CheckTest.other"), "{tests:?}");
+}
+
+// AC-0964: a rule configured inside a loop or switch is conditional; a
+// record's string constant resolves like a class's. AC-0965: a JUnit
+// annotation proven only by a wildcard import is no test when the test's
+// package declares that name.
+#[test]
+fn spring_loop_rules_record_constants_and_shadowed_junit() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    let test = dir.path().join("src/test/java/com/acme");
+    let other = dir.path().join("src/test/java/com/other");
+    for d in [&base, &test, &other] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        base.join("Roles.java"),
+        "package com.acme;\npublic record Roles() {\n    public static final String ADMIN = \"ROLE_ADMIN\";\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("SecurityConfiguration.java"),
+        r#"package com.acme;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, int mode) throws Exception {
+        // Not an HttpSecurity: configures no chain.
+        new Registry().authorizeHttpRequests(r -> r.requestMatchers("/api/loop/**").denyAll());
+        for (int i = 0; i < mode; i++) {
+            http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/loop/**").permitAll());
+        }
+        switch (mode) {
+            case 1:
+                http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/switch/**").permitAll());
+                break;
+        }
+        http.authorizeHttpRequests(authz -> authz.anyRequest().authenticated());
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("Resource.java"),
+        r#"package com.acme;
+import org.springframework.security.access.annotation.Secured;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @GetMapping("/api/loop/x") public void loop() {}
+    @GetMapping("/api/switch/x") public void sw() {}
+    @Secured(Roles.ADMIN)
+    @GetMapping("/api/admin") public void admin() {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("Test.java"),
+        "package com.acme;\npublic @interface Test {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test.join("ShadowedTest.java"),
+        "package com.acme;\nimport org.junit.jupiter.api.*;\nclass ShadowedTest {\n    @Test void notJunit() {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other.join("RealTest.java"),
+        "package com.other;\nimport org.junit.jupiter.api.*;\nclass RealTest {\n    @Test void junit() {}\n}\n",
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["auth"]
+            .clone()
+    };
+    for path in ["/api/loop/x", "/api/switch/x"] {
+        let reading = auth(path);
+        assert_eq!(reading["state"], "unknown", "{path}: {reading}");
+        assert!(
+            reading.to_string().contains("under a condition"),
+            "{reading}"
+        );
+    }
+    let admin = auth("/api/admin");
+    assert_eq!(admin["roles"], serde_json::json!(["ADMIN"]), "{admin}");
+    assert_eq!(admin["caller"], "caller with role ADMIN", "{admin}");
+    let tests: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tests, BTreeSet::from(["RealTest.junit"]));
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.props.get("shadowed_by").is_some())
+    );
+    assert!(
+        !out.edges
+            .iter()
+            .any(|e| e.src.starts_with("test:") && e.src.contains("ShadowedTest"))
+    );
+}
