@@ -59,7 +59,7 @@ fn evidence(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
 }
 
 /// The file's static imports: (class FQN, member or `*`).
-fn static_imports(cx: &FileCx<'_>, root: TsNode<'_>) -> Vec<(String, String)> {
+pub(super) fn static_imports(cx: &FileCx<'_>, root: TsNode<'_>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut walk = root.walk();
     for node in root.named_children(&mut walk) {

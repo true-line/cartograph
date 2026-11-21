@@ -587,10 +587,19 @@ pub(super) fn parts(
         "identifier" => {
             let class = enclosing_class(cx, node, package)?;
             let spelled = cx.text(&node).to_string();
-            out.push(Part::Constant {
-                names: vec![format!("{class}.{spelled}")],
-                spelled,
-            });
+            // The class's own field first, then a static import of the name
+            // (`import static com.acme.Roles.ADMIN;` or `Roles.*`).
+            let mut names = vec![format!("{class}.{spelled}")];
+            let mut root = node;
+            while let Some(parent) = root.parent() {
+                root = parent;
+            }
+            for (imported, member) in super::target_tests::static_imports(cx, root) {
+                if member == spelled || member == "*" {
+                    names.push(format!("{imported}.{spelled}"));
+                }
+            }
+            out.push(Part::Constant { names, spelled });
             Some(())
         }
         "field_access" => {

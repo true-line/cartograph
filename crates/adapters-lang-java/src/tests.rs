@@ -5291,6 +5291,21 @@ public class OrderResource {
     )
     .unwrap();
     std::fs::write(
+        base.join("web/AuditResource.java"),
+        r#"package com.acme.web;
+import static com.acme.security.Authorities.ADMIN;
+import org.springframework.security.access.annotation.Secured;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class AuditResource {
+    @GetMapping("/audit")
+    @Secured(ADMIN)
+    public String audit() { return ""; }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
         base.join("web/HealthResource.java"),
         "package com.acme.web;\nimport org.springframework.web.bind.annotation.*;\n@RestController\npublic class HealthResource {\n    @GetMapping(\"/health\")\n    public String health() { return \"ok\"; }\n}\n",
     )
@@ -5320,6 +5335,8 @@ public class OrderResource {
         serde_json::json!(["FINANCE"])
     );
     assert_eq!(auth("GET", "/orders/public")["state"], "none");
+    // A statically imported constant resolves like a qualified one.
+    assert_eq!(auth("GET", "/audit")["roles"], serde_json::json!(["ADMIN"]));
     assert_eq!(auth("PUT", "/orders/{id}")["caller"], "signed-in user");
     let bulk = auth("POST", "/orders/bulk");
     assert_eq!(bulk["state"], "unknown");
