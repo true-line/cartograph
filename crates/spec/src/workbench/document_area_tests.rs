@@ -215,7 +215,8 @@ fn arrangement(stories: &Stories<'_>) -> Vec<(Option<String>, String)> {
 
 // AC-0871: a capability's area is the concept Subsystem holding most of its
 // handler files; a tie goes to the name that sorts first; the shared group
-// and files in no Subsystem give none. Areas come first, by name.
+// and files in no Subsystem give none. Areas come first, by name, and each
+// area's capabilities by name (AC-1205).
 #[test]
 fn a_capability_takes_the_area_holding_most_of_its_handler_files() {
     let fixture = fixture();
@@ -225,14 +226,48 @@ fn a_capability_takes_the_area_holding_most_of_its_handler_files() {
     assert_eq!(
         arrangement(&stories.0),
         vec![
-            (area("Alias"), "Manage alias".to_owned()),
             (area("Alias"), "Custom alias".to_owned()),
+            (area("Alias"), "Manage alias".to_owned()),
             (area("Alias"), "Transfer".to_owned()),
             (area("Mailbox"), "Manage mailbox".to_owned()),
             (None, "Manage session".to_owned()),
             (None, "View health".to_owned()),
         ]
     );
+}
+
+// AC-1205/T-1205 (#2224): a Capability id hashes the cited facts' ids,
+// which carry the registration's random key, so stories (and the US-R
+// numbers they are printed under) follow names, never ids: the same
+// capabilities under ids in the reverse order are listed the same way.
+#[test]
+fn stories_follow_capability_names_not_ids() {
+    let listed = |fixture: &Fixture| {
+        let stories = fixture.stories(ExportMode::BestEffort, &BTreeSet::new());
+        let numbered: Vec<String> = stories
+            .0
+            .included
+            .iter()
+            .map(|story| NodeName(story.node).to_string())
+            .collect();
+        (numbered, arrangement(&stories.0))
+    };
+    let ordered = fixture();
+    let mut reversed = fixture();
+    for (node, _) in &mut reversed.capabilities {
+        let key = node.id.strip_prefix("capability:").unwrap();
+        let id = format!(
+            "capability:{}",
+            char::from(b'z' - (key.as_bytes()[0] - b'a'))
+        );
+        node.props["prov"] = derived_prov(&id, Tier::Semantic);
+        node.id = id;
+    }
+    let (numbered, arranged) = listed(&ordered);
+    let mut by_name = numbered.clone();
+    by_name.sort();
+    assert_eq!(numbered, by_name);
+    assert_eq!(listed(&reversed), (numbered, arranged));
 }
 
 // AC-0871: a Subsystem that is filtered, rejected, malformed or shadows a
@@ -280,10 +315,12 @@ fn only_admissible_subsystems_arrange_capabilities() {
     ];
     let stories = fixture.stories(ExportMode::BestEffort, &BTreeSet::new());
     assert_eq!((stories.included(), stories.arranged()), (6, 0));
-    let unarranged: Vec<String> = CAPABILITIES
+    // In name order, never id order (#2224).
+    let mut unarranged: Vec<String> = CAPABILITIES
         .iter()
         .map(|(_, title, _)| (*title).to_owned())
         .collect();
+    unarranged.sort();
     assert_eq!(
         arrangement(&stories.0)
             .into_iter()
@@ -396,8 +433,8 @@ fn frames_list_capabilities_area_by_area() {
     assert_eq!(
         rows,
         [
-            "| Alias | Manage alias",
             "| Alias | Custom alias",
+            "| Alias | Manage alias",
             "| Alias | Transfer",
             "| Mailbox | Manage mailbox",
             "| Other capabilities | Manage session",
@@ -413,8 +450,8 @@ fn frames_list_capabilities_area_by_area() {
         headings,
         [
             "### Alias",
-            "#### Manage alias",
             "#### Custom alias",
+            "#### Manage alias",
             "#### Transfer",
             "### Mailbox",
             "#### Manage mailbox",

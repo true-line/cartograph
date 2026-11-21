@@ -425,6 +425,12 @@ fn compile_capability_stories(
     })
 }
 
+/// Where a story or an Actor is listed: by the name it is shown under, then
+/// its id (#2224).
+fn listed_order(node: &Node) -> (String, &str) {
+    (render::NodeName(node).to_string(), node.id.as_str())
+}
+
 // Returning only borrowed stories drops every lookup/projection/ordering index
 // before selected compilation; support Vecs stay owned by the returned stories.
 fn validated_stories<'a>(
@@ -455,6 +461,11 @@ fn validated_stories<'a>(
         .iter()
         .map(|e| (&e.src, &e.dst, &e.label))
         .collect();
+    // Stories in name order, the id only breaking a tie: an id hashes the
+    // cited facts' ids, which carry the registration's random key
+    // (ADR-0023), so id order would renumber every story (US-R-NNNN) each
+    // time a source is added again (#2224).
+    let mut ids = BTreeSet::new();
     let mut ordered = BTreeMap::new();
     for candidate in candidates {
         let node = candidate.capability;
@@ -470,9 +481,10 @@ fn validated_stories<'a>(
         {
             return Err(CapabilityStoryInputError::Candidate);
         }
-        if ordered.insert(node.id.as_str(), candidate).is_some() {
+        if !ids.insert(node.id.as_str()) {
             return Err(CapabilityStoryInputError::DuplicateCandidate);
         }
+        ordered.insert(listed_order(node), candidate);
     }
     // Caller admits graph/sidecar input and validation scratch: provenance
     // decoding owns strings even though lookup borrows facts. Overlay admission
@@ -522,6 +534,7 @@ fn validated_stories<'a>(
     if actors.is_empty() {
         return Ok(stories);
     }
+    let mut actor_ids = BTreeSet::new();
     let mut actor_order = BTreeMap::new();
     for fact in actors {
         let endpoint = crate::knowledge::actors::verify_actor(base, fact)
@@ -529,15 +542,14 @@ fn validated_stories<'a>(
         let core_graph::overlay::OverlayItem::Node(node) = &fact.item else {
             return Err(CapabilityStoryInputError::Candidate);
         };
-        if nodes.contains_key(node.id.as_str()) || ordered.contains_key(node.id.as_str()) {
+        if nodes.contains_key(node.id.as_str()) || ids.contains(node.id.as_str()) {
             return Err(CapabilityStoryInputError::Candidate);
         }
-        if actor_order
-            .insert(node.id.as_str(), (node, endpoint, fact))
-            .is_some()
-        {
+        // Actors by name too, for the same reason as the stories (#2224).
+        if !actor_ids.insert(node.id.as_str()) {
             return Err(CapabilityStoryInputError::DuplicateCandidate);
         }
+        actor_order.insert(listed_order(node), (node, endpoint, fact));
     }
     for &(node, endpoint, fact) in actor_order.values() {
         let p = Provenance::deserialize(&node.props["prov"]).expect("canonical Actor provenance");
