@@ -204,22 +204,26 @@ mod tests {
                     Family::TargetTests => assert_eq!(
                         claimed,
                         src.join("target_tests.rs").is_file(),
-                        "{language} target tests"
+                        "{language} target tests: PRODUCERS disagrees with {}/target_tests.rs",
+                        adapter_crate(language)
                     ),
                     Family::RuleEvidence => assert_eq!(
                         claimed,
                         src.join("rule_evidence.rs").is_file(),
-                        "{language} rule evidence"
+                        "{language} rule evidence: PRODUCERS disagrees with {}/rule_evidence.rs",
+                        adapter_crate(language)
                     ),
                     Family::Persistence => assert_eq!(
                         claimed,
                         sources(adapter_crate(language)).contains("label: \"DataEntity\""),
-                        "{language} persistence"
+                        "{language} persistence: PRODUCERS disagrees with the DataEntity facts of {}",
+                        adapter_crate(language)
                     ),
                     Family::EndpointAuth => assert_eq!(
                         claimed,
                         auth.contains(*language),
-                        "{language} endpoint auth"
+                        "{language} endpoint auth: PRODUCERS disagrees with the RECOVERY languages \
+                         in spec/src/workbench/endpoint_permissions.rs"
                     ),
                 }
             }
