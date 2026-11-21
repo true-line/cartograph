@@ -83,6 +83,47 @@ impl Pending {
         self.accesses.extend(other.accesses);
     }
 
+    /// A table another persistence reader recovered (Exposed, AC-1026),
+    /// joined with Room's.
+    pub(crate) fn push_entity(
+        &mut self,
+        fqn: String,
+        path: &str,
+        shadows: Vec<String>,
+        node: Node,
+    ) {
+        self.entities.push(Entity {
+            fqn,
+            path: path.to_string(),
+            shadows,
+            node,
+        });
+    }
+
+    /// A read or write of the table declared by one of `candidates`, or
+    /// `gap` when none resolves.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_class_access(
+        &mut self,
+        path: &str,
+        shadows: Vec<String>,
+        src: &str,
+        candidates: Vec<String>,
+        label: &'static str,
+        props: serde_json::Value,
+        gap: (Node, Edge),
+    ) {
+        self.accesses.push(Access {
+            path: path.to_string(),
+            shadows,
+            src: src.to_string(),
+            target: Target::Class(candidates),
+            label,
+            props,
+            gap,
+        });
+    }
+
     pub(crate) fn retarget(&mut self, commit: &str) {
         for entity in &mut self.entities {
             retarget_props_commit(&mut entity.node.props, commit);
@@ -223,14 +264,31 @@ fn short(cx: &FileCx<'_>, node: TsNode<'_>) -> String {
 }
 
 fn gap_pair(cx: &FileCx<'_>, at: TsNode<'_>, src: &str, label: &str, reason: &str) -> (Node, Edge) {
-    let gap = format!("gap:room:{}@{}@{}", cx.id.repo, cx.path, at.start_byte());
+    framework_gap(cx, FRAMEWORK, at, src, label, reason)
+}
+
+/// A Gap for `framework` at `at`, and the `label` edge from `src` to it.
+pub(crate) fn framework_gap(
+    cx: &FileCx<'_>,
+    framework: &str,
+    at: TsNode<'_>,
+    src: &str,
+    label: &str,
+    reason: &str,
+) -> (Node, Edge) {
+    let gap = format!(
+        "gap:{framework}:{}@{}@{}",
+        cx.id.repo,
+        cx.path,
+        at.start_byte()
+    );
     (
         Node {
             id: gap.clone(),
             label: "Gap".into(),
             props: serde_json::json!({
                 "reason": reason,
-                "framework": FRAMEWORK,
+                "framework": framework,
                 "language": "kotlin",
                 "expression": short(cx, at),
                 "attempted_tiers": ["T0"],
@@ -368,12 +426,23 @@ fn columns(
 fn uses_field(cx: &FileCx<'_>, accessor: TsNode<'_>) -> bool {
     let mut stack = vec![accessor];
     while let Some(node) = stack.pop() {
-        if node.kind() == "identifier" && cx.text(&node) == "field" {
+        if node.kind() == "identifier" && cx.text(&node) == "field" && !qualified(node) {
             return true;
         }
         stack.extend(named_children(node));
     }
     false
+}
+
+/// Whether an identifier is the member half of `x.name`, which names a
+/// property called `name`, not the accessor's backing `field`.
+fn qualified(node: TsNode<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == "navigation_expression"
+            && named_children(parent)
+                .first()
+                .is_some_and(|first| first.id() != node.id())
+    })
 }
 
 /// The entity type a write function's first parameter names, unwrapped
@@ -422,7 +491,7 @@ fn parameter_entity<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> Option<(String
 }
 
 /// The FQNs a type name written in this file can denote.
-fn candidates(name: &str, imports: &Imports, package: Option<&str>) -> Vec<String> {
+pub(crate) fn candidates(name: &str, imports: &Imports, package: Option<&str>) -> Vec<String> {
     let (head, rest) = match name.split_once('.') {
         Some((head, rest)) => (head, Some(rest)),
         None => (name, None),
