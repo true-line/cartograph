@@ -7207,7 +7207,7 @@ impl SpecInputs {
 
     /// Stamp what the bundle was compiled from: the graph basis (AC-0593)
     /// and the curated basis beside it (AC-0653).
-    fn stamp(self, bundle: &mut spec::SpecBundle) {
+    fn stamp<A>(self, bundle: &mut spec::SpecBundle<A>) {
         bundle.curated_basis = match &self.curated {
             CuratedInput::Computed(projection) => Some(spec::CuratedBasis::of(projection)),
             CuratedInput::NotRead | CuratedInput::NotComputed(_) => None,
@@ -7402,17 +7402,28 @@ fn compile_spec_bundle(
     inputs: SpecInputs,
     mode: spec::ExportMode,
 ) -> Result<spec::SpecBundle, String> {
+    compile_spec_bundle_kept(inputs, mode, |artifact| artifact)
+}
+
+/// [`compile_spec_bundle`] keeping `keep(artifact)` of each artifact as it
+/// is compiled, so the whole bundle is never held at once (#2215).
+fn compile_spec_bundle_kept<A>(
+    inputs: SpecInputs,
+    mode: spec::ExportMode,
+    keep: impl FnMut(spec::SpecArtifact) -> A,
+) -> Result<spec::SpecBundle<A>, String> {
     let mut bundle = {
         let candidates = inputs.candidates()?;
         let knowledge = inputs.knowledge(&candidates, mode)?;
         // An export whose citations do not resolve is refused (ADR-0058).
-        spec::try_compile_spec_supplied(
+        spec::try_compile_spec_supplied_kept(
             &inputs.base.graph.0,
             &inputs.base.graph.1,
             &inputs.flows,
             mode,
             &inputs.rejected_hashes,
             inputs.supplied(knowledge.as_ref()),
+            keep,
         )
         .map_err(|error| error.to_string())?
     };
@@ -7617,15 +7628,18 @@ fn build_spec_with_views_and_curated(
     ),
     String,
 > {
-    compile_spec_with_views_and_curated(spec_inputs(graph, decisions, Some(review))?, mode)
+    compile_spec_with_views_and_curated(spec_inputs(graph, decisions, Some(review))?, mode, |a| a)
 }
 
-fn compile_spec_with_views_and_curated(
+/// The bundle, its views and the curated read from one compilation, keeping
+/// `keep(artifact)` of each artifact as it is compiled (#2215).
+fn compile_spec_with_views_and_curated<A>(
     inputs: SpecInputs,
     mode: spec::ExportMode,
+    keep: impl FnMut(spec::SpecArtifact) -> A,
 ) -> Result<
     (
-        spec::SpecBundle,
+        spec::SpecBundle<A>,
         spec::SpecViewBundle,
         curated_workbench::CuratedWorkbenchRead,
     ),
@@ -7637,13 +7651,14 @@ fn compile_spec_with_views_and_curated(
         let candidates = inputs.candidates()?;
         let knowledge = inputs.knowledge(&candidates, mode)?;
         // An export whose citations do not resolve is refused (ADR-0058).
-        spec::try_compile_spec_with_views_supplied(
+        spec::try_compile_spec_with_views_supplied_kept(
             &inputs.base.graph.0,
             &inputs.base.graph.1,
             &inputs.flows,
             mode,
             &inputs.rejected_hashes,
             inputs.supplied(knowledge.as_ref()),
+            keep,
         )
         .map_err(|error| error.to_string())?
     };
@@ -7725,43 +7740,56 @@ struct SpecBundlePreview {
     curated_basis: Option<spec::CuratedBasis>,
 }
 
+#[cfg(test)]
 fn preview_spec_bundle(bundle: spec::SpecBundle) -> SpecBundlePreview {
+    bundle_preview(spec::SpecBundle {
+        mode: bundle.mode,
+        artifacts: bundle.artifacts.into_iter().map(preview_artifact).collect(),
+        assertion_count: bundle.assertion_count,
+        gap_count: bundle.gap_count,
+        drift_count: bundle.drift_count,
+        security_count: bundle.security_count,
+        graph_basis: bundle.graph_basis,
+        curated_basis: bundle.curated_basis,
+    })
+}
+
+/// One artifact capped before it crosses IPC (#488), keeping its true
+/// length and assertion count. The export commands cap each artifact as it
+/// is compiled, so the complete bundle is never held (#2215).
+fn preview_artifact(artifact: spec::SpecArtifact) -> SpecArtifactPreview {
+    let content_byte_len = artifact.content.len();
+    let mut content = artifact.content;
+    let content_truncated =
+        truncate_utf8_in_place(&mut content, SPEC_ARTIFACT_CONTENT_PREVIEW_BYTES);
+    content.shrink_to_fit();
+    let assertions_total = artifact.assertions.len();
+    let assertions_truncated = assertions_total > SPEC_ARTIFACT_ASSERTIONS_PREVIEW_COUNT;
+    let mut assertions = artifact.assertions;
+    assertions.truncate(SPEC_ARTIFACT_ASSERTIONS_PREVIEW_COUNT);
+    assertions.shrink_to_fit();
+    SpecArtifactPreview {
+        id: artifact.id,
+        file_name: artifact.file_name,
+        title: artifact.title,
+        format: artifact.format,
+        schema: artifact.schema,
+        content_id: artifact.content_id,
+        content,
+        content_truncated,
+        content_byte_len,
+        assertions,
+        assertions_truncated,
+        assertions_total,
+    }
+}
+
+fn bundle_preview(bundle: spec::SpecBundle<SpecArtifactPreview>) -> SpecBundlePreview {
     let graph_basis = bundle.graph_basis;
     let curated_basis = bundle.curated_basis;
-    let artifacts = bundle
-        .artifacts
-        .into_iter()
-        .map(|artifact| {
-            let content_byte_len = artifact.content.len();
-            let mut content = artifact.content;
-            let content_truncated =
-                truncate_utf8_in_place(&mut content, SPEC_ARTIFACT_CONTENT_PREVIEW_BYTES);
-            let assertions_total = artifact.assertions.len();
-            let assertions_truncated = assertions_total > SPEC_ARTIFACT_ASSERTIONS_PREVIEW_COUNT;
-            let assertions = artifact
-                .assertions
-                .into_iter()
-                .take(SPEC_ARTIFACT_ASSERTIONS_PREVIEW_COUNT)
-                .collect();
-            SpecArtifactPreview {
-                id: artifact.id,
-                file_name: artifact.file_name,
-                title: artifact.title,
-                format: artifact.format,
-                schema: artifact.schema,
-                content_id: artifact.content_id,
-                content,
-                content_truncated,
-                content_byte_len,
-                assertions,
-                assertions_truncated,
-                assertions_total,
-            }
-        })
-        .collect();
     SpecBundlePreview {
         mode: bundle.mode,
-        artifacts,
+        artifacts: bundle.artifacts,
         assertion_count: bundle.assertion_count,
         gap_count: bundle.gap_count,
         drift_count: bundle.drift_count,
@@ -7810,7 +7838,7 @@ fn export_spec_blocking(
     mode: spec::ExportMode,
     state: &AppState,
 ) -> Result<SpecBundlePreview, String> {
-    compile_spec_bundle(export_inputs(state)?, mode).map(preview_spec_bundle)
+    compile_spec_bundle_kept(export_inputs(state)?, mode, preview_artifact).map(bundle_preview)
 }
 
 /// Compile structured diagram views (`topology`, `flow-dossiers`, `data-model`)
@@ -7828,7 +7856,8 @@ fn export_spec_views_blocking(
     mode: spec::ExportMode,
     state: &AppState,
 ) -> Result<spec::SpecViewBundle, String> {
-    Ok(compile_spec_with_views_and_curated(export_inputs(state)?, mode)?.1)
+    // Nothing of an artifact is kept: the views carry its identity (#2215).
+    Ok(compile_spec_with_views_and_curated(export_inputs(state)?, mode, |_| ())?.1)
 }
 
 /// Compile the capped official spec bundle and its structured diagram views
@@ -7847,9 +7876,9 @@ fn export_spec_with_views_blocking(
     state: &AppState,
 ) -> Result<SpecWithViewsPreview, String> {
     let (bundle, views, curated) =
-        compile_spec_with_views_and_curated(export_inputs(state)?, mode)?;
+        compile_spec_with_views_and_curated(export_inputs(state)?, mode, preview_artifact)?;
     Ok(SpecWithViewsPreview {
-        bundle: preview_spec_bundle(bundle),
+        bundle: bundle_preview(bundle),
         views,
         curated,
     })
@@ -8543,6 +8572,87 @@ mod tests {
         let mut short = String::from("hello");
         assert!(!super::truncate_utf8_in_place(&mut short, 10));
         assert_eq!(short, "hello");
+    }
+
+    // AC-1204/T-1204 (#2215): the export commands cap each artifact as it
+    // is compiled instead of capping a complete bundle, and return in every
+    // byte what capping the complete bundle returns, for artifacts over both
+    // caps and for the views compiled beside them.
+    #[test]
+    fn capping_each_artifact_as_compiled_equals_capping_the_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::registered_source_tests::app_state(dir.path());
+        // Each Gap is one register assertion and about 300 bytes of the JSON
+        // fact index, so 2,000 pass both caps.
+        let gaps = 2_000;
+        {
+            let mut graph = state.graph.lock().unwrap();
+            for at in 0..gaps {
+                let prov = core_prov::Provenance::new(
+                    core_prov::Tier::Deterministic,
+                    core_prov::ConfidenceTier::Gap,
+                    vec![],
+                    "t0.fixture",
+                    format!("gap {at}").as_bytes(),
+                )
+                .unwrap();
+                graph
+                    .put_node(&Node {
+                        id: format!("gap:{at:04}"),
+                        label: "Gap".into(),
+                        props: serde_json::json!({
+                            "name": format!("gap {at}"),
+                            "reason": "an unresolved call",
+                            "prov": prov,
+                        }),
+                    })
+                    .unwrap();
+            }
+        }
+        fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+            serde_json::to_value(value).unwrap()
+        }
+        for mode in [spec::ExportMode::BestEffort, spec::ExportMode::VerifiedOnly] {
+            let whole = super::preview_spec_bundle(
+                super::compile_spec_bundle(super::export_inputs(&state).unwrap(), mode).unwrap(),
+            );
+            let gap_register = whole
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == "gap-register")
+                .unwrap();
+            if mode == spec::ExportMode::BestEffort {
+                assert!(gap_register.assertions_truncated);
+                assert_eq!(gap_register.assertions_total, gaps);
+                assert!(
+                    whole
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.content_truncated)
+                );
+            }
+            let capped = super::export_spec_blocking(mode, &state).unwrap();
+            assert_eq!(json(&capped), json(&whole), "{mode:?}");
+
+            let (bundle, views, curated) = super::compile_spec_with_views_and_curated(
+                super::export_inputs(&state).unwrap(),
+                mode,
+                |artifact| artifact,
+            )
+            .unwrap();
+            let whole = super::SpecWithViewsPreview {
+                bundle: super::preview_spec_bundle(bundle),
+                views,
+                curated,
+            };
+            let capped = super::export_spec_with_views_blocking(mode, &state).unwrap();
+            assert_eq!(json(&capped), json(&whole), "{mode:?}");
+            assert_eq!(
+                json(&super::export_spec_views_blocking(mode, &state).unwrap()),
+                json(&whole.views),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
