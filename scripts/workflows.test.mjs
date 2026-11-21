@@ -154,8 +154,8 @@ test('heavy Rust jobs hold one of two shared-host slots and release it (#1242)',
   // budget beyond the longest wait (#1373).
   assert.match(rust, /^ {4}timeout-minutes: 89$/mu);
   assert.ok(89 * 60 - Number(rustWait) >= 45 * 60);
-  assert.ok(rust.indexOf('Take a host heavy-build slot') < rust.indexOf('cargo test --workspace'));
-  assert.ok(rust.indexOf('cargo test --workspace') < rust.search(release));
+  assert.ok(rust.indexOf('Take a host heavy-build slot') < rust.indexOf('cargo test $PACKAGES'));
+  assert.ok(rust.indexOf('cargo test $PACKAGES') < rust.search(release));
   const codeql = readFileSync(path.join(root, '.github/workflows/codeql.yml'), 'utf8');
   const [, when, codeqlWait] = codeql.match(take) ?? [];
   assert.equal(when, "matrix.language == 'rust'");
@@ -247,7 +247,8 @@ test('complete suite retains every existing Cartograph gate', () => {
     /npm run test:version/u,
     /cargo fmt --all --check/u,
     /cargo clippy --workspace --all-targets -- -D warnings/u,
-    /cargo test --workspace/u,
+    /cargo test \$PACKAGES/u,
+    /--workspace --exclude app --exclude agents --exclude spec/u,
     /cargo deny check/u,
     /npm run lint/u,
     /npm run typecheck/u,
@@ -265,7 +266,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // always() keeps a job of a cancelled run waiting for a runner, holding the
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
-  assert.deepEqual(uses, ["        if: always() && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
+  assert.deepEqual(uses, ["        if: always() && matrix.group == 'core' && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
   assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 14);
 });
 
@@ -332,8 +333,31 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   const rust = job('rust');
   const shards = job('rust-app-tests');
   const complete = job('complete');
-  assert.match(rust, /run: cargo test --workspace --exclude app --exclude agents --exclude spec\n/u);
-  assert.equal([...rust.matchAll(/--exclude/gu)].length, 3);
+  // The Rust job's groups jointly run every package but app, agents and spec,
+  // each exactly once: the named groups' packages are exactly the ones the
+  // `core` group excludes besides those three (#1924).
+  assert.match(rust, /env:\n +PACKAGES: \$\{\{ matrix\.packages \}\}\n(?: +#.*\n)* +run: cargo test \$PACKAGES\n/u);
+  assert.match(rust, /fail-fast: false/u);
+  const groups = [...rust.matchAll(/- group: ([a-z]+)\n +packages: (?:>-\n)?((?:.*\S.*\n)+?)(?= +- group:| {4}#| {4}[a-z])/gu)].map(
+    ([, name, packages]) => ({ name, args: packages.trim().split(/\s+/u) }),
+  );
+  assert.deepEqual(groups.map(({ name }) => name), ['adapters', 'ingest', 'core']);
+  const named = groups.filter(({ name }) => name !== 'core').flatMap(({ args }) => {
+    assert.equal(args.length % 2, 0);
+    return args.filter((_, index) => index % 2 === 1).map((name, index) => {
+      assert.equal(args[index * 2], '-p');
+      return name;
+    });
+  });
+  assert.equal(new Set(named).size, named.length, 'a package runs in two Rust groups');
+  const core = groups.find(({ name }) => name === 'core').args;
+  assert.equal(core[0], '--workspace');
+  const excluded = core.slice(1).filter((_, index) => index % 2 === 1);
+  assert.ok(core.slice(1).every((arg, index) => index % 2 === 1 || arg === '--exclude'));
+  assert.deepEqual(excluded.slice(0, 3), ['app', 'agents', 'spec']);
+  assert.deepEqual([...excluded.slice(3)].sort(), [...named].sort());
+  const members = readdirSync(path.join(root, 'crates'));
+  for (const name of named) assert.ok(members.includes(name), `${name} is not a workspace crate`);
   assert.ok(condition(shards));
   assert.equal(condition(shards), condition(rust));
   assert.match(shards, /needs: \[policy, merge-evidence, preflight-evidence, ci-image\]/u);
@@ -386,12 +410,13 @@ test('real-model acceptance is explicit, bounded, and retains evidence after fai
   const rust = workflow.split('\n  rust:\n')[1].split('\n  windows-job-ownership:\n')[0];
   const model = rust.split('- name: Run explicit local-provider acceptance')[1]
     .split('- name: Retain local-provider acceptance evidence')[0];
-  assert.match(model, /if: github\.event_name == 'workflow_dispatch' && inputs\.local_provider_acceptance/u);
+  // One Rust group runs it, so a dispatch starts one model run, not three.
+  assert.match(model, /if: matrix\.group == 'core' && github\.event_name == 'workflow_dispatch' && inputs\.local_provider_acceptance/u);
   assert.match(model, new RegExp(`bounded-command@${PLAYBOOK_RUNTIME_PIN}`, 'u'));
   assert.match(model, /timeout-seconds: '2400'/u);
   assert.doesNotMatch(model, /continue-on-error|attempts:/u);
   const artifact = rust.split('- name: Retain local-provider acceptance evidence')[1];
-  assert.match(artifact, /if: always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.local_provider_acceptance/u);
+  assert.match(artifact, /if: always\(\) && matrix\.group == 'core' && github\.event_name == 'workflow_dispatch' && inputs\.local_provider_acceptance/u);
   assert.match(artifact, /cartograph-local-acceptance\/evidence/u);
   assert.match(artifact, /include-hidden-files: true/u);
   assert.doesNotMatch(artifact, /cartograph-local-acceptance\/runtime/u);
