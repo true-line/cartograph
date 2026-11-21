@@ -508,17 +508,29 @@ fn names_rebound_in_other_files_drop_the_rules_relying_on_them() {
         "src/main/kotlin/com/acme/Local.kt",
         "package com.acme\n\nprivate fun <T> T.let(block: (T) -> Unit) {}\n",
     );
+    // An unrelated type's private member is visible inside it only, so
+    // it rebinds no `?.let` elsewhere.
+    write(
+        "src/main/kotlin/com/acme/Other.kt",
+        "package com.acme\n\nclass Other {\n    private fun <T> T.let(block: (T) -> Unit) {}\n}\n",
+    );
+    // An explicit `kotlin.require` import outranks the same-package one.
+    write(
+        "src/main/kotlin/com/acme/Imp.kt",
+        "package com.acme\n\nimport kotlin.require\n\nclass Imp {\n    fun e(n: Int) {\n        require(n > 0) { \"pos\" }\n    }\n}\n",
+    );
     write("src/main/kotlin/com/acme/Svc.kt", svc);
     let id = SourceId {
         repo: "acme/shop",
         commit: "c0ffee",
     };
     let out = crate::extract_dir(dir.path(), &id).expect("extracts");
-    let owners: Vec<String> = rules(&out)
+    let mut owners: Vec<String> = rules(&out)
         .iter()
         .map(|rule| rule.owner_id.rsplit('#').next().unwrap().to_owned())
         .collect();
-    assert_eq!(owners, ["Svc.b", "Svc.d"], "{owners:?}");
+    owners.sort();
+    assert_eq!(owners, ["Imp.e", "Svc.b", "Svc.d"], "{owners:?}");
     let dangling = out.nodes.iter().any(|n| {
         n.label == "Gap"
             && n.id.starts_with("gap:rule:")

@@ -350,12 +350,7 @@ fn settle_rules(out: &mut Extraction) {
         }
         false
     };
-    let any_member = |name: &str| {
-        rebinding
-            .types
-            .values()
-            .any(|ty| ty.members.contains(name) || ty.private_members.contains(name))
-    };
+    let any_member = |name: &str| rebinding.types.values().any(|ty| ty.members.contains(name));
     let declared = rule_evidence::Declarations {
         top_level: &top,
         member_of: &member_of,
@@ -1902,6 +1897,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         &functions_by_start,
         package.as_deref(),
         &imports.wildcard_packages,
+        &imports
+            .bindings
+            .iter()
+            .filter(|(name, fqn)| fqn.strip_prefix("kotlin.") == Some(name.as_str()))
+            .map(|(name, _)| name.clone())
+            .collect(),
         &mut out,
     );
 

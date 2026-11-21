@@ -544,6 +544,9 @@ pub(super) struct PendingRule {
     uses: Vec<(String, bool)>,
     package: Option<String>,
     stars: Vec<String>,
+    /// Relied-on names the file imports explicitly from `kotlin`: an
+    /// explicit import outranks same-package and star-imported callables.
+    std_imported: BTreeSet<String>,
     enclosing: Option<String>,
 }
 
@@ -698,13 +701,14 @@ pub(super) fn settle(
         .into_iter()
         .filter(|rule| {
             rule.uses.iter().any(|(name, bare)| {
-                let top = rule
-                    .package
-                    .iter()
-                    .chain(&rule.stars)
-                    .map(|package| format!("{package}.{name}"))
-                    .chain(rule.package.is_none().then(|| name.clone()))
-                    .any(|fqn| (declared.top_level)(&fqn));
+                let top = !rule.std_imported.contains(name)
+                    && rule
+                        .package
+                        .iter()
+                        .chain(&rule.stars)
+                        .map(|package| format!("{package}.{name}"))
+                        .chain(rule.package.is_none().then(|| name.clone()))
+                        .any(|fqn| (declared.top_level)(&fqn));
                 let member = if *bare {
                     rule.enclosing
                         .as_deref()
@@ -972,6 +976,7 @@ pub(super) fn extract(
     functions: &HashMap<usize, String>,
     package: Option<&str>,
     stars: &[String],
+    std_imported: &BTreeSet<String>,
     out: &mut Extraction,
 ) {
     // Test code states no product rule.
@@ -1178,11 +1183,17 @@ pub(super) fn extract(
                     }
                     node
                 };
+                let imported = uses
+                    .iter()
+                    .filter(|(name, _)| std_imported.contains(name))
+                    .map(|(name, _)| name.clone())
+                    .collect();
                 out.pending_rules.push(PendingRule {
                     rule_id: rule_id.clone(),
                     uses,
                     package: package.map(str::to_owned),
                     stars: stars.to_vec(),
+                    std_imported: imported,
                     enclosing: enclosing_type(cx.source, function, package),
                 });
             }
