@@ -238,3 +238,31 @@ fn a_finding_whose_cited_fact_is_gone_is_unresolvable() {
     );
     assert_eq!(projection.findings[0].missing, [citation("rule:return")]);
 }
+
+// AC-1010 (T-1010, #2040): accepted findings are bounded by their bytes,
+// not by a count.
+#[test]
+fn accepted_findings_are_bounded_by_bytes_not_by_count() {
+    let fixture = fixture();
+    let count = MAX_CURATED_ACCEPTED + 4;
+    let mut one = 0;
+    for index in 0..count {
+        let mut record = fixture.record(&format!("finding-{index:03}"), &["rule:refund"]);
+        record.subject.subject_id = format!("investigation-finding-review-v1:{index:064x}");
+        one = payload_bytes(&record, MAX_CURATED_ACCEPTED_FINDING_BYTES);
+        fixture.review(&record, 0, CurationDecision::Accepted);
+    }
+    let review = fixture.reviews.gather();
+    assert_eq!(review.failure, None);
+    assert_eq!(review.findings.len(), count);
+
+    let store = fixture.reviews.drafts.lock().unwrap();
+    // Every accepted finding has the same encoded size here.
+    assert!(reviewed_findings_within(&store, one * count).is_ok());
+    assert_eq!(
+        reviewed_findings_within(&store, one * count - 1).map(|read| read.len()),
+        Err(CuratedFailure::AcceptedTooLarge {
+            limit_bytes: one * count - 1
+        })
+    );
+}

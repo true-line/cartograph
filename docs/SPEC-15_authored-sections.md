@@ -159,8 +159,11 @@ draft carries its claims, which are what a document prints.
 
 As built (host, slice 5): the application keeps the draft store in
 `section-drafts.sqlite` beside the staging store. The curated read takes
-every reviewed draft in one bounded read (the bounds of the staged records)
-before any graph lock, and a store that cannot be read leaves the projection
+every reviewed draft in one bounded read before any graph lock: at most
+4,096 reviewed drafts, and accepted ones up to 64 MiB of encoded payload
+(256 drafts of the largest size the store admits; many smaller ones fit,
+#2040), more leaving the projection not computed with the reason
+`accepted_too_large`; and a store that cannot be read leaves the projection
 not computed, as for the staging store. The current hash of each cited fact
 is read from the nodes and edges of the snapshot being compiled
 (`spec::cited_fact_hashes`), in one pass and only when a draft is accepted.

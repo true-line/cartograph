@@ -358,3 +358,41 @@ fn a_draft_store_that_cannot_be_read_leaves_the_projection_not_computed() {
             .contains("- Curated revision: not computed (`reviews_unavailable`)")
     );
 }
+
+// AC-1010 (T-1010, #2040): accepted drafts are bounded by their bytes, not
+// by a count. More than 256 small accepted drafts are all read; accepted
+// drafts past the byte budget fail the read whole, with the reason.
+#[test]
+fn accepted_drafts_are_bounded_by_bytes_not_by_count() {
+    let fixture = fixture();
+    let count = MAX_CURATED_ACCEPTED + 44;
+    for index in 0..count {
+        let draft = fixture.draft(
+            "1.1",
+            &format!("Checkout {index:03} is offered."),
+            &["cap:checkout"],
+        );
+        fixture.review(&draft, DraftDecision::Accepted);
+    }
+    let review = fixture.reviews.gather();
+    assert_eq!(review.failure, None);
+    assert_eq!(review.drafts.len(), count);
+
+    let store = fixture.reviews.drafts.lock().unwrap();
+    let one = payload_bytes(
+        &store.list(1, None).unwrap().items[0].draft,
+        MAX_CURATED_ACCEPTED_DRAFT_BYTES,
+    );
+    // Every accepted draft has the same encoded size here.
+    assert!(reviewed_drafts_within(&store, one * count).is_ok());
+    assert_eq!(
+        reviewed_drafts_within(&store, one * count - 1),
+        Err(CuratedFailure::AcceptedTooLarge {
+            limit_bytes: one * count - 1
+        })
+    );
+    assert_eq!(
+        MAX_CURATED_ACCEPTED_DRAFT_BYTES,
+        MAX_CURATED_ACCEPTED * agents::draft_store::MAX_DRAFT_RECORD_BYTES
+    );
+}

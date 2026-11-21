@@ -44,6 +44,22 @@ pub(crate) const MAX_CURATED_RECORD_SCAN: usize = MAX_STAGED_REFERENCE_SCAN;
 /// graph is copied once for all of them while the store does not move
 /// (`assessment::SharedObservation`). More than this fails the read.
 pub(crate) const MAX_CURATED_ACCEPTED: usize = 256;
+/// Most bytes of accepted section drafts one projection takes, measured as
+/// each draft's encoded payload: as much as [`MAX_CURATED_ACCEPTED`] drafts
+/// of the largest size a store admits. A draft costs no assessment, so many
+/// small drafts are read as long as their sum fits; the projection copies
+/// their claims, so the sum bounds that copy. More fails the read (#2040).
+pub(crate) const MAX_CURATED_ACCEPTED_DRAFT_BYTES: usize =
+    MAX_CURATED_ACCEPTED * agents::draft_store::MAX_DRAFT_RECORD_BYTES;
+/// The same for accepted curated findings (#2040).
+pub(crate) const MAX_CURATED_ACCEPTED_FINDING_BYTES: usize =
+    MAX_CURATED_ACCEPTED * agents::finding_curation::MAX_CURATED_FINDING_BYTES;
+
+/// The encoded size of an accepted payload, counted against its budget. A
+/// payload that cannot be encoded counts as the whole budget.
+fn payload_bytes(payload: &impl serde::Serialize, budget: usize) -> usize {
+    serde_json::to_vec(payload).map_or(budget.saturating_add(1), |bytes| bytes.len())
+}
 
 /// What [`gather`] read: the reviewed records and the assessments made for
 /// them, or why the read did not finish. The default is a store with no
@@ -290,14 +306,23 @@ fn reviewed_records(
 
 /// Every reviewed draft of `store`, in pages of
 /// [`agents::draft_store::MAX_DRAFT_PAGE_ITEMS`], newest first; the caller
-/// holds the draft store lock across all of them. The bounds are those of
-/// the staged records: more drafts, or more accepted ones, fail the read.
+/// holds the draft store lock across all of them. More drafts than the
+/// staged-record bound, or accepted ones past
+/// [`MAX_CURATED_ACCEPTED_DRAFT_BYTES`], fail the read.
 fn reviewed_drafts(
     store: &agents::draft_store::DraftStore,
 ) -> Result<Vec<ReviewedDraft>, CuratedFailure> {
+    reviewed_drafts_within(store, MAX_CURATED_ACCEPTED_DRAFT_BYTES)
+}
+
+/// [`reviewed_drafts`] with accepted drafts bounded by `budget` bytes.
+fn reviewed_drafts_within(
+    store: &agents::draft_store::DraftStore,
+    budget: usize,
+) -> Result<Vec<ReviewedDraft>, CuratedFailure> {
     use agents::draft_store::{DraftDecision, MAX_DRAFT_PAGE_ITEMS};
     let mut drafts = Vec::new();
-    let (mut scanned, mut accepted) = (0usize, 0usize);
+    let (mut scanned, mut accepted_bytes) = (0usize, 0usize);
     let mut before: Option<u64> = None;
     loop {
         let page = store
@@ -313,10 +338,10 @@ fn reviewed_drafts(
             match stored.review_decision {
                 None => continue,
                 Some(DraftDecision::Accepted) => {
-                    accepted += 1;
-                    if accepted > MAX_CURATED_ACCEPTED {
-                        return Err(CuratedFailure::TooManyAccepted {
-                            limit: MAX_CURATED_ACCEPTED,
+                    accepted_bytes += payload_bytes(&stored.draft, budget);
+                    if accepted_bytes > budget {
+                        return Err(CuratedFailure::AcceptedTooLarge {
+                            limit_bytes: budget,
                         });
                     }
                 }
@@ -332,10 +357,19 @@ fn reviewed_drafts(
 }
 
 /// Every finding of `store` with a curation review, oldest first; the
-/// caller holds the draft store lock. The bounds are those of the staged
-/// records: more findings, or more accepted ones, fail the read.
+/// caller holds the draft store lock. More findings than the staged-record
+/// bound, or accepted ones past [`MAX_CURATED_ACCEPTED_FINDING_BYTES`],
+/// fail the read.
 fn reviewed_findings(
     store: &agents::draft_store::DraftStore,
+) -> Result<Vec<ReviewedFinding>, CuratedFailure> {
+    reviewed_findings_within(store, MAX_CURATED_ACCEPTED_FINDING_BYTES)
+}
+
+/// [`reviewed_findings`] with accepted findings bounded by `budget` bytes.
+fn reviewed_findings_within(
+    store: &agents::draft_store::DraftStore,
+    budget: usize,
 ) -> Result<Vec<ReviewedFinding>, CuratedFailure> {
     use agents::finding_curation::{CurationDecision, reviewed_finding};
     let read = store
@@ -347,15 +381,16 @@ fn reviewed_findings(
             limit: MAX_CURATED_RECORD_SCAN,
         });
     }
-    let accepted = read
-        .items
-        .iter()
-        .filter(|stored| stored.review_decision == CurationDecision::Accepted)
-        .count();
-    if accepted > MAX_CURATED_ACCEPTED {
-        return Err(CuratedFailure::TooManyAccepted {
-            limit: MAX_CURATED_ACCEPTED,
-        });
+    let mut accepted_bytes = 0usize;
+    for stored in &read.items {
+        if stored.review_decision == CurationDecision::Accepted {
+            accepted_bytes += payload_bytes(&stored.record, budget);
+            if accepted_bytes > budget {
+                return Err(CuratedFailure::AcceptedTooLarge {
+                    limit_bytes: budget,
+                });
+            }
+        }
     }
     Ok(read.items.iter().map(reviewed_finding).collect())
 }

@@ -223,6 +223,12 @@ fn a_projection_that_was_not_computed_is_stated_and_changes_no_other_artifact() 
             CuratedFailure::TooManyAccepted { limit: 256 },
             "too_many_accepted",
         ),
+        (
+            CuratedFailure::AcceptedTooLarge {
+                limit_bytes: 67_108_864,
+            },
+            "accepted_too_large",
+        ),
         (CuratedFailure::DuplicateRecord, "duplicate_record"),
         (
             CuratedFailure::DuplicateAssertionDecision,
