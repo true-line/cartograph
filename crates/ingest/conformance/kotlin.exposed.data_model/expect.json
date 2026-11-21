@@ -1,0 +1,25 @@
+{
+  "nodes": [
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@sql:notes",
+      "props": {
+        "storage": "sql",
+        "framework": "exposed",
+        "class": "demo.Notes"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "READS",
+      "src": "sym:local/p@Notes.kt#NoteStore.all",
+      "dst": "data:local/p@sql:notes"
+    },
+    {
+      "label": "WRITES",
+      "src": "sym:local/p@Notes.kt#NoteStore.add",
+      "dst": "data:local/p@sql:notes"
+    }
+  ]
+}
