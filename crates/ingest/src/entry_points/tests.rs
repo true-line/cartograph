@@ -537,3 +537,60 @@ fn a_wrangler_config_enters_its_worker_module() {
         "cron"
     );
 }
+
+/// AC-0961: a Go `func main()` in `package main` is a start by kind,
+/// entering `main` when the adapter emitted it; tests, e2e trees, ignored
+/// files and other packages start nothing.
+#[test]
+fn a_go_main_package_is_a_start_by_kind() {
+    let symbols = BTreeSet::from([format!("sym:{REPO}@cmd/api/main.go#main")]);
+    let out = extract_with(
+        &[
+            (
+                "cmd/api/main.go",
+                "package main\n\nimport \"net/http\"\n\nfunc main() {\n\thttp.ListenAndServe(\":8080\", nil)\n}\n",
+            ),
+            ("cmd/tool/main.go", "package main\n\nfunc main() {}\n"),
+            (
+                "worker/main.go",
+                "// Package main.\npackage main\n\nfunc main() { run() }\n",
+            ),
+            ("e2e/srv/main.go", "package main\n\nfunc main() {}\n"),
+            (
+                "gen/main.go",
+                "//go:build ignore\n\npackage main\n\nfunc main() {}\n",
+            ),
+            ("pkg/lib/lib.go", "package lib\n\nfunc main() {}\n"),
+            ("cmd/api/main_test.go", "package main\n\nfunc main() {}\n"),
+        ],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let api = entry(&out, "cmd/api/main.go", "main");
+    assert_eq!(api.props["kind"], "http-server");
+    assert_eq!(api.props["how"], "func main");
+    assert_eq!(
+        entry_edge(&out, "cmd/api/main.go", "main").dst,
+        format!("sym:{REPO}@cmd/api/main.go#main")
+    );
+    assert_eq!(
+        entry(&out, "cmd/tool/main.go", "main").props["kind"],
+        "command"
+    );
+    assert_eq!(
+        entry(&out, "worker/main.go", "main").props["kind"],
+        "process"
+    );
+    // Not emitted by the adapter: the start enters the file.
+    assert_eq!(
+        entry_edge(&out, "worker/main.go", "main").dst,
+        format!("file:{REPO}@worker/main.go")
+    );
+    let entries: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 3, "{entries:?}");
+}
