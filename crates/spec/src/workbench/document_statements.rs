@@ -1143,16 +1143,52 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
         .iter()
         .map(|&(display, polarity)| equality(display, polarity))
         .collect();
+    // An elif chain's earlier tests (#1998): `not (alias and …)` says nothing
+    // once another condition says `not alias`, for a plain local name.
+    let tested = |display: &str, polarity: BranchPolarity| -> Option<(Expr, bool)> {
+        let mut expr = parse(display)?;
+        let mut negated = polarity == BranchPolarity::FalsyBranch;
+        while let Expr::Not(inner) = expr {
+            expr = *inner;
+            negated = !negated;
+        }
+        Some((expr, negated))
+    };
+    let absent: Vec<Option<String>> = conditions
+        .iter()
+        .map(|&(display, polarity)| match tested(display, polarity)? {
+            (Expr::Ref(path), true) if path.len() == 1 => Some(path[0].clone()),
+            _ => None,
+        })
+        .collect();
+    let refuted_conjunction: Vec<Option<String>> = conditions
+        .iter()
+        .map(|&(display, polarity)| match tested(display, polarity)? {
+            (Expr::And(parts), true) => match parts.first() {
+                Some(Expr::Ref(path)) if path.len() == 1 => Some(path[0].clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
     tests
         .iter()
-        .map(|test| {
-            test.as_ref().is_some_and(|(value, equal, lit)| {
+        .enumerate()
+        .map(|(i, test)| {
+            let pinned = test.as_ref().is_some_and(|(value, equal, lit)| {
                 !equal
                     && tests
                         .iter()
                         .flatten()
                         .any(|(other, pinned, to)| *pinned && other == value && distinct(to, lit))
-            })
+            });
+            let absorbed = refuted_conjunction[i].as_ref().is_some_and(|name| {
+                absent
+                    .iter()
+                    .enumerate()
+                    .any(|(j, other)| j != i && other.as_ref() == Some(name))
+            });
+            pinned || absorbed
         })
         .collect()
 }
@@ -2077,6 +2113,20 @@ mod tests {
                 ("success", t),
             ]),
             vec![false, true, true, false, false]
+        );
+        // An elif chain: the first two tests say nothing once `not alias`.
+        assert_eq!(
+            implied_by_pin(&[
+                ("alias and not alias.user_id == user.id", f),
+                ("alias and alias.user_id == user.id", f),
+                ("not alias", t),
+                ("hostname and user.include", t),
+            ]),
+            vec![true, true, false, false]
+        );
+        assert_eq!(
+            implied_by_pin(&[("alias and alias.enabled", f), ("not other", t)]),
+            vec![false, false]
         );
         assert_eq!(
             implied_by_pin(&[("count != 0", t), ("count == 3", t)]),
