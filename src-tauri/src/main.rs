@@ -1123,7 +1123,7 @@ fn clear_graph(state: State<'_, AppState>) -> Result<GraphStats, String> {
     Ok(stats)
 }
 
-/// Start a new project (#1994, AC-1012): ask the next launch to remove
+/// Start a new project (#1994, AC-1013): ask the next launch to remove
 /// everything tied to the loaded system, keeping the application's
 /// settings, then restart. Refused while a job is queued or running.
 #[tauri::command]
