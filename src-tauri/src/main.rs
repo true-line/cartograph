@@ -36,7 +36,7 @@ mod paths;
 mod primary_source;
 #[cfg(test)]
 mod primary_source_tests;
-mod project_reset;
+mod projects;
 mod proposals;
 mod provider_checks;
 mod provider_credentials;
@@ -1123,13 +1123,14 @@ fn clear_graph(state: State<'_, AppState>) -> Result<GraphStats, String> {
     Ok(stats)
 }
 
-/// Start a new project (#1994, AC-1013): ask the next launch to remove
-/// everything tied to the loaded system, keeping the application's
-/// settings, then restart. Refused while a job is queued or running.
-#[tauri::command]
-fn start_new_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    // Held through the restart, so no job can be enqueued between the check
-    // and the marker.
+/// Refuse while a job is queued or running, then ask the next launch to
+/// make `change` and restart (#1994). The jobs lock is held through the
+/// restart, so no job can be enqueued between the check and the marker.
+fn change_project(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    change: projects::Change,
+) -> Result<(), String> {
     let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
     let busy = jobs
         .list()
@@ -1138,13 +1139,54 @@ fn start_new_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
         .any(|job| matches!(job.status.as_str(), "queued" | "running"));
     if busy {
         return Err(
-            "Work is still running. Cancel it or let it finish, then start a new project.".into(),
+            "Work is still running. Cancel it or let it finish, then change project.".into(),
         );
     }
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    project_reset::request(&data_dir).map_err(|e| e.to_string())?;
+    projects::request(&data_dir, change)?;
     let _held = jobs;
     app.restart()
+}
+
+/// Set the loaded project aside and start an empty one (AC-1013).
+#[tauri::command]
+fn start_new_project(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    change_project(&app, &state, projects::Change::New)
+}
+
+/// Set the loaded project aside and load the parked project `id` (AC-1014).
+#[tauri::command]
+fn switch_project(
+    id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    change_project(&app, &state, projects::Change::Switch { to: id })
+}
+
+/// Every project, the loaded one first (AC-1014).
+#[tauri::command]
+fn list_projects(app: tauri::AppHandle) -> Result<Vec<projects::ProjectEntry>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    projects::list(&data_dir)
+}
+
+/// Name a project; an empty name clears it (AC-1014).
+#[tauri::command]
+fn rename_project(
+    id: String,
+    name: String,
+    app: tauri::AppHandle,
+) -> Result<projects::ProjectMeta, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    projects::rename(&data_dir, &id, &name)
+}
+
+/// Delete a project that is not loaded (AC-1014).
+#[tauri::command]
+fn delete_project(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    projects::delete(&data_dir, &id)
 }
 
 #[tauri::command]
@@ -7769,11 +7811,11 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
 }
 
 /// Every store the application keeps under `data_dir`, opened and
-/// recovered as one launch does. A pending new project (#1994) is applied
+/// recovered as one launch does. A pending project change (#1994) is made
 /// first, before any store is open.
 fn open_app_state(data_dir: &std::path::Path) -> Result<AppState, Box<dyn std::error::Error>> {
     let data_dir = data_dir.to_path_buf();
-    project_reset::apply(&data_dir, |state_path| {
+    projects::apply(&data_dir, |state_path| {
         settings::SettingsStore::open(state_path).map_err(|e| e.to_string())?;
         JobStore::open(state_path).map_err(|e| e.to_string())?;
         Ok(())
@@ -7926,6 +7968,10 @@ fn main() {
             graph_stats,
             clear_graph,
             start_new_project,
+            switch_project,
+            list_projects,
+            rename_project,
+            delete_project,
             system_contents,
             adapter_inventory,
             list_plugins,
