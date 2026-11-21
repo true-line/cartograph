@@ -99,13 +99,11 @@ impl ObservationInputs {
             ObservationInput {
                 declared: path.to_owned(),
                 read_path: base.join(path),
-                captured: relative
-                    .filter(|relative| {
-                        capture
-                            .as_ref()
-                            .is_some_and(|capture| capture.file(relative).is_ok())
-                    })
-                    .map(str::to_owned),
+                captured: relative.filter(|relative| {
+                    capture
+                        .as_ref()
+                        .is_some_and(|capture| capture.file(relative).is_ok())
+                }),
             }
         };
         Self {
@@ -188,22 +186,31 @@ impl ObservationInputs {
 }
 
 /// A declared path in the form a capture of the manifest folder admits:
-/// relative, `/`-separated, without `.` or `..` components.
-fn capturable_path(path: &str) -> Option<&str> {
-    let relative = path.strip_prefix("./").unwrap_or(path);
+/// relative, `/`-separated, without `.` or `..` components. On Windows a
+/// native backslash separator is read as `/`; a drive or root prefix never is.
+fn capturable_path(path: &str) -> Option<String> {
+    let path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    let relative = path.strip_prefix("./").unwrap_or(&path);
     let valid = !relative.is_empty()
         && !relative.starts_with('/')
         && !relative.contains('\\')
+        && !relative.contains(':')
         && relative
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != "..");
-    valid.then_some(relative)
+    valid.then(|| relative.to_owned())
 }
 
 /// Capture the capturable `declared` paths together. When the whole set is
 /// refused (one file past the limits, or the set past a joint limit), keep a
-/// bounded subset: each path in order joins it only if the subset with it
-/// still captures, so files that fit are kept and the rest stay uncaptured.
+/// bounded subset chosen from file metadata alone: regular files within the
+/// per-file bound, admitted in order while the joint count and byte bounds
+/// hold, then captured once. Each file is read at most twice, never once per
+/// admitted prefix.
 fn capture_inputs(
     base: &Path,
     id: &source_capture::SourceId,
@@ -213,7 +220,6 @@ fn capture_inputs(
     let mut paths: Vec<String> = declared
         .iter()
         .filter_map(|path| capturable_path(path))
-        .map(str::to_owned)
         .collect();
     paths.sort();
     paths.dedup();
@@ -222,18 +228,25 @@ fn capture_inputs(
     }
     let capture = |paths: &[String]| source_capture::capture_working_tree(base, id, paths, limits);
     capture(&paths).ok().or_else(|| {
-        let mut kept: Vec<String> = Vec::new();
-        let mut last = None;
-        for path in paths {
-            kept.push(path);
-            match capture(&kept) {
-                Ok(captured) => last = Some(captured),
-                Err(_) => {
-                    kept.pop();
+        let mut total = 0u64;
+        let kept: Vec<String> = paths
+            .into_iter()
+            .filter(|path| {
+                let Ok(meta) = std::fs::symlink_metadata(base.join(path)) else {
+                    return false;
+                };
+                let fits = meta.is_file()
+                    && path.len() <= limits.max_path_bytes
+                    && meta.len() <= limits.max_file_bytes
+                    && total.saturating_add(meta.len()) <= limits.max_total_bytes;
+                if fits {
+                    total += meta.len();
                 }
-            }
-        }
-        last
+                fits
+            })
+            .take(limits.max_files)
+            .collect();
+        (!kept.is_empty()).then(|| capture(&kept).ok()).flatten()
     })
 }
 
@@ -243,9 +256,9 @@ mod tests {
 
     #[test]
     fn only_relative_paths_inside_the_manifest_folder_are_capturable() {
-        assert_eq!(capturable_path("state.json"), Some("state.json"));
+        assert_eq!(capturable_path("state.json").as_deref(), Some("state.json"));
         assert_eq!(
-            capturable_path("./infra/state.json"),
+            capturable_path("./infra/state.json").as_deref(),
             Some("infra/state.json")
         );
         for path in [
@@ -254,9 +267,22 @@ mod tests {
             "a/../b.json",
             "a//b",
             "",
-            "a\\b",
+            "C:/state.json",
+            "C:state.json",
         ] {
             assert_eq!(capturable_path(path), None, "{path}");
+        }
+        // Codex on #2222: a native Windows separator is a separator there,
+        // never a way to escape the folder.
+        if cfg!(windows) {
+            assert_eq!(
+                capturable_path("traces\\run.jsonl").as_deref(),
+                Some("traces/run.jsonl")
+            );
+            assert_eq!(capturable_path("..\\state.json"), None);
+            assert_eq!(capturable_path("\\state.json"), None);
+        } else {
+            assert_eq!(capturable_path("a\\b"), None);
         }
     }
 
@@ -282,5 +308,22 @@ mod tests {
         assert!(capture.file("a.jsonl").is_ok());
         assert!(capture.file("b.jsonl").is_ok());
         assert!(capture.file("c.jsonl").is_err());
+        // A missing or oversized file is left out without replaying the
+        // capture for every admitted prefix (Codex on #2222).
+        std::fs::write(dir.path().join("big.jsonl"), "x".repeat(40)).unwrap();
+        let limits = source_capture::CaptureLimits {
+            max_file_bytes: 20,
+            ..source_capture::CaptureLimits::default()
+        };
+        let capture = capture_inputs(
+            dir.path(),
+            &id,
+            &["a.jsonl", "big.jsonl", "missing.jsonl", "c.jsonl"],
+            limits,
+        )
+        .unwrap();
+        assert!(capture.file("a.jsonl").is_ok());
+        assert!(capture.file("c.jsonl").is_ok());
+        assert!(capture.file("big.jsonl").is_err());
     }
 }
