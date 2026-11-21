@@ -5,19 +5,24 @@
 //!   guard. It is applied by wrapping the handler (`mux.Handle("/x",
 //!   requireAuth(h))`), by chi `r.With(m).Get(...)`, or by `r.Use(m)` on the
 //!   same chi router value (every route on it) or gin engine (routes
-//!   registered after the `Use` call). A guard is a library guard bound by
-//!   its import (gin `BasicAuth` / `BasicAuthForRealm`, chi middleware
-//!   `BasicAuth`, jwtauth `Authenticator`) or a repository function whose
-//!   body answers the request with 401 or 403 (a literal, or
-//!   `http.StatusUnauthorized` / `http.StatusForbidden` through the
-//!   `net/http` import) or with a package-level error value built with one
-//!   (a `var`, or a function returning a composite literal that names the
-//!   status, as in `render.Render(w, r, ErrForbidden)`). A call answers the
-//!   request when it is `http.Error`, `WriteHeader` on an
-//!   `http.ResponseWriter` parameter, a response call on a `*gin.Context`
-//!   parameter (`AbortWithStatus`, `AbortWithStatusJSON`, `AbortWithError`,
-//!   `JSON`, `String`, `Status`), or any call handed one of those
-//!   parameters; a status that is only logged does not count.
+//!   registered after a `Use` statement earlier in the same function; a gin
+//!   `Use` elsewhere is an `unordered_middleware` reason). A repository
+//!   function wrapping the handler counts only when it takes a handler, so
+//!   a handler factory (`makeHandler(db)`) is not middleware.
+//!
+//!   A guard is a library guard bound by its import (gin `BasicAuth` /
+//!   `BasicAuthForRealm`, chi middleware `BasicAuth`, jwtauth
+//!   `Authenticator`) or a repository function whose body answers the
+//!   request with 401 or 403 (a literal, or `http.StatusUnauthorized` /
+//!   `http.StatusForbidden` through the `net/http` import) or with a
+//!   package-level error value built with one (a `var`, or a function
+//!   returning a composite literal that names the status, as in
+//!   `render.Render(w, r, ErrForbidden)`; the value's declaration is
+//!   cited). A call answers the request when it is `http.Error`,
+//!   `WriteHeader` on an `http.ResponseWriter` parameter, a response call on
+//!   a `*gin.Context` parameter (`AbortWithStatus`, `AbortWithStatusJSON`,
+//!   `AbortWithError`, `JSON`, `String`, `Status`), or any call handed one
+//!   of those parameters; a status that is only logged does not count.
 //! - `unknown`: anything else, with sorted reasons. Go has no declarative
 //!   way to say a route is public, and a handler may check the caller
 //!   itself, so an endpoint is never `none`.
@@ -146,6 +151,9 @@ pub(super) enum Kind {
     },
     /// An expression this pass cannot read.
     Unreadable,
+    /// A gin `Use` on the route's engine whose order against the route is
+    /// not provable (another function, or a conditional statement).
+    Unordered,
 }
 
 /// One middleware applied to a registration.
@@ -154,6 +162,9 @@ pub(super) struct Applied {
     name: String,
     kind: Kind,
     site: EvidenceRef,
+    /// Applied by wrapping the handler (`m(h)`): a repository function
+    /// here is middleware only when it takes a handler.
+    wrapper: bool,
 }
 
 /// The middleware applied to one route registration.
@@ -172,6 +183,9 @@ pub(super) struct Denial {
     qualified: String,
     direct: Option<(u16, EvidenceRef)>,
     refs: Vec<(String, String, EvidenceRef)>,
+    /// The function takes a handler (`next http.Handler`), so it can wrap
+    /// one.
+    wraps: bool,
 }
 
 /// A package-level error value built with 401 or 403: a `var` whose value,
@@ -182,6 +196,8 @@ pub(super) struct DenyValue {
     package_dir: String,
     name: String,
     status: u16,
+    /// The declaration that names the status.
+    evidence: EvidenceRef,
 }
 
 /// Most repository values read from one function body.
@@ -201,6 +217,9 @@ pub(super) fn retarget(out: &mut Extraction, commit: &str) {
         for (_, _, site) in &mut denial.refs {
             site.commit_sha = commit.into();
         }
+    }
+    for value in &mut out.deny_values {
+        value.evidence.commit_sha = commit.into();
     }
 }
 
@@ -301,6 +320,7 @@ pub(super) fn deny_values(
                             package_dir: package_dir(cx.path),
                             name: cx.text(&name).to_string(),
                             status,
+                            evidence: evidence(cx, node),
                         });
                     }
                 }
@@ -323,6 +343,7 @@ pub(super) fn deny_values(
                             package_dir: package_dir(cx.path),
                             name: cx.text(&name).to_string(),
                             status,
+                            evidence: evidence(cx, node),
                         });
                         break;
                     }
@@ -435,9 +456,41 @@ fn answers(
     }
 }
 
+/// Whether `function` takes a handler: a parameter typed `http.Handler`,
+/// `http.HandlerFunc`, `gin.HandlerFunc` or `func(http.ResponseWriter, ...)`.
+fn takes_handler(
+    cx: &FileCx<'_>,
+    function: TsNode<'_>,
+    bindings: &HashMap<String, ImportBinding>,
+) -> bool {
+    let Some(parameters) = function.child_by_field_name("parameters") else {
+        return false;
+    };
+    let mut walk = parameters.walk();
+    parameters.named_children(&mut walk).any(|parameter| {
+        let Some(ty) = parameter.child_by_field_name("type") else {
+            return false;
+        };
+        let text: String = cx.text(&ty).split_whitespace().collect();
+        if let Some(inner) = text.strip_prefix("func(") {
+            return inner.split_once('.').is_some_and(|(alias, rest)| {
+                rest.starts_with("ResponseWriter")
+                    && bindings.get(alias).is_some_and(|b| b.path == "net/http")
+            });
+        }
+        text.split_once('.').is_some_and(|(alias, name)| {
+            match bindings.get(alias).map(|b| b.path.as_str()) {
+                Some("net/http") => matches!(name, "Handler" | "HandlerFunc"),
+                Some("github.com/gin-gonic/gin") => name == "HandlerFunc",
+                _ => false,
+            }
+        })
+    })
+}
+
 /// What `function`'s body (nested func literals included) says about 401
 /// and 403: its first response call writing one, and the repository values
-/// its response calls pass.
+/// its response calls pass. Whether it takes a handler is recorded too.
 pub(super) fn denial(
     cx: &FileCx<'_>,
     function: TsNode<'_>,
@@ -445,8 +498,9 @@ pub(super) fn denial(
     bindings: &HashMap<String, ImportBinding>,
 ) -> Option<Denial> {
     let body = function.child_by_field_name("body")?;
+    let wraps = takes_handler(cx, function, bindings);
     let params = response_params(cx, function, bindings);
-    if params.is_empty() {
+    if params.is_empty() && !wraps {
         return None;
     }
     let mut stack = vec![body];
@@ -482,11 +536,12 @@ pub(super) fn denial(
             }
         }
     }
-    (direct.is_some() || !refs.is_empty()).then(|| Denial {
+    (wraps || direct.is_some() || !refs.is_empty()).then(|| Denial {
         package_dir: package_dir(cx.path),
         qualified: qualified.to_string(),
         direct,
         refs,
+        wraps,
     })
 }
 
@@ -558,6 +613,7 @@ fn classify(
         name,
         kind,
         site: evidence(cx, expression),
+        wrapper: false,
     }
 }
 
@@ -585,6 +641,26 @@ pub(super) struct Use<'t> {
     framework: Framework,
     at: usize,
     arguments: Vec<TsNode<'t>>,
+    /// Start of the innermost enclosing function, and whether the call is
+    /// a statement directly in its body (so it runs before what follows).
+    scope: Option<usize>,
+    straight: bool,
+}
+
+/// The innermost function (declaration, method or func literal) around
+/// `node`, by start byte.
+fn enclosing_function(node: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut at = node.parent();
+    while let Some(parent) = at {
+        if matches!(
+            parent.kind(),
+            "function_declaration" | "method_declaration" | "func_literal"
+        ) {
+            return Some(parent);
+        }
+        at = parent.parent();
+    }
+    None
 }
 
 /// The receiver a call's `X.Member` names, as its visible declaration.
@@ -630,11 +706,25 @@ pub(super) fn uses<'t>(cx: &FileCx<'_>, root: TsNode<'t>, receivers: &Receivers)
         if let Some((receiver, framework)) = receiver_key(cx, operand, receivers)
             && matches!(framework, Framework::Chi | Framework::Gin)
         {
+            let function = enclosing_function(node);
+            // `e.Use(m)` as a statement of the function body itself.
+            let straight = function.is_some_and(|function| {
+                let body = function.child_by_field_name("body");
+                let statement = node.parent().filter(|p| p.kind() == "expression_statement");
+                let list = statement.and_then(|s| s.parent());
+                list.zip(body).is_some_and(|(list, body)| {
+                    list.id() == body.id()
+                        || (list.kind() == "statement_list"
+                            && list.parent().is_some_and(|p| p.id() == body.id()))
+                })
+            });
             found.push(Use {
                 receiver,
                 framework,
                 at: node.start_byte(),
                 arguments: call_arguments(node),
+                scope: function.map(|f| f.start_byte()),
+                straight,
             });
         }
     }
@@ -714,19 +804,36 @@ pub(super) fn registration(
         receiver_key(cx, operand, receivers)
     });
     if let Some((receiver, framework)) = key {
+        let scope = enclosing_function(call).map(|f| f.start_byte());
         for found in uses.iter().filter(|u| u.receiver == receiver) {
-            let applies = match framework {
-                Framework::Chi => true,
-                Framework::Gin => found.framework == Framework::Gin && found.at < call.start_byte(),
-                Framework::HttpMux => false,
-            };
-            if applies {
-                applied.extend(
+            match framework {
+                Framework::Chi => applied.extend(
                     found
                         .arguments
                         .iter()
                         .map(|m| classify(cx, *m, bindings, receivers)),
-                );
+                ),
+                // gin applies `Use` to routes registered after it at run
+                // time: proven only for a straight-line `Use` earlier in
+                // the same function.
+                Framework::Gin if found.framework == Framework::Gin => {
+                    let ordered = found.straight && found.scope == scope;
+                    if ordered && found.at < call.start_byte() {
+                        applied.extend(
+                            found
+                                .arguments
+                                .iter()
+                                .map(|m| classify(cx, *m, bindings, receivers)),
+                        );
+                    } else if !ordered {
+                        applied.extend(found.arguments.iter().map(|m| {
+                            let mut unordered = classify(cx, *m, bindings, receivers);
+                            unordered.kind = Kind::Unordered;
+                            unordered
+                        }));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -737,7 +844,11 @@ pub(super) fn registration(
             break;
         };
         if !is_conversion(cx, callee, bindings) {
-            applied.push(classify(cx, callee, bindings, receivers));
+            let mut wrapper = classify(cx, callee, bindings, receivers);
+            // `m(args)(h)` applies the middleware `m(args)` returns; a plain
+            // `f(x)` is middleware only if `f` takes a handler.
+            wrapper.wrapper = callee.kind() != "call_expression";
+            applied.push(wrapper);
         }
         wrapper = call_arguments(node)
             .into_iter()
@@ -757,24 +868,35 @@ pub(super) fn resolve(
     repo: &str,
     symbols: &BTreeMap<(String, String), String>,
 ) {
-    let values: BTreeMap<(&str, &str), u16> = out
+    let values: BTreeMap<(&str, &str), &DenyValue> = out
         .deny_values
         .iter()
-        .map(|v| ((v.package_dir.as_str(), v.name.as_str()), v.status))
+        .map(|v| ((v.package_dir.as_str(), v.name.as_str()), v))
+        .collect();
+    // Repository functions that take a handler, so can wrap one.
+    let wrappers: BTreeSet<&String> = out
+        .denials
+        .iter()
+        .filter(|d| d.wraps)
+        .filter_map(|d| symbols.get(&(d.package_dir.clone(), d.qualified.clone())))
         .collect();
     // A function's denial: its own response call, else the first deny value
-    // its calls pass.
-    let denials: BTreeMap<String, (u16, EvidenceRef)> = out
+    // its calls pass, with the call and the value's declaration cited.
+    let denials: BTreeMap<String, (u16, Vec<EvidenceRef>)> = out
         .denials
         .iter()
         .filter_map(|d| {
-            let found = d.direct.clone().or_else(|| {
-                d.refs.iter().find_map(|(dir, name, site)| {
-                    values
-                        .get(&(dir.as_str(), name.as_str()))
-                        .map(|status| (*status, site.clone()))
-                })
-            })?;
+            let found = d
+                .direct
+                .clone()
+                .map(|(status, site)| (status, vec![site]))
+                .or_else(|| {
+                    d.refs.iter().find_map(|(dir, name, site)| {
+                        values
+                            .get(&(dir.as_str(), name.as_str()))
+                            .map(|value| (value.status, vec![site.clone(), value.evidence.clone()]))
+                    })
+                })?;
             symbols
                 .get(&(d.package_dir.clone(), d.qualified.clone()))
                 .map(|symbol| (symbol.clone(), found))
@@ -837,14 +959,16 @@ pub(super) fn resolve(
                         package_dir,
                         exported,
                     } => match symbols.get(&(package_dir.clone(), exported.clone())) {
+                        // A handler factory (`makeHandler(db)`), not middleware.
+                        Some(symbol) if applied.wrapper && !wrappers.contains(symbol) => {}
                         Some(symbol) => match denials.get(symbol) {
-                            Some((status, site)) => {
+                            Some((status, cited)) => {
                                 guarded = true;
                                 library_only = false;
                                 guards.insert(symbol.clone());
                                 basis.insert(format!("responds {status} in {exported}"));
                                 sites.push(applied.site.clone());
-                                sites.push(site.clone());
+                                sites.extend(cited.iter().cloned());
                             }
                             None => {
                                 reasons.insert(format!("no_deny_status:{}", applied.name));
@@ -857,6 +981,9 @@ pub(super) fn resolve(
                             "unresolved_middleware",
                         ),
                     },
+                    Kind::Unordered => {
+                        reasons.insert(format!("unordered_middleware:{}", applied.name));
+                    }
                     Kind::Unreadable => unreadable(
                         &mut reasons,
                         &mut gaps,
