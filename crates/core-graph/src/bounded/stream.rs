@@ -66,6 +66,33 @@ impl SqliteGraphStore {
     }
 }
 
+impl SqliteGraphStore {
+    /// [`Self::visit_snapshot_bounded`] with the store revision read in the
+    /// same SQLite transaction as the rows, as
+    /// [`Self::read_snapshot_with_revision_bounded`] pairs them, so a caller
+    /// can keep a projection of the graph instead of every decoded row.
+    pub fn visit_snapshot_with_revision_bounded<E: From<GraphError>>(
+        &self,
+        limits: impl Into<IdentityPassLimits>,
+        visit: impl FnMut(SnapshotRow) -> Result<(), E>,
+    ) -> Result<(crate::StoreRevision, StreamedSnapshot), E> {
+        let limits = limits.into();
+        limits.validate().map_err(E::from)?;
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(GraphError::from)
+            .map_err(E::from)?;
+        let revision = crate::generation::read_store_revision(&transaction).map_err(E::from)?;
+        let streamed = visit_rows(&transaction, limits, visit)?;
+        transaction
+            .commit()
+            .map_err(GraphError::from)
+            .map_err(E::from)?;
+        Ok((revision, streamed))
+    }
+}
+
 impl ScopedGraphReader<'_> {
     /// Stream the complete graph inside this reader's pinned transaction, so a
     /// scoped acquisition and a complete-graph identity share one revision.

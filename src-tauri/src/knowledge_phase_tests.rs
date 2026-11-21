@@ -779,3 +779,68 @@ fn published_producer_node_census_counts_all_four_and_skips_edges() {
     assert!(wire.get("publishedProducerNodes").is_none());
     assert!(wire.get("published_producer_nodes").is_none());
 }
+
+// AC-1202/T-1202: the phase reads its base streamed, in the materialized
+// read's order and revision, with BusinessRule props left out; every other
+// row is unchanged and the producers derive the identical facts from it.
+#[test]
+fn the_phase_base_leaves_out_only_props_no_producer_reads() {
+    let host = host();
+    put_resolver(&host.graph);
+    put_entity(&host.graph);
+    {
+        let mut graph = host.graph.lock().unwrap();
+        let symbol = graph.nodes_with_label("Symbol").unwrap()[0].id.clone();
+        graph
+            .put_node(&Node {
+                id: "rule:refund-window".into(),
+                label: "BusinessRule".into(),
+                props: serde_json::json!({
+                    "name": "Refunds close after 30 days",
+                    "text": "x".repeat(4096),
+                }),
+            })
+            .unwrap();
+        for (dst, label) in [(symbol.as_str(), "GOVERNS"), ("gap:refund", "DEPENDS_ON")] {
+            if label == "DEPENDS_ON" {
+                graph
+                    .put_node(&Node {
+                        id: dst.into(),
+                        label: "Gap".into(),
+                        props: serde_json::json!({ "reason": "unresolved" }),
+                    })
+                    .unwrap();
+            }
+            graph
+                .put_edge(&core_graph::Edge {
+                    src: "rule:refund-window".into(),
+                    dst: dst.into(),
+                    label: label.into(),
+                    props: serde_json::json!({ "rule_evidence_gap": true }),
+                })
+                .unwrap();
+        }
+    }
+    let graph = host.graph.lock().unwrap();
+    let full = graph
+        .read_snapshot_with_revision_bounded(PHASE_LIMITS)
+        .unwrap();
+    let base = read_base(&graph, PHASE_LIMITS).unwrap();
+    drop(graph);
+    assert_eq!(base.revision, full.revision);
+    assert_eq!(base.graph.1, full.graph.1);
+    assert_eq!(base.graph.0.len(), full.graph.0.len());
+    for (read, stored) in base.graph.0.iter().zip(&full.graph.0) {
+        assert_eq!((&read.id, &read.label), (&stored.id, &stored.label));
+        if stored.label == "BusinessRule" {
+            assert_eq!(read.props, serde_json::json!({}));
+        } else {
+            assert_eq!(read.props, stored.props);
+        }
+    }
+    let facts =
+        |snapshot: &RevisionedSnapshot| serde_json::to_string(&derive(snapshot).facts).unwrap();
+    let derived = facts(&full);
+    assert!(derived.contains("Capability") && derived.contains("DomainEntity"));
+    assert_eq!(facts(&base), derived);
+}

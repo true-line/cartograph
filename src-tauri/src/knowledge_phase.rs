@@ -162,6 +162,48 @@ pub(crate) fn run_for_setting(
 /// was skipped whole and no knowledge node was produced for it.
 pub(crate) const PHASE_LIMITS: SnapshotReadLimits = SnapshotReadLimits::investigation();
 
+/// Labels whose props no producer, unit builder or overlay admission reads.
+/// Their nodes stay in the base with id and label, so citations, id lookups
+/// and shadowing checks see them, but their props are read as `{}` (AC-1202).
+/// A recovered `BusinessRule` holds its whole rule text and evidence: on REA
+/// those props are a third of the graph's JSON.
+pub(crate) const PROPS_UNREAD: [&str; 1] = ["BusinessRule"];
+
+/// The bounded base the phase reads, streamed under the same admission as
+/// [`SqliteGraphStore::read_snapshot_with_revision_bounded`] and in its row
+/// order, without holding the props of [`PROPS_UNREAD`] labels (AC-1202).
+fn read_base(
+    graph: &SqliteGraphStore,
+    limits: SnapshotReadLimits,
+) -> Result<RevisionedSnapshot, core_graph::GraphError> {
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    let (revision, _) = graph.visit_snapshot_with_revision_bounded(limits, |row| {
+        match row {
+            core_graph::SnapshotRow::Node(mut node) => {
+                if PROPS_UNREAD.contains(&node.label.as_str()) {
+                    node.props = serde_json::Value::Object(serde_json::Map::new());
+                }
+                nodes.push(node);
+            }
+            core_graph::SnapshotRow::Edge(edge) => edges.push(edge),
+        }
+        Ok::<_, core_graph::GraphError>(())
+    })?;
+    // The stream delivers edges by (src, label, dst); the materialized read
+    // and every producer's tie-breaking see them by (src, dst, label).
+    edges.sort_unstable_by(|a, b| {
+        (a.src.as_str(), a.dst.as_str(), a.label.as_str()).cmp(&(
+            b.src.as_str(),
+            b.dst.as_str(),
+            b.label.as_str(),
+        ))
+    });
+    Ok(RevisionedSnapshot {
+        revision,
+        graph: (nodes, edges),
+    })
+}
+
 fn run_within(
     graph: &Mutex<SqliteGraphStore>,
     cache: &Arc<Mutex<EmbeddingCache>>,
@@ -172,7 +214,7 @@ fn run_within(
     let _phase = PHASE.lock().map_err(|e| e.to_string())?;
     let (snapshot, lease) = {
         let graph = graph.lock().map_err(|e| e.to_string())?;
-        let snapshot = match graph.read_snapshot_with_revision_bounded(limits) {
+        let snapshot = match read_base(&graph, limits) {
             Ok(snapshot) => snapshot,
             Err(core_graph::GraphError::SnapshotBounds(_)) => {
                 return Ok(report(0, 0, Some(BASE_BOUNDS)));
