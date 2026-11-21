@@ -28,7 +28,7 @@ provider, tier or confidence label.
 - **Claim:** `{ statement, kind, citations }`. `statement` is at most 2,048
   UTF-8 bytes. `kind` is `implemented`, `documented_intent` or
   `interpretation`. `citations` holds 1 to 16 citation ids.
-- **Draft:** an address, 1 to 64 claims in order, and for each distinct cited
+- **Draft:** an address, 1 to 256 claims in order, and for each distinct cited
   id the content hash of that fact when the run read it.
 - **Frame:** the projected content of a section: every statement the compiler
   already produces for it.
