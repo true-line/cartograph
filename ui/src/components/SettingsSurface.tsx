@@ -40,6 +40,9 @@ export interface SettingsSurfaceProps {
   quickDispatchFallbackEnabled?: boolean;
   onQuickDispatchFallbackChange?: (enabled: boolean) => void;
   onOpenQuickDispatch: () => void;
+  /** Whether the closed-state dispatch hint shows (#251, AC-1702). */
+  quickDispatchHintShown?: boolean;
+  onQuickDispatchHintChange?: (shown: boolean) => void;
 }
 
 /** "Ingest parallelism" (#236): Auto or a fixed worker count. Workers only
@@ -258,6 +261,8 @@ export function SettingsSurface({
   quickDispatchFallbackEnabled = true,
   onQuickDispatchFallbackChange,
   onOpenQuickDispatch,
+  quickDispatchHintShown = true,
+  onQuickDispatchHintChange,
 }: SettingsSurfaceProps) {
   return (
     <section className="settings-surface" aria-label="Settings">
@@ -285,6 +290,10 @@ export function SettingsSurface({
       <label className="tier-card">
         <input type="checkbox" checked={quickDispatchFallbackEnabled} onChange={(event) => onQuickDispatchFallbackChange?.(event.target.checked)} />
         <span>Enable Cmd+J fallback for quick investigation</span>
+      </label>
+      <label className="tier-card">
+        <input type="checkbox" checked={quickDispatchHintShown} onChange={(event) => onQuickDispatchHintChange?.(event.target.checked)} />
+        <span>Show the "Dispatch to an agent" hint</span>
       </label>
       <p className="muted">Cmd+Space works while Cartograph is focused and receives it; macOS may intercept it. Use this button if the shortcut is unavailable, or enable Cmd+J as a fallback.</p>
       <button type="button" className="secondary-button" onClick={onOpenQuickDispatch}>Open quick investigation</button>

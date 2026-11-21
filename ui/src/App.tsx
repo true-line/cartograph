@@ -55,7 +55,8 @@ import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
 import { useAgentChatDockStore } from './agentChatDockStore';
-import { readQuickDispatchFallback, writeQuickDispatchFallback } from './quickDispatchPreference';
+import { readQuickDispatchFallback, readQuickDispatchHint, writeQuickDispatchFallback, writeQuickDispatchHint } from './quickDispatchPreference';
+import { QuickDispatchHint } from './components/QuickDispatchHint';
 import type { InvestigationChanged, InvestigationFollowUpContext } from './investigationTypes';
 import type { Job, PreflightProgress, SpecArtifact, SpecAssertion, SpecBundle } from './store';
 import {
@@ -81,6 +82,9 @@ const SpecWorkbench = lazy(() =>
     default: Component,
   })),
 );
+
+/** Views where the dispatch hint would cover setup or settings work. */
+const HINTLESS_VIEWS = new Set<string>(['settings', 'help', 'connect', 'preflight', 'recover']);
 
 /** Surfaces a refused export or copy (e.g. a stale artifact identity) in
  *  the Workbench's error banner. */
@@ -226,6 +230,12 @@ export default function App() {
   const [atlasLayer, setAtlasLayer] = useState('All layers');
   const [dropActive, setDropActive] = useState(false);
   const [quickDispatchFallbackEnabled, setQuickDispatchFallbackEnabled] = useState(readQuickDispatchFallback);
+  // The closed-state dispatch hint (#251, AC-1702) shows until the first confirmed dispatch.
+  const [quickDispatchHintShown, setQuickDispatchHintShown] = useState(readQuickDispatchHint);
+  const showQuickDispatchHint = useCallback((shown: boolean) => {
+    setQuickDispatchHintShown(shown);
+    writeQuickDispatchHint(shown);
+  }, []);
   const [quickDispatchOpenRequest, setQuickDispatchOpenRequest] = useState(0);
   const [followUpCancelRequest, setFollowUpCancelRequest] = useState(0);
   const [followUpContext, setFollowUpContext] = useState<InvestigationFollowUpContext | null>(null);
@@ -1055,6 +1065,8 @@ export default function App() {
             quickDispatchFallbackEnabled={quickDispatchFallbackEnabled}
             onQuickDispatchFallbackChange={(enabled) => { setQuickDispatchFallbackEnabled(enabled); writeQuickDispatchFallback(enabled); }}
             onOpenQuickDispatch={openStandaloneQuickDispatch}
+            quickDispatchHintShown={quickDispatchHintShown}
+            onQuickDispatchHintChange={showQuickDispatchHint}
           />
           <ProviderKeys available={backend === 'up'} onEgressRecorded={() => {
             invoke<import('./store').EgressSummary | null>('egress_summary')
@@ -1117,12 +1129,17 @@ export default function App() {
         onStandalone={openStandaloneQuickDispatch} onCloseParent={cancelFollowUpCapture}
         followUpCancelRequest={followUpCancelRequest}
         onNavigate={navigate} onAcceptedTask={(taskId) => {
+          showQuickDispatchHint(false);
           activeFollowUpParentRef.current = null;
           setFollowUpContext(null);
           inlineReplyTask.current = null; setInlineReply(null);
           useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
           navigate('agent-chats');
         }} />
+      {quickDispatchHintShown && !HINTLESS_VIEWS.has(view) && (
+        <QuickDispatchHint fallbackEnabled={quickDispatchFallbackEnabled}
+          onOpen={openStandaloneQuickDispatch} onDismiss={() => showQuickDispatchHint(false)} />
+      )}
       <SavedResultNotices view={view} onOpenChat={(taskId) => {
         useAgentChatDockStore.getState().requestOpenFromNotice(taskId);
         navigate('agent-chats');
