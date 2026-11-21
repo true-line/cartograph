@@ -1849,3 +1849,87 @@ fn a() -> bool {
         assert!(config_read_ids(&x).is_empty(), "{text}");
     }
 }
+
+// AC-1008 (T-1008): a file a `#[path]` attribute wires in is the module the
+// declaration names, so `super::` in it resolves to the declaring module.
+#[test]
+fn path_attribute_modules_take_the_declared_module() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "gamma/Cargo.toml",
+        "[package]\nname = \"gamma\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        root,
+        "gamma/src/lib.rs",
+        "mod curated;\n#[path = \"../shared/util.rs\"]\nmod util;\n",
+    );
+    write(
+        root,
+        "gamma/src/curated.rs",
+        "pub fn gather() {}\n\n#[cfg(test)]\n// The tests live beside the module.\n#[path = \"curated_tests.rs\"]\nmod tests;\n",
+    );
+    write(
+        root,
+        "gamma/src/curated_tests.rs",
+        "use super::gather;\nfn reads() { gather(); }\n",
+    );
+    write(root, "gamma/shared/util.rs", "pub fn shared() {}\n");
+    let x = extract_dir(root, &id()).unwrap();
+    let module = |rel: &str| {
+        x.nodes
+            .iter()
+            .find(|n| n.id == format!("file:local/rust-ws@{rel}"))
+            .map(|n| n.props["module_path"].as_str().unwrap().to_string())
+    };
+    assert_eq!(
+        module("gamma/src/curated_tests.rs").as_deref(),
+        Some("gamma::curated::tests")
+    );
+    assert_eq!(
+        module("gamma/shared/util.rs").as_deref(),
+        Some("gamma::util")
+    );
+    assert_eq!(
+        module("gamma/src/curated.rs").as_deref(),
+        Some("gamma::curated")
+    );
+    assert!(has_edge(
+        &x,
+        "CALLS",
+        "sym:local/rust-ws@gamma/src/curated_tests.rs#reads",
+        "sym:local/rust-ws@gamma/src/curated.rs#gather",
+    ));
+}
+
+#[test]
+fn path_attributes_resolve_from_the_declaring_directory() {
+    assert_eq!(
+        module_paths::resolve("a/src/x.rs", "y_tests.rs").as_deref(),
+        Some("a/src/y_tests.rs")
+    );
+    assert_eq!(
+        module_paths::resolve("a/src/x.rs", "../gen/./z.rs").as_deref(),
+        Some("a/gen/z.rs")
+    );
+    assert_eq!(module_paths::resolve("x.rs", "../z.rs"), None);
+    assert_eq!(module_paths::resolve("a/x.rs", "/abs/z.rs"), None);
+    let decls = module_paths::declarations(
+        b"#[path = \"t.rs\"] mod tests;\nmod inline { #[path = \"i.rs\"] mod nested; }\n#[cfg_attr(test, path = \"c.rs\")] mod c;\n#[path = \"b.rs\"] mod body {}\n",
+    );
+    assert_eq!(decls, [("tests".to_string(), "t.rs".to_string())]);
+    // A cycle keeps the location's module.
+    let declared = BTreeMap::from([
+        (
+            "src/a.rs".to_string(),
+            vec![("b".to_string(), "b.rs".to_string())],
+        ),
+        (
+            "src/b.rs".to_string(),
+            vec![("a".to_string(), "a.rs".to_string())],
+        ),
+    ]);
+    assert!(module_paths::modules(&declared, &[]).is_empty());
+}
