@@ -544,7 +544,7 @@ fn paths(group: &[&str]) -> Vec<String> {
 
 /// Every group of the mixed fixture: the regrouping recovers all of them
 /// from any partial grouping, since files left out of the given groups that
-/// share a word of their names form that group (AC-0965).
+/// share a word of their names form that group (AC-0970).
 fn every_group() -> Vec<(String, Vec<String>)> {
     vec![
         ("Abuser".to_owned(), paths(&ABUSER)),
@@ -640,7 +640,7 @@ fn a_name_is_the_term_most_of_the_group_carries() {
     assert!(coherence(&terms, 4) < MIN_COHERENCE);
 }
 
-// AC-0965: files in no group that share a word of their own names are that
+// AC-0970: files in no group that share a word of their own names are that
 // subject's group; fewer than three, or sharing no word, are in none.
 #[test]
 fn leftovers_named_for_one_subject_are_its_group() {
