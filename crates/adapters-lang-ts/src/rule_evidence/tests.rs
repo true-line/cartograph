@@ -659,3 +659,54 @@ export class DefaultTaxZoneStrategy implements TaxZoneStrategy {
         "(await this.getActiveTaxRates(ctx)).find(r => r.test(zone, taxCategory))"
     );
 }
+
+#[test]
+fn guarded_writes_events_service_calls_and_field_changes_are_effects() {
+    // AC-1012 (T-1012, #1998): under a branch condition, a repository write,
+    // a published event, an acting service call and a member assignment are
+    // guarded effects; an unguarded one, a service read, a local call, an
+    // assignment on `this` and a constructor body are not.
+    let code = r#"
+export class OrderService {
+  constructor(private eventBus: EventBus) {
+    if (eventBus) this.ready = true;
+  }
+  async cancel(ctx: RequestContext, order: Order, line: OrderLine) {
+    if (order.active === false) {
+      this.cached = order;
+      order.state = 'Cancelled';
+      await this.connection.getRepository(ctx, Order).save(order);
+      this.eventBus.publish(new OrderCancelledEvent(ctx, order));
+      await this.historyService.createHistoryEntryForOrder({ ctx, order });
+      await this.orderLineRepository.delete(line.id);
+      await this.historyService.getHistoryForOrder(ctx, order.id);
+      helper(order);
+    }
+    await this.connection.getRepository(ctx, Order).save(order);
+  }
+}
+"#;
+    let out = recover(code);
+    let found: Vec<(String, usize)> = rules(&out)
+        .into_iter()
+        .filter(|(_, rule)| rule.kind == RuleKind::GuardedEffect)
+        .map(|(_, rule)| {
+            let shown = match &rule.effect {
+                LocalExit::Assign { target, value } => {
+                    format!("{} = {}", target.display.as_str(), value.display.as_str())
+                }
+                LocalExit::Call { value } => value.display.as_str().to_owned(),
+                _ => String::new(),
+            };
+            (shown, rule.conditions.len())
+        })
+        .collect();
+    let shown: Vec<&str> = found.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(shown.len(), 5, "{found:?}");
+    assert!(shown[0].starts_with("order.state = "), "{found:?}");
+    assert!(shown[1].contains("getRepository(ctx, Order).save(order)"));
+    assert!(shown[2].starts_with("this.eventBus.publish("));
+    assert!(shown[3].starts_with("this.historyService.createHistoryEntryForOrder("));
+    assert!(shown[4].starts_with("this.orderLineRepository.delete("));
+    assert!(found.iter().all(|(_, conditions)| *conditions == 1));
+}
