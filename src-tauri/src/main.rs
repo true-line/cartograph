@@ -6879,11 +6879,14 @@ impl SpecRead {
         let (curated, graph_basis) = match review {
             Some(review) => {
                 let graph_basis = graph_basis_of(&nodes, &edges);
+                let overlay =
+                    curated::overlay_nodes(knowledge.capabilities.iter().chain(&knowledge.actors));
                 let projection = curated::project(
                     review,
                     &curated::Snapshot {
                         nodes: &nodes,
                         edges: &edges,
+                        overlay: &overlay,
                         derived_decisions: curated::DerivedDecisions::Compile(&flows),
                         coverage: &coverage,
                         content_hash: &graph_basis.content_hash,

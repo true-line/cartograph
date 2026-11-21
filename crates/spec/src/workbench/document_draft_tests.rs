@@ -686,3 +686,88 @@ fn curated_names_the_changed_and_missing_facts_of_each_accepted_draft() {
     let none = compile(ExportMode::BestEffort, &empty, &BTreeSet::new());
     assert!(!curated(&none).contains("Accepted section drafts"));
 }
+
+// AC-1011 (T-1011): a draft citing a derived Capability the export prints
+// is printed, and the fact index lists that Capability. Without the
+// knowledge layer the same draft is named as citing a fact the export does
+// not list.
+#[test]
+fn a_draft_citing_a_derived_capability_resolves_in_the_fact_index() {
+    use crate::workbench::capabilities::{KnowledgeStories, Stories, Story};
+    let mut refunds = node(
+        "capability:refunds",
+        "Capability",
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+    );
+    refunds.props["title"] = "Refunds".into();
+    let cited = vec![id("capability:refunds"), id("rule:limit")];
+    let ids: BTreeSet<String> = cited.iter().cloned().collect();
+    let mut hashes = cited_fact_hashes(&nodes(), &[edge()], &ids);
+    hashes.extend(crate::cited_node_hashes([&refunds], &ids));
+    let mut accepted = draft("draft-k", "1.3", "Refunds are limited per order.", &cited);
+    accepted.cited_hashes = hashes.clone();
+    let projection = project(&ProjectionInput {
+        nodes: &nodes(),
+        edges: &[],
+        graph_content_hash: "graph-hash-1",
+        proposals: &[],
+        assessments: &BTreeMap::new(),
+        assertion_decisions: &[],
+        current_assertion_hashes: &BTreeSet::new(),
+        drafts: std::slice::from_ref(&accepted),
+        cited_fact_hashes: &hashes,
+        findings: &[],
+        cited_fact_digests: &BTreeMap::new(),
+        policy_version: CURATED_POLICY_VERSION,
+    })
+    .unwrap();
+    assert_eq!(projection.draft_counts.eligible, 1);
+    let knowledge = KnowledgeStories(Stories {
+        included: vec![Story {
+            node: &refunds,
+            support: Vec::new(),
+        }],
+        ..Stories::default()
+    });
+    let compiled = |knowledge| {
+        try_compile_spec_supplied(
+            &nodes(),
+            &[edge()],
+            &flows(),
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            Supplied {
+                repo_names: &[],
+                knowledge,
+                coverage: &[],
+                stale_coverage: &[],
+                curated: Curated::Computed(&projection),
+                graph_content_hash: None,
+                source_revisions: None,
+            },
+        )
+        .unwrap()
+    };
+
+    let bundle = compiled(Some(&knowledge));
+    let content = &d1(&bundle).content;
+    assert!(content.contains("1. Refunds are limited per order. (implemented;"));
+    let listed = index(&bundle);
+    check_citations(&listed, printed_citations(content)).unwrap();
+    let row = listed
+        .rows
+        .iter()
+        .find(|row| row.citation_id == id("capability:refunds"))
+        .unwrap();
+    assert!(row.cited_by.iter().any(|by| by == D1_ARTIFACT_ID));
+
+    let bundle = compiled(None);
+    let content = &d1(&bundle).content;
+    assert!(!content.contains("Refunds are limited per order."));
+    assert!(content.contains(
+        "- Draft `draft-k` for scope `system` is eligible and is not printed: it cites a fact \
+         this export does not list.\n"
+    ));
+    check_citations(&index(&bundle), printed_citations(content)).unwrap();
+}
