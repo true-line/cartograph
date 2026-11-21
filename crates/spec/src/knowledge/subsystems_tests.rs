@@ -542,6 +542,19 @@ fn paths(group: &[&str]) -> Vec<String> {
     paths
 }
 
+/// Every group of the mixed fixture: the regrouping recovers all of them
+/// from any partial grouping, since files left out of the given groups that
+/// share a word of their names form that group (AC-0965).
+fn every_group() -> Vec<(String, Vec<String>)> {
+    vec![
+        ("Abuser".to_owned(), paths(&ABUSER)),
+        ("Alias".to_owned(), paths(&ALIAS)),
+        ("Custom domain".to_owned(), paths(&DOMAIN)),
+        ("Event bus".to_owned(), paths(&EVENT)),
+        ("Mailbox".to_owned(), paths(&MAILBOX)),
+    ]
+}
+
 // AC-0914: a group named for two subjects becomes one group per subject.
 #[test]
 fn a_group_of_two_subjects_is_two_groups() {
@@ -559,12 +572,7 @@ fn a_group_of_two_subjects_is_two_groups() {
     );
     assert_eq!(
         regrouped(&signals, &[&both, &ALIAS, &DOMAIN]),
-        vec![
-            ("Abuser".to_owned(), paths(&ABUSER)),
-            ("Alias".to_owned(), paths(&ALIAS)),
-            ("Custom domain".to_owned(), paths(&DOMAIN)),
-            ("Mailbox".to_owned(), paths(&MAILBOX)),
-        ]
+        every_group()
     );
 }
 
@@ -575,10 +583,7 @@ fn files_no_term_holds_together_are_not_a_group() {
     let signals = signals(&base, REPO, &mut report).unwrap();
     assert_eq!(
         regrouped(&signals, &[&LEFTOVER, &ALIAS, &MAILBOX]),
-        vec![
-            ("Alias".to_owned(), paths(&ALIAS)),
-            ("Mailbox".to_owned(), paths(&MAILBOX)),
-        ]
+        every_group()
     );
     // The whole rule publishes no group for them either.
     let report = derive_subsystems(&base);
@@ -599,11 +604,7 @@ fn groups_with_one_name_are_one_group() {
     let signals = signals(&base, REPO, &mut report).unwrap();
     assert_eq!(
         regrouped(&signals, &[&EVENT[..3], &EVENT[3..], &ALIAS, &MAILBOX]),
-        vec![
-            ("Alias".to_owned(), paths(&ALIAS)),
-            ("Event bus".to_owned(), paths(&EVENT)),
-            ("Mailbox".to_owned(), paths(&MAILBOX)),
-        ]
+        every_group()
     );
 }
 
@@ -614,11 +615,7 @@ fn a_leftover_file_joins_the_group_it_is_named_for() {
     let signals = signals(&base, REPO, &mut report).unwrap();
     assert_eq!(
         regrouped(&signals, &[&ALIAS[..3], &MAILBOX, &DOMAIN]),
-        vec![
-            ("Alias".to_owned(), paths(&ALIAS)),
-            ("Custom domain".to_owned(), paths(&DOMAIN)),
-            ("Mailbox".to_owned(), paths(&MAILBOX)),
-        ]
+        every_group()
     );
 }
 
@@ -641,4 +638,20 @@ fn a_name_is_the_term_most_of_the_group_carries() {
     // A term scoring far below the first does not hold the group together.
     let terms = [term("lookup", 0.73, 1), term("abuser", 0.2, 4)];
     assert!(coherence(&terms, 4) < MIN_COHERENCE);
+}
+
+// AC-0965: files in no group that share a word of their own names are that
+// subject's group; fewer than three, or sharing no word, are in none.
+#[test]
+fn leftovers_named_for_one_subject_are_its_group() {
+    let (base, mut report) = read(&mixed());
+    let signals = signals(&base, REPO, &mut report).unwrap();
+    // Only Alias and Mailbox were found: the abuser, custom domain and event
+    // bus files form their groups, the unrelated leftovers none.
+    assert_eq!(regrouped(&signals, &[&ALIAS, &MAILBOX]), every_group());
+    // One alias file left out stays out of a group of its own: it joins Alias.
+    assert_eq!(
+        regrouped(&signals, &[&ALIAS[..3], &MAILBOX, &ABUSER, &DOMAIN, &EVENT]),
+        every_group()
+    );
 }

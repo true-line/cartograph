@@ -26,7 +26,8 @@
 //!    groups do; the subject is the leading term the most files carry.
 //! 6. **Groups follow their names**: files no term holds together are not a
 //!    group, a group named for two subjects is two groups, two groups with
-//!    one name are one, and a leftover file joins the group it is named for.
+//!    one name are one, a leftover file joins the group it is named for,
+//!    and leftovers that share a word of their own names are its group.
 //! 7. **A group stays in one repository.** Each repository's files are
 //!    grouped and named on their own, as if it were the only one. A server
 //!    and its clients name the same concepts (`alias`, `mailbox`), which
@@ -43,7 +44,7 @@ use core_graph::Edge;
 /// Deterministic recipe grouping source files into named subsystems.
 pub const SUBSYSTEM_RULE: &str = "knowledge.subsystems";
 /// Changed units, signals, clustering or naming require a new recipe version.
-pub const SUBSYSTEM_RULE_VERSION: &str = "3";
+pub const SUBSYSTEM_RULE_VERSION: &str = "4";
 /// Files clustered per repository. Similarity is computed per pair of files
 /// that share a signal, so the bound keeps one run's work and memory fixed.
 pub const MAX_SUBSYSTEM_FILES: usize = 8192;
@@ -1290,6 +1291,40 @@ fn regroup(mut groups: Vec<Vec<usize>>, signals: &Signals<'_>) -> Vec<Vec<usize>
         }
         for (file, group) in joins {
             groups[group].push(file);
+            group_of[file] = Some(group);
+        }
+        // Files still in no group that share a word of their own names are
+        // a group of that subject: a concept the clusters missed, such as a
+        // configured strategy with its default and alternatives.
+        let mut left: BTreeSet<usize> = (0..n)
+            .filter(|&file| !shared[file] && group_of[file].is_none())
+            .collect();
+        loop {
+            let mut cover: BTreeMap<&str, usize> = BTreeMap::new();
+            for &file in &left {
+                let stem: BTreeSet<&str> = units[file].stem.iter().map(String::as_str).collect();
+                for word in stem {
+                    *cover.entry(word).or_default() += 1;
+                }
+            }
+            let Some((word, count)) = cover
+                .into_iter()
+                .max_by(|(a, x), (b, y)| x.cmp(y).then_with(|| b.cmp(a)))
+            else {
+                break;
+            };
+            if count < MIN_FILES {
+                break;
+            }
+            let members: Vec<usize> = left
+                .iter()
+                .copied()
+                .filter(|&file| units[file].stem.iter().any(|w| w == word))
+                .collect();
+            for file in &members {
+                left.remove(file);
+            }
+            groups.push(members);
         }
         for members in &mut groups {
             members.sort_unstable();
