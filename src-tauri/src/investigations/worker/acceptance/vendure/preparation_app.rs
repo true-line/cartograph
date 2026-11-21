@@ -1,11 +1,11 @@
-//! Sealed synchronous fixture ownership; generic/manual callbacks stay retained.
+//! Captured-preparation fixture over a test app. Its AppState stores are freed
+//! when the owner drops (#1621); a handle a callback cloned out keeps them alive.
 use super::super::expanded::vendure_prepare::{self, BoundDefinition};
 use super::*;
 use agents::investigation::InvestigationDetail;
 
 pub(in super::super) struct PreparationApp {
-    app: tauri::App<tauri::test::MockRuntime>,
-    returned: bool,
+    app: crate::test_app::TestApp,
 }
 pub(super) struct CaptureSnapshot {
     pub(super) task: InvestigationDetail,
@@ -17,7 +17,6 @@ impl PreparationApp {
     pub(super) fn new(profile: &profile::NativeProfile) -> Result<Self, String> {
         Ok(Self {
             app: profile.app()?,
-            returned: false,
         })
     }
     pub(in super::super) fn for_reopen(
@@ -25,27 +24,20 @@ impl PreparationApp {
     ) -> Result<Self, String> {
         Self::new(&basis.profile)
     }
-    pub(super) fn capture(mut self, basis: CapturePreparation<'_>) -> Result<Preparation, String> {
-        let result = complete_capture(basis, &self.app);
-        self.returned = true;
-        result
+    pub(super) fn capture(self, basis: CapturePreparation<'_>) -> Result<Preparation, String> {
+        complete_capture(basis, &self.app)
     }
     pub(in super::super) fn bound(
-        mut self,
+        self,
         basis: &measurement::ReopenPreparation<'_>,
         paths: [&Path; 4],
         expected: &vendure_prepare::Definition,
         validated: BoundDefinition<'_>,
     ) -> Result<serde_json::Value, String> {
-        let result =
-            vendure_prepare::prepare_fixture_on_app(&self.app, basis, paths, expected, validated);
-        self.returned = true;
-        result
+        vendure_prepare::prepare_fixture_on_app(&self.app, basis, paths, expected, validated)
     }
-    pub(super) fn snapshot(mut self, id: &str) -> Result<CaptureSnapshot, String> {
-        let result = self.read_snapshot(id);
-        self.returned = true;
-        result
+    pub(super) fn snapshot(self, id: &str) -> Result<CaptureSnapshot, String> {
+        self.read_snapshot(id)
     }
     fn read_snapshot(&self, id: &str) -> Result<CaptureSnapshot, String> {
         let state = self.app.state::<AppState>();
@@ -79,21 +71,6 @@ impl PreparationApp {
         })
     }
 }
-impl Drop for PreparationApp {
-    fn drop(&mut self) {
-        if self.returned {
-            // Only the fixed synchronous methods above set eligibility. Their
-            // inner calls have returned, dropping State/guards/operation owners
-            // before this runs, including ordinary errors. No raw App, handle,
-            // callback or Deref is exposed. Panic leaves returned=false.
-            // Audited paths: synchronous run_ingest/detail, manifest-only
-            // bound/start, and snapshot; none dispatches work or exports handles.
-            #[allow(deprecated)]
-            drop(self.app.unmanage::<AppState>());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,15 +142,13 @@ mod tests {
         }
     }
 
-    // AC-0450: an unfinished owner and arbitrary generic callbacks stay retained.
+    // AC-0450: a panicked owner releases too; a handle a generic callback cloned keeps state.
     #[test]
-    fn captured_fixture_preparation_retains_state_on_panic_and_generic_escape() {
+    fn captured_fixture_preparation_releases_on_panic_and_retains_escaped_handles() {
         let case = super::super::tests::Case::new();
         let prepared = case.prepare_fixture().unwrap();
         let owner = PreparationApp::new(&prepared.profile).unwrap();
         let weak = Arc::downgrade(&owner.app.state::<AppState>().sources);
-        // Private test access only, to clean up after proving panic retention.
-        let cleanup = owner.app.handle().clone();
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let _owner = owner;
@@ -181,9 +156,7 @@ mod tests {
             }))
             .is_err()
         );
-        assert!(weak.upgrade().is_some());
-        #[allow(deprecated)]
-        drop(cleanup.unmanage::<AppState>());
+        assert!(weak.upgrade().is_none());
 
         let base = case.root.parent().unwrap();
         let receipt = base.join("lifetime-preparation.json");
@@ -199,9 +172,10 @@ mod tests {
             |app, _, _, _| Ok(app.handle().clone()),
         )
         .unwrap();
+        let sources = Arc::downgrade(&escaped.state::<AppState>().sources);
+        // The generic callback's handle keeps the app alive until it drops.
         assert!(escaped.try_state::<AppState>().is_some());
-        // The generic callback remains live until the test explicitly releases it.
-        #[allow(deprecated)]
-        drop(escaped.unmanage::<AppState>());
+        drop(escaped);
+        assert!(sources.upgrade().is_none());
     }
 }
