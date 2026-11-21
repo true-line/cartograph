@@ -13920,6 +13920,105 @@ export function App() {
     }
 
     #[test]
+    fn manifest_observation_inputs_are_captured_under_their_own_identity() {
+        // AC-1041 (ADR-0080, #385): a declared state file inside the manifest
+        // folder is captured under `input/<source id>` and its observed
+        // evidence cites that identity and the declared relative path; one
+        // outside the folder is still read, but its evidence stays uncaptured
+        // and coverage names it unverified. Neither becomes a system repo.
+        use tauri::Manager;
+        const STATE: &str = r#"{"format_version":"1.0","values":{"root_module":{"resources":[
+            {"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{"url":"https://sqs.example/jobs"},"sensitive_values":{}}]}}}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        for repo in ["inside", "outside"] {
+            let root = system.join(repo);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("main.tf"),
+                "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(system.join("inside.tfstate.json"), STATE).unwrap();
+        std::fs::write(dir.path().join("outside.tfstate.json"), STATE).unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"inside\"\nlayers = [\"infra\"]\nstate_json = \"./inside.tfstate.json\"\n\n\
+             [[repos]]\nurl = \"outside\"\nlayers = [\"infra\"]\nstate_json = \"../outside.tfstate.json\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        let summary =
+            super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+                .unwrap();
+        let sources = state.sources.lock().unwrap().list().unwrap();
+        let source_of = |name: &str| {
+            sources
+                .iter()
+                .find(|source| source.repo_key.ends_with(name) || source.display_name == name)
+                .unwrap()
+                .clone()
+        };
+        let inside = source_of("inside");
+        let outside = source_of("outside");
+        let resources = state
+            .graph
+            .lock()
+            .unwrap()
+            .nodes_with_label("Resource")
+            .unwrap();
+        let observed = |source: &crate::sources::RegisteredSource| {
+            resources
+                .iter()
+                .find(|node| node.id == format!("res:{}@aws_sqs_queue.jobs", source.repo_key))
+                .unwrap()
+                .props["observed_prov"]["evidence"][0]
+                .clone()
+        };
+        let cited = observed(&inside);
+        assert_eq!(cited["repo"], format!("input/{}", inside.source_id));
+        assert_eq!(cited["path"], "inside.tfstate.json");
+        assert_eq!(cited["commit_sha"], "workdir");
+        let uncited = observed(&outside);
+        assert_eq!(uncited["repo"], "");
+        assert_eq!(uncited["commit_sha"], "");
+        let reason = |source: &crate::sources::RegisteredSource| {
+            summary
+                .coverage
+                .iter()
+                .find(|coverage| coverage.repo == source.repo_key)
+                .unwrap()
+                .producers
+                .iter()
+                .find(|producer| producer.id == dynamic::EXTRACTOR_ID)
+                .unwrap()
+                .stopping_reason
+                .clone()
+        };
+        assert!(
+            !reason(&inside).contains("unverified"),
+            "{}",
+            reason(&inside)
+        );
+        assert!(
+            reason(&outside).ends_with("unverified (outside the manifest folder or past the capture limits): ../outside.tfstate.json"),
+            "{}",
+            reason(&outside)
+        );
+        // Captured inputs are not source registrations of the system.
+        assert!(
+            super::system_contents_of(&resources)
+                .iter()
+                .all(|entry| !entry.repo.starts_with("input/"))
+        );
+    }
+
+    #[test]
     fn system_recovery_reports_each_repos_coverage_inventory() {
         // AC-0238 (#588): each recovered repo lists which producers ran,
         // which its layer hints excluded, which inputs were missing and
