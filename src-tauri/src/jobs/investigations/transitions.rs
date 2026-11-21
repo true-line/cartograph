@@ -767,6 +767,7 @@ impl JobStore {
 
     /// Internal terminal path for failures outside a pending source read.
     /// Reservations must settle their durable charge and disposition instead.
+    #[cfg(test)]
     pub(crate) fn stop_next_prompt_investigation(
         &mut self,
         execution: &JobExecution,

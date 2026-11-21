@@ -59,6 +59,7 @@ pub(super) fn insert(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn load(
     connection: &Connection,
     task: &str,
