@@ -304,6 +304,9 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
+        if node.label == "BusinessRule" {
+            rule_evidence::retarget(&mut node.props, commit);
+        }
     }
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
@@ -1780,6 +1783,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         functions.push((function, symbol));
     }
 
+    // Guarded returns and throws of the file's functions (AC-1106).
+    rule_evidence::extract(&cx, root, &functions_by_start, &mut out);
+
     for (symbol, function, return_type) in returns {
         if let Some(ty) = return_type {
             let candidates = type_candidates(
@@ -2964,6 +2970,7 @@ mod receivers;
 mod rest_template;
 mod retrofit;
 mod room;
+mod rule_evidence;
 mod spring_kafka;
 mod webclient;
 
