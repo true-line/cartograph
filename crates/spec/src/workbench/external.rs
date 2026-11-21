@@ -1231,7 +1231,11 @@ pub(super) fn output(
                 Literal(origin),
                 Caller(site.caller()),
                 Literal(text("method").unwrap_or("—")),
-                Literal(text("url").map_or("—", url_path)),
+                // Only the base is in source: the path is built at run time (#2065).
+                Literal(match request {
+                    Some(request) if request["path_computed"] == true => "computed at run time",
+                    _ => text("url").map_or("—", url_path),
+                }),
                 Literal(
                     site.uses
                         .and_then(|edge| edge.props["client"].as_str())

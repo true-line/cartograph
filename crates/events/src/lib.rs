@@ -506,6 +506,26 @@ fn resolve_site_url(
     }
 }
 
+/// The base URL of a joined site whose path is computed (#2065): its
+/// origin is known from source although no endpoint can be matched, so
+/// the Gap keeps it as the request's URL for the boundary to place.
+fn computed_path_base(
+    site: &adapters_fw::client::FetchSite,
+    cfg: &ConfigIndex,
+) -> Option<(String, String)> {
+    let base = site.base.as_ref()?;
+    if !matches!(site.url, IdentityExpr::Computed(_)) {
+        return None;
+    }
+    match &base.url {
+        IdentityExpr::Literal(url) => Some((url.clone(), "base:literal".into())),
+        IdentityExpr::EnvRef(key) => cfg
+            .resolve(key)
+            .map(|(value, file)| (value.to_string(), format!("base:config:{file}"))),
+        IdentityExpr::Computed(_) => None,
+    }
+}
+
 /// Stitch data-fetch sites against recovered endpoints (US-0005, AC-0014):
 /// a resolvable URL whose method+path matches exactly one endpoint route is
 /// a Confirmed `FETCHES` edge; anything else — computed URL, unresolved env
@@ -663,6 +683,14 @@ pub fn stitch_fetches_with(
                         "method": site.method,
                         "url": url,
                         "url_source": source,
+                    });
+                } else if let Some((base, source)) = computed_path_base(site, cfg) {
+                    // Only the base is known: the path is computed (#2065).
+                    props["request"] = serde_json::json!({
+                        "method": site.method,
+                        "url": base,
+                        "url_source": source,
+                        "path_computed": true,
                     });
                 }
                 out.nodes.push(Node {

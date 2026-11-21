@@ -276,6 +276,41 @@ fn stem_title(path: &str) -> String {
     }
 }
 
+/// The path of an absolute http(s) URL, without query or fragment; `None`
+/// for a bare origin, which names no endpoint.
+fn url_path(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let path = &rest[rest.find('/')?..];
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    (path.len() > 1).then_some(path)
+}
+
+/// Whether a concrete path matches an endpoint route: equal segments, a
+/// parameter (`:id`, `<id>`, `{id}`) matching one segment, and a trailing
+/// rest parameter (`{path...}`, `*`) matching one or more.
+fn path_matches(pattern: &str, path: &str) -> bool {
+    let ps: Vec<&str> = pattern.trim_end_matches('/').split('/').collect();
+    let cs: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    let param = |p: &str| {
+        p.starts_with(':')
+            || (p.len() > 2 && p.starts_with('<') && p.ends_with('>'))
+            || (p.len() > 2 && p.starts_with('{') && p.ends_with('}'))
+    };
+    for (i, p) in ps.iter().enumerate() {
+        let rest = *p == "*" || (p.starts_with('{') && p.ends_with("...}"));
+        if rest && i + 1 == ps.len() {
+            return cs.len() > i && cs[i..].iter().all(|c| !c.is_empty());
+        }
+        match cs.get(i) {
+            Some(c) if c == p || (param(p) && !c.is_empty()) => {}
+            _ => return false,
+        }
+    }
+    ps.len() == cs.len()
+}
+
 /// The language a file's extension names, if it is a common one.
 fn language(path: &str) -> Option<&'static str> {
     let ext = path.rsplit_once('.')?.1;
@@ -568,6 +603,7 @@ impl<'a> Model<'a> {
         let mut operator_containers: Vec<(usize, Vec<&'a Node>)> = Vec::new();
         let mut smtp_listeners: Vec<(usize, &'a Node)> = Vec::new();
         let mut db_listeners: Vec<(usize, &'a Node)> = Vec::new();
+        let mut workers: Vec<(usize, &'a Node)> = Vec::new();
         let mut client_containers: Vec<(usize, Vec<&'a Node>)> = Vec::new();
         let mut page_containers: Vec<(usize, Vec<&'a Node>)> = Vec::new();
         let mut web_of: BTreeMap<&'a str, usize> = BTreeMap::new();
@@ -656,12 +692,26 @@ impl<'a> Model<'a> {
                     operator.push(entry);
                     continue;
                 }
-                let file = entry.props["file"].as_str().unwrap_or_default();
+                let mut file = entry.props["file"].as_str().unwrap_or_default();
+                if kind == "edge-worker" {
+                    // The module the worker config names, not the config.
+                    if let Some(module) = index
+                        .edges("ENTRY")
+                        .iter()
+                        .find(|e| e.src == entry.id)
+                        .and_then(|e| e.dst.strip_prefix("file:"))
+                        .and_then(|dst| dst.split_once('@'))
+                        .map(|(_, path)| path)
+                    {
+                        file = module;
+                    }
+                }
                 let what = match kind {
                     "smtp-listener" => "SMTP listener",
                     "database-listener" => "Database listener",
                     "queue-consumer" => "Queue consumer",
                     "polling-loop" => "Polling loop",
+                    "edge-worker" => "Cloudflare Worker",
                     _ => "Process",
                 };
                 let mut technology = language(file).map(str::to_string).unwrap_or_default();
@@ -680,6 +730,12 @@ impl<'a> Model<'a> {
                     }
                     "queue-consumer" => format!("Runs `{file}`; consumes queue messages"),
                     "polling-loop" => format!("Runs `{file}` in a loop until it is stopped"),
+                    "edge-worker" => match entry.props["route"].as_str() {
+                        Some(route) => {
+                            format!("Runs `{file}` on Cloudflare's edge; serves `{route}`")
+                        }
+                        None => format!("Runs `{file}` on Cloudflare's edge"),
+                    },
                     _ => format!("Runs `{file}` as its own process{port}"),
                 };
                 let at = push(
@@ -687,7 +743,10 @@ impl<'a> Model<'a> {
                     &mut owners,
                     Element {
                         kind: Kind::Container,
-                        name: stem_title(file),
+                        name: entry.props["worker"]
+                            .as_str()
+                            .filter(|_| kind == "edge-worker")
+                            .map_or_else(|| stem_title(file), stem_title),
                         technology,
                         description,
                         repo: Some(repo),
@@ -701,6 +760,7 @@ impl<'a> Model<'a> {
                 match kind {
                     "smtp-listener" => smtp_listeners.push((at, entry)),
                     "database-listener" => db_listeners.push((at, entry)),
+                    "edge-worker" => workers.push((at, entry)),
                     _ => {}
                 }
             }
@@ -1061,6 +1121,85 @@ impl<'a> Model<'a> {
             );
         }
 
+        // A Cloudflare Worker: who sends it webhooks, and which endpoints
+        // of the system the URLs in its config name (a configured address,
+        // not a traced call, so the arrow is inferred).
+        let endpoints: Vec<&'a Node> = nodes
+            .iter()
+            .copied()
+            .filter(|n| n.label == "Endpoint")
+            .collect();
+        for (worker, entry) in &workers {
+            if let Some(sender) = entry.props["webhook_from"].as_str() {
+                let at = push(
+                    &mut elements,
+                    &mut owners,
+                    Element {
+                        kind: Kind::External,
+                        name: sender.to_string(),
+                        technology: "HTTPS webhooks".into(),
+                        description: format!("Sends signed {sender} webhooks"),
+                        repo: None,
+                        facts: vec![Fact::Node(entry)],
+                        gap: false,
+                        weak: false,
+                        weight: 2,
+                    },
+                    &[],
+                );
+                relations.add(
+                    (at, *worker),
+                    "Sends webhooks to",
+                    ("", ""),
+                    "HTTPS",
+                    None,
+                    [Fact::Node(entry)],
+                    false,
+                );
+            }
+            let urls = entry.props["configured_urls"].as_object();
+            for url in urls
+                .into_iter()
+                .flat_map(|m| m.values())
+                .filter_map(|v| v.as_str())
+            {
+                let Some(path) = url_path(url) else { continue };
+                // The most specific routes the path matches: fewest
+                // parameter segments.
+                let matched: Vec<(usize, &&'a Node)> = endpoints
+                    .iter()
+                    .filter_map(|endpoint| {
+                        let pattern = endpoint.props["path"].as_str()?;
+                        path_matches(pattern, path).then(|| {
+                            let params = pattern
+                                .split('/')
+                                .filter(|p| p.starts_with([':', '<', '{']) || *p == "*")
+                                .count();
+                            (params, endpoint)
+                        })
+                    })
+                    .collect();
+                let fewest = matched.iter().map(|(n, _)| *n).min();
+                for (_, endpoint) in matched.iter().filter(|(n, _)| Some(*n) == fewest) {
+                    let Some(&container) = owners.trigger.get(endpoint.id.as_str()) else {
+                        continue;
+                    };
+                    if container == *worker {
+                        continue;
+                    }
+                    relations.add(
+                        (*worker, container),
+                        "Calls",
+                        ("", ""),
+                        "HTTPS",
+                        None,
+                        [Fact::Node(entry), Fact::Node(endpoint)],
+                        true,
+                    );
+                }
+            }
+        }
+
         // Data stores and providers, from observed and declared resources.
         let mut store_of: BTreeMap<String, usize> = BTreeMap::new();
         let mut store_repo: Vec<(usize, &'a str)> = Vec::new();
@@ -1089,12 +1228,30 @@ impl<'a> Model<'a> {
                 // A logical id names a store within its repository: two
                 // repositories reading the same variable name are two
                 // stores unless binding evidence says otherwise.
-                let key = format!(
-                    "{}|{}",
-                    repo_of(&node.id),
-                    node.props["logical_id"].as_str().unwrap_or(&node.id)
-                );
+                // A store known only by its URL variable, read where another
+                // variable of the same provider is read as its fallback, is
+                // one store located by either.
+                let fallback = node.props["store_from_env_key"] == true;
+                let key = if fallback {
+                    let mut readers: Vec<&str> = users.iter().map(|e| e.src.as_str()).collect();
+                    readers.sort_unstable();
+                    format!(
+                        "{}|env-store|{}|{}",
+                        repo_of(&node.id),
+                        node.props["provider"].as_str().unwrap_or_default(),
+                        readers.join(",")
+                    )
+                } else {
+                    format!(
+                        "{}|{}",
+                        repo_of(&node.id),
+                        node.props["logical_id"].as_str().unwrap_or(&node.id)
+                    )
+                };
                 let at = if let Some(&at) = store_of.get(&key) {
+                    if let (true, Some(env)) = (fallback, node.props["env_key"].as_str()) {
+                        let _ = write!(elements[at].description, " or `{env}`");
+                    }
                     elements[at].facts.push(Fact::Node(node));
                     at
                 } else {

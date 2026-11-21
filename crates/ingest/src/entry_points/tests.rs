@@ -463,3 +463,77 @@ function b() {
     assert_eq!(commands, BTreeSet::from(["build", "deploy", "lint"]));
     assert!(!out.nodes.iter().any(|n| n.id.contains("lib/plain.mjs")));
 }
+
+/// AC-0948: a Cloudflare Worker config enters the module it names, relative
+/// to the config, and records the worker name and route.
+#[test]
+fn a_wrangler_config_enters_its_worker_module() {
+    const JSONC: &str = r#"{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "events",
+  "main": "src/index.ts", // the module Cloudflare runs
+  /* routes */
+  "routes": [{ "pattern": "events.example.com", "custom_domain": true }],
+  "vars": { "URL": "https://example.com/x", "MODE": "strict" },
+}"#;
+    let out = extract(&[
+        ("edge/wrangler.jsonc", JSONC),
+        (
+            "edge/src/index.ts",
+            "const sig = req.headers.get(\"X-Hub-Signature-256\");\n",
+        ),
+        (
+            "other/wrangler.toml",
+            "name = \"cron\"\nmain = \"missing.ts\"\n",
+        ),
+        (
+            "deploy/wrangler.toml",
+            "name = \"up\"\nmain = \"../edge/src/index.ts\"\n",
+        ),
+        (
+            "escape/wrangler.toml",
+            "name = \"out\"\nmain = \"../../x.ts\"\n",
+        ),
+    ]);
+    // A parent-relative module resolves; one leaving the repository is a Gap.
+    assert_eq!(
+        entry_edge(&out, "deploy/wrangler.toml", "worker").dst,
+        format!("file:{REPO}@edge/src/index.ts")
+    );
+    assert!(
+        entry_edge(&out, "escape/wrangler.toml", "worker")
+            .dst
+            .starts_with("gap:")
+    );
+    let worker = entry(&out, "edge/wrangler.jsonc", "worker");
+    assert_eq!(worker.props["kind"], "edge-worker");
+    assert_eq!(worker.props["how"], "Cloudflare Worker");
+    assert_eq!(worker.props["worker"], "events");
+    assert_eq!(worker.props["route"], "events.example.com");
+    assert_eq!(
+        worker.props["configured_urls"],
+        serde_json::json!({"URL": "https://example.com/x"})
+    );
+    // The signature header names the webhook sender, cited at its span.
+    assert_eq!(worker.props["webhook_from"], "GitHub");
+    let spans = worker.props["prov"]["evidence"].as_array().unwrap();
+    assert!(
+        spans
+            .iter()
+            .any(|s| s["path"] == "edge/src/index.ts" && s["byte_start"] == 29),
+        "{spans:?}"
+    );
+    let edge = entry_edge(&out, "edge/wrangler.jsonc", "worker");
+    assert_eq!(edge.dst, format!("file:{REPO}@edge/src/index.ts"));
+    assert_eq!(confidence(&edge.props), "Confirmed");
+    let missing = entry_edge(&out, "other/wrangler.toml", "worker");
+    assert!(
+        missing.dst.starts_with("gap:entry-point:"),
+        "{}",
+        missing.dst
+    );
+    assert_eq!(
+        entry(&out, "other/wrangler.toml", "worker").props["worker"],
+        "cron"
+    );
+}

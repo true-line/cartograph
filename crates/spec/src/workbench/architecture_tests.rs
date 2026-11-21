@@ -583,3 +583,102 @@ fn the_app_view_is_the_model_the_markdown_draws() {
     }
     assert!(seen > 0);
 }
+
+/// AC-0948: a Cloudflare Worker entry point is its own container, named for
+/// the worker and described by the module it runs and the route it serves.
+#[test]
+fn an_edge_worker_is_a_container_named_for_the_worker() {
+    let mut f = system();
+    let entry = f.node(
+        &format!("entry:{TOOLS}@edge/wrangler.jsonc#worker"),
+        "EntryPoint",
+        json!({"kind": "edge-worker", "name": "Edge worker (edge/wrangler.jsonc)",
+               "how": "Cloudflare Worker", "file": "edge/wrangler.jsonc",
+               "worker": "agent-events", "route": "events.example.com",
+               "webhook_from": "GitHub",
+               "configured_urls": {"SERVER_URL": "https://api.example.com",
+                                   "LIST_URL": "https://api.example.com/api/aliases?x=1",
+                                   "OTHER": "https://elsewhere.example.com/nothing"}}),
+        (TOOLS, "edge/wrangler.jsonc"),
+    );
+    let module = format!("file:{TOOLS}@edge/src/index.ts");
+    f.node(
+        &module,
+        "File",
+        json!({"path": "edge/src/index.ts"}),
+        (TOOLS, "edge/src/index.ts"),
+    );
+    f.edge(
+        &entry,
+        "ENTRY",
+        &module,
+        (TOOLS, "edge/wrangler.jsonc"),
+        json!({}),
+    );
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert!(l2.contains("<b>Agent events</b>"), "{l2}");
+    assert!(
+        l2.contains("[Container: TypeScript, Cloudflare Worker]"),
+        "{l2}"
+    );
+    assert!(
+        l2.contains("Runs `edge/src/index.ts` on Cloudflare's edge; serves `events.example.com`"),
+        "{l2}"
+    );
+    // GitHub sends it webhooks; the configured URL naming the web app's
+    // endpoint is an inferred call, the bare origin and the unknown path
+    // draw nothing.
+    assert!(l2.contains("<b>GitHub</b>"), "{l2}");
+    assert!(
+        md.contains("| GitHub | Sends webhooks to | Agent events | HTTPS | Confirmed |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("| Agent events | Calls | Web application | HTTPS | InferredWeak |"),
+        "{md}"
+    );
+    assert_eq!(md.matches("| Agent events | Calls |").count(), 1, "{md}");
+    let (strict, _) = render(&f, ExportMode::VerifiedOnly, None);
+    assert!(!strict.contains("| Agent events | Calls |"), "{strict}");
+}
+
+/// AC-0948: a configured URL matches an endpoint route by its segments.
+#[test]
+fn a_configured_url_matches_an_endpoint_route() {
+    assert_eq!(url_path("https://a.example/x/y?q=1"), Some("/x/y"));
+    assert_eq!(url_path("https://a.example"), None);
+    assert_eq!(url_path("https://a.example/"), None);
+    assert!(path_matches("/api/hooks/{path...}", "/api/hooks/batch"));
+    assert!(path_matches("/api/hooks/{path...}", "/api/hooks/a/b"));
+    assert!(!path_matches("/api/hooks/{path...}", "/api/hooks"));
+    assert!(path_matches("/users/:id", "/users/7"));
+    assert!(!path_matches("/users/:id", "/users/7/x"));
+    assert!(path_matches("/.well-known/k.json", "/.well-known/k.json"));
+}
+
+/// AC-0947: a store known only by its URL variable, read in one place with
+/// a fallback variable of the same provider, is drawn once.
+#[test]
+fn a_store_read_through_a_fallback_variable_is_one_store() {
+    let mut f = system();
+    let reader = f.code(SERVER, "app/kv.py", "from_env");
+    for env in ["KV_REST_API_URL", "UPSTASH_REDIS_REST_URL"] {
+        let store = f.node(
+            &format!("res:{SERVER}@observed:redis:env:{env}"),
+            "Resource",
+            json!({"kind": "sdk-client", "provider": "redis", "observed": true,
+                   "env_key": env, "store_from_env_key": true,
+                   "logical_id": format!("observed:redis:env:{env}")}),
+            (SERVER, "app/kv.py"),
+        );
+        f.edge(&reader, "USES", &store, (SERVER, "app/kv.py"), json!({}));
+    }
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert_eq!(l2.matches("<b>Redis</b>").count(), 1, "{l2}");
+    assert!(
+        l2.contains("Located by `KV_REST_API_URL` or `UPSTASH_REDIS_REST_URL`"),
+        "{l2}"
+    );
+}
