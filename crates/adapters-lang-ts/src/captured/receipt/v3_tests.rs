@@ -425,17 +425,19 @@ fn fact_match_value_bound_tightens_the_wire_model_on_real_inputs() {
     assert!(fact_match_workspace(usize::MAX / 4, usize::MAX / 4).is_none());
 }
 
-// AC-1024, AC-1026, AC-1029: each lane's receipts name the exact grammar
-// and parser pins its adapter manifest declares.
+// AC-1024, AC-1026, AC-1029, AC-1031: each lane's receipts name the exact
+// grammar and parser pins its adapter manifest declares.
 #[test]
 fn lane_pins_match_the_adapter_manifests() {
     let python = include_str!("../../../../adapters-lang-python/Cargo.toml");
     let go = include_str!("../../../../adapters-lang-go/Cargo.toml");
+    let java = include_str!("../../../../adapters-lang-java/Cargo.toml");
     let ts = include_str!("../../../Cargo.toml");
     for (manifest, grammar, package) in [
         (ts, Grammar::TypeScript, "tree-sitter-typescript"),
         (python, Grammar::Python, "tree-sitter-python"),
         (go, Grammar::Go, "tree-sitter-go"),
+        (java, Grammar::Java, "tree-sitter-java"),
     ] {
         let contract = contract(3, grammar).unwrap();
         let (name, version) = contract.grammar_package.split_once('@').unwrap();

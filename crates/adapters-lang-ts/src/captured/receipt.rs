@@ -32,9 +32,9 @@ struct Contract {
 }
 
 /// The producer contract a receipt of `version` and `grammar` was minted
-/// under. Python (AC-1024) and Go (AC-1026) receipts exist only in the v3
-/// shape and carry primary provenance alone; each lane's own prefix and
-/// domain keep it distinct from every TypeScript receipt.
+/// under. Python (AC-1024), Go (AC-1026) and Java (AC-1031) receipts exist
+/// only in the v3 shape and carry primary provenance alone; each lane's own
+/// prefix and domain keep it distinct from every TypeScript receipt.
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
     let lane = match grammar {
         Grammar::Python => Some(Contract {
@@ -50,6 +50,14 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.adapter-go/direct-lexical-v1",
             domain: b"cartograph:go-primary-receipt:v1\0",
             grammar_package: GO_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        Grammar::Java => Some(Contract {
+            prefix: "java-primary-v1:",
+            producer: "t0.adapter-java/direct-lexical-v1",
+            domain: b"cartograph:java-primary-receipt:v1\0",
+            grammar_package: JAVA_GRAMMAR_PACKAGE,
             parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
@@ -115,6 +123,8 @@ const PARSER_PACKAGE: &str = "tree-sitter@0.27.2";
 const PYTHON_GRAMMAR_PACKAGE: &str = "tree-sitter-python@0.25.0";
 // The Go adapter's exact grammar pin (crates/adapters-lang-go).
 const GO_GRAMMAR_PACKAGE: &str = "tree-sitter-go@0.25.0";
+// The Java adapter's exact grammar pin (crates/adapters-lang-java).
+const JAVA_GRAMMAR_PACKAGE: &str = "tree-sitter-java@0.23.5";
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,12 +139,14 @@ pub enum Grammar {
     Python,
     /// `.go` files, parsed by the Go adapter (AC-1026).
     Go,
+    /// `.java` files, parsed by the Java adapter (AC-1031).
+    Java,
 }
 
 impl Grammar {
     /// A non-TypeScript lane whose receipts bind primary provenance alone.
     pub(super) fn provenance_only(self) -> bool {
-        matches!(self, Self::Python | Self::Go)
+        matches!(self, Self::Python | Self::Go | Self::Java)
     }
 
     pub(super) fn for_path(path: &str) -> Self {
@@ -144,6 +156,8 @@ impl Grammar {
             Self::Python
         } else if path.ends_with(".go") {
             Self::Go
+        } else if path.ends_with(".java") {
+            Self::Java
         } else {
             Self::Tsx
         }
@@ -606,7 +620,8 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
         || !super::valid_path(&file.path)
         || !(super::supported(&file.path)
             || file.path.ends_with(".py")
-            || file.path.ends_with(".go"))
+            || file.path.ends_with(".go")
+            || file.path.ends_with(".java"))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
@@ -677,7 +692,7 @@ fn inventory(
         push(RangeRole::Provenance, index, evidence)?;
     }
     if let Some(value) = props.get("rule") {
-        // The Python and Go lanes carry primary provenance alone.
+        // The Python, Go and Java lanes carry primary provenance alone.
         if grammar.provenance_only() {
             return Err(CapturedError::Invalid("rule source inventory"));
         }
