@@ -5,6 +5,7 @@
 //
 // Checks:
 //   1. Every US in user_stories.md has a row in the US-TM matrix, and vice versa.
+//      The matrix is docs/US-TM.md plus fragment rows in docs/us-tm.d/.
 //   2. AC ids are globally unique; every US defines at least one AC.
 //   3. Each matrix row's AC range covers exactly the ACs its US defines.
 //   4. Every ADR referenced in the matrix exists as a file in docs/adr/.
@@ -76,8 +77,28 @@ for (const [us, statuses] of storyStatuses) {
   }
 }
 
-// --- US-TM.md ----------------------------------------------------------------
-const matrixSrc = await readFile(path.join(ROOT, 'docs/US-TM.md'), 'utf8');
+// --- US-TM.md + docs/us-tm.d/ ---------------------------------------------------
+// The matrix is docs/US-TM.md plus fragment files in docs/us-tm.d/. A fragment
+// holds rows in the same column layout: a US row adds ACs, ADRs and test ids to
+// a story that already has its row in US-TM.md, and an ADR row adds to the ADR
+// index. A PR that adds ACs writes a new fragment instead of editing a shared
+// row, so parallel PRs never touch the same lines.
+const baseMatrixSrc = await readFile(path.join(ROOT, 'docs/US-TM.md'), 'utf8');
+const fragmentDir = path.join(ROOT, 'docs/us-tm.d');
+const fragmentFiles = (await readdir(fragmentDir).catch(() => []))
+  .filter((f) => f.endsWith('.md') && f !== 'README.md')
+  .sort();
+const fragmentSrcs = [];
+for (const file of fragmentFiles) {
+  if (!/^(?:AC|ADR)-\d{4}\.md$/u.test(file)) {
+    fail(`docs/us-tm.d/${file} is not named AC-NNNN.md or ADR-NNNN.md`);
+  }
+  fragmentSrcs.push(await readFile(path.join(fragmentDir, file), 'utf8'));
+}
+const matrixSrc = [baseMatrixSrc, ...fragmentSrcs].join('\n');
+const baseUs = new Set(
+  [...baseMatrixSrc.matchAll(/^\|\s*(US-\d{4})\s*\|/gmu)].map((m) => m[1]),
+);
 
 const expandAcRange = (cell) => {
   // "AC-0001..0003" or "AC-0013..0014" or a single "AC-0007"
@@ -90,15 +111,27 @@ const expandAcRange = (cell) => {
   return acs;
 };
 
-const matrixUs = new Map(); // US id -> { acs, adrs }
+const matrixUs = new Map(); // US id -> { acs, adrs }, unioned over its rows
 const matrixAdrRefs = new Set();
+const matrixAcRow = new Map(); // AC id -> US of the row that maps it
 for (const line of matrixSrc.split('\n')) {
   const row = line.match(/^\|\s*(US-\d{4})\s*\|([^|]*)\|/u);
   if (!row) continue;
   const us = row[1];
   const adrs = new Set([...line.matchAll(/ADR-\d{4}/gu)].map((m) => m[0]));
   for (const adr of adrs) matrixAdrRefs.add(adr);
-  matrixUs.set(us, { acs: expandAcRange(row[2]), adrs });
+  const acs = expandAcRange(row[2]);
+  for (const ac of acs) {
+    if (matrixAcRow.has(ac)) fail(`${ac} is mapped by more than one US-TM row`);
+    matrixAcRow.set(ac, us);
+  }
+  const entry = matrixUs.get(us) ?? { acs: new Set(), adrs: new Set() };
+  for (const ac of acs) entry.acs.add(ac);
+  for (const adr of adrs) entry.adrs.add(adr);
+  matrixUs.set(us, entry);
+}
+for (const us of matrixUs.keys()) {
+  if (!baseUs.has(us)) fail(`${us} has a row in docs/us-tm.d/ but none in US-TM.md`);
 }
 
 for (const us of storyAcs.keys()) {
@@ -138,7 +171,11 @@ for (const adr of matrixAdrRefs) {
   if (!adrIds.has(adr)) fail(`US-TM.md references ${adr}, but docs/adr/ has no such file`);
 }
 // The ADR index table at the bottom of US-TM.md must list every ADR on disk.
-const indexedAdrs = new Set([...matrixSrc.matchAll(/^\|\s*(ADR-\d{4})\s*\|/gmu)].map((m) => m[1]));
+const indexedAdrs = new Set();
+for (const m of matrixSrc.matchAll(/^\|\s*(ADR-\d{4})\s*\|/gmu)) {
+  if (indexedAdrs.has(m[1])) fail(`${m[1]} is listed more than once in the US-TM ADR index`);
+  indexedAdrs.add(m[1]);
+}
 for (const adr of adrIds) {
   if (!indexedAdrs.has(adr)) fail(`${adr} exists in docs/adr/ but is missing from the US-TM.md ADR index`);
 }
@@ -166,7 +203,8 @@ for (const line of matrixSrc.split('\n')) {
   if (!row) continue;
   const acs = [...expandAcRange(row[2])];
   const tids = [...expandTestRange(line)];
-  if (tids.length > 0 && tids.length !== acs.length) {
+  // Every row, in US-TM.md or a fragment, reserves one test id per AC.
+  if (tids.length !== acs.length) {
     fail(
       `${row[1]}: US-TM reserves ${tids.length} test ids for ${acs.length} ACs — ranges must pair 1:1`,
     );
