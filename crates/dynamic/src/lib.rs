@@ -500,6 +500,13 @@ pub struct Enrichment {
     pub resources_enriched: usize,
     /// Placeholder nodes the observation resolved (AC-0009 supersede).
     pub placeholders_resolved: usize,
+    /// The root module outside the repository root the state was applied
+    /// to, when the repository has exactly one and no root-level match
+    /// (ADR-0077). `None` for the repository-root module.
+    pub root_module: Option<String>,
+    /// A `gap:tf-state-root:` Gap when the state could not be tied to one
+    /// root module and was not applied (ADR-0077).
+    pub unapplied: Option<Node>,
 }
 
 fn observed_prov(state_path: &str, span: &Range<usize>, fact: &str) -> serde_json::Value {
@@ -553,6 +560,15 @@ fn address_span(raw: &str, address: &str) -> Range<usize> {
 /// parsed block defined (a module's innards, a resource in an unparsed
 /// file). State proves it exists: the flag drops, the observed type and
 /// logical id land, and `observed_prov` records where (AC-0009).
+///
+/// Terraform ids are scoped by root module (ADR-0077). The repository's one
+/// `state_json` is the state of the repository-root module: it matches nodes
+/// with neither a `root_module` nor a `child_module` prop, exactly as before
+/// scoping. When it matches none of those and the repository has exactly
+/// one root module outside its root, it is that module's state (a lone
+/// `infra/` directory keeps matching). With two or more such root modules
+/// nothing says which one the state belongs to, so nothing is applied and
+/// [`Enrichment::unapplied`] holds a `gap:tf-state-root:` Gap naming them.
 pub fn enrich_resources(
     nodes: &mut [Node],
     repo: &str,
@@ -565,14 +581,68 @@ pub fn enrich_resources(
         .iter()
         .map(|r| (r.address.as_str(), r))
         .collect();
-    let prefix = format!("res:{repo}@");
+    let unscoped = |node: &Node| {
+        node.props.get("root_module").is_none() && node.props.get("child_module").is_none()
+    };
+    let mut out = enrich_scope(
+        nodes,
+        &format!("res:{repo}@"),
+        &unscoped,
+        &by_address,
+        state,
+        state_path,
+        state_raw,
+    );
+    if out.resources_enriched > 0 {
+        return out;
+    }
+    let root_modules: BTreeSet<String> = nodes
+        .iter()
+        .filter(|node| node.label == "Resource")
+        .filter_map(|node| node.props.get("root_module")?.as_str())
+        .map(str::to_string)
+        .collect();
+    match root_modules.len() {
+        0 => {}
+        1 => {
+            let root_module = root_modules.first().expect("one root module").clone();
+            let in_root = |node: &Node| {
+                node.props.get("root_module").and_then(|v| v.as_str()) == Some(&root_module)
+            };
+            out = enrich_scope(
+                nodes,
+                &format!("res:{repo}@{root_module}/"),
+                &in_root,
+                &by_address,
+                state,
+                state_path,
+                state_raw,
+            );
+            if out.resources_enriched > 0 {
+                out.root_module = Some(root_module);
+            }
+        }
+        _ => out.unapplied = Some(state_root_gap(repo, &root_modules, state_path, state_raw)),
+    }
+    out
+}
+
+fn enrich_scope(
+    nodes: &mut [Node],
+    prefix: &str,
+    in_scope: &dyn Fn(&Node) -> bool,
+    by_address: &BTreeMap<&str, &ObservedResource>,
+    state: &ObservedState,
+    state_path: &str,
+    state_raw: &str,
+) -> Enrichment {
     let mut out = Enrichment::default();
 
     for node in nodes.iter_mut() {
-        if node.label != "Resource" {
+        if node.label != "Resource" || !in_scope(node) {
             continue;
         }
-        let Some(address) = node.id.strip_prefix(&prefix) else {
+        let Some(address) = node.id.strip_prefix(prefix) else {
             continue;
         };
         let address = address.to_string();
@@ -613,6 +683,45 @@ pub fn enrich_resources(
         out.resources_enriched += 1;
     }
     out
+}
+
+/// Gap for a `state_json` that cannot be tied to one root module
+/// (ADR-0077): the repository has no repository-root Terraform it matches
+/// and several root modules elsewhere.
+fn state_root_gap(
+    repo: &str,
+    root_modules: &BTreeSet<String>,
+    state_path: &str,
+    state_raw: &str,
+) -> Node {
+    let id = format!("gap:tf-state-root:{repo}@");
+    let provenance = Provenance::new(
+        Tier::Dynamic,
+        ConfidenceTier::Gap,
+        vec![EvidenceRef {
+            repo: String::new(),
+            path: state_path.into(),
+            byte_start: 0,
+            byte_end: state_raw.len() as u64,
+            commit_sha: String::new(),
+        }],
+        EXTRACTOR_ID,
+        format!("Gap {id} {}", serde_json::json!(root_modules)).as_bytes(),
+    )
+    .expect("Dynamic/Gap is within ceiling");
+    Node {
+        id,
+        label: "Gap".into(),
+        props: serde_json::json!({
+            "state_json": state_path,
+            "root_modules": root_modules,
+            "reason": "state_json matches no repository-root Terraform and the repository \
+                has several root modules; nothing states which one this state belongs to, \
+                so it is not applied",
+            "attempted_tiers": ["T1"],
+            "prov": provenance,
+        }),
+    }
 }
 
 /// Counts from Pulumi deployment enrichment.
@@ -1301,6 +1410,102 @@ mod tests {
             .as_u64()
             .unwrap() as usize;
         assert_eq!(&STATE[start..start + 22], "\"aws_sqs_queue.orders\"");
+    }
+
+    fn scoped(id: &str, key: &str, scope: &str) -> Node {
+        let mut node = t0_resource(id, "aws_sqs_queue");
+        node.props[key] = scope.into();
+        node
+    }
+
+    #[test]
+    fn state_json_matches_only_repository_root_terraform_when_present() {
+        // AC-1501 (T-1501, ADR-0077): state_json is the repository-root
+        // module's state; scoped nodes with the same address stay untouched.
+        let state = parse_state(STATE).unwrap();
+        let mut nodes = vec![
+            t0_resource("res:local/infra@aws_sqs_queue.orders", "aws_sqs_queue"),
+            scoped(
+                "res:local/infra@envs/prod/aws_sqs_queue.orders",
+                "root_module",
+                "envs/prod",
+            ),
+            scoped(
+                "res:local/infra@modules/q/aws_sqs_queue.orders",
+                "child_module",
+                "modules/q",
+            ),
+        ];
+        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        assert_eq!(report.resources_enriched, 1);
+        assert_eq!(report.root_module, None);
+        assert!(report.unapplied.is_none());
+        assert!(nodes[0].props.get("observed").is_some());
+        assert!(nodes[1].props.get("observed").is_none());
+        assert!(nodes[2].props.get("observed").is_none());
+    }
+
+    #[test]
+    fn state_json_applies_to_a_lone_root_module_outside_the_root() {
+        // AC-1501: a repository whose only root module is `infra/` keeps
+        // matching its state_json after scoping; child-module reads never do.
+        let state = parse_state(STATE).unwrap();
+        let mut nodes = vec![
+            scoped(
+                "res:local/infra@infra/aws_sqs_queue.orders",
+                "root_module",
+                "infra",
+            ),
+            scoped(
+                "res:local/infra@modules/q/aws_sqs_queue.orders",
+                "child_module",
+                "modules/q",
+            ),
+        ];
+        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        assert_eq!(report.resources_enriched, 1);
+        assert_eq!(report.root_module.as_deref(), Some("infra"));
+        assert!(nodes[0].props.get("observed").is_some());
+        assert!(nodes[1].props.get("observed").is_none());
+        let start = nodes[0].props["observed_prov"]["evidence"][0]["byte_start"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(&STATE[start..start + 22], "\"aws_sqs_queue.orders\"");
+    }
+
+    #[test]
+    fn state_json_with_several_root_modules_is_a_gap_not_a_guess() {
+        // AC-1501: two root modules and no repository-root match: nothing
+        // says which one the state belongs to, so it is not applied.
+        let state = parse_state(STATE).unwrap();
+        let mut nodes = vec![
+            scoped(
+                "res:local/infra@envs/prod/aws_sqs_queue.orders",
+                "root_module",
+                "envs/prod",
+            ),
+            scoped(
+                "res:local/infra@envs/staging/aws_sqs_queue.orders",
+                "root_module",
+                "envs/staging",
+            ),
+        ];
+        let report = enrich_resources(&mut nodes, "local/infra", &state, "state.json", STATE);
+        assert_eq!(report.resources_enriched, 0);
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.props.get("observed").is_none())
+        );
+        let gap = report.unapplied.expect("ambiguous state is a Gap");
+        assert_eq!(gap.id, "gap:tf-state-root:local/infra@");
+        assert_eq!(gap.label, "Gap");
+        assert_eq!(
+            gap.props["root_modules"],
+            serde_json::json!(["envs/prod", "envs/staging"])
+        );
+        assert_eq!(gap.props["prov"]["confidence_tier"], "Gap");
+        assert_eq!(gap.props["prov"]["evidence"][0]["path"], "state.json");
     }
 
     #[test]
