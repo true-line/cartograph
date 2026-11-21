@@ -274,10 +274,19 @@ pub(super) fn keep_test_facts(out: &mut Extraction) {
 /// The number of literal segments a route matches `path` with, or `None`
 /// when it does not match. `{name}` and `:name` match one segment; a final
 /// `{name...}` or `*` matches the rest; a final `{$}` matches nothing more.
-fn route_match(route: &str, path: &str) -> Option<usize> {
+fn route_match(route: &str, path: &str, subtree: bool) -> Option<usize> {
     // `{$}` (Go 1.22) anchors the end: the path must stop there.
     if let Some(prefix) = route.strip_suffix("{$}") {
         return (path == prefix).then(|| prefix.split('/').filter(|s| !s.is_empty()).count() + 1);
+    }
+    // `net/http`: a pattern ending in `/` names itself and the subtree
+    // below it.
+    if subtree && route.ends_with('/') {
+        let prefix = route.trim_end_matches('/');
+        if path.trim_end_matches('/') == prefix {
+            return route_match(prefix, prefix, false).or(Some(0));
+        }
+        return route_match(&format!("{prefix}/{{rest...}}"), path, false);
     }
     let rs: Vec<&str> = route.trim_end_matches('/').split('/').collect();
     let ps: Vec<&str> = path.trim_end_matches('/').split('/').collect();
@@ -303,15 +312,20 @@ pub(super) fn resolve(out: &mut Extraction, repo: &str) {
     if requests.is_empty() {
         return;
     }
-    let endpoints: Vec<(String, String, String)> = out
+    // One row per endpoint identity: two registrations of one route are
+    // one endpoint.
+    let endpoints: BTreeMap<String, (String, String, bool)> = out
         .nodes
         .iter()
         .filter(|n| n.label == "Endpoint")
         .filter_map(|n| {
             Some((
-                n.props["method"].as_str()?.to_string(),
-                n.props["path"].as_str()?.to_string(),
                 n.id.clone(),
+                (
+                    n.props["method"].as_str()?.to_string(),
+                    n.props["path"].as_str()?.to_string(),
+                    n.props["framework"] == "net/http",
+                ),
             ))
         })
         .collect();
@@ -322,8 +336,10 @@ pub(super) fn resolve(out: &mut Extraction, repo: &str) {
             let path = request.path.clone()?;
             let mut matches: Vec<(usize, &str)> = endpoints
                 .iter()
-                .filter(|(m, _, _)| *m == method || m == "ANY")
-                .filter_map(|(_, route, id)| Some((route_match(route, &path)?, id.as_str())))
+                .filter(|(_, (m, _, _))| *m == method || m == "ANY")
+                .filter_map(|(id, (_, route, subtree))| {
+                    Some((route_match(route, &path, *subtree)?, id.as_str()))
+                })
                 .collect();
             matches.sort_by_key(|(fixed, _)| std::cmp::Reverse(*fixed));
             match matches.as_slice() {

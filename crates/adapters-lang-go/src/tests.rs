@@ -1373,10 +1373,13 @@ func Routes(mux *http.ServeMux) {
     mux.HandleFunc("GET /api/items/{id}", GetItem)
     mux.HandleFunc("POST /api/items", CreateItem)
     mux.HandleFunc("GET /{$}", GetItem)
+    mux.HandleFunc("/static/", GetItem)
+    mux.HandleFunc("/static/", GetItem)
 }
 func GetItem(w http.ResponseWriter, r *http.Request) {}
 func CreateItem(w http.ResponseWriter, r *http.Request) { validate() }
 func validate() {}
+func run() {}
 "#,
     )
     .unwrap();
@@ -1407,6 +1410,10 @@ func TestComputed(t *testing.T) {
     _ = httptest.NewRequest("DELETE", "/api/items", nil)
     _ = httptest.NewRequest("GET", "/other", nil)
 }
+func TestStatic(t *testing.T) {
+    _ = httptest.NewRequest("GET", "/static/css/site.css", nil)
+    run()
+}
 func Testing(t *testing.T) {}
 func TestNotATest(x int) {}
 "#,
@@ -1415,6 +1422,11 @@ func TestNotATest(x int) {}
     std::fs::write(
         dir.path().join("helper_test.go"),
         "package app\nfunc newHelper() { validate() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("worker.go"),
+        "package app\ntype Worker struct{}\nfunc (w *Worker) run() {}\n",
     )
     .unwrap();
     let x = extract_dir(dir.path(), &id()).unwrap();
@@ -1426,7 +1438,7 @@ func TestNotATest(x int) {}
         .collect();
     assert_eq!(
         tests,
-        BTreeSet::from(["TestComputed", "TestCreate", "TestGetItem"])
+        BTreeSet::from(["TestComputed", "TestCreate", "TestGetItem", "TestStatic"])
     );
     let edge = |src: &str, label: &str| -> Vec<&Edge> {
         x.edges
@@ -1462,6 +1474,19 @@ func TestNotATest(x int) {}
         edge("server_test.go#TestCreate", "REQUESTS")[0].dst,
         "ep:local/go-service@POST:/api/items"
     );
+    // A `net/http` subtree pattern serves the paths below it, and two
+    // registrations of it are one endpoint.
+    assert_eq!(
+        edge("server_test.go#TestStatic", "REQUESTS")[0].dst,
+        "ep:local/go-service@ANY:/static/"
+    );
+    // An unqualified call reaches the package function, not a method of
+    // the same name.
+    let run: Vec<&str> = edge("server_test.go#TestStatic", "CALLS")
+        .iter()
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(run, ["sym:local/go-service@server.go#run"]);
     // Computed and unserved requests are Gaps naming them.
     let mut reasons: Vec<&str> = edge("server_test.go#TestComputed", "REQUESTS")
         .iter()

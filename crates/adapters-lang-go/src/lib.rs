@@ -1652,11 +1652,16 @@ pub fn extract_dir_incremental_with_progress(
     // method value on a receiver, #2007).
     // A test file's functions answer only calls from test files, and never
     // shadow the package's own (#2019).
-    let index_of = |tests: bool| {
+    // An unqualified call names a package-level function, never a method,
+    // so `functions` leaves out `Type.Method` symbols.
+    let index_of = |tests: bool, functions: bool| {
         out.nodes
             .iter()
             .filter(|node| node.label == "Symbol")
             .filter(move |node| tests || !in_test_file(&node.id))
+            .filter(move |node| {
+                !functions || !node.id.rsplit('#').next().unwrap_or("").contains('.')
+            })
             .flat_map(|node| {
                 let dir = node.props.get("package_dir").and_then(|d| d.as_str());
                 let test = in_test_file(&node.id);
@@ -1683,26 +1688,17 @@ pub fn extract_dir_incremental_with_progress(
             .map(|(key, (_, id))| (key, id))
             .collect::<BTreeMap<_, _>>()
     };
-    let test_index = index_of(true);
-    let symbol_index = out
-        .nodes
-        .iter()
-        .filter(|node| node.label == "Symbol" && !in_test_file(&node.id))
-        .flat_map(|node| {
-            let dir = node.props.get("package_dir").and_then(|d| d.as_str());
-            ["simple_name", "name"].into_iter().filter_map(move |key| {
-                Some((
-                    (dir?.to_string(), node.props.get(key)?.as_str()?.to_string()),
-                    node.id.clone(),
-                ))
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
+    let test_index = index_of(true, false);
+    let symbol_index = index_of(false, false);
+    let test_functions = index_of(true, true);
+    let package_functions = index_of(false, true);
     for pending in std::mem::take(&mut out.pending_calls) {
-        let index = if in_test_file(&pending.src) {
-            &test_index
-        } else {
-            &symbol_index
+        let unqualified = pending.props["resolution"] == "go-package-directory-proven";
+        let index = match (in_test_file(&pending.src), unqualified) {
+            (true, true) => &test_functions,
+            (true, false) => &test_index,
+            (false, true) => &package_functions,
+            (false, false) => &symbol_index,
         };
         if let Some(dst) = index.get(&(pending.package_dir, pending.exported)) {
             out.edges.push(Edge {
