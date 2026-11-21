@@ -381,11 +381,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # Clippy runs in the Rust clippy lane (#1924).
-
-      # The app unit-test binary runs in the Rust app tests shards and the
-      # agents and spec packages in Rust agents & spec tests (#1924); `app` is
-      # a binary-only package, so excluding it drops nothing else.
+      # Clippy runs in the Rust clippy lane, the app unit-test binary in the
+      # Rust app tests shards and the agents and spec packages in Rust agents
+      # & spec tests (#1924); `app` is a binary-only package, so excluding it
+      # drops nothing else.
       - name: Test
         run: cargo test --workspace --exclude app --exclude agents --exclude spec
 
