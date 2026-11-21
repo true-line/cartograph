@@ -136,6 +136,13 @@ const TEMPLATES: &[(&str, OmissionClass, FillSeam)] = &[
         C::MissingInput,
         S::ManifestInput,
     ),
+    // ADR-0075: the value is there but no allowlist lets it be read.
+    (
+        "env key * is set in * but its value is not read: list it in env_read in \
+         cartograph.system.toml or in .cartograph/env.toml",
+        C::MissingInput,
+        S::ManifestInput,
+    ),
     ("runtime-computed *", C::MissingInput, S::ManifestInput),
     ("dynamic * path", C::MissingInput, S::ManifestInput),
     (
@@ -719,6 +726,12 @@ mod tests {
         let cases = [
             (
                 "env key API_URL not found in any env file in the repo",
+                OmissionClass::MissingInput,
+                FillSeam::ManifestInput,
+            ),
+            (
+                "env key API_URL (base URL of api.get) is set in .env but its value is not \
+                 read: list it in env_read in cartograph.system.toml or in .cartograph/env.toml",
                 OmissionClass::MissingInput,
                 FillSeam::ManifestInput,
             ),

@@ -189,13 +189,14 @@ and `Ready` mean no AC has any evidence yet. Statuses were last set from `main` 
 - **As a** engineer **I want** producers and consumers linked by channel identity **so that** flows cross service and repo boundaries.
 - **Priority:** Must · **Status:** Done
 - **AC-0010** Given a literal channel id on both sides, when matched, then a Confirmed PUBLISHES/SUBSCRIBES edge is created.
-- **AC-0011** Given a channel id from a present config/env file, when resolved, then the edge is Confirmed via the config resolver.
+- **AC-0011** Given a channel id from a present config/env file under a key the author allowlists (AC-1018), when resolved, then the edge is Confirmed via the config resolver.
 - **AC-0012** Given a runtime-computed channel id, when unresolved at T0, then the hop escalates and, if still unresolved, emits a Gap with reason.
 - **AC-0256** Given an EventBridge `PutEvents` site whose detail type is unresolved at T0, when an OTel trace is applied, then the Gap is filled only by observations attributed to that site that establish bus and detail type (with literal static components) as exactly one distinct scoped identity; a bus-only, contradicting, unattributed, multi-identity or batched case keeps the Gap with a reason naming the shortfall, and an observed bus is preserved as its own fact.
 - **AC-0990** Given env files (`.env`, `.env.*`) that hold a secret-shaped value (a recognized secret pattern, a token-shaped value, a URL with a password, or a value under a credential key name that is not a template placeholder), when the config resolver indexes them, then the ingest is refused with every file, line and key named, no value disclosed, and the way to proceed (remove the values or files; declare non-secret values in `cartograph.system.toml` `[env]`) (#933).
-- **Security:** AC-0990: an env file holding a secret refuses the ingest; the resolver never keeps a secret-shaped value.
+- **AC-1018** Given env files (`.env`, `.env.*`), when the config resolver indexes them, then it reads a value only for a key listed in `env_read` in `cartograph.system.toml` or in `read` in the repository's `.cartograph/env.toml` (exact key names; a glob or other shape refuses the configuration; both empty by default), a listed URL value loses any `user@` part, and a site whose identity or base URL names a key an env file sets but no list names stays unresolved with a Gap naming the key, the file and how to list it; the secret refusal of AC-0990 still covers every line, listed or not, and `[env]` values need no listing (#933, ADR-0075).
+- **Security:** AC-0990: an env file holding a secret refuses the ingest; the resolver never keeps a secret-shaped value. AC-1018: no env-file value is read unless the author lists its key.
 - **Performance:** Channel index keyed by identity for O(1) match.
-- **Trace:** M3,M5,M6 · `events`, `dynamic`, `adapters-fw`, `adapters-lang-ts`, `flowtracer`, `app` · — · T-0010..0012, T-0256, T-0990
+- **Trace:** M3,M5,M6 · `events`, `dynamic`, `adapters-fw`, `adapters-lang-ts`, `flowtracer`, `ingest`, `app` · ADR-0075 · T-0010..0012, T-0256, T-0990, T-1018
 
 ### US-0005 — Client-side interaction graph (React first)
 - **Actor:** Engine

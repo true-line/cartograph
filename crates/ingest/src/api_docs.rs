@@ -85,7 +85,7 @@ fn normalize_key(path: &str) -> String {
 }
 
 /// Why [`read_anchored`] refused or failed to read a repo-relative file.
-enum AnchoredRead {
+pub(crate) enum AnchoredRead {
     /// A component of the path does not exist.
     NotFound,
     /// A component is a symlink or not a directory, or the final entry is not
@@ -110,7 +110,7 @@ impl From<std::io::Error> for AnchoredRead {
 /// it is typed and size-checked on the opened handle. At most
 /// [`MAX_API_DOC_BYTES`] + 1 bytes are read, so a file that grows after the
 /// check is still rejected. This mirrors `source_capture`'s selected-file read.
-fn read_anchored(root: &Path, rel: &str) -> Result<Vec<u8>, AnchoredRead> {
+pub(crate) fn read_anchored(root: &Path, rel: &str) -> Result<Vec<u8>, AnchoredRead> {
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
     use std::io::Read;
     let not_found = |err: std::io::Error| {
@@ -150,7 +150,7 @@ fn read_anchored(root: &Path, rel: &str) -> Result<Vec<u8>, AnchoredRead> {
 }
 
 /// Gap reason for a failed [`read_anchored`] of `what`.
-fn anchored_reason(what: &str, failure: AnchoredRead) -> String {
+pub(crate) fn anchored_reason(what: &str, failure: AnchoredRead) -> String {
     match failure {
         AnchoredRead::NotFound => format!("{what} does not exist"),
         AnchoredRead::NotRegular => {

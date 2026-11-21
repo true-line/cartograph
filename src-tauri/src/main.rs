@@ -1677,6 +1677,7 @@ fn extract_tree_with_registries(
         commit,
         layers,
         manifest_env,
+        &std::collections::BTreeSet::new(),
         deferred_origins,
         state_json,
         pulumi_json,
@@ -1713,6 +1714,9 @@ fn extract_tree_packed(
     commit: &str,
     layers: &[String],
     manifest_env: &std::collections::BTreeMap<String, String>,
+    // Env keys the system manifest lets the resolver read (ADR-0075);
+    // unioned with the repository's `.cartograph/env.toml`.
+    env_read: &std::collections::BTreeSet<String>,
     // Origins the system manifest binds (#589); empty outside a system add.
     deferred_origins: &std::collections::BTreeSet<String>,
     state_json: Option<&std::path::Path>,
@@ -2093,7 +2097,9 @@ fn extract_tree_packed(
                 .map_err(pack_err)?;
         }
     }
-    let mut cfg = events::ConfigIndex::from_dir(root).map_err(|e| e.to_string())?;
+    let mut read = ingest::manifest::repo_env_read(root).map_err(|e| e.to_string())?;
+    read.extend(env_read.iter().cloned());
+    let mut cfg = events::ConfigIndex::from_dir(root, &read).map_err(|e| e.to_string())?;
     cfg.apply_manifest(manifest_env, ingest::manifest::MANIFEST_NAME);
     cfg.defer_origins(deferred_origins);
     let ev_id = events::SourceId { repo, commit };
@@ -5305,6 +5311,7 @@ fn run_ingest<R: tauri::Runtime>(
             &[],
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],
@@ -5761,6 +5768,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &[],
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
             None,
             None,
             &[],
@@ -6076,6 +6084,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &commit,
                 &entry.layers,
                 &manifest.env,
+                &manifest.env_read_keys(),
                 &deferred_origins,
                 state_path.as_deref(),
                 pulumi_path.as_deref(),
@@ -12782,7 +12791,7 @@ export function App() {
         let tf = iac::extract_dir(dir.path(), &tf_id).unwrap();
         extraction.nodes.extend(tf.nodes);
         extraction.edges.extend(tf.edges);
-        let cfg = events::ConfigIndex::from_dir(dir.path()).unwrap();
+        let cfg = events::ConfigIndex::from_dir(dir.path(), &Default::default()).unwrap();
         let ev_id = events::SourceId {
             repo: "local",
             commit: "workdir",

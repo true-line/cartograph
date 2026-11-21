@@ -265,6 +265,13 @@ fn untracked_inputs(repo: &git2::Repository, root: &Path, depth: usize) -> Resul
         .map(|file| file.rel)
         .chain(gitignores)
         .chain(events::env_files(root).map_err(drop)?)
+        // The env-read allowlist changes what recovery resolves even when the
+        // repository ignores it (ADR-0075).
+        .chain(
+            std::fs::symlink_metadata(root.join(ingest::manifest::REPO_ENV_REL_PATH))
+                .is_ok_and(|meta| meta.is_file())
+                .then(|| ingest::manifest::REPO_ENV_REL_PATH.to_owned()),
+        )
         .collect();
     Ok(flagged
         .saturating_add(stale_submodules)
@@ -446,6 +453,32 @@ pub(crate) mod tests {
         fs::write(
             dir.path().join(".env"),
             b"API_URL=https://example.invalid\n",
+        )
+        .unwrap();
+        assert_eq!(
+            local_commit(dir.path()),
+            LocalCommit::Workdir {
+                reason: "1 modified or untracked files".into()
+            }
+        );
+    }
+
+    // AC-1018: an ignored `.cartograph/env.toml` changes which env values
+    // recovery reads, so it keeps `workdir`. (T-1018)
+    #[test]
+    fn ignored_env_read_allowlist_keeps_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_clean_repo(
+            dir.path(),
+            &[
+                (".gitignore", b".cartograph/\n"),
+                ("src/app.ts", b"export const ok = 1;\n"),
+            ],
+        );
+        fs::create_dir_all(dir.path().join(".cartograph")).unwrap();
+        fs::write(
+            dir.path().join(ingest::manifest::REPO_ENV_REL_PATH),
+            b"read = [\"QUEUE_URL\"]\n",
         )
         .unwrap();
         assert_eq!(

@@ -5,11 +5,14 @@
 //! deterministically at ingest; T2 may *suggest* additions later (M7),
 //! always user-confirmed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The canonical manifest file name.
 pub const MANIFEST_NAME: &str = "cartograph.system.toml";
+
+/// A repository's own env-read allowlist (ADR-0075), relative to its root.
+pub const REPO_ENV_REL_PATH: &str = ".cartograph/env.toml";
 
 /// Manifest errors.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +49,14 @@ pub enum ManifestError {
     /// A base URL is not an absolute `http(s)://host[/path]` URL.
     #[error("base URL \"{0}\" must be absolute http(s)://host[/path], without query or fragment")]
     InvalidBaseUrl(String),
+    /// An env-read allowlist entry is not an exact key name (ADR-0075).
+    #[error(
+        "env_read entry \"{0}\" must be an exact env key name ([A-Za-z_][A-Za-z0-9_.]*); globs are not allowed"
+    )]
+    InvalidEnvReadKey(String),
+    /// `.cartograph/env.toml` is not a readable regular file in the repository.
+    #[error("{0}")]
+    RepoEnvUnreadable(String),
 }
 
 /// The five layers of SPEC-00 §3; hints gate which extractors run.
@@ -137,6 +148,11 @@ pub struct SystemManifest {
     /// (`SETTINGS.apiUrl`, #737): only this declaration resolves it.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Env keys whose values the config resolver may read from env files
+    /// (ADR-0075, AC-1018): exact names, empty by default. No other
+    /// env-file value is read.
+    #[serde(default)]
+    pub env_read: Vec<String>,
     /// Declared HTTP services (#589).
     #[serde(default)]
     pub services: Vec<ManifestService>,
@@ -164,7 +180,13 @@ impl SystemManifest {
             }
         }
         manifest.validate_bindings()?;
+        validate_env_read(&manifest.env_read)?;
         Ok(manifest)
+    }
+
+    /// The `env_read` allowlist as a set.
+    pub fn env_read_keys(&self) -> BTreeSet<String> {
+        self.env_read.iter().cloned().collect()
     }
 
     /// Check that service names are unique, services name declared repos,
@@ -202,4 +224,56 @@ impl SystemManifest {
         }
         Ok(())
     }
+}
+
+/// Refuse an allowlist entry that is not an exact env key name.
+fn validate_env_read(keys: &[String]) -> Result<(), ManifestError> {
+    let exact = |key: &str| {
+        let mut chars = key.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    };
+    match keys.iter().find(|key| !exact(key)) {
+        Some(bad) => Err(ManifestError::InvalidEnvReadKey(bad.clone())),
+        None => Ok(()),
+    }
+}
+
+/// Top-level schema of a repository's `.cartograph/env.toml`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoEnv {
+    #[serde(default)]
+    read: Vec<String>,
+}
+
+/// The env keys a repository lets the config resolver read, from
+/// `.cartograph/env.toml` at its root (ADR-0075, AC-1018): `read = [...]`,
+/// exact names. No file is an empty allowlist; a malformed file or entry,
+/// a symlink, or a non-regular or oversized file is an error, never an
+/// empty list.
+pub fn repo_env_read(root: &Path) -> Result<BTreeSet<String>, ManifestError> {
+    use crate::api_docs::{AnchoredRead, anchored_reason, read_anchored};
+    // No symlink anywhere in the path, a regular file, bounded size: the
+    // same anchored read as `.cartograph/api-docs.toml`.
+    let bytes = match read_anchored(root, REPO_ENV_REL_PATH) {
+        Ok(bytes) => bytes,
+        Err(AnchoredRead::NotFound) => return Ok(BTreeSet::new()),
+        Err(failure) => {
+            return Err(ManifestError::RepoEnvUnreadable(anchored_reason(
+                REPO_ENV_REL_PATH,
+                failure,
+            )));
+        }
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        ManifestError::RepoEnvUnreadable(format!(
+            "{REPO_ENV_REL_PATH} is not valid UTF-8 ({error})"
+        ))
+    })?;
+    let parsed: RepoEnv = toml::from_str(&text)?;
+    validate_env_read(&parsed.read)?;
+    Ok(parsed.read.into_iter().collect())
 }
