@@ -1901,7 +1901,8 @@ fn extract_tree_packed(
             .unwrap_or_default();
         let (python, stats) = if let (Some(capture), false) = (primary, captured_python.is_empty())
         {
-            let mut minted = Vec::new();
+            // Candidates are bounded by the receipt budget as they are minted.
+            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
             let python = adapters_lang_python::extract_dir_from_sources(
                 root,
                 &python_id,
@@ -1922,11 +1923,12 @@ fn extract_tree_packed(
                             &parsed.edges,
                         )
                     {
-                        minted.extend(receipts);
+                        stage.extend(receipts);
                     }
                 },
             )
             .map_err(|error| error.to_string())?;
+            let mut minted = stage.into_receipts();
             // Only facts directory resolution left unchanged keep a receipt.
             let survivors =
                 primary_source::matching_bindings_in(&python.nodes, &python.edges, &minted)

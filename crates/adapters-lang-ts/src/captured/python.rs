@@ -47,17 +47,46 @@ pub fn mint_python_file_receipts(
     Ok(receipts)
 }
 
+/// Python receipt candidates staged while the lane mints them, charged
+/// against the extraction receipt budget as they arrive: once the staged
+/// candidates reach it, later ones are dropped, so minting cannot outgrow the
+/// budget before the survivor check and final admission run.
+#[derive(Default)]
+pub struct ReceiptStage {
+    receipts: Vec<MintedReceipt>,
+    charge: Charge,
+}
+
+impl ReceiptStage {
+    /// Stage one file's candidates in order; those past the budget are dropped
+    /// and their facts stay uncaptured.
+    pub fn extend(&mut self, candidates: Vec<MintedReceipt>) {
+        self.extend_within(candidates, EXTRACTION_BUDGET);
+    }
+
+    fn extend_within(&mut self, candidates: Vec<MintedReceipt>, budget: ReceiptBudget) {
+        for receipt in candidates {
+            if self.charge.admit(&receipt, self.receipts.len(), budget) {
+                self.receipts.push(receipt);
+            }
+        }
+    }
+
+    /// The staged candidates, in staging order.
+    pub fn into_receipts(self) -> Vec<MintedReceipt> {
+        self.receipts
+    }
+}
+
+const EXTRACTION_BUDGET: ReceiptBudget = ReceiptBudget {
+    bytes: MAX_EXTRACTION_RECEIPT_BYTES,
+    receipts: MAX_EXTRACTION_RECEIPTS,
+};
+
 /// Admit `candidates` after `held` within the extraction receipt budget, in
 /// order; one that does not fit is left out and its fact stays uncaptured.
 pub fn admit_after(held: &mut Vec<MintedReceipt>, candidates: Vec<MintedReceipt>) {
-    admit_within(
-        held,
-        candidates,
-        ReceiptBudget {
-            bytes: MAX_EXTRACTION_RECEIPT_BYTES,
-            receipts: MAX_EXTRACTION_RECEIPTS,
-        },
-    )
+    admit_within(held, candidates, EXTRACTION_BUDGET)
 }
 
 fn admit_within(
@@ -213,5 +242,15 @@ mod tests {
             },
         );
         assert_eq!(held, minted);
+        // Staging is bounded as candidates arrive.
+        let mut stage = ReceiptStage::default();
+        stage.extend_within(
+            minted.clone(),
+            ReceiptBudget {
+                bytes: usize::MAX,
+                receipts: 1,
+            },
+        );
+        assert_eq!(stage.into_receipts(), minted[..1]);
     }
 }

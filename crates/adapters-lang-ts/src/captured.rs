@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod python;
-pub use python::{admit_after, mint_python_file_receipts};
+pub use python::{ReceiptStage, admit_after, mint_python_file_receipts};
 mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES, MintedHeader, MintedReceipt,
