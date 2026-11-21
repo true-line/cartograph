@@ -216,69 +216,85 @@ fn control_reason(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
     }
 }
 
-/// Whether the callable enclosing `node` declares `name` as a parameter or
-/// local (a variable, catch, for-each, resource or lambda binding). Without
-/// one, a bare assignment may bind a field, so it counts as a mutation.
+/// Whether `name` is a parameter or local in scope at `node` (a variable
+/// declared earlier in an enclosing block, or a catch, for, for-each,
+/// resource, lambda or callable binding). Without one, a bare assignment
+/// binds a field, so it counts as a mutation.
 fn declares_local(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
-    let mut scope = node;
-    while let Some(parent) = scope.parent() {
-        scope = parent;
-        if BOUNDARIES.contains(&scope.kind()) {
-            break;
+    let named = |n: Option<TsNode<'_>>| n.is_some_and(|n| cx.text(&n) == name);
+    let declares = |declaration: TsNode<'_>| {
+        let mut walk = declaration.walk();
+        declaration
+            .children_by_field_name("declarator", &mut walk)
+            .any(|d| named(d.child_by_field_name("name")))
+    };
+    let parameters = |params: TsNode<'_>| match params.kind() {
+        "identifier" => cx.text(&params) == name,
+        _ => {
+            let mut walk = params.walk();
+            params.named_children(&mut walk).any(|p| match p.kind() {
+                "identifier" => cx.text(&p) == name,
+                "formal_parameter" | "spread_parameter" => named(p.child_by_field_name("name")),
+                _ => false,
+            })
         }
-    }
-    if !matches!(
-        scope.kind(),
-        "method_declaration"
-            | "constructor_declaration"
-            | "compact_constructor_declaration"
-            | "lambda_expression"
-            | "static_initializer"
-    ) {
-        return false;
-    }
-    let mut stack = vec![scope];
-    while let Some(current) = stack.pop() {
-        let bound = match current.kind() {
-            "variable_declarator"
-            | "formal_parameter"
-            | "spread_parameter"
-            | "catch_formal_parameter"
-            | "enhanced_for_statement"
-            | "resource" => current.child_by_field_name("name"),
-            _ => None,
-        };
-        if bound.is_some_and(|n| cx.text(&n) == name) {
+    };
+    let mut child = node;
+    while let Some(scope) = child.parent() {
+        let found =
+            match scope.kind() {
+                // Locals declared before the statement on the path.
+                "block" | "switch_block_statement_group" | "constructor_body" => {
+                    let mut walk = scope.walk();
+                    scope
+                        .named_children(&mut walk)
+                        .take_while(|s| s.start_byte() < child.start_byte())
+                        .any(|s| s.kind() == "local_variable_declaration" && declares(s))
+                }
+                "for_statement" => {
+                    let mut walk = scope.walk();
+                    scope
+                        .children_by_field_name("init", &mut walk)
+                        .any(|init| init.kind() == "local_variable_declaration" && declares(init))
+                }
+                "enhanced_for_statement" => {
+                    scope.child_by_field_name("body") == Some(child)
+                        && named(scope.child_by_field_name("name"))
+                }
+                "catch_clause" => {
+                    let mut walk = scope.walk();
+                    scope
+                        .named_children(&mut walk)
+                        .filter(|c| c.kind() == "catch_formal_parameter")
+                        .any(|c| named(c.child_by_field_name("name")))
+                }
+                "try_with_resources_statement" => scope
+                    .child_by_field_name("resources")
+                    .is_some_and(|resources| {
+                        let mut walk = resources.walk();
+                        resources
+                            .named_children(&mut walk)
+                            .filter(|r| {
+                                r.kind() == "resource" && r.end_byte() <= child.start_byte()
+                            })
+                            .any(|r| named(r.child_by_field_name("name")))
+                    }),
+                "lambda_expression" => scope
+                    .child_by_field_name("parameters")
+                    .is_some_and(parameters),
+                "method_declaration" | "constructor_declaration" => scope
+                    .child_by_field_name("parameters")
+                    .is_some_and(parameters),
+                _ => false,
+            };
+        if found {
             return true;
         }
-        // A lambda's bare parameter names, `x -> …` or `(x, y) -> …`.
-        if current.kind() == "lambda_expression"
-            && let Some(params) = current.child_by_field_name("parameters")
-        {
-            if params.kind() == "identifier" && cx.text(&params) == name {
-                return true;
-            }
-            if params.kind() == "inferred_parameters" {
-                let mut walk = params.walk();
-                if params
-                    .named_children(&mut walk)
-                    .any(|p| p.kind() == "identifier" && cx.text(&p) == name)
-                {
-                    return true;
-                }
-            }
+        // A callable or class body ends the scopes this one can see.
+        if BOUNDARIES.contains(&scope.kind()) {
+            return false;
         }
-        // A nested class body declares its own fields, not this callable's.
-        if current != scope
-            && matches!(
-                current.kind(),
-                "class_body" | "enum_body" | "interface_body"
-            )
-        {
-            continue;
-        }
-        let mut walk = current.walk();
-        stack.extend(current.named_children(&mut walk));
+        child = scope;
     }
     false
 }
