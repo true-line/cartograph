@@ -327,6 +327,9 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
         retarget_props_commit(&mut node.props, commit);
+        if node.label == "BusinessRule" {
+            rule_evidence::retarget(&mut node.props, commit);
+        }
     }
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
@@ -1054,6 +1057,9 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         });
         methods.push((method, symbol, chain, name));
     }
+
+    // Guarded returns and throws as business rules (#2020).
+    rule_evidence::extract(&cx, root, &methods_by_start, &mut out);
 
     // Retrofit client calls (#737): interface methods now, base URL at the
     // directory join.
@@ -1869,6 +1875,7 @@ mod http_request;
 mod okhttp;
 mod rest_template;
 mod retrofit;
+mod rule_evidence;
 mod spring_kafka;
 mod webclient;
 
