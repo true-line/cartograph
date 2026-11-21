@@ -93,20 +93,49 @@ fn reason_description(reason: &str) -> &'static str {
     }
 }
 
-/// The Symbol owning `node`: its method or constructor declaration; `None`
-/// inside a lambda, a class body (an anonymous or local class) or an
-/// initializer, whose exits are not the method's.
+/// The Symbol owning `node`: its method or constructor declaration (a
+/// record's compact constructor included); `None` inside a lambda, a class
+/// body or an initializer, whose exits are not the method's, and for a
+/// method of an anonymous or local class.
 fn owner<'f>(mut node: TsNode<'_>, methods: &'f HashMap<usize, String>) -> Option<&'f String> {
     while let Some(parent) = node.parent() {
         match parent.kind() {
-            "method_declaration" | "constructor_declaration" => {
-                return methods.get(&parent.start_byte());
+            "method_declaration"
+            | "constructor_declaration"
+            | "compact_constructor_declaration" => {
+                return member_of_named_type(parent)
+                    .then(|| methods.get(&parent.start_byte()))
+                    .flatten();
             }
             kind if BOUNDARIES.contains(&kind) => return None,
             _ => node = parent,
         }
     }
     None
+}
+
+/// Whether a declaration is a member of a named type nested only in other
+/// named types up to the file: not of an anonymous class body (an
+/// `object_creation_expression` or enum constant body) or a local class.
+fn member_of_named_type(declaration: TsNode<'_>) -> bool {
+    let mut node = declaration;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "program" => return true,
+            "class_body"
+            | "enum_body"
+            | "enum_body_declarations"
+            | "interface_body"
+            | "annotation_type_body"
+            | "class_declaration"
+            | "enum_declaration"
+            | "interface_declaration"
+            | "record_declaration"
+            | "annotation_type_declaration" => node = parent,
+            _ => return false,
+        }
+    }
+    false
 }
 
 type Branch<'t> = (TsNode<'t>, TsNode<'t>, BranchPolarity);
@@ -337,7 +366,8 @@ pub(super) fn extract(
             continue;
         };
         match node.kind() {
-            "return_statement" | "throw_statement" if exit_value(node).is_some() => {
+            // A bare `return` is no rule but still precedes later exits.
+            "return_statement" | "throw_statement" => {
                 observed.entry(owner.clone()).or_default().push(node);
             }
             _ => {
@@ -359,7 +389,7 @@ pub(super) fn extract(
         for (order, exit) in exits.iter().copied().enumerate() {
             let (ancestors, limited) = branches(exit);
             let earlier = prior.replace(exit);
-            if ancestors.is_empty() && !limited {
+            if exit_value(exit).is_none() || (ancestors.is_empty() && !limited) {
                 continue;
             }
             if limited || rule_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {

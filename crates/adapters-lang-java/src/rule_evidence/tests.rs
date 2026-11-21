@@ -264,3 +264,54 @@ fn a_reused_java_files_rules_carry_the_new_commit() {
         "{text}"
     );
 }
+
+// AC-0967: an exit in a method of an anonymous or local class is not its
+// enclosing method's rule; a record's compact constructor owns its guarded
+// throw; a bare `return` is no rule but precedes the exits after it.
+#[test]
+fn java_anonymous_and_local_class_exits_are_not_rules_and_compact_constructors_own_theirs() {
+    let source = r#"package com.acme;
+public class Outer {
+    public Runnable task(int n) {
+        class Local {
+            int get() {
+                if (n > 1) { return 2; }
+                return 0;
+            }
+        }
+        return new Runnable() {
+            public void run() {
+                if (n < 0) { throw new IllegalStateException("negative"); }
+            }
+        };
+    }
+    public void check(boolean done, boolean bad) {
+        if (done) return;
+        if (bad) throw new IllegalArgumentException("bad");
+    }
+    record Range(int lo, int hi) {
+        Range {
+            if (lo > hi) throw new IllegalArgumentException("lo after hi");
+        }
+    }
+}
+"#;
+    let out = extract(source, "src/main/java/com/acme/Outer.java");
+    let rules = rules(&out);
+    let owners: Vec<String> = rules
+        .iter()
+        .map(|rule| rule.owner_id.rsplit('#').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        owners,
+        ["Outer.check(boolean,boolean)", "Outer.Range.Range(int,int)"],
+        "{rules:#?}"
+    );
+    let gaps: Vec<String> = rules[0]
+        .interpretation
+        .gap_ids
+        .iter()
+        .map(|id| id.rsplit(':').next().unwrap().to_owned())
+        .collect();
+    assert!(gaps.contains(&"preceding_exit".to_owned()), "{gaps:?}");
+}

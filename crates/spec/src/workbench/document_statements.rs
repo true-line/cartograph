@@ -1157,6 +1157,30 @@ fn plain_message(arg: &str) -> Option<String> {
     (!inner.is_empty() && !inner.contains(['"', '\'', '{', '\\'])).then(|| inner.to_owned())
 }
 
+/// A Java string literal's text with its escapes decoded (`"User's id"`,
+/// `"Invalid\nID"`); line breaks and tabs read as spaces. `None` for
+/// anything but one plain literal, an empty one, a unicode or octal escape,
+/// or a `{placeholder}`.
+fn java_message(arg: &str) -> Option<String> {
+    let mut chars = arg.strip_prefix('"')?.chars();
+    let mut out = String::new();
+    loop {
+        match chars.next()? {
+            '"' => break,
+            '\\' => match chars.next()? {
+                '"' => out.push('"'),
+                '\'' => out.push('\''),
+                '\\' => out.push('\\'),
+                'n' | 't' | 'r' | 'f' | 'b' | 's' => out.push(' '),
+                _ => return None,
+            },
+            c => out.push(c),
+        }
+    }
+    let message = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    (chars.as_str().is_empty() && !message.is_empty() && !message.contains('{')).then_some(message)
+}
+
 /// Whether a rule was recovered from Go source: the Go response and error
 /// shapes are read only there, never in another language's display text.
 pub(super) fn is_go(evidence: &GuardedExitEvidence) -> bool {
@@ -1187,7 +1211,7 @@ pub(super) fn java_thrown(display: &str) -> Option<String> {
     }
     let inner = rest[open + 1..].strip_suffix(')')?;
     let parts = top_level_parts(inner)?;
-    if let Some(message) = parts.first().and_then(|first| plain_message(first.trim())) {
+    if let Some(message) = parts.first().and_then(|first| java_message(first.trim())) {
         return Some(format!("the error “{message}”"));
     }
     let name = class.rsplit('.').next().unwrap_or(class);
@@ -1896,6 +1920,15 @@ mod tests {
             Some("an error")
         );
         assert_eq!(java_thrown("error"), None);
+        // A literal with an apostrophe or escapes is still the message.
+        assert_eq!(
+            java_thrown("new ValidationException(\"User's id is \\\"bad\\\"\\nnow\")").as_deref(),
+            Some("the error “User's id is \"bad\" now”")
+        );
+        assert_eq!(
+            java_thrown("new ValidationException(\"a\" + b)").as_deref(),
+            Some("a “validation” error")
+        );
         // The call whose error is tested names the condition.
         let failed = |display: &str, polarity, call| {
             condition(
