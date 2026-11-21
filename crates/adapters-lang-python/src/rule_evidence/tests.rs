@@ -249,8 +249,8 @@ fn records_added_to_the_session_and_query_deletes_are_guarded_effects() {
     // AC-0910 (T-0910, #1998): `Session.add` of an imported class's
     // constructor, directly or through a local assigned before it, is an
     // effect whose value is the constructor; `Model.filter(…).delete()` is
-    // one too. A local not built from an imported class, reassigned, or
-    // assigned in another block is not.
+    // one too, as is `x = Model.create(…)`. A local not built from an
+    // imported class, reassigned, or assigned in another block is not.
     let code = r#"
 from app.models import DeletedAlias, DomainDeletedAlias, Alias
 from app.db import Session
@@ -272,6 +272,12 @@ def perform(alias, reason):
     Session.add(late)
     Alias.filter(Alias.id == alias.id).delete()
     Local.filter(x=1).delete()
+
+def suggest(user, hostname):
+    if hostname and user.include_website_in_one_click_alias:
+        alias = Alias.create(user_id=user.id, email=hostname)
+    found = Alias.get_by(email=hostname)
+    local = Local.create(x=1)
 "#;
     let out = recover(code);
     let found: Vec<(String, usize)> = rules(&out)
@@ -288,6 +294,10 @@ def perform(alias, reason):
             ),
             ("DomainDeletedAlias(email=alias.email)".to_owned(), 1),
             ("Alias.filter(Alias.id == alias.id).delete()".to_owned(), 0),
+            (
+                "Alias.create(user_id=user.id, email=hostname)".to_owned(),
+                1
+            ),
         ],
         "{found:?}"
     );
