@@ -236,6 +236,20 @@ fn env_read_allowlists_are_exact_keys() {
     assert!(manifest::repo_env_read(repo.path()).is_err());
     std::fs::write(&env, "reads = [\"ORDERS_QUEUE\"]\n").unwrap();
     assert!(manifest::repo_env_read(repo.path()).is_err());
+
+    // A symlink is refused, never followed out of the repository.
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("env.toml");
+        std::fs::write(&target, "read = [\"ORDERS_QUEUE\"]\n").unwrap();
+        std::fs::remove_file(&env).unwrap();
+        std::os::unix::fs::symlink(&target, &env).unwrap();
+        assert!(matches!(
+            manifest::repo_env_read(repo.path()),
+            Err(manifest::ManifestError::RepoEnvUnreadable(reason)) if reason.contains("regular file")
+        ));
+    }
 }
 
 // AC-0240 (#589): services and gateway routes are author-declared binding

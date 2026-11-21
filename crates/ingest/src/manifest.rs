@@ -54,6 +54,9 @@ pub enum ManifestError {
         "env_read entry \"{0}\" must be an exact env key name ([A-Za-z_][A-Za-z0-9_.]*); globs are not allowed"
     )]
     InvalidEnvReadKey(String),
+    /// `.cartograph/env.toml` is not a readable regular file in the repository.
+    #[error("{0}")]
+    RepoEnvUnreadable(String),
 }
 
 /// The five layers of SPEC-00 §3; hints gate which extractors run.
@@ -248,16 +251,28 @@ struct RepoEnv {
 
 /// The env keys a repository lets the config resolver read, from
 /// `.cartograph/env.toml` at its root (ADR-0075, AC-1018): `read = [...]`,
-/// exact names. No file is an empty allowlist; a malformed file or entry
-/// is an error, never an empty list.
+/// exact names. No file is an empty allowlist; a malformed file or entry,
+/// a symlink, or a non-regular or oversized file is an error, never an
+/// empty list.
 pub fn repo_env_read(root: &Path) -> Result<BTreeSet<String>, ManifestError> {
-    let text = match std::fs::read_to_string(root.join(REPO_ENV_REL_PATH)) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BTreeSet::new());
+    use crate::api_docs::{AnchoredRead, anchored_reason, read_anchored};
+    // No symlink anywhere in the path, a regular file, bounded size: the
+    // same anchored read as `.cartograph/api-docs.toml`.
+    let bytes = match read_anchored(root, REPO_ENV_REL_PATH) {
+        Ok(bytes) => bytes,
+        Err(AnchoredRead::NotFound) => return Ok(BTreeSet::new()),
+        Err(failure) => {
+            return Err(ManifestError::RepoEnvUnreadable(anchored_reason(
+                REPO_ENV_REL_PATH,
+                failure,
+            )));
         }
-        Err(error) => return Err(error.into()),
     };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        ManifestError::RepoEnvUnreadable(format!(
+            "{REPO_ENV_REL_PATH} is not valid UTF-8 ({error})"
+        ))
+    })?;
     let parsed: RepoEnv = toml::from_str(&text)?;
     validate_env_read(&parsed.read)?;
     Ok(parsed.read.into_iter().collect())
