@@ -754,18 +754,37 @@ pub(crate) fn compose_gated_by_area(
             ..compiled.address.clone()
         };
         let outcome = match prepared(&compiled, address, area.clone(), &text) {
-            Ok(prepared) => compose_gated(state, provider, &prepared, check, job_id)?,
+            Ok(prepared) => compose_gated(state, provider, &prepared, check, job_id),
             // The rest of an arranged section may print no fact at all.
             Err(reason) if reason == "no_citable_fact" && !whole => continue,
-            Err(reason) => return Err(reason),
+            Err(reason) => Err(reason),
         };
-        drafts.push(GatedDraft {
-            scope,
-            area,
-            outcome,
-        });
+        match outcome {
+            Ok(outcome) => drafts.push(GatedDraft {
+                scope,
+                area,
+                outcome,
+            }),
+            // Nothing was staged yet: the run failed as a whole.
+            Err(error) if !drafts.iter().any(staged) => return Err(error),
+            // Drafts of earlier areas are already staged under this job, so
+            // the run ends here and reports them, with this part named as
+            // where it stopped (a cancel, a provider failure).
+            Err(_) => {
+                drafts.push(GatedDraft {
+                    scope,
+                    area,
+                    outcome: ComposeOutcome::none("run_stopped"),
+                });
+                break;
+            }
+        }
     }
     Ok(drafts)
+}
+
+fn staged(draft: &GatedDraft) -> bool {
+    matches!(draft.outcome.outcome, DraftingOutcome::Staged { .. })
 }
 
 /// Compose §1.5 through the gated `draft-rules@1` workflow on the

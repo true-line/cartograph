@@ -330,7 +330,11 @@ fn the_auditor_sends_unsupported_claims_back_once_then_drops_them() {
     // A revision the auditor accepts is kept.
     let mut model = Fake::new(vec![
         reply(vec![good(1), added(2)]),
-        serde_json::json!({"verdicts": [{"claim": 2, "verdict": "adds_detail"}]}).to_string(),
+        serde_json::json!({"verdicts": [
+            {"claim": 1, "verdict": "supported"},
+            {"claim": 2, "verdict": "adds_detail"}
+        ]})
+        .to_string(),
         reply(vec![good(1), good(2)]),
         supported(2),
     ]);
@@ -345,6 +349,39 @@ fn an_auditor_reply_outside_the_schema_skips_the_audit() {
     let outcome = run_with(&Workflow::shipped().unwrap(), 1, &mut model);
     assert_eq!(outcome.stats.audit_failed, 1);
     assert_eq!(outcome.finish.expect("kept").claims.len(), 1);
+}
+
+#[test]
+fn an_auditor_reply_that_misses_or_repeats_a_claim_is_a_failed_audit() {
+    assert_eq!(
+        decode_audit(&supported(2), 2),
+        Some(vec![Verdict::Supported; 2])
+    );
+    for reply in [
+        serde_json::json!({"verdicts": []}),
+        serde_json::json!({"verdicts": [{"claim": 1, "verdict": "supported"}]}),
+        serde_json::json!({"verdicts": [
+            {"claim": 1, "verdict": "supported"},
+            {"claim": 1, "verdict": "supported"},
+            {"claim": 2, "verdict": "supported"}
+        ]}),
+        serde_json::json!({"verdicts": [
+            {"claim": 0, "verdict": "supported"},
+            {"claim": 2, "verdict": "supported"}
+        ]}),
+        serde_json::json!({"verdicts": [
+            {"claim": 1, "verdict": "supported"},
+            {"claim": 3, "verdict": "supported"}
+        ]}),
+    ] {
+        assert_eq!(decode_audit(&reply.to_string(), 2), None, "{reply}");
+    }
+    let mut model = Fake::new(vec![
+        reply(vec![good(1), good(2)]),
+        serde_json::json!({"verdicts": []}).to_string(),
+    ]);
+    let outcome = run_with(&Workflow::shipped().unwrap(), 2, &mut model);
+    assert_eq!(outcome.stats.audit_failed, 1);
 }
 
 #[test]

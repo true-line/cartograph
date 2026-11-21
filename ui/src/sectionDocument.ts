@@ -194,6 +194,7 @@ export const COMPOSE_REFUSAL: Record<string, string> = {
   gated_composition_section_unsupported: 'Only section 1.5 is drafted through the gated workflow.',
   area_not_found: 'No current area has that scope. Re-run the knowledge step, then compose again.',
   area_not_in_section: 'The compiled section lists nothing under that area.',
+  run_stopped: 'The run stopped here, so this draft and any after it were not staged.',
 };
 
 /** The exact payload a cloud composition of the address would send. */

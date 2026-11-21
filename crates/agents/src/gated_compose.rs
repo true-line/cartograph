@@ -878,20 +878,22 @@ struct AuditVerdict {
     verdict: Verdict,
 }
 
-/// Decode an auditor reply into one verdict per claim. A claim the reply
-/// gives no verdict for is supported; a reply that is not the schema is
-/// `None`, and the audit is skipped.
+/// Decode an auditor reply into one verdict per claim. The reply must give
+/// exactly one verdict for each claim, numbered 1 to `claims`; a reply that
+/// is not the schema, omits a claim, repeats one or numbers one out of range
+/// is `None`, and the audit is counted as failed (`audit_failed`), so no
+/// claim is ever taken as judged without a verdict.
 pub fn decode_audit(text: &str, claims: usize) -> Option<Vec<Verdict>> {
     let reply: AuditReply = serde_json::from_str(text.trim()).ok()?;
-    let mut verdicts = vec![Verdict::Supported; claims];
+    let mut verdicts: Vec<Option<Verdict>> = vec![None; claims];
     for verdict in reply.verdicts {
-        if let Ok(index) = usize::try_from(verdict.claim - 1)
-            && let Some(slot) = verdicts.get_mut(index)
-        {
-            *slot = verdict.verdict;
+        let index = usize::try_from(verdict.claim.checked_sub(1)?).ok()?;
+        let slot = verdicts.get_mut(index)?;
+        if slot.replace(verdict.verdict).is_some() {
+            return None;
         }
     }
-    Some(verdicts)
+    verdicts.into_iter().collect()
 }
 
 // --------------------------------------------------------------------- runner
