@@ -5789,6 +5789,8 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfiguration {
     public SecurityFilterChain filterChain(HttpSecurity http, int mode) throws Exception {
+        // Not an HttpSecurity: configures no chain.
+        new Registry().authorizeHttpRequests(r -> r.requestMatchers("/api/loop/**").denyAll());
         for (int i = 0; i < mode; i++) {
             http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/loop/**").permitAll());
         }

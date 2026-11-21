@@ -304,6 +304,10 @@ pub(super) fn chains(
         let Some(bean) = bean else {
             continue;
         };
+        // Only a call on the bean's own `HttpSecurity` configures a chain.
+        if !on_http_security(cx, call, bean) {
+            continue;
+        }
         let scoped = cx.text(&bean).contains("securityMatcher");
         let calls: Vec<(TsNode<'_>, bool)> = match arguments(call).first() {
             // `authorizeHttpRequests(authz -> authz.requestMatchers(…)…)`
@@ -378,6 +382,54 @@ pub(super) fn chains(
         });
     }
     out
+}
+
+/// Whether `call`'s receiver chain starts at a parameter or local of the
+/// bean method declared as `HttpSecurity`.
+fn on_http_security(cx: &FileCx<'_>, call: TsNode<'_>, bean: TsNode<'_>) -> bool {
+    let Some(object) = call.child_by_field_name("object") else {
+        return false;
+    };
+    let (_, root) = chain_calls(object);
+    if root.kind() != "identifier" {
+        return false;
+    }
+    let name = cx.text(&root);
+    let typed = |node: TsNode<'_>| {
+        node.child_by_field_name("type").is_some_and(|t| {
+            let t = cx.text(&t);
+            t == "HttpSecurity" || t == format!("{BUILDERS}.HttpSecurity")
+        })
+    };
+    let mut stack = vec![bean];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "formal_parameter"
+                if typed(node)
+                    && node
+                        .child_by_field_name("name")
+                        .is_some_and(|n| cx.text(&n) == name) =>
+            {
+                return true;
+            }
+            "local_variable_declaration" if typed(node) => {
+                let mut walk = node.walk();
+                if node
+                    .children_by_field_name("declarator", &mut walk)
+                    .any(|d| {
+                        d.child_by_field_name("name")
+                            .is_some_and(|n| cx.text(&n) == name)
+                    })
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        let mut walk = node.walk();
+        stack.extend(node.named_children(&mut walk));
+    }
+    false
 }
 
 /// How much of an endpoint a matcher covers.
