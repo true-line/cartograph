@@ -1139,8 +1139,9 @@ pub(super) fn rules_per_capability(
         writeln!(
             out,
             "State machines (#2067): {}. Each is a `transitions` table declared as data: every \
-             state with the states it may move to, as written (Deterministic). A state that may \
-             move nowhere is final. The guarded exits of a hook beside the table that the \
+             state with the states it may move to, as written (Deterministic), stated first \
+             in its area. A state that may move nowhere is final. The guarded exits of a hook \
+             beside the table that the \
              framework runs before a move (`onTransitionStart`) are listed under it. Whether the \
              framework applies further moves is not established.\n",
             index.machines.len()
@@ -1159,8 +1160,10 @@ pub(super) fn rules_per_capability(
     }
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
-    // Areas in name order, each one's capabilities then its own code; the
-    // capabilities with no area last, as `capabilities()` lists them.
+    // Areas in name order, each one's state machines first (its lifecycle,
+    // which a briefing cut from the front keeps, #2069), then its
+    // capabilities, then its own code; the capabilities with no area last,
+    // as `capabilities()` lists them.
     let mut named: Vec<&Node> = listed
         .iter()
         .filter_map(|(area, _)| *area)
@@ -1169,42 +1172,48 @@ pub(super) fn rules_per_capability(
         .collect();
     named.sort_by(|a, b| area_order(a).cmp(&area_order(b)));
     named.dedup_by(|a, b| a.id == b.id);
-    let mut units: Vec<(Option<&Node>, Option<&Story<'_>>)> = Vec::new();
+    let mut units: Vec<Unit<'_, '_>> = Vec::new();
     for area in named {
+        if machines.iter().any(|(a, _)| a.id == area.id) {
+            units.push(Unit::Machines(area));
+        }
         units.extend(
             listed
                 .iter()
                 .filter(|(a, _)| a.is_some_and(|a| a.id == area.id))
-                .map(|(a, story)| (*a, Some(*story))),
+                .map(|(a, story)| Unit::Story(*a, story)),
         );
-        if own_code.iter().any(|(a, _)| a.id == area.id)
-            || machines.iter().any(|(a, _)| a.id == area.id)
-        {
-            units.push((Some(area), None));
+        if own_code.iter().any(|(a, _)| a.id == area.id) {
+            units.push(Unit::Own(area));
         }
     }
     units.extend(
         listed
             .iter()
             .filter(|(a, _)| a.is_none())
-            .map(|(a, story)| (*a, Some(*story))),
+            .map(|(a, story)| Unit::Story(*a, story)),
     );
-    for (area, story) in units {
-        let Some(story) = story else {
-            let area = area.expect("an own-code unit names its area");
-            if let Some((_, owners)) = own_code.iter().find(|(a, _)| a.id == area.id) {
-                printed +=
-                    index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
+    for unit in units {
+        let (area, story) = match unit {
+            Unit::Machines(area) => {
+                for machine in machines
+                    .iter()
+                    .filter(|(a, _)| a.id == area.id)
+                    .flat_map(|(_, m)| m)
+                {
+                    let marks = headings.before(Some(area), out)?;
+                    printed += state_machine(&index, machine, marks, assertions, asserted, out)?;
+                }
+                continue;
             }
-            for machine in machines
-                .iter()
-                .filter(|(a, _)| a.id == area.id)
-                .flat_map(|(_, m)| m)
-            {
-                let marks = headings.before(Some(area), out)?;
-                printed += state_machine(&index, machine, marks, assertions, asserted, out)?;
+            Unit::Own(area) => {
+                if let Some((_, owners)) = own_code.iter().find(|(a, _)| a.id == area.id) {
+                    printed +=
+                        index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
+                }
+                continue;
             }
-            continue;
+            Unit::Story(area, story) => (area, story),
         };
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
         let rejections = index.each(reached.iter().copied(), |_| Ok(()))?;
@@ -1267,6 +1276,16 @@ pub(super) fn rules_per_capability(
         printed += index.changes(&shared, &mut BTreeSet::new(), assertions, asserted, out)?;
     }
     Ok(printed)
+}
+
+/// One part of §1.5, in print order.
+enum Unit<'s, 'a> {
+    /// An area's state machines (#2067), first in the area (#2069).
+    Machines(&'a Node),
+    /// A capability's rules, under its area if it has one.
+    Story(Option<&'a Node>, &'s Story<'a>),
+    /// The rules in an area's own code (#2066), last in the area.
+    Own(&'a Node),
 }
 
 /// Change rows printed per capability (#1998).
@@ -2981,5 +3000,78 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
                 .contains("### State machines\n\n#### State machine: configureDefaultOrderProcess"),
             "{plain}"
         );
+    }
+
+    // AC-0998: an area's state machines come first in its §1.5 block,
+    // before its capabilities and its own code, so an area briefing cut from
+    // the front keeps the lifecycle (#2069).
+    #[test]
+    fn an_areas_state_machines_come_before_its_own_code() {
+        let source = "export const defaultPaymentProcess: PaymentProcess<PaymentState> = {
+    transitions: {
+        Authorized: { to: ['Settled', 'Declined'] },
+        Settled: { to: [] },
+        Declined: { to: [] },
+    },
+};
+export function assertPaymentState(state) {
+    if (!state) {
+        throw new Error('no state');
+    }
+}
+";
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/config/payment/default-payment-process.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let payment = Node {
+            id: "subsystem:1".into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": "Payment" }),
+        };
+        let file = "file:repo@src/config/payment/default-payment-process.ts";
+        let knowledge = Stories {
+            included: Vec::new(),
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: [(file, &payment)].into_iter().collect(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}\n{text}"))
+        };
+        assert!(
+            at("### Payment\n") < at("#### State machine: defaultPaymentProcess"),
+            "{text}"
+        );
+        assert!(
+            at("#### State machine: defaultPaymentProcess")
+                < at("#### Rules in the Payment area's own code"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| Authorized | Settled, Declined | F-"),
+            "{text}"
+        );
+        assert!(text.contains("assertPaymentState"), "{text}");
     }
 }

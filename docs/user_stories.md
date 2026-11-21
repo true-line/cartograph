@@ -1363,6 +1363,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** P1 (#260) · `spec` · ADR-0051 · T-0970
 - **AC-0978** Given the knowledge phase's producer rules, when the overlay recipe is named, then it is `knowledge@2;producers@blake3:` followed by the BLAKE3 content hash of each `rule@version` in phase order, so a change to any rule version or to the order changes the overlay identity, and the name has one length however many producers land, within the overlay's 256-byte name bound with the `knowledge-derived-rejected` marker (#2040).
 - **Trace:** P1 (#2040) · `app` · ADR-0051 · T-0978
+- **AC-0998** Given areas and recovered state machines, when D1 §1.5 is compiled, then each area's state machines are stated first in its block, before its capabilities' rules and the rules in its own code, so an area briefing cut from the front to its bound keeps the area's lifecycle and the guards of its hooks (#2069).
+- **Trace:** P1 (#2069) · `spec` · ADR-0051 · T-0998
 
 - **AC-0519** Given otherwise-valid deterministic Endpoint, HANDLES or Method support whose provenance names an explicit artifact or observation evidence basis, when the Capability rule checks support, then that support is refused and no candidate forms, because the derived candidate's own provenance resolves to a source basis; support with no basis or an explicit source basis is unchanged, and the rule version moves to 2 so the changed eligibility changes candidate identity, Rule provenance and the knowledge recipe (#1489).
 - **Security:** Derived facts can no longer relabel artifact or runtime evidence as source evidence; the existing source-backed contract is enforced, not widened.
