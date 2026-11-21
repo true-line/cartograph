@@ -137,6 +137,36 @@ fn area_block<'a>(section: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+/// One compiled section split by area (#2083): the block of each area of
+/// `names` the section holds, in `names` order, and the rest of the section
+/// with those blocks taken out (its heading, its introduction and any block
+/// that is not an area's, such as shared rejections). An area the section
+/// holds no block for is absent. Every line of `section` is in exactly one
+/// part.
+pub fn area_blocks<'a>(section: &'a str, names: &[&'a str]) -> (Vec<(&'a str, &'a str)>, String) {
+    let mut found: Vec<(usize, &'a str, &'a str)> = names
+        .iter()
+        .filter_map(|name| {
+            let block = area_block(section, name)?;
+            let start = block.as_ptr() as usize - section.as_ptr() as usize;
+            Some((start, *name, block))
+        })
+        .collect();
+    let blocks = found
+        .iter()
+        .map(|(_, name, block)| (*name, *block))
+        .collect();
+    found.sort_by_key(|(start, ..)| *start);
+    let mut rest = String::new();
+    let mut at = 0;
+    for (start, _, block) in &found {
+        rest.push_str(&section[at..*start]);
+        at = start + block.len();
+    }
+    rest.push_str(&section[at..]);
+    (blocks, rest)
+}
+
 /// The length of a block's own heading line, which is outside the bound.
 fn heading_len(block: &str) -> usize {
     block.find('\n').map_or(block.len(), |at| at + 1)

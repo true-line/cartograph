@@ -94,7 +94,7 @@ pub use views::{
     try_compile_spec_with_views_and_coverage, try_compile_spec_with_views_supplied,
 };
 pub use workbench::{
-    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
+    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_blocks, area_briefing,
     area_neighbours, briefing_citation_ids,
 };
 pub use workbench::{

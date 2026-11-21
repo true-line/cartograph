@@ -52,7 +52,7 @@ fn substantive(statement: &str) -> bool {
         >= MIN_STATEMENT_WORDS
 }
 
-const SYSTEM: &str = "You are Cartograph's section composer. You write one section of a \
+pub(crate) const SYSTEM: &str = "You are Cartograph's section composer. You write one section of a \
 product specification for a legacy system, so that a team that has never seen the code \
 could rebuild the behaviour from it. You are given the section as Cartograph compiled it \
 from the system's knowledge graph, and one row per fact you may cite. Write dense, \
@@ -202,12 +202,18 @@ pub fn response_schema(citable: &BTreeSet<String>) -> String {
 }
 
 fn prompt(input: &ComposeInput<'_>) -> String {
+    prompt_with(input, COMPOSER_CLAIMS)
+}
+
+/// The composer's prompt asking for at most `max_claims` claims. Shared with
+/// the gated workflow (#2083), which composes one bounded chunk per call.
+pub(crate) fn prompt_with(input: &ComposeInput<'_>, max_claims: usize) -> String {
     let address = input.address;
     let mut out = String::new();
     let _ = write!(
         out,
         "Compose section {} \"{}\" of document {} (catalogue {}) for scope {}.\n\
-         Write at most {COMPOSER_CLAIMS} claims. Each claim cites 1 to {MAX_CITATIONS} \
+         Write at most {max_claims} claims. Each claim cites 1 to {MAX_CITATIONS} \
          citation ids, the most direct facts for it, chosen only from the citable facts \
          below.\n\n<section>\n{}\n</section>\n\n<citable_facts>\n\
          citation_id | label | name | tier | confidence\n",

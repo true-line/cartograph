@@ -7862,6 +7862,7 @@ fn main() {
             area_expert::run_area_ask,
             section_compose::section_compose_preview,
             section_compose::run_section_compose,
+            section_compose::run_section_compose_gated,
             section_review::section_document,
             section_review::review_section_draft,
             investigations::commands::list_investigations,
