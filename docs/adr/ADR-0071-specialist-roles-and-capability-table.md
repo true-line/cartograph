@@ -1,6 +1,6 @@
 # ADR-0071 — Specialist roles, retired versions and one capability table
 
-- **Status:** Proposed; owner review
+- **Status:** Accepted (2026-11-21, by the coordinator as the owner's review delegate, with the amendments in decision 1)
 - **Date:** 2026-11-18
 - **Deciders:** Cartograph owner; Claude implements
 - **Related:** #1751; #1745; #1874 stack (section-writer@1); #598; #1710; #1757; #256; [SPEC-10](../SPEC-10_specialist-investigations.md); AC-0574, AC-0584, AC-0589
@@ -64,11 +64,19 @@ only so stored runs reopen.
 
 | Role | Current | Retired (kept so stored runs reopen) | Runs under |
 |---|---|---|---|
-| domain-analyst | **@27** | @1–@15, @17–@26 | investigation-v2 |
+| domain-analyst | **@28** | @1–@15, @17–@26; @27 stays offered (see below) | investigation-v2 |
 | evidence-auditor | **@14** | @1–@13 | investigation-v2 |
 | spec-writer | **@2** | @1 | investigation-v1 |
 | gap-triager | **@2** | @1 | investigation-v1 |
 | section-writer | **@1** (#1874 stack) | none | investigation-v1 |
+
+**Accepted amendments (2026-11-21).** domain-analyst@28 (#1335, the selected
+response schema shown in the prompt) joined the catalog after this ADR was
+written; as the newest offered analyst it is the current one. domain-analyst@27
+is not retired while an acceptance freeze names it (AC-0574, AC-0589): it stays
+offered as an explicit, advanced version choice. The profile question below is
+settled as recommended: one current version per role, and the composer picks
+the profile from the role.
 
 Reasons, from what the code offers:
 
@@ -148,7 +156,11 @@ acceptance freeze names.
   `uses_*` a one-line read of it (then inline them at call sites). A test
   asserts, for every `SpecialistId`, that each capability equals the old
   predicate's answer, so the change is provably neutral.
-- **(b) Read-only reopen.** Mark retired versions in the table; the catalog
+- **(b) Read-only reopen.** First (AC-1400): an `availability` column
+  (current, offered, retired) marks exactly today's offered set, the desktop
+  catalog and every policy's `specialist_ids` are derived from it, and every
+  start path, legacy included, refuses a version it does not offer. Then
+  mark retired versions in the table; the catalog
   stops offering them; the reopened run shows its original id and offers no
   new work under it (decision 2).
 - **(c) Backend catalog serves roles and capabilities.** The
