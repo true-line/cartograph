@@ -1825,9 +1825,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     // Endpoints are product facts: a test source set yields none (#1250).
     let product = !adapters_fw::in_jvm_test_source_set(path);
 
-    // JUnit tests and the requests they perform (AC-1102).
+    // JUnit tests and Kotest specs, and the requests they perform
+    // (AC-1102, AC-1112).
     target_tests::extract(
         &cx,
+        root,
         &imports,
         package.as_deref(),
         &functions,
