@@ -38,6 +38,9 @@ pub(crate) const ACTIVE: &str = "project.json";
 /// Where parked projects live.
 pub(crate) const PARKED: &str = "projects";
 
+/// The suffix of a parked project being deleted.
+const DELETING: &str = ".deleting";
+
 /// The entries of the app data directory that belong to the loaded project.
 pub(crate) const PROJECT_ENTRIES: &[&str] = &[
     "graph.db",
@@ -208,6 +211,11 @@ pub(crate) fn list(data_dir: &Path) -> Result<Vec<ProjectEntry>, String> {
             for entry in entries {
                 let entry = entry.map_err(|e| e.to_string())?;
                 let id = entry.file_name().to_string_lossy().into_owned();
+                if id.ends_with(DELETING) {
+                    // A deletion that stopped part way is finished here.
+                    let _ = remove(&entry.path());
+                    continue;
+                }
                 if !is_id(&id) {
                     continue;
                 }
@@ -271,10 +279,11 @@ pub(crate) fn delete(data_dir: &Path, id: &str) -> Result<(), String> {
     if pending_change(data_dir)?.is_some_and(|change| change == Change::Switch { to: id.into() }) {
         return Err("This project is about to be loaded.".into());
     }
-    // Its metadata goes first, so a deletion that stops part way leaves a
-    // directory the picker no longer lists rather than a broken project.
-    std::fs::remove_file(dir.join(ACTIVE)).map_err(|e| e.to_string())?;
-    remove(&dir).map_err(|e| e.to_string())
+    // One rename takes it out of the listing whole; a removal that stops
+    // part way is finished by the next listing.
+    let doomed = data_dir.join(PARKED).join(format!("{id}{DELETING}"));
+    std::fs::rename(&dir, &doomed).map_err(|e| e.to_string())?;
+    remove(&doomed).map_err(|e| e.to_string())
 }
 
 /// Ask the next launch to make `change`.

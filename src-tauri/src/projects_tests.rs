@@ -153,6 +153,16 @@ fn switching_loads_a_parked_project_whole_and_settings_follow_the_application() 
     assert!(delete(dir.path(), &second.id).is_err());
     delete(dir.path(), &first.id).unwrap();
     assert_eq!(list(dir.path()).unwrap().len(), 1);
+    assert_eq!(entries(&dir.path().join(PARKED)), Vec::<String>::new());
+    // A deletion that stopped part way is finished by the next listing.
+    let stopped = dir
+        .path()
+        .join(PARKED)
+        .join(format!("{}{DELETING}", second.id));
+    std::fs::create_dir_all(&stopped).unwrap();
+    std::fs::write(stopped.join("graph.db"), b"left").unwrap();
+    assert_eq!(list(dir.path()).unwrap().len(), 1);
+    assert!(!stopped.exists());
     assert!(request(dir.path(), Change::Switch { to: first.id }).is_err());
 }
 
