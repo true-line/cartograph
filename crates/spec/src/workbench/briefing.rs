@@ -15,8 +15,11 @@
 //!
 //! **Bound.** The briefing holds at most `max_bytes` of blocks. Budget goes
 //! to the smallest blocks first, so a short section is never cut to make
-//! room for a long one. A block over its share loses whole capability
-//! subsections (`####`) from its end, and says how many. The introduction,
+//! room for a long one, and to the business rules (§1.5) last, so they take
+//! what every other block leaves (#2068). A block over its share keeps its
+//! leading capability subsections (`####`) that fit and, of the next one,
+//! its heading, table header and the rows that fit; it says how many rows
+//! and how many whole subsections it leaves out. The introduction,
 //! the section headings and each block's own heading are outside the bound.
 //!
 //! **Cost.** One scan of the document per section, one pass over the
@@ -32,6 +35,9 @@ use std::fmt::Write;
 
 /// The D1 sections arranged by area (#260), in document order.
 pub const AREA_SECTIONS: &[&str] = &["1.3", "1.4", "1.5", "1.6"];
+
+/// The section whose block is fitted last, taking what the others leave.
+const RULES_SECTION: &str = "1.5";
 
 /// The bound a host compiles a briefing under.
 pub const AREA_BRIEFING_BYTES: usize = 96 * 1024;
@@ -136,28 +142,76 @@ fn heading_len(block: &str) -> usize {
     block.find('\n').map_or(block.len(), |at| at + 1)
 }
 
-/// `block` with at most `budget` bytes after its heading, and how many
-/// capability subsections that leaves out. A block over budget keeps its
-/// heading and its leading subsections that fit.
-fn fitted(block: &str, budget: usize) -> (&str, usize) {
+/// What of one block a briefing keeps.
+struct Fitted<'a> {
+    /// The block's leading text that fits.
+    text: &'a str,
+    /// Capability subsections left out whole.
+    left_out: usize,
+    /// Table rows left out of the subsection cut short, if one was.
+    rows_cut: usize,
+}
+
+/// The fewest lines of a subsection worth keeping when it is cut: its
+/// heading, the blank line, a table's header and separator, and one row.
+const MIN_CUT_LINES: usize = 5;
+
+/// `block` with at most `budget` bytes after its heading. A block over
+/// budget keeps its heading, its leading subsections that fit, and of the
+/// next one as many leading lines as fit (#2068): its heading, its table
+/// header and the rows that fit, so a subsection larger than the whole
+/// share still says something. The rows it loses are counted.
+fn fitted(block: &str, budget: usize) -> Fitted<'_> {
     let head = heading_len(block);
     if block.len() - head <= budget {
-        return (block, 0);
+        return Fitted {
+            text: block,
+            left_out: 0,
+            rows_cut: 0,
+        };
     }
     let mut starts: Vec<usize> = block
         .match_indices("\n#### ")
         .map(|(at, _)| at + 1)
         .collect();
+    // One undivided block is one subsection after its heading.
     if starts.is_empty() {
-        // One undivided block: keep the heading line and count it as one.
-        return (&block[..head], 1);
+        starts.push(head);
     }
     starts.push(block.len());
-    let kept = starts
+    let subsections = starts.len() - 1;
+    let whole = starts
         .iter()
         .rposition(|end| end.saturating_sub(head) <= budget)
         .unwrap_or_default();
-    (&block[..starts[kept]], starts.len() - 1 - kept)
+    // A block with no subsection kept keeps at least its heading.
+    let kept = starts[whole].max(head);
+    // The next subsection's leading lines that fit, ending at a line break.
+    let (from, to) = (kept, starts[whole + 1]);
+    let room = budget.saturating_sub(kept - head);
+    let mut end = from;
+    let mut lines = 0;
+    for line in block[from..to].split_inclusive('\n') {
+        if end + line.len() - from > room {
+            break;
+        }
+        end += line.len();
+        lines += 1;
+    }
+    let rows = |text: &str| text.lines().filter(|l| l.starts_with("| ")).count();
+    if lines >= MIN_CUT_LINES && rows(&block[from..end]) > 2 {
+        Fitted {
+            text: &block[..end],
+            left_out: subsections - whole - 1,
+            rows_cut: rows(&block[end..to]),
+        }
+    } else {
+        Fitted {
+            text: &block[..kept],
+            left_out: subsections - whole,
+            rows_cut: 0,
+        }
+    }
 }
 
 /// The briefing for the area named `name` of `files` member files, from the
@@ -178,18 +232,25 @@ pub fn area_briefing(
             Some((*number, section.lines().next().unwrap_or_default(), block))
         })
         .collect();
-    // Smallest first, so what a short block does not use goes to the rest.
+    // Smallest first, so what a short block does not use goes to the rest;
+    // the rules (§1.5) last, so they take what every other block leaves
+    // (#2068): a topic expert needs the rules first.
     let mut order: Vec<usize> = (0..blocks.len()).collect();
-    order.sort_by_key(|at| blocks[*at].2.len());
-    let mut kept: Vec<(&str, usize)> = vec![("", 0); blocks.len()];
+    order.sort_by_key(|at| (blocks[*at].0 == RULES_SECTION, blocks[*at].2.len()));
+    let mut kept: Vec<Option<Fitted<'_>>> = (0..blocks.len()).map(|_| None).collect();
     let mut remaining = max_bytes;
     for (done, at) in order.iter().enumerate() {
         let share = remaining / (blocks.len() - done);
-        kept[*at] = fitted(blocks[*at].2, share);
+        let fit = fitted(blocks[*at].2, share);
         // A block's own heading is outside the bound.
-        let used = kept[*at].0.len() - heading_len(kept[*at].0);
+        let used = fit.text.len() - heading_len(fit.text);
         remaining = remaining.saturating_sub(used);
+        kept[*at] = Some(fit);
     }
+    let kept: Vec<Fitted<'_>> = kept
+        .into_iter()
+        .map(|f| f.expect("every block is fitted"))
+        .collect();
     let list = |names: &[String]| {
         names
             .iter()
@@ -217,16 +278,24 @@ pub fn area_briefing(
         text.push_str("\nThe product specification lists nothing under this area.\n");
     }
     let mut left_out = 0;
-    for ((_, heading, _), (block, dropped)) in blocks.iter().zip(&kept) {
-        let _ = write!(text, "\n{heading}\n\n{}", block.trim_end());
+    for ((_, heading, _), fit) in blocks.iter().zip(&kept) {
+        let _ = write!(text, "\n{heading}\n\n{}", fit.text.trim_end());
         text.push('\n');
-        if *dropped > 0 {
+        if fit.rows_cut > 0 {
             let _ = writeln!(
                 text,
-                "\n{dropped} capability subsections of this area are left out of this briefing to keep its bound."
+                "\nThe last subsection above is cut short: {} more of its rows are left out of this briefing to keep its bound.",
+                fit.rows_cut
             );
         }
-        left_out += dropped;
+        if fit.left_out > 0 {
+            let _ = writeln!(
+                text,
+                "\n{} capability subsections of this area are left out of this briefing to keep its bound.",
+                fit.left_out
+            );
+        }
+        left_out += fit.left_out;
     }
     AreaBriefing {
         text,
