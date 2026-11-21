@@ -765,4 +765,166 @@ export class DefaultTaxZoneStrategy implements TaxZoneStrategy {
             "the default implementation's guard governs it"
         );
     }
+
+    // AC-0977: an object literal declared with an interface type, or
+    // returned by a function declared to return it, implements it; a
+    // `for (const x of xs)` loop variable over configuration reads is typed
+    // by the repository's `interface Owner { prop?: Array<I> }`, and
+    // `this.field` by the class's `field: I`, so a call on either reaches
+    // every class and typed object implementing `I`, even when `xs` is
+    // bound in an enclosing function. An untyped object, a `let` iterable,
+    // an unknown property and an undeclared field add nothing.
+    #[test]
+    fn a_config_loop_call_reaches_typed_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "src/config/vendure-config.ts",
+            "export interface PaymentOptions {
+    process?: Array<PaymentProcess<any>>;
+    customPaymentProcess?: PaymentProcess<any>[];
+    handlers: string[];
+}
+",
+        );
+        write(
+            "src/config/payment/default-payment-process.ts",
+            "export const defaultPaymentProcess: PaymentProcess<PaymentState> = {
+    transitions: { Created: { to: ['Settled'] } },
+    async onTransitionStart(fromState, toState, data) {
+        if (toState === 'Settled' && !data.order.active) {
+            return 'cannot settle a payment of an inactive order';
+        }
+    },
+    onTransitionEnd: async (fromState, toState, data) => {},
+};
+export const untyped = {
+    onTransitionStart(fromState, toState) { return true; },
+};
+",
+        );
+        write(
+            "src/config/payment/custom-process.ts",
+            "export function configureProcess(): PaymentProcess<PaymentState> {
+    const process: PaymentProcess<PaymentState> = {
+        onTransitionStart: (fromState, toState) => true,
+    };
+    return process;
+}
+",
+        );
+        write(
+            "src/common/fsm.ts",
+            "export class FSM {
+    private hooks: StateMachineConfig;
+    constructor(private config: StateMachineConfig, initialState: string) {}
+    async transitionTo(state: string, data: any) {
+        await this.config.onTransitionStart('a', state, data);
+        this.hooks.onError('a', state, 'm');
+        this.other.onTransitionStart('a', state, data);
+    }
+}
+",
+        );
+        write(
+            "src/service/payment-state-machine.ts",
+            "export class PaymentStateMachine {
+    constructor(private configService: ConfigService) {}
+    private initConfig(): StateMachineConfig {
+        const custom = this.configService.paymentOptions.customPaymentProcess ?? [];
+        const processes = [...custom, ...(this.configService.paymentOptions.process ?? [])];
+        let others = this.configService.paymentOptions.process ?? [];
+        const handlers = this.configService.paymentOptions.handlers;
+        return {
+            onTransitionStart: async (fromState, toState, data) => {
+                for (const process of processes) {
+                    await process.onTransitionStart(fromState, toState, data);
+                }
+                for (const process of others) {
+                    process.onTransitionEnd(fromState, toState, data);
+                }
+                for (const handler of handlers) {
+                    handler.onTransitionStart();
+                }
+            },
+        };
+    }
+}
+",
+        );
+        let out = extract_dir(
+            dir.path(),
+            &SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let edges: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.label == "CALLS" && e.props["resolution"] == "strategy-implementation")
+            .collect();
+        // The FSM's typed `config` field reaches the hook of the object
+        // `initConfig(): StateMachineConfig` returns; `hooks` names a
+        // method that object lacks, and `other` is undeclared.
+        let fsm: Vec<_> = edges
+            .iter()
+            .filter(|e| e.props["interface"] == "StateMachineConfig")
+            .collect();
+        assert_eq!(fsm.len(), 1, "{fsm:#?}");
+        assert_eq!(fsm[0].src, "sym:repo@src/common/fsm.ts#FSM.transitionTo");
+        assert_eq!(fsm[0].props["implementation"], "initConfig");
+        assert!(
+            fsm[0]
+                .dst
+                .contains("PaymentStateMachine.initConfig/object@"),
+            "{}",
+            fsm[0].dst
+        );
+        let edges: Vec<_> = edges
+            .into_iter()
+            .filter(|e| e.props["interface"] != "StateMachineConfig")
+            .collect();
+        // One call (the `processes` loop) to the two typed objects.
+        assert_eq!(edges.len(), 2, "{edges:#?}");
+        let mut implementations: Vec<&str> = edges
+            .iter()
+            .map(|e| e.props["implementation"].as_str().unwrap())
+            .collect();
+        implementations.sort();
+        assert_eq!(implementations, ["defaultPaymentProcess", "process"]);
+        for edge in &edges {
+            assert_eq!(edge.props["interface"], "PaymentProcess");
+            assert_eq!(edge.props["alternatives"], 2);
+            assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
+            assert!(
+                edge.src
+                    .starts_with("sym:repo@src/service/payment-state-machine.ts#"),
+                "{}",
+                edge.src
+            );
+        }
+        let default = edges
+            .iter()
+            .find(|e| e.props["implementation"] == "defaultPaymentProcess")
+            .unwrap();
+        assert!(
+            default
+                .dst
+                .contains("default-payment-process.ts#defaultPaymentProcess@"),
+            "{}",
+            default.dst
+        );
+        assert!(
+            out.edges
+                .iter()
+                .any(|e| e.label == "GOVERNS" && e.dst == default.dst),
+            "the default object's guard governs its method"
+        );
+    }
 }
