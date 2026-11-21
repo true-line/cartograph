@@ -38,8 +38,8 @@ mod documentation;
 mod manifest;
 mod neutrality;
 pub use document::{
-    SYSTEM_SCOPE, SectionScopeError, cited_fact_digests, cited_fact_hashes, drafted_section,
-    section_citation_set,
+    SYSTEM_SCOPE, SectionScopeError, cited_fact_digests, cited_fact_hashes, cited_node_hashes,
+    drafted_section, section_citation_set,
 };
 pub use neutrality::{CODE_LABELS, SourceIdentifiers};
 mod endpoint_inventory;

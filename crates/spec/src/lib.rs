@@ -108,7 +108,7 @@ pub use workbench::{
     PartitionArtifactKind, PartitionError, PartitionWorkspaceBound, SelectedArtifactLimit,
     SelectedArtifactOutcome, SelectedCompileLimits, SpecArtifact, SpecAssertion, SpecBundle,
     StaleCoverage, Supplied, artifact_catalog, check_citations, citation_id, cited_fact_digests,
-    cited_fact_hashes, compile_capability_user_stories,
+    cited_fact_hashes, cited_node_hashes, compile_capability_user_stories,
     compile_capability_user_stories_with_flows_and_security,
     compile_capability_user_stories_with_security, compile_knowledge_user_stories,
     compile_knowledge_user_stories_with_flows_and_security, compile_partition_selected,
