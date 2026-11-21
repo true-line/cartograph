@@ -303,8 +303,12 @@ jobs:
     # run; the libraries come with the CI image.
     # Several runners share one host's memory; cargo's default of one rustc
     # per CPU exhausts it while compiling the workspace.
+    # Tests keep file and line numbers in backtraces but drop full debuginfo,
+    # which made every crate slower to compile and link (#1924). CI only: a
+    # local `cargo test` keeps the dev profile's full debuginfo.
     env:
       CARGO_BUILD_JOBS: 6
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -520,8 +524,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+    # Line tables only, as in the Rust lane (#1924).
     env:
       CARGO_BUILD_JOBS: 6
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
