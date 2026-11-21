@@ -239,7 +239,8 @@ fn a_finding_whose_cited_fact_is_gone_is_unresolvable() {
     assert_eq!(projection.findings[0].missing, [citation("rule:return")]);
 }
 
-// #2040: accepted findings are bounded by their bytes, not by a count.
+// AC-1010 (T-1010, #2040): accepted findings are bounded by their bytes,
+// not by a count.
 #[test]
 fn accepted_findings_are_bounded_by_bytes_not_by_count() {
     let fixture = fixture();

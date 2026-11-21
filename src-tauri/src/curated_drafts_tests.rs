@@ -359,9 +359,9 @@ fn a_draft_store_that_cannot_be_read_leaves_the_projection_not_computed() {
     );
 }
 
-// #2040: accepted drafts are bounded by their bytes, not by a count. More
-// than 256 small accepted drafts are all read; accepted drafts past the
-// byte budget fail the read whole, with the reason.
+// AC-1010 (T-1010, #2040): accepted drafts are bounded by their bytes, not
+// by a count. More than 256 small accepted drafts are all read; accepted
+// drafts past the byte budget fail the read whole, with the reason.
 #[test]
 fn accepted_drafts_are_bounded_by_bytes_not_by_count() {
     let fixture = fixture();
