@@ -23,7 +23,7 @@ fn table_rows_follow_enum_order_and_ids() {
 #[test]
 fn every_capability_matches_the_legacy_predicates() {
     for id in SpecialistId::all() {
-        let legacy: [(Capability, bool); 19] = [
+        let legacy: [(Capability, bool); 21] = [
             (C::CompactDisclosure, legacy_uses_compact_disclosure(id)),
             (C::TurnProgress, legacy_uses_turn_progress(id)),
             (
@@ -75,6 +75,11 @@ fn every_capability_matches_the_legacy_predicates() {
             (
                 C::TypedCitationCorrection,
                 legacy_uses_typed_citation_correction(id),
+            ),
+            (C::FindingWithholding, legacy_uses_finding_withholding(id)),
+            (
+                C::LocalFinishGeneration,
+                legacy_uses_local_finish_generation(id),
             ),
         ];
         for (capability, expected) in legacy {
@@ -679,4 +684,25 @@ fn each_role_has_exactly_one_current_version_and_it_is_the_newest() {
         let newest = rows.iter().map(|row| row.version).max().unwrap();
         assert_eq!(current[0].version, newest, "{role:?}");
     }
+}
+
+// Verbatim from `src-tauri/src/jobs/investigations/analyst_lineage.rs`
+// before #1751 slice (c).
+fn legacy_uses_local_finish_generation(id: SpecialistId) -> bool {
+    matches!(
+        id,
+        SpecialistId::DomainAnalystV26
+            | SpecialistId::DomainAnalystV27
+            | SpecialistId::DomainAnalystV28
+    )
+}
+
+fn legacy_uses_finding_withholding(id: SpecialistId) -> bool {
+    matches!(
+        id,
+        SpecialistId::DomainAnalystV25
+            | SpecialistId::DomainAnalystV26
+            | SpecialistId::DomainAnalystV27
+            | SpecialistId::DomainAnalystV28
+    )
 }
