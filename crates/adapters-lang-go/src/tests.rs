@@ -1710,3 +1710,369 @@ func (s *Store) Joined(table string) {
             .all(|(label, _, _)| label == "READS")
     );
 }
+
+#[test]
+fn gorm_models_are_entities_read_and_written_through_their_types() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("go.mod"), "module example.com/service\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("users")).unwrap();
+    std::fs::create_dir_all(dir.path().join("articles")).unwrap();
+    std::fs::write(
+        dir.path().join("users/models.go"),
+        r#"package users
+import "gorm.io/gorm"
+type UserModel struct {
+    gorm.Model
+    Username     string `gorm:"column:username;uniqueIndex"`
+    PasswordHash string `gorm:"column:password;not null"`
+    Secret       string `gorm:"-"`
+    Hidden       string `gorm:"-:all"`
+    Legacy       string `gorm:"-:migration"`
+    Follows      []FollowModel
+    lower        string
+}
+type FollowModel struct {
+    FollowingID  uint `gorm:"primaryKey"`
+    FollowedByID uint
+}
+type Category struct {
+    ID   uint   `gorm:"primaryKey"`
+    Name string
+}
+type Plain struct{ Name string }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("users/table.go"),
+        "package users\nfunc (FollowModel) TableName() string { return \"follows\" }\nfunc (Category) TableName(prefix string) string { return \"archive_categories\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("users/store.go"),
+        r#"package users
+import "gorm.io/gorm"
+func FindUser(db *gorm.DB, name string) (UserModel, error) {
+    var user UserModel
+    err := db.Where(&UserModel{Username: name}).First(&user).Error
+    return user, err
+}
+func (u *UserModel) Follow(db *gorm.DB, v UserModel) {
+    db.FirstOrCreate(&FollowModel{FollowingID: v.ID, FollowedByID: u.ID})
+    db.Model(u).Updates(map[string]any{"username": "x"})
+}
+func Unfollow(db *gorm.DB) {
+    db.Where("following_id = ?", 1).Delete(&FollowModel{})
+}
+func SaveOne(db *gorm.DB, data interface{}) error {
+    return db.Save(data).Error
+}
+func List(db *gorm.DB) {
+    categories := make([]Category, 0)
+    db.Find(&categories)
+    var plain Plain
+    db.First(&plain)
+    var n int64
+    db.Model(&Category{}).Count(&n)
+}
+func Shadow(db *gorm.DB, x Plain) {
+    {
+        x := Category{}
+        db.Create(&x)
+    }
+    for _, x := range load() {
+        db.Save(&x)
+    }
+}
+func Summary(db *gorm.DB) {
+    var result Plain
+    db.Model(&UserModel{}).Scan(&result)
+}
+func SaveAny(db *gorm.DB, data any) {
+    db.Save(data)
+}
+func SavePlain(db *gorm.DB, p Plain) {
+    db.Save(&p)
+}
+func Rename(db *gorm.DB, u UserModel) {
+    db.Updates(&u)
+}
+func Upsert(db *gorm.DB, c Category) {
+    db.Save(&c)
+}
+func Dynamic(db *gorm.DB, value any) {
+    db.Model(value).Create(&Category{})
+}
+func Churn(db *gorm.DB, u UserModel) {
+    db.Create(&u)
+    db.Delete(&u)
+}
+func Pair(db *gorm.DB) {
+    var plain, cat = Plain{}, Category{}
+    _ = plain
+    db.Create(&cat)
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("articles/models.go"),
+        r#"package articles
+import (
+    "gorm.io/gorm"
+    "example.com/service/users"
+)
+func Authors(db *gorm.DB) {
+    var authors []users.UserModel
+    db.Find(&authors)
+    db.Create(&users.UserModel{Username: "a"})
+}
+"#,
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let entities: BTreeMap<&str, (&str, &str, Vec<&str>)> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "DataEntity")
+        .map(|n| {
+            (
+                n.props["name"].as_str().unwrap(),
+                (
+                    n.props["table"].as_str().unwrap(),
+                    n.props["table_source"].as_str().unwrap(),
+                    n.props["columns"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| c["name"].as_str().unwrap())
+                        .collect(),
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entities,
+        BTreeMap::from([
+            ("Category", ("categories", "default", vec!["id", "name"])),
+            (
+                "FollowModel",
+                (
+                    "follows",
+                    "explicit",
+                    vec!["following_id", "followed_by_id"]
+                )
+            ),
+            (
+                "UserModel",
+                (
+                    "user_models",
+                    "default",
+                    vec![
+                        "id",
+                        "created_at",
+                        "updated_at",
+                        "deleted_at",
+                        "username",
+                        "password",
+                        "legacy"
+                    ]
+                )
+            ),
+        ])
+    );
+    let user = x
+        .nodes
+        .iter()
+        .find(|n| n.props["name"] == "UserModel")
+        .unwrap();
+    assert_eq!(user.id, "data:local/go-service@gorm:users#UserModel");
+    assert_eq!(user.props["prov"]["confidence_tier"], "Confirmed");
+    let access: BTreeSet<(String, String, String, String)> = x
+        .edges
+        .iter()
+        .filter(|e| e.dst.starts_with("data:"))
+        .map(|e| {
+            assert_eq!(e.props["resolution"], "gorm-model");
+            assert_eq!(e.props["prov"]["confidence_tier"], "InferredStrong");
+            (
+                e.src.rsplit('#').next().unwrap().to_string(),
+                e.label.clone(),
+                e.dst.rsplit('#').next().unwrap().to_string(),
+                e.props["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|o| o.as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        })
+        .collect();
+    let row = |a: &str, b: &str, c: &str, d: &str| (a.into(), b.into(), c.into(), d.into());
+    assert_eq!(
+        access,
+        BTreeSet::from([
+            row("FindUser", "READS", "UserModel", "read"),
+            row("UserModel.Follow", "READS", "FollowModel", "read"),
+            row("UserModel.Follow", "WRITES", "FollowModel", "insert"),
+            row("UserModel.Follow", "WRITES", "UserModel", "update"),
+            row("Unfollow", "WRITES", "FollowModel", "delete"),
+            row("List", "READS", "Category", "read"),
+            row("Shadow", "WRITES", "Category", "insert"),
+            row("Summary", "READS", "UserModel", "read"),
+            row("Authors", "READS", "UserModel", "read"),
+            row("Authors", "WRITES", "UserModel", "insert"),
+            row("Rename", "WRITES", "UserModel", "update"),
+            row("Upsert", "WRITES", "Category", "update,insert"),
+            // Each name of `var a, b = A{}, B{}` takes its own value's type.
+            row("Pair", "WRITES", "Category", "insert"),
+            row("Churn", "WRITES", "UserModel", "delete,insert"),
+        ])
+    );
+    // Merged accesses keep every call's method and evidence.
+    let churn = x
+        .edges
+        .iter()
+        .find(|e| e.src.ends_with("#Churn") && e.label == "WRITES")
+        .unwrap();
+    assert_eq!(
+        churn.props["methods"],
+        serde_json::json!(["Create", "Delete"])
+    );
+    let starts: Vec<u64> = churn.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["byte_start"].as_u64().unwrap())
+        .collect();
+    assert_eq!(starts.len(), 2, "{churn:#?}");
+    assert_ne!(starts[0], starts[1]);
+    // An explicit table is cited from its `TableName()` method as well.
+    let follow = x
+        .nodes
+        .iter()
+        .find(|n| n.props["name"] == "FollowModel")
+        .unwrap();
+    let cited: Vec<&str> = follow.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(cited, ["users/models.go", "users/table.go"], "{follow:#?}");
+    // A write through an unproven type, or a type that is no recovered
+    // model, is a Gap; a struct with no GORM marker is no model.
+    let gaps: BTreeSet<&str> = x
+        .nodes
+        .iter()
+        .filter(|n| n.id.starts_with("gap:gorm:"))
+        .map(|n| n.props["expression"].as_str().unwrap())
+        .collect();
+    // An unresolved `Model(value)` is not replaced by the destination.
+    assert_eq!(gaps, BTreeSet::from(["data", "&x", "&p", "value"]));
+}
+
+/// AC-0963: a GORM table name is pluralized as GORM's inflection library
+/// does it, and a model field's package type is read through its import
+/// whatever name binds it.
+#[test]
+fn gorm_tables_follow_gorm_inflection_and_aliased_types_are_columns() {
+    for (model, table) in [
+        ("Quiz", "quizzes"),
+        ("UserStatus", "user_statuses"),
+        ("Person", "people"),
+        ("Human", "humen"),
+        ("Fish", "fish"),
+        ("Knife", "knives"),
+        ("Category", "categories"),
+        ("Box", "boxes"),
+        ("Mouse", "mice"),
+        ("ComputerMouse", "computer_mouses"),
+        ("Matrix", "matrices"),
+        ("Datum", "data"),
+        ("Analysis", "analyses"),
+        ("Address", "addresses"),
+        ("Day", "days"),
+        ("News", "news"),
+        ("OrderV2", "order_v2"),
+    ] {
+        assert_eq!(super::gorm::table(model), table, "{model}");
+    }
+    let source = br#"package store
+import (
+    gm "gorm.io/gorm"
+    t "time"
+    "github.com/google/uuid"
+    other "example.com/other"
+)
+type Note struct {
+    ID        uuid.UUID `gorm:"primaryKey"`
+    CreatedOn t.Time
+    DeletedAt gm.DeletedAt `gorm:"index"`
+    Owner     other.Time
+}
+"#;
+    let out = extract_source(source, "store/note.go", &id()).unwrap();
+    let note = out
+        .nodes
+        .iter()
+        .find(|n| n.label == "DataEntity" && n.props["name"] == "Note")
+        .unwrap_or_else(|| panic!("{:#?}", out.nodes));
+    let columns: Vec<&str> = note.props["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(columns, ["id", "created_on", "deleted_at"], "{note:#?}");
+}
+
+/// A file importing both supported GORM packages recovers the models of
+/// each, whatever order its imports are read in.
+#[test]
+fn gorm_models_embedding_either_imported_package_are_entities() {
+    let source = br#"package store
+import (
+    g1 "gorm.io/gorm"
+    g2 "github.com/jinzhu/gorm"
+)
+type New struct { g1.Model }
+type Old struct { g2.Model }
+"#;
+    for _ in 0..8 {
+        let out = extract_source(source, "store/both.go", &id()).unwrap();
+        let models: BTreeSet<&str> = out
+            .nodes
+            .iter()
+            .filter(|n| n.label == "DataEntity")
+            .map(|n| n.props["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(models, BTreeSet::from(["New", "Old"]));
+    }
+}
+
+/// A reused file's GORM write to an unproven model keeps its Gap on the
+/// new commit.
+#[test]
+fn a_reused_files_gorm_gap_carries_the_new_commit() {
+    let source = br#"package store
+import "gorm.io/gorm"
+func Save(db *gorm.DB, v Missing) { db.Create(&v) }
+func (Missing) TableName() string { return "missing" }
+"#;
+    let mut extraction = extract_source(source, "store/save.go", &id()).unwrap();
+    assert_eq!(
+        extraction.pending_gorm.len(),
+        1,
+        "{:#?}",
+        extraction.pending_gorm
+    );
+    retarget_commit(&mut extraction, "def456");
+    let text = extraction.pending_gorm[0].props["unresolved"].to_string();
+    assert!(
+        text.contains("def456") && !text.contains("abc123"),
+        "{text}"
+    );
+    assert_eq!(extraction.gorm_table_names[0].evidence.commit_sha, "def456");
+}
