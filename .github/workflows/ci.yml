@@ -36,9 +36,8 @@ permissions:
   contents: read
   pull-requests: read
 
-# Jobs run on the organisation's own runners: the Linux runner group holds one
-# x86-64 runner, the MacOS group one arm64 runner. No job runs on a
-# GitHub-hosted runner: hosted minutes are billed.
+# Every job runs on a GitHub-hosted runner, each a fresh VM. The self-hosted
+# macOS runner is used only by release.yml/package.yml on tags.
 jobs:
   policy:
     name: Action Policy
