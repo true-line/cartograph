@@ -383,7 +383,12 @@ pub(super) fn enclosing(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<String>
 }
 
 /// `this` follows arrows, but never crosses an ordinary callback/object method.
-pub(super) fn this_class(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<String> {
+pub(super) fn this_class(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
+    this_class_node(node).map(|class| class_name(cx, class))
+}
+
+/// The class whose instance `this` at `node` is, under [`this_class`]'s rules.
+pub(super) fn this_class_node(mut node: TsNode<'_>) -> Option<TsNode<'_>> {
     while let Some(parent) = node.parent() {
         // Parameter decorators sit beneath the method's parameter node but
         // execute at class creation. They cannot borrow the callee's instance
@@ -395,7 +400,7 @@ pub(super) fn this_class(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<String
             if member_kind(parent) == "static" {
                 return None;
             }
-            return direct_class(parent).map(|class| class_name(cx, class));
+            return direct_class(parent);
         }
         if matches!(
             parent.kind(),

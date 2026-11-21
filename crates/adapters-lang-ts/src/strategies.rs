@@ -294,47 +294,48 @@ fn loop_config(cx: &FileCx<'_>, site: TsNode<'_>, name: &str) -> Vec<(String, St
         return Vec::new();
     };
     let iterable_name = cx.text(&iterable);
-    // The `const` binding the iterable, searched from the loop's function
-    // outward, at most three functions out, as lexical scope reads it.
+    // The nearest `const` binding the iterable that is visible at the loop:
+    // declared directly in a block (or the program) that encloses it,
+    // searched from the loop outward and across at most two enclosing
+    // functions, as lexical scope reads it.
     let mut reads = Vec::new();
-    let mut scope = iterable;
-    for _ in 0..3 {
-        let Some(next) = std::iter::successors(scope.parent(), |n| n.parent())
-            .find(|n| super::callable::is_callable(*n) || n.kind() == "program")
-        else {
-            break;
-        };
-        scope = next;
-        let mut stack = vec![scope];
-        let mut bound = false;
-        while let Some(node) = stack.pop() {
-            if node.kind() == "lexical_declaration"
-                && node.child(0).is_some_and(|k| cx.text(&k) == "const")
-            {
-                let mut walk = node.walk();
-                for declarator in node.named_children(&mut walk) {
-                    if declarator.kind() == "variable_declarator"
-                        && declarator.child_by_field_name("name").is_some_and(|n| {
-                            n.kind() == "identifier" && cx.text(&n) == iterable_name
-                        })
-                    {
-                        bound = true;
-                        if let Some(value) = declarator.child_by_field_name("value") {
-                            config_reads(cx, value, &mut reads);
-                        }
-                    }
-                }
-            }
-            let mut walk = node.walk();
-            for child in node.named_children(&mut walk) {
-                if !super::callable::is_callable(child) {
-                    stack.push(child);
-                }
+    let mut crossed = 0;
+    let mut node = iterable;
+    while let Some(parent) = node.parent() {
+        if super::callable::is_callable(parent) {
+            crossed += 1;
+            if crossed > 2 {
+                break;
             }
         }
-        if bound || scope.kind() == "program" {
-            break;
+        if matches!(parent.kind(), "statement_block" | "program") {
+            let mut walk = parent.walk();
+            let value = parent
+                .named_children(&mut walk)
+                .filter(|statement| {
+                    statement.kind() == "lexical_declaration"
+                        && statement.child(0).is_some_and(|k| cx.text(&k) == "const")
+                })
+                .flat_map(|statement| {
+                    let mut walk = statement.walk();
+                    statement
+                        .named_children(&mut walk)
+                        .filter(|d| d.kind() == "variable_declarator")
+                        .collect::<Vec<_>>()
+                })
+                .find(|declarator| {
+                    declarator
+                        .child_by_field_name("name")
+                        .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == iterable_name)
+                });
+            if let Some(declarator) = value {
+                if let Some(value) = declarator.child_by_field_name("value") {
+                    config_reads(cx, value, &mut reads);
+                }
+                break;
+            }
         }
+        node = parent;
     }
     reads
 }
@@ -353,8 +354,7 @@ fn this_field_type(cx: &FileCx<'_>, receiver: TsNode<'_>) -> Option<String> {
         .child_by_field_name("property")
         .filter(|p| p.kind() == "property_identifier")?;
     let field = cx.text(&field);
-    let class = std::iter::successors(receiver.parent(), |n| n.parent())
-        .find(|n| matches!(n.kind(), "class_declaration" | "class"))?;
+    let class = super::callable::this_class_node(receiver)?;
     let body = class.child_by_field_name("body")?;
     let mut walk = body.walk();
     for member in body.named_children(&mut walk) {
@@ -457,12 +457,25 @@ pub(super) fn sites(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Pending) {
                 let Some(interface) = named_interface(cx, ty) else {
                     continue;
                 };
-                let mut walk = body.walk();
-                for statement in body.named_children(&mut walk) {
-                    let Some(object) = (statement.kind() == "return_statement")
-                        .then(|| statement.named_child(0))
-                        .flatten()
-                        .filter(|v| v.kind() == "object")
+                // Every `return {…}` of this function, in branches too, but
+                // not those of nested functions.
+                let mut returns = Vec::new();
+                let mut stack = vec![body];
+                while let Some(current) = stack.pop() {
+                    if current.kind() == "return_statement" {
+                        returns.push(current);
+                        continue;
+                    }
+                    let mut walk = current.walk();
+                    for child in current.named_children(&mut walk) {
+                        if !super::callable::is_callable(child) {
+                            stack.push(child);
+                        }
+                    }
+                }
+                returns.sort_by_key(|r| r.start_byte());
+                for statement in returns {
+                    let Some(object) = statement.named_child(0).filter(|v| v.kind() == "object")
                     else {
                         continue;
                     };
@@ -926,5 +939,75 @@ export const untyped = {
                 .any(|e| e.label == "GOVERNS" && e.dst == default.dst),
             "the default object's guard governs its method"
         );
+    }
+
+    // AC-0977: the loop's iterable is the nearest visible `const` (a
+    // sibling block's shadowing one is not); a branch's `return {…}` of a
+    // typed factory implements the interface too; `this` inside an object
+    // method is that object, not the class.
+    #[test]
+    fn config_dispatch_follows_lexical_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "src/config.ts",
+            "export interface PaymentOptions { process?: Array<PaymentProcess<any>>; }
+export interface RefundOptions { process?: Array<RefundProcess<any>>; }
+export function makePayment(flag: boolean): PaymentProcess<any> {
+    if (flag) {
+        return { onTransitionStart(a, b) { return true; } };
+    }
+    return { onTransitionEnd(a, b) {} };
+}
+export const refund: RefundProcess<any> = { onTransitionStart(a, b) { return false; } };
+",
+        );
+        write(
+            "src/machine.ts",
+            "export class Machine {
+    constructor(private config: StateMachineConfig, private configService: ConfigService) {}
+    run() {
+        const processes = this.configService.paymentOptions.process;
+        {
+            const processes = this.configService.refundOptions.process;
+        }
+        for (const process of processes) {
+            process.onTransitionStart(1, 2);
+        }
+        const hooks = {
+            fire() {
+                this.config.onTransitionStart(1, 2);
+            },
+        };
+        return hooks;
+    }
+}
+export function machineConfig(): StateMachineConfig {
+    return { onTransitionStart(a, b) { return true; } };
+}
+",
+        );
+        let out = extract_dir(
+            dir.path(),
+            &SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let edges: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.label == "CALLS" && e.props["resolution"] == "strategy-implementation")
+            .collect();
+        // Only the payment process, through the branch's object.
+        assert_eq!(edges.len(), 1, "{edges:#?}");
+        assert_eq!(edges[0].props["interface"], "PaymentProcess");
+        assert_eq!(edges[0].props["implementation"], "makePayment");
+        assert_eq!(edges[0].src, "sym:repo@src/machine.ts#Machine.run");
     }
 }
