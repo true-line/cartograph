@@ -56,6 +56,8 @@ pub struct Extraction {
     pending_bases: Vec<base::Pending>,
     base_bindings: Vec<base::Binding>,
     test_requests: Vec<target_tests::Request>,
+    pending_gorm: Vec<gorm::Pending>,
+    gorm_table_names: Vec<gorm::TableName>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +184,17 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         let mut props = serde_json::json!({ "prov": function.prov.take() });
         retarget_props_commit(&mut props, commit);
         function.prov = props["prov"].take();
+    }
+    for pending in &mut extraction.pending_gorm {
+        retarget_props_commit(&mut pending.props, commit);
+        // The Gap a write becomes when its type is no model carries its own.
+        for part in ["node", "edge"] {
+            if let Some(props) = pending.props["unresolved"].get_mut(part)
+                && let Some(props) = props.get_mut("props")
+            {
+                retarget_props_commit(props, commit);
+            }
+        }
     }
     for request in &mut extraction.test_requests {
         request.retarget(commit);
@@ -1357,6 +1370,7 @@ fn extract_source_with_module(
     } else {
         rule_evidence::extract(&cx, root, &functions_by_start, &bindings, &mut out);
         sql::extract(&cx, root, &functions_by_start, &bindings, &mut out);
+        gorm::extract(&cx, root, &functions_by_start, &bindings, &mut out);
     }
     Ok(out)
 }
@@ -1645,6 +1659,8 @@ pub fn extract_dir_incremental_with_progress(
             out.pending_bases.extend(extraction.pending_bases);
             out.base_bindings.extend(extraction.base_bindings);
             out.test_requests.extend(extraction.test_requests);
+            out.pending_gorm.extend(extraction.pending_gorm);
+            out.gorm_table_names.extend(extraction.gorm_table_names);
             Ok(())
         },
     );
@@ -1730,6 +1746,7 @@ pub fn extract_dir_incremental_with_progress(
     vercel::routes(root, id.repo, id.commit, &functions, &mut out);
     target_tests::resolve(&mut out, id.repo);
     sql::merge(&mut out);
+    gorm::resolve(&mut out);
     let modules = repo_modules(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(
@@ -1760,6 +1777,7 @@ mod base;
 mod client;
 mod config_read;
 mod events;
+mod gorm;
 mod queries;
 mod rule_evidence;
 mod sql;

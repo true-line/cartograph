@@ -130,6 +130,39 @@ fn sqlalchemy_entity_fixture() -> RevisionedSnapshot {
     }
 }
 
+/// A GORM model as the Go adapter recovers it (#2019).
+fn gorm_entity_fixture() -> RevisionedSnapshot {
+    let mut snapshot = sqlalchemy_entity_fixture();
+    let node = &mut snapshot.graph.0[0];
+    let evidence = vec![EvidenceRef {
+        repo: "local/go".into(),
+        path: "users/models.go".into(),
+        byte_start: 10,
+        byte_end: 200,
+        commit_sha: "a".repeat(40),
+    }];
+    node.id = "data:local/go@gorm:users#UserModel".into();
+    node.props["name"] = "UserModel".into();
+    node.props["storage"] = "gorm".into();
+    node.props["framework"] = "gorm".into();
+    node.props["language"] = "go".into();
+    node.props["table_source"] = "default".into();
+    node.props["table"] = "user_models".into();
+    node.props["store"] = "user_models".into();
+    node.props["prov"] = serde_json::to_value(
+        Provenance::new(
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+            evidence,
+            "t0.adapter-go",
+            format!("DataEntity {}", node.id).as_bytes(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    snapshot
+}
+
 // AC-0511: ORM-derived candidates and mappings stay cited in the overlay; malformed and oversized pairs fail closed.
 #[test]
 fn orm_domain_entities_map_real_jpa_facts_in_the_overlay_only() {
@@ -365,6 +398,7 @@ fn orm_domain_entities_require_source_basis_on_model_support() {
     for (storage, original) in [
         ("jpa", jpa_entity_fixture()),
         ("sqlalchemy", sqlalchemy_entity_fixture()),
+        ("gorm", gorm_entity_fixture()),
     ] {
         let expected = derive_orm_domain_entities(&original);
         assert_eq!(expected.facts.len(), 2); // Implicit source basis remains admitted.
