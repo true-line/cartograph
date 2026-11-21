@@ -164,6 +164,8 @@ const KT_WEBCLIENT: &str = "`WebClient` request chains `<client>.<verb>().uri(�
 const KT_OKHTTP: &str = "inline `Request.Builder()…build()` chains on a named-imported (or aliased) or fully qualified `okhttp3.Request.Builder` whose every link is a positional builder member; a builder held in a variable and built later, a trailing lambda, a link name the file declares or imports and files with wildcard imports are not read, and a URL is a literal only as a pure string `url(\"…\")`";
 /// What the Kotlin Apache HttpClient cell reads (AC-0471).
 const KT_APACHE: &str = "`HttpGet(<url>)` and the other HttpClient 4 and 5 request classes, named-imported (or aliased) or fully qualified, with one positional argument and no trailing lambda; a file-declared name, a binding of the first segment, a captured `org` (declared, imported or possibly wildcard-imported) and no-argument constructors are not read, and a URL is a literal only as a pure string literal";
+/// What the Kotlin Room cell reads (AC-1025).
+const KT_ROOM: &str = "import-proven `@Entity` classes (a literal `tableName` or the class name; constructor and body properties as columns, `@ColumnInfo(name)` literals honoured, `@Embedded` and `@Relation` not flattened) and `@Dao` functions: a `@Query` read only as one string literal (raw strings included) through the shared SQL reader, and `@Insert`/`@Update`/`@Delete`/`@Upsert` by their first parameter's entity type; `entity =` arguments, `@RawQuery`, `@DatabaseView` and FTS tables are not read";
 /// What the Kotlin Ktor server routes cell reads (AC-1023).
 const KT_KTOR_ROUTES: &str = "`routing { }` blocks and `Route` extension functions whose builders (`route`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`) are imported from `io.ktor.server.routing` (or Ktor 1's `io.ktor.routing`), named or by a star import no same-package declaration obscures; a path is a literal only as one pure string literal, a group gets its prefix only from a zero-argument call of its name inside routing, and type-safe `Resources` routes, `method(...)` blocks and routes installed through plugins are not read";
 /// What the Kotlin Ktor client cell reads (AC-0479).
@@ -370,6 +372,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Kotlin", CORE, Calls, Supported, ""),
     cell("Kotlin", "spring-web", HttpEndpoints, Supported, ""),
     cell("Kotlin", "ktor", HttpEndpoints, Partial, KT_KTOR_ROUTES),
+    cell("Kotlin", "room", DataModel, Partial, KT_ROOM),
     cell(
         "Kotlin",
         "navigation3",
