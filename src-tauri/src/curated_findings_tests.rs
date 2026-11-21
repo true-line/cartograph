@@ -123,6 +123,7 @@ impl Fixture {
             &Snapshot {
                 nodes: &nodes,
                 edges: &edges,
+                overlay: &[],
                 derived_decisions: DerivedDecisions::Compile(&[]),
                 coverage: &coverage,
                 content_hash: &content_hash,
