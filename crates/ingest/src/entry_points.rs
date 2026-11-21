@@ -16,6 +16,10 @@
 //! - a `.js`/`.mjs`/`.cjs` script behind a `node` shebang is a process
 //!   start, and each subcommand it dispatches on `process.argv` a command
 //!   (`node.rs`).
+//! - a Go `func main()` in `package main` is a process start (`go.rs`).
+//! - a Java `public static void main`, a message-listener, `@Scheduled` or
+//!   runner method is a process start, queue consumer, scheduled job or
+//!   startup task (`java.rs`).
 //!
 //! What starts a Python process is read from the module and the repository
 //! modules it imports, never guessed from its name, and recorded as `kind`
@@ -141,6 +145,7 @@ pub fn extract_dir(
             .clone()
     };
     let mut starts: Vec<Start> = Vec::new();
+    let mut java_files: Vec<(String, String)> = Vec::new();
     for file in &walked {
         let rel = file.rel.as_str();
         if rel.ends_with(".py") {
@@ -173,6 +178,9 @@ pub fn extract_dir(
         } else if go::candidate(rel) {
             let Some(text) = read(rel) else { continue };
             starts.extend(go::go_start(id.repo, rel, &text, symbols));
+        } else if java::candidate(rel) {
+            let Some(text) = read(rel) else { continue };
+            java_files.push((rel.to_string(), text));
         } else if node::candidate(rel) && !rel.contains("node_modules/") {
             if scheduled.contains(rel) {
                 continue;
@@ -184,6 +192,7 @@ pub fn extract_dir(
             starts.extend(package_bins(rel, &text, &files));
         }
     }
+    starts.extend(java::starts(id.repo, &java_files, symbols));
     let mut out = EntryPointExtraction::default();
     let declaring: BTreeSet<&str> = starts.iter().map(|s| s.declared_in.as_str()).collect();
     out.files = declaring.len() as u64;
@@ -1054,6 +1063,8 @@ fn started_by(kind: &str) -> &'static str {
         "http-server" => "an HTTP request",
         "command" => "a person runs the command",
         "edge-worker" => "an HTTP request at the edge",
+        "scheduled-job" => "its schedule",
+        "startup-task" => "the application starting",
         _ => "the process is started",
     }
 }
@@ -1068,11 +1079,18 @@ fn display(start: &Start) -> String {
         "http-server" => "HTTP server",
         "command" => "Command",
         "edge-worker" => "Edge worker",
+        "scheduled-job" => "Scheduled job",
+        "startup-task" => "Startup task",
         _ => "Process",
     };
-    let at = match (&start.command, start.how.as_str()) {
+    let handler = start
+        .extra
+        .iter()
+        .find_map(|(key, value)| (*key == "handler").then(|| value.as_str()).flatten());
+    let at = match (&start.command, handler) {
         (Some(command), _) => format!("{}: {command}", start.declared_in),
-        (None, _) => start.declared_in.clone(),
+        (None, Some(handler)) => format!("{}: {handler}", start.declared_in),
+        (None, None) => start.declared_in.clone(),
     };
     match start.port {
         Some(port) => format!("{what} ({at}, port {port})"),
@@ -1215,6 +1233,7 @@ fn emit(
 }
 
 mod go;
+mod java;
 mod node;
 mod wrangler;
 
