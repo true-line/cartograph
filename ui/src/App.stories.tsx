@@ -605,6 +605,8 @@ function installFakeCore(options: {
         return graphStats;
       case 'list_jobs':
         return jobs;
+      case 'list_job_usage':
+        return [];
       case 'list_nodes': {
         const label = (args as { label: string }).label;
         if (label === 'Endpoint') return [FAKE_ENDPOINT];
