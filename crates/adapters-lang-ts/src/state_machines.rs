@@ -156,15 +156,26 @@ pub(super) fn extract(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Extractio
                 object
                     .named_children(&mut walk)
                     .filter_map(|member| {
-                        let key = match member.kind() {
-                            "method_definition" => member.child_by_field_name("name")?,
-                            "pair" => member.child_by_field_name("key")?,
+                        // A shorthand method's callable starts at the method;
+                        // a property's at its function value.
+                        let (key, start) = match member.kind() {
+                            "method_definition" => {
+                                (member.child_by_field_name("name")?, member.start_byte())
+                            }
+                            "pair" => {
+                                let value = member.child_by_field_name("value")?;
+                                matches!(
+                                    value.kind(),
+                                    "arrow_function" | "function_expression" | "function"
+                                )
+                                .then_some(())?;
+                                (member.child_by_field_name("key")?, value.start_byte())
+                            }
                             _ => return None,
                         };
                         let name = cx.text(&key);
-                        name.starts_with("onTransition").then(|| {
-                            serde_json::json!({ "name": name, "byte_start": member.start_byte() })
-                        })
+                        name.starts_with("onTransition")
+                            .then(|| serde_json::json!({ "name": name, "byte_start": start }))
                     })
                     .collect()
             })
@@ -315,6 +326,55 @@ export const single = { transitions: { a: { to: [] } } };
                 .contains("toState === 'ArrangingPayment' && order.lines.length === 0"),
             "{}",
             rule.props
+        );
+    }
+    // AC-0951: a hook written as a property (`onTransitionStart: async () =>`)
+    // is recorded at its function's start, which its callable's id ends with.
+    #[test]
+    fn a_property_hook_is_recorded_at_its_function() {
+        const PAYMENT: &str = "
+export const defaultPaymentProcess: PaymentProcess<PaymentState> = {
+    transitions: {
+        Created: { to: ['Authorized', 'Declined'] },
+        Declined: { to: [] },
+    },
+    onTransitionStart: async (fromState, toState, { payment }) => {
+        if (toState === 'Authorized' && payment.amount <= 0) {
+            return 'message.payment-amount-must-be-positive';
+        }
+    },
+};
+";
+        let out = extract_source(
+            PAYMENT.as_bytes(),
+            "src/config/payment/default-payment-process.ts",
+            &SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let machine = &out
+            .nodes
+            .iter()
+            .find(|n| n.label == "StateMachine")
+            .expect("a machine")
+            .props;
+        assert_eq!(machine["name"], "defaultPaymentProcess");
+        let hook = &machine["hooks"][0];
+        assert_eq!(hook["name"], "onTransitionStart");
+        let start = hook["byte_start"].as_u64().unwrap() as usize;
+        assert!(PAYMENT[start..].starts_with("async (fromState"), "{hook}");
+        let suffix = format!(".onTransitionStart@{start}");
+        assert!(
+            out.edges
+                .iter()
+                .any(|e| e.label == "GOVERNS" && e.dst.ends_with(&suffix)),
+            "{:#?}",
+            out.edges
+                .iter()
+                .filter(|e| e.label == "GOVERNS")
+                .collect::<Vec<_>>()
         );
     }
 }
