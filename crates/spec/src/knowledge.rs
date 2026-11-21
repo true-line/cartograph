@@ -57,6 +57,7 @@ fn orm_model_support(node: &Node) -> Option<(Provenance, String, String)> {
     let (storage, expected_extractor, columns_key) = match node.props["storage"].as_str()? {
         "jpa" => ("jpa", "t0.adapter-java", "fields"),
         "sqlalchemy" => ("sqlalchemy", "t0.adapter-python", "columns"),
+        "gorm" => ("gorm", "t0.adapter-go", "columns"),
         _ => return None,
     };
     let name = node.props["name"].as_str()?.trim();
