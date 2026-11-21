@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Most claims one draft holds.
-pub const MAX_CLAIMS: usize = 64;
+pub const MAX_CLAIMS: usize = 256;
 /// Most UTF-8 bytes one statement holds.
 pub const MAX_STATEMENT_BYTES: usize = 2_048;
 /// Most citation ids one claim holds.
