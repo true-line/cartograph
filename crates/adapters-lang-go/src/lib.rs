@@ -58,6 +58,9 @@ pub struct Extraction {
     test_requests: Vec<target_tests::Request>,
     pending_gorm: Vec<gorm::Pending>,
     gorm_table_names: Vec<gorm::TableName>,
+    pending_auth: Vec<middleware::Pending>,
+    denials: Vec<middleware::Denial>,
+    deny_values: Vec<middleware::DenyValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +205,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for request in &mut extraction.test_requests {
         request.retarget(commit);
     }
+    middleware::retarget(extraction, commit);
     for pending in &mut extraction.pending_endpoints {
         retarget_props_commit(&mut pending.node.props, commit);
         retarget_props_commit(&mut pending.edge.props, commit);
@@ -241,6 +245,7 @@ fn default_import_name(import_path: &str) -> &str {
         "net/http" => "http",
         "github.com/go-chi/chi" | "github.com/go-chi/chi/v5" => "chi",
         "github.com/gin-gonic/gin" => "gin",
+        "github.com/go-chi/jwtauth/v5" => "jwtauth",
         "github.com/segmentio/kafka-go" => "kafka",
         _ => import_path.rsplit('/').next().unwrap_or(import_path),
     }
@@ -1091,6 +1096,8 @@ fn extract_source_with_module(
     out.base_bindings = base::bindings(&cx, root, &package_dir(path));
     let receivers = assignment_receivers(&cx, root, &bindings);
     let closures = closures(&cx, root);
+    let uses = middleware::uses(&cx, root, &receivers);
+    out.deny_values = middleware::deny_values(&cx, root, &bindings);
     let client = client::Proof::new(&cx, &bindings);
 
     let function_query =
@@ -1106,6 +1113,8 @@ fn extract_source_with_module(
         };
         let symbol = symbol_id(id.repo, path, &qualified);
         functions_by_start.insert(function.start_byte(), symbol.clone());
+        out.denials
+            .extend(middleware::denial(&cx, function, &qualified, &bindings));
         out.handler_functions.extend(vercel::handler_function(
             &cx, function, &symbol, &simple, &bindings,
         ));
@@ -1152,8 +1161,9 @@ fn extract_source_with_module(
             let Some(function) = call.child_by_field_name("function") else {
                 continue;
             };
+            let (route_callee, _) = middleware::peel_with(&cx, function, &receivers);
             if let Some((_, _, handler_node, _)) =
-                endpoint_registration(&cx, call, cx.text(&function), &bindings, &receivers)
+                endpoint_registration(&cx, call, &route_callee, &bindings, &receivers)
                 && let (_, Some(literal)) = handler_target(&cx, handler_node, &scope, 0)
             {
                 literals.push(literal);
@@ -1189,8 +1199,9 @@ fn extract_source_with_module(
             continue;
         };
         let callee = cx.text(&function);
+        let (route_callee, with) = middleware::peel_with(&cx, function, &receivers);
         if let Some((method, route, handler_node, framework)) =
-            endpoint_registration(&cx, call, callee, &bindings, &receivers)
+            endpoint_registration(&cx, call, &route_callee, &bindings, &receivers)
         {
             let scope = HandlerScope {
                 bindings: &bindings,
@@ -1206,6 +1217,16 @@ fn extract_source_with_module(
                 handler = HandlerTarget::Resolved(symbol);
             }
             let endpoint = format!("ep:{}@{method}:{route}", id.repo);
+            out.pending_auth.push(middleware::registration(
+                &cx,
+                &endpoint,
+                call,
+                handler_node,
+                &with,
+                &uses,
+                &bindings,
+                &receivers,
+            ));
             let mut endpoint_node = Node {
                 id: endpoint.clone(),
                 label: "Endpoint".into(),
@@ -1389,6 +1410,7 @@ pub fn extract_source(
     let held = std::mem::take(&mut out.pending_bases);
     let joined = base::join(held, &std::mem::take(&mut out.base_bindings));
     out.fetch_sites.extend(joined);
+    middleware::resolve_file(&mut out, id.repo);
     Ok(out)
 }
 
@@ -1716,6 +1738,9 @@ fn extract_dir_with(
             out.test_requests.extend(extraction.test_requests);
             out.pending_gorm.extend(extraction.pending_gorm);
             out.gorm_table_names.extend(extraction.gorm_table_names);
+            out.pending_auth.extend(extraction.pending_auth);
+            out.denials.extend(extraction.denials);
+            out.deny_values.extend(extraction.deny_values);
             Ok(())
         },
     );
@@ -1797,6 +1822,7 @@ fn extract_dir_with(
     let held = std::mem::take(&mut out.pending_bases);
     let joined = base::join(held, &std::mem::take(&mut out.base_bindings));
     out.fetch_sites.extend(joined);
+    middleware::resolve(&mut out, id.repo, &symbol_index);
     let functions = std::mem::take(&mut out.handler_functions);
     vercel::routes(root, id.repo, id.commit, &functions, &mut out);
     target_tests::resolve(&mut out, id.repo);
@@ -1833,6 +1859,7 @@ mod client;
 mod config_read;
 mod events;
 mod gorm;
+mod middleware;
 mod queries;
 mod rule_evidence;
 mod sql;
