@@ -7,9 +7,10 @@
 //! standard-library environment reads the language adapters recover
 //! (ADR-0059). No model is called and no fact is recovered here.
 //!
-//! **Names only.** The facts hold key names and spans, never a value, a
-//! default or a fallback, and nothing else is read here (ADR-0059 decisions
-//! 5 and 7). An environment-file fact has no span by design: a span would be
+//! **Names only.** The facts hold key names and spans, never a string value,
+//! default or fallback, and nothing else is read here (ADR-0059 decisions 5
+//! and 7). A Python read's numeric or boolean `defaults` (ADR-0059 decision
+//! 5 as amended) are stated in rule rows (#1998), not in this artifact. An environment-file fact has no span by design: a span would be
 //! a readable window into a file that holds secrets.
 //!
 //! **One row per key.** A key is listed once per repository, with every

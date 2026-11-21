@@ -23,6 +23,9 @@ import { TierBadge, methodLabel } from './TierBadge';
 import { CuratedSection } from './CuratedSection';
 import { SectionDocumentView } from './SectionDocumentView';
 import type { SectionDocumentViewProps } from './SectionDocumentView';
+import { AreaExpertPanel } from './AreaExpertPanel';
+import { ArchitectureCanvas } from './ArchitectureCanvas';
+import type { AreaExpertPanelProps } from './AreaExpertPanel';
 
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
@@ -35,6 +38,8 @@ export interface SpecWorkbenchProps {
    *  surface does not offer it. Its accepted-draft states come from
    *  `curated`, and a citation opens the fact index of `bundle`. */
   sections?: Omit<SectionDocumentViewProps, 'curated' | 'onOpenCitation'>;
+  /** Ask the expert of one subsystem area (#2057, AC-0932). */
+  expert?: Omit<AreaExpertPanelProps, 'onOpenCitation'>;
   pageSize?: number;
   mode: SpecExportMode;
   decisions: AssertionDecisionRecord[];
@@ -130,6 +135,7 @@ export function SpecWorkbench({
   curated,
   onRefreshCurated,
   sections,
+  expert,
   pageSize,
   mode,
   decisions,
@@ -173,6 +179,8 @@ export function SpecWorkbench({
     if (selected.id === 'data-model') return views.data_model ?? null;
     return null;
   }, [selected, isDiagramArtifact, views]);
+  const architectureView =
+    selected?.id === 'architecture' && views?.architecture ? views.architecture : null;
   const hasValidDiagramView = Boolean(
     selectedDiagramView && verifyDiagramViewIdentity(selectedDiagramView, selected),
   );
@@ -240,6 +248,16 @@ export function SpecWorkbench({
             <SectionDocumentView
               {...sections}
               curated={curated ?? null}
+              onOpenCitation={factIndex ? (citationId) => {
+                setSelectedId(factIndex.id);
+                setArtifactView('rendered');
+                setOpenedCitation(citationId);
+              } : undefined}
+            />
+          )}
+          {expert && (
+            <AreaExpertPanel
+              {...expert}
               onOpenCitation={factIndex ? (citationId) => {
                 setSelectedId(factIndex.id);
                 setArtifactView('rendered');
@@ -329,7 +347,21 @@ export function SpecWorkbench({
                   be curated (R-INT-1).
                 </p>
 
-                {selectedDiagramView ? (
+                {architectureView ? (
+                  <>
+                    <ArchitectureCanvas
+                      key={`${selected.id}:${selected.content_id}`}
+                      view={architectureView}
+                      artifact={selected}
+                    />
+                    <details className="spec-artifact-source-details">
+                      <summary>Copyable Mermaid / Markdown source</summary>
+                      <pre className="spec-artifact-source" data-testid="spec-artifact-source">
+                        {selected.content}
+                      </pre>
+                    </details>
+                  </>
+                ) : selectedDiagramView ? (
                   <>
                     <SpecDiagramCanvas
                       key={`${selected.id}:${selected.content_id}`}

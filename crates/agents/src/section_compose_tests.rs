@@ -62,6 +62,12 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
         .unwrap();
     assert!(guide < prompt.find("<section>").unwrap());
     assert!(guidance("1.3").unwrap().contains("never enumerate routes"));
+    // Areas the section lists are followed, not reinvented.
+    assert!(
+        guidance("1.3")
+            .unwrap()
+            .contains("When the section lists capability areas")
+    );
     assert_eq!(guidance("9.9"), None);
     let schema: serde_json::Value =
         serde_json::from_str(action.payload.response_schema.as_deref().unwrap()).unwrap();

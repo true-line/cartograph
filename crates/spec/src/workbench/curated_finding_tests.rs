@@ -136,6 +136,7 @@ fn compile(
         mode,
         rejected,
         Supplied {
+            repo_names: &[],
             knowledge: None,
             coverage: &[],
             stale_coverage: &[],

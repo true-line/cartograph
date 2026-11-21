@@ -103,7 +103,7 @@ const SPELLED: &[(&str, &str)] = &[
 
 /// Lowercase words of an identifier: camelCase, PascalCase with acronyms,
 /// snake_case, kebab-case, dotted and path names.
-fn words(name: &str) -> Vec<String> {
+pub(super) fn words(name: &str) -> Vec<String> {
     let chars: Vec<char> = name.chars().collect();
     let mut out = Vec::new();
     let mut word = String::new();
@@ -148,7 +148,7 @@ fn plural(word: &str) -> String {
     format!("{word}s")
 }
 
-fn spelled(word: &str) -> &str {
+pub(super) fn spelled(word: &str) -> &str {
     SPELLED
         .iter()
         .find(|(short, _)| *short == word)
@@ -180,6 +180,70 @@ pub(super) fn generic(name: &str) -> bool {
                 ]
                 .contains(&w.as_str())
         })
+}
+
+/// Where a source file sits, in words, for telling apart titles that would
+/// collide (#1999): a capability name never carries a file path. The file's
+/// stem, or its directory's name when the stem is generic (`views/index.py`
+/// reads `views`), abbreviations spelled out; a container or process
+/// manifest reads as what it declares (`Dockerfile` reads `container image`).
+/// With `full`, every directory segment is named too, for files whose short
+/// place collides.
+pub(super) fn place(path: &str, full: bool) -> String {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((file, dirs)) = segments.split_last() else {
+        return String::new();
+    };
+    let stem = file.rsplit_once('.').map_or(*file, |(stem, _)| stem);
+    let known = match stem.to_ascii_lowercase().as_str() {
+        "dockerfile" | "containerfile" => Some("container image"),
+        "procfile" => Some("process file"),
+        _ => None,
+    };
+    let mut named: Vec<&str> = if full { dirs.to_vec() } else { Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    match known {
+        Some(known) => {
+            out.extend(named.iter().map(|d| spelled_words(d)));
+            out.push(known.to_owned());
+        }
+        None => {
+            if !full && (generic(stem) || stem == "__main__" || stem == "__init__") {
+                if let Some(dir) = dirs.last() {
+                    named.push(dir);
+                }
+            } else {
+                named.push(stem);
+            }
+            out.extend(named.iter().map(|d| spelled_words(d)));
+        }
+    }
+    out.retain(|w| !w.is_empty());
+    out.join(" ")
+}
+
+/// [`place`] of each file, short where that tells the files apart and with
+/// every directory named where it does not.
+pub(super) fn places_apart<'a>(
+    files: impl IntoIterator<Item = &'a str>,
+) -> std::collections::BTreeMap<&'a str, String> {
+    let files: std::collections::BTreeSet<&str> = files.into_iter().collect();
+    let mut short: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for file in &files {
+        *short.entry(place(file, false)).or_default() += 1;
+    }
+    files
+        .into_iter()
+        .map(|file| {
+            let near = place(file, false);
+            let name = if short[&near] > 1 {
+                place(file, true)
+            } else {
+                near
+            };
+            (file, name)
+        })
+        .collect()
 }
 
 /// Words of a whole name, abbreviations spelled out: an audience.
@@ -358,5 +422,24 @@ mod tests {
         );
         assert!(mutating("POST") && mutating("mutation") && mutating("delete"));
         assert!(!mutating("GET") && !mutating("query") && !mutating("HEAD"));
+    }
+
+    // AC-0905: a file that tells colliding titles apart is named in words.
+    #[test]
+    fn a_file_is_placed_in_words() {
+        assert_eq!(place("oauth_tester.py", false), "OAuth tester");
+        assert_eq!(place("Dockerfile", false), "container image");
+        assert_eq!(
+            place("deploy/crontab-all-hosts.yml", false),
+            "crontab all hosts"
+        );
+        assert_eq!(place("app/dashboard/views/index.py", false), "views");
+        assert_eq!(
+            place("app/dashboard/views/index.py", true),
+            "app dashboard views index"
+        );
+        let apart = places_apart(["a/views/index.py", "b/views/index.py", "c/setup.py"]);
+        assert_eq!(apart["a/views/index.py"], "a views index");
+        assert_eq!(apart["c/setup.py"], "setup");
     }
 }

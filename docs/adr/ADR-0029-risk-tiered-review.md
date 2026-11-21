@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
-- **Deciders:** Chris Kane (owner), Cartograph implementation agent
+- **Deciders:** Project owner, Cartograph implementation agent
 
 ## Context
 

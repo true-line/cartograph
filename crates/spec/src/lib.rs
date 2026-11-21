@@ -11,6 +11,7 @@ use flowtracer::Flow;
 mod adr;
 mod contract;
 mod documents;
+mod front_doors;
 pub use documents::{
     DOCUMENT_EXTRACTOR_ID, DOCUMENTATION_DRIFT_EXTRACTOR_ID, DocumentCounts, DocumentFacts,
     DocumentReference, DocumentSkip, DocumentationDrift, MAX_DOCUMENT_BYTES,
@@ -25,11 +26,13 @@ mod knowledge;
 pub use knowledge::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     BUSINESS_FLOW_RULE, BUSINESS_FLOW_RULE_VERSION, BusinessFlowOmission, BusinessFlowReport,
-    CAPABILITY_CONTROLLER_RULE, CAPABILITY_CONTROLLER_RULE_VERSION, CAPABILITY_GRAPHQL_RULE,
-    CAPABILITY_GRAPHQL_RULE_VERSION, CapabilityReport, DOMAIN_ENTITY_ORM_RULE,
-    DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport, derive_business_flows,
-    derive_controller_capabilities, derive_graphql_resolver_capabilities,
-    derive_orm_domain_entities, derive_permission_actors,
+    CAPABILITY_CONTROLLER_RULE, CAPABILITY_CONTROLLER_RULE_VERSION, CAPABILITY_ENTRY_POINT_RULE,
+    CAPABILITY_ENTRY_POINT_RULE_VERSION, CAPABILITY_GRAPHQL_RULE, CAPABILITY_GRAPHQL_RULE_VERSION,
+    CapabilityReport, DOMAIN_ENTITY_ORM_RULE, DOMAIN_ENTITY_ORM_RULE_VERSION, DomainEntityReport,
+    MAX_SUBSYSTEM_FILES, SUBSYSTEM_FILE_CAP, SUBSYSTEM_RULE, SUBSYSTEM_RULE_VERSION,
+    SubsystemReport, derive_business_flows, derive_controller_capabilities,
+    derive_entry_point_capabilities, derive_graphql_resolver_capabilities,
+    derive_orm_domain_entities, derive_permission_actors, derive_subsystems,
 };
 
 /// Version of the spec compiler's projection rules, recorded with every
@@ -84,10 +87,15 @@ pub use contract::{
     extract_contract_facts, extract_contract_facts_among,
 };
 pub use views::{
-    DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS, SPEC_VIEW_MAX_NODES, SpecDiagramView,
-    SpecViewBundle, compile_selected_flow_view, compile_spec_views, compile_spec_with_views,
-    compile_spec_with_views_and_coverage, try_compile_spec_with_views_and_coverage,
-    try_compile_spec_with_views_supplied,
+    ArchitectureComponents, ArchitectureElement, ArchitectureFact, ArchitectureRelation,
+    ArchitectureView, DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS,
+    SPEC_VIEW_MAX_NODES, SpecDiagramView, SpecViewBundle, compile_selected_flow_view,
+    compile_spec_views, compile_spec_with_views, compile_spec_with_views_and_coverage,
+    try_compile_spec_with_views_and_coverage, try_compile_spec_with_views_supplied,
+};
+pub use workbench::{
+    AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_briefing,
+    area_neighbours, briefing_citation_ids,
 };
 pub use workbench::{
     ActorStoryWorkspaceBound, ArtifactDescriptor, ArtifactSelectionError, COMPILE_WORKSPACE_MODEL,
@@ -117,7 +125,7 @@ pub use workbench::{
 pub use workbench::{
     CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,
     DerivedGroup, SYSTEM_SCOPE, SectionFrame, SectionKind, SectionScopeError, SourceIdentifiers,
-    catalogue_section, catalogue_sections, composition_facts, drafted_section,
+    catalogue_section, catalogue_sections, composition_facts, composition_text, drafted_section,
     section_citation_set, section_text,
 };
 

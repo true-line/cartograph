@@ -313,3 +313,159 @@ fn an_export_with_no_endpoint_says_none() {
     assert!(content.contains("Endpoints listed: 0. Recorded as a Gap: 0."));
     assert!(content.contains("| — | — | — | — | — | — | — | — | None in this export |"));
 }
+
+/// The fixture with the shapes the Python adapter records on the first two
+/// endpoints: inputs and responses on one, a partial response on the other.
+fn shaped() -> (Vec<Node>, Vec<Edge>) {
+    let (mut nodes, edges) = fixture();
+    nodes[0].props["request_inputs"] = json!({
+        "query": ["page", "q"],
+        "body": ["note"],
+        "scope": "handler_body",
+        "prov": confirmed((12, 20), "inputs of list"),
+    });
+    nodes[0].props["responses"] = json!({
+        "kinds": ["json"],
+        "statuses": [200, 400],
+        "keys": ["error", "orders"],
+        "scope": "handler_body",
+        "prov": confirmed((30, 38), "responses of list"),
+    });
+    nodes[0].props["rate_limits"] = json!({
+        "entries": [{
+            "text": "limiter.limit(ALIAS_LIMIT)",
+            "value": "100/day;50/hour;5/minute",
+            "limits": [
+                {"count": 100, "per": 1, "unit": "day"},
+                {"count": 50, "per": 1, "unit": "hour"},
+                {"count": 5, "per": 1, "unit": "minute"},
+            ],
+            "source": "environment_default",
+            "environment_key": "ALIAS_LIMIT",
+        }],
+        "prov": prov(Tier::Deterministic, ConfidenceTier::InferredStrong, (5, 9), "limits of list"),
+    });
+    nodes[1].props["responses"] = json!({
+        "kinds": ["json"],
+        "statuses": [201],
+        "partial": ["response_built_elsewhere", "status_computed"],
+        "scope": "handler_body",
+        "prov": confirmed((60, 80), "responses of refund"),
+    });
+    (nodes, edges)
+}
+
+fn contract_row<'a>(content: &'a str, id: &str) -> &'a str {
+    content
+        .lines()
+        .skip_while(|line| *line != "## Requests and responses")
+        .find(|line| line.starts_with(&format!("| {id} |")))
+        .unwrap_or_else(|| panic!("{id} has a contract row"))
+}
+
+// AC-0880: each endpoint's recorded request inputs and responses are
+// printed in D4 §4.2 terms, with the reasons the adapter gave for not
+// proving more, and an endpoint with neither reads "not recovered".
+#[test]
+fn request_inputs_and_responses_are_printed_per_endpoint() {
+    let (nodes, edges) = shaped();
+    let content = artifact(&nodes, &edges, ExportMode::BestEffort).content;
+    assert!(content.contains("Endpoints with a recorded request or response shape: 2 of 3."));
+    let cite = |id: &str| citation_id(&FactKey::Node { id: id.into() });
+    assert_eq!(
+        contract_row(&content, "ep:acme/shop@GET:/orders"),
+        format!(
+            "| ep:acme/shop@GET:/orders | GET | /orders | query page, q; body note | \
+             200, 400 (json) | error, orders | at most 100 a day, 50 an hour, 5 a minute (the \
+             default; the environment variable ALIAS\\_LIMIT replaces it) | — | {}, {}, {} |",
+            cite("request-inputs:ep:acme/shop@GET:/orders"),
+            cite("responses:ep:acme/shop@GET:/orders"),
+            cite("rate-limits:ep:acme/shop@GET:/orders"),
+        )
+    );
+    assert_eq!(
+        contract_row(&content, "ep:acme/shop@POST:/refunds"),
+        format!(
+            "| ep:acme/shop@POST:/refunds | POST | /refunds | not recovered | 201 (json) | — | \
+             none recorded | a JSON body is built outside the handler; a status is computed | {} |",
+            cite("responses:ep:acme/shop@POST:/refunds"),
+        )
+    );
+    assert_eq!(
+        contract_row(&content, "ep:acme/shop@route:7"),
+        "| ep:acme/shop@route:7 | unknown | unknown | not recovered | not recovered | — | \
+         none recorded | — | — |"
+    );
+}
+
+// AC-0880 (ADR-0058): each printed shape is its own assertion and resolves
+// in the fact index under the id the row prints; a weak shape is left out
+// of verified-only.
+#[test]
+fn printed_shapes_resolve_in_the_fact_index_and_follow_the_mode() {
+    let (mut nodes, edges) = shaped();
+    let bundle = try_compile_spec_with_coverage(
+        &nodes,
+        &edges,
+        &[],
+        ExportMode::VerifiedOnly,
+        &BTreeSet::new(),
+        &[],
+    )
+    .expect("the citations resolve");
+    let artifact_out = bundle.artifacts.iter().find(|a| a.id == ID).unwrap();
+    let index = bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "fact-index-json")
+        .unwrap();
+    let index: FactIndex = serde_json::from_str(&index.content).unwrap();
+    for id in [
+        "rate-limits:ep:acme/shop@GET:/orders",
+        "request-inputs:ep:acme/shop@GET:/orders",
+        "responses:ep:acme/shop@GET:/orders",
+        "responses:ep:acme/shop@POST:/refunds",
+    ] {
+        assert!(
+            artifact_out.assertions.iter().any(|a| a.subject_id == id),
+            "{id}"
+        );
+        let key = FactKey::Node { id: id.into() };
+        let row = index.rows.iter().find(|row| row.fact == key).unwrap();
+        assert!(artifact_out.content.contains(&row.citation_id));
+    }
+
+    nodes[1].props["responses"]["prov"] = prov(
+        Tier::Agentic,
+        ConfidenceTier::InferredWeak,
+        (60, 80),
+        "weak responses",
+    );
+    let verified = artifact(&nodes, &edges, ExportMode::VerifiedOnly).content;
+    assert_eq!(
+        contract_row(&verified, "ep:acme/shop@POST:/refunds"),
+        "| ep:acme/shop@POST:/refunds | POST | /refunds | not recovered | not recovered | — | \
+         none recorded | — | — |"
+    );
+    let best = artifact(&nodes, &edges, ExportMode::BestEffort).content;
+    assert!(contract_row(&best, "ep:acme/shop@POST:/refunds").contains("| 201 (json) |"));
+}
+
+// AC-0902 (T-0902): JSON keys tied to their statuses are printed per status,
+// with keys whose status is computed after them; a fact recorded before keys
+// were tied to statuses prints its keys alone.
+#[test]
+fn json_keys_are_printed_per_status() {
+    assert_eq!(
+        json_keys(&json!({
+            "keys": ["alias", "error", "extra"],
+            "keys_by_status": { "400": ["error"], "201": ["alias"] },
+        })),
+        "201: alias; 400: error; status computed: extra"
+    );
+    assert_eq!(json_keys(&json!({ "keys": ["a", "b"] })), "a, b");
+    assert_eq!(json_keys(&json!({})), "—");
+    let raw = json!({ "keys_by_status": { "200": ["enabled"] } });
+    assert_eq!(status_keys(&raw, 200), ["enabled"]);
+    assert!(status_keys(&raw, 201).is_empty());
+}

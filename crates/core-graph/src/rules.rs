@@ -68,6 +68,10 @@ pub struct GuardedExitEvidence {
 pub enum RuleKind {
     /// A return or throw observed within source branch conditions.
     GuardedExit,
+    /// A state change or call statement, with the source branch conditions
+    /// around it, possibly none (#1998, ADR-0020 amended): an assignment
+    /// through an attribute or subscript, or a call whose result is unused.
+    GuardedEffect,
 }
 
 /// One lexical branch condition governing the source location of an exit.
@@ -205,6 +209,46 @@ pub enum LocalExit {
         /// Thrown source expression.
         value: SourceExpression,
     },
+    /// Assignment through an attribute or subscript (`alias.enabled = False`,
+    /// `g.user = api_key.user`); the callable continues (#1998).
+    Assign {
+        /// The assigned place.
+        target: SourceExpression,
+        /// The assigned source expression.
+        value: SourceExpression,
+    },
+    /// A call statement whose result is unused; the callable continues (#1998).
+    Call {
+        /// The call expression.
+        value: SourceExpression,
+    },
+}
+
+impl LocalExit {
+    /// The effect's source expressions in source order.
+    pub fn expressions(&self) -> Vec<&SourceExpression> {
+        match self {
+            LocalExit::Return { value } => value.iter().collect(),
+            LocalExit::Throw { value } | LocalExit::Call { value } => vec![value],
+            LocalExit::Assign { target, value } => vec![target, value],
+        }
+    }
+
+    /// The effect's source expressions in source order, mutably.
+    pub fn expressions_mut(&mut self) -> Vec<&mut SourceExpression> {
+        match self {
+            LocalExit::Return { value } => value.iter_mut().collect(),
+            LocalExit::Throw { value } | LocalExit::Call { value } => vec![value],
+            LocalExit::Assign { target, value } => vec![target, value],
+        }
+    }
+
+    /// Whether the effect leaves the callable (a return or throw), as
+    /// [`RuleKind::GuardedExit`] requires; an assignment or call does not and
+    /// is a [`RuleKind::GuardedEffect`].
+    pub fn exits(&self) -> bool {
+        matches!(self, LocalExit::Return { .. } | LocalExit::Throw { .. })
+    }
 }
 
 /// A prerequisite relevant to a source rule's conditions or local effect.
@@ -397,13 +441,8 @@ impl GuardedExitEvidence {
             visitor(&mut condition.branch_source);
             visitor(&mut condition.expression.source);
         }
-        match &mut self.effect {
-            LocalExit::Return { value } => {
-                if let Some(value) = value {
-                    visitor(&mut value.source);
-                }
-            }
-            LocalExit::Throw { value } => visitor(&mut value.source),
+        for value in self.effect.expressions_mut() {
+            visitor(&mut value.source);
         }
         for dependency in &mut self.dependencies {
             visitor(&mut dependency.source);
@@ -479,13 +518,12 @@ impl GuardedExitEvidence {
             span(&condition.branch_source, "branch_source")?;
             expression(&condition.expression)?;
         }
-        match &self.effect {
-            LocalExit::Return { value } => {
-                if let Some(value) = value {
-                    expression(value)?;
-                }
-            }
-            LocalExit::Throw { value } => expression(value)?,
+        // An exit is a guarded exit; an assignment or call a guarded effect.
+        if self.effect.exits() != (self.kind == RuleKind::GuardedExit) {
+            return Err(RuleValidationError::MalformedPayload);
+        }
+        for value in self.effect.expressions() {
+            expression(value)?;
         }
         for dependency in &self.dependencies {
             span(&dependency.source, "dependency.source")?;
@@ -541,6 +579,77 @@ fn expression(value: &SourceExpression) -> Result<(), RuleValidationError> {
         }
     }
     Ok(())
+}
+
+/// The status code a Go `net/http` status constant names, by its name
+/// without the package (`StatusForbidden` is 403); `None` for any other
+/// name (#2009).
+pub fn go_http_status(name: &str) -> Option<u16> {
+    Some(match name.strip_prefix("Status")? {
+        "Continue" => 100,
+        "SwitchingProtocols" => 101,
+        "Processing" => 102,
+        "EarlyHints" => 103,
+        "OK" => 200,
+        "Created" => 201,
+        "Accepted" => 202,
+        "NonAuthoritativeInfo" => 203,
+        "NoContent" => 204,
+        "ResetContent" => 205,
+        "PartialContent" => 206,
+        "MultiStatus" => 207,
+        "AlreadyReported" => 208,
+        "IMUsed" => 226,
+        "MultipleChoices" => 300,
+        "MovedPermanently" => 301,
+        "Found" => 302,
+        "SeeOther" => 303,
+        "NotModified" => 304,
+        "UseProxy" => 305,
+        "TemporaryRedirect" => 307,
+        "PermanentRedirect" => 308,
+        "BadRequest" => 400,
+        "Unauthorized" => 401,
+        "PaymentRequired" => 402,
+        "Forbidden" => 403,
+        "NotFound" => 404,
+        "MethodNotAllowed" => 405,
+        "NotAcceptable" => 406,
+        "ProxyAuthRequired" => 407,
+        "RequestTimeout" => 408,
+        "Conflict" => 409,
+        "Gone" => 410,
+        "LengthRequired" => 411,
+        "PreconditionFailed" => 412,
+        "RequestEntityTooLarge" => 413,
+        "RequestURITooLong" => 414,
+        "UnsupportedMediaType" => 415,
+        "RequestedRangeNotSatisfiable" => 416,
+        "ExpectationFailed" => 417,
+        "Teapot" => 418,
+        "MisdirectedRequest" => 421,
+        "UnprocessableEntity" => 422,
+        "Locked" => 423,
+        "FailedDependency" => 424,
+        "TooEarly" => 425,
+        "UpgradeRequired" => 426,
+        "PreconditionRequired" => 428,
+        "TooManyRequests" => 429,
+        "RequestHeaderFieldsTooLarge" => 431,
+        "UnavailableForLegalReasons" => 451,
+        "InternalServerError" => 500,
+        "NotImplemented" => 501,
+        "BadGateway" => 502,
+        "ServiceUnavailable" => 503,
+        "GatewayTimeout" => 504,
+        "HTTPVersionNotSupported" => 505,
+        "VariantAlsoNegotiates" => 506,
+        "InsufficientStorage" => 507,
+        "LoopDetected" => 508,
+        "NotExtended" => 510,
+        "NetworkAuthenticationRequired" => 511,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -660,6 +769,41 @@ mod tests {
         wire["effect"]["raw_source"] = "unexpected source text".into();
         let error = GuardedExitEvidence::from_value(wire).unwrap_err();
         assert_eq!(error.to_string(), "malformed source-rule payload");
+    }
+
+    #[test]
+    fn guarded_effects_round_trip_and_never_pose_as_exits() {
+        // AC-0910: an assignment or call statement is a guarded effect; an
+        // effect under the exit kind, or an exit under the effect kind, is
+        // malformed.
+        let LocalExit::Return { value: Some(value) } = rule().effect else {
+            panic!("fixture has a returned expression");
+        };
+        for effect in [
+            LocalExit::Assign {
+                target: value.clone(),
+                value: value.clone(),
+            },
+            LocalExit::Call {
+                value: value.clone(),
+            },
+        ] {
+            let mut changed = rule();
+            changed.kind = RuleKind::GuardedEffect;
+            changed.effect = effect;
+            let wire = serde_json::to_value(&changed).unwrap();
+            assert_eq!(wire["kind"], "guarded_effect");
+            assert_eq!(GuardedExitEvidence::from_value(wire).unwrap(), changed);
+            let mut posing = changed.clone();
+            posing.kind = RuleKind::GuardedExit;
+            assert_eq!(
+                posing.validate(),
+                Err(RuleValidationError::MalformedPayload)
+            );
+        }
+        let mut exit = rule();
+        exit.kind = RuleKind::GuardedEffect;
+        assert_eq!(exit.validate(), Err(RuleValidationError::MalformedPayload));
     }
 
     #[test]

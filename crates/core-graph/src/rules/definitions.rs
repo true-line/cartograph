@@ -441,11 +441,8 @@ pub(super) fn validate(rule: &GuardedExitEvidence) -> Result<(), RuleValidationE
             return Err(invalid("condition_span"));
         }
     }
-    match &rule.effect {
-        LocalExit::Return { value: Some(value) } | LocalExit::Throw { value } => {
-            checked_expression(value, &rule.exit_source)?
-        }
-        LocalExit::Return { value: None } => {}
+    for value in rule.effect.expressions() {
+        checked_expression(value, &rule.exit_source)?;
     }
     for dependency in &rule.dependencies {
         checked_source(&dependency.source, &rule.exit_source)?;
@@ -725,8 +722,14 @@ fn links(
         }
         Ok(())
     };
+    // A condition's names are followed to their definitions, and so are an
+    // unguarded choice's returned names (AC-0956): an exit value whose
+    // definition the producer did not admit is skipped above.
     for dependency in &rule.dependencies {
-        if dependency.role == DependencyRole::Condition {
+        if matches!(
+            dependency.role,
+            DependencyRole::Condition | DependencyRole::ExitValue
+        ) {
             observe(&dependency.source, &dependency.resolution, None)?;
         }
     }

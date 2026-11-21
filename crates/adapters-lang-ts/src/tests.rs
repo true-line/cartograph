@@ -5821,3 +5821,61 @@ export class Photo {
         ]
     );
 }
+
+#[test]
+fn node_test_runner_calls_are_tests() {
+    // AC-0920 (#2008): `node:test` proves `test`/`it`/`describe`/`suite`,
+    // named or as its default export; a lookalike module does not. The framework follows the binding that proved the call.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "tests/hq.test.mjs",
+        "import { test, describe } from 'node:test';\nimport assert from 'node:assert/strict';\ndescribe('hq', () => { test('admits a soul', () => { assert.ok(true); }); });\ntest.skip('later', () => {});\n",
+    );
+    write(
+        "tests/default.test.mjs",
+        "import t from 'node:test';\nimport { suite, it } from 'node:test';\nt('default export', () => {});\nsuite('group', () => { it('inside', () => {}); });\n",
+    );
+    write(
+        "tests/fake.test.mjs",
+        "import { test } from './not-node-test.mjs';\ntest('ignored', () => {});\n",
+    );
+    write(
+        "tests/mixed.test.ts",
+        "import { test } from 'vitest';\nimport { mock } from 'node:test';\ntest('vitest case', () => { mock.fn(); });\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut names: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .filter_map(|n| n.props["qualified_name"].as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "default export",
+            "group > inside",
+            "hq > admits a soul",
+            "later",
+            "vitest case"
+        ],
+        "{names:?}"
+    );
+    // The framework follows the binding that proved the call, not the
+    // file's other imports.
+    let framework = |name: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "TestCase" && n.props["qualified_name"] == name)
+            .map(|n| n.props["framework"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    assert_eq!(framework("vitest case"), "vitest-jest");
+    assert_eq!(framework("hq > admits a soul"), "node-test");
+}

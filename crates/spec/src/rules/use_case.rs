@@ -277,6 +277,11 @@ pub fn project_use_case(
         let Ok(rule) = GuardedExitEvidence::from_value(node.props["rule"].clone()) else {
             continue;
         };
+        // A guarded effect (#1998) changes state; it is not an exit that may
+        // block the goal, so it is no decision row or guard candidate.
+        if !rule.effect.exits() {
+            continue;
+        }
         let Some(&role) = roles.get(rule.owner_id.as_str()) else {
             continue;
         };
@@ -433,6 +438,24 @@ fn row(
         },
         LocalExit::Throw { value } => RowOutcome {
             kind: "throw".into(),
+            display: Some(value.display.as_str().to_owned()),
+            capture: Some(value.capture),
+        },
+        LocalExit::Assign { target, value } => RowOutcome {
+            kind: "assign".into(),
+            display: Some(format!(
+                "{} = {}",
+                target.display.as_str(),
+                value.display.as_str()
+            )),
+            capture: Some(if target.capture == ExpressionCapture::CompleteSyntax {
+                value.capture
+            } else {
+                target.capture
+            }),
+        },
+        LocalExit::Call { value } => RowOutcome {
+            kind: "call".into(),
             display: Some(value.display.as_str().to_owned()),
             capture: Some(value.capture),
         },

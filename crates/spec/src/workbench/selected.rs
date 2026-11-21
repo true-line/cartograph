@@ -89,6 +89,10 @@ pub struct Supplied<'a> {
     /// against this graph (#1443). When present, `user-stories` renders them
     /// beside the base Capabilities, exactly as the MCP read does.
     pub knowledge: Option<&'a capabilities::KnowledgeStories<'a>>,
+    /// The display name of each registered repository, by registry key,
+    /// when the host has them. `architecture.md` names client applications
+    /// and repositories by them (#2049); no other artifact reads them.
+    pub repo_names: &'a [(String, String)],
 }
 
 /// One stored inventory the host compared with the repository's current
@@ -128,6 +132,8 @@ pub(crate) struct Beside<'a> {
     pub(crate) source_revisions: Option<&'a [crate::SourceRevision]>,
     /// Validated knowledge stories the host supplied, if any (#1443).
     pub(crate) knowledge: Option<&'a capabilities::Stories<'a>>,
+    /// Repository display names the host supplied, if any (#2049).
+    pub(crate) repo_names: &'a [(String, String)],
 }
 
 impl<'a> Beside<'a> {
@@ -152,6 +158,7 @@ impl<'a> Beside<'a> {
             graph_content_hash: supplied.graph_content_hash,
             source_revisions: supplied.source_revisions,
             knowledge: supplied.knowledge.map(|k| &k.0),
+            repo_names: supplied.repo_names,
         }
     }
 }
@@ -314,6 +321,20 @@ const ARTIFACTS: &[Artifact] = &[
         file: "curated.md",
         title: "Curated items",
         format: "markdown",
+    },
+    // After it, for the same reason (#2049): the C4 views and their
+    // Structurizr DSL workspace.
+    Artifact {
+        id: architecture::MARKDOWN_ID,
+        file: "architecture.md",
+        title: "Architecture (C4 levels 1 to 3)",
+        format: "markdown",
+    },
+    Artifact {
+        id: architecture::DSL_ID,
+        file: "architecture.dsl",
+        title: "Architecture as a Structurizr DSL workspace",
+        format: "structurizr-dsl",
     },
     // After it: the document's header carries the curated revision, and its
     // frames are cited before the index (#1748, AC-0663).
@@ -611,6 +632,26 @@ fn produce(
         // items cite and the admitted facts its findings cite (AC-0653,
         // AC-0845). No stored inventory is read.
         curated::ARTIFACT_ID => curated::output((nodes, edges), beside.curated, mode, max)?,
+        // The admitted facts and flows, the subsystem areas of the supplied
+        // knowledge stories and the repository names the host supplied
+        // (#2049). No stored inventory is read.
+        architecture::MARKDOWN_ID | architecture::DSL_ID => {
+            let model = architecture::Model::new(
+                nodes,
+                edges,
+                flows,
+                &architecture::Supplied {
+                    knowledge: stories.or(beside.knowledge),
+                    repo_names: beside.repo_names,
+                    mode,
+                },
+            );
+            if a.id == architecture::MARKDOWN_ID {
+                architecture::markdown(&model, mode, max)?
+            } else {
+                architecture::dsl(&model, max)?
+            }
+        }
         // The catalogue's D1 over the admitted nodes and flows, the gap
         // count and the supplied projection's revision (AC-0663).
         document::D1_ARTIFACT_ID => document::d1(
@@ -755,6 +796,7 @@ pub fn compile_spec_selected_with_coverage(
             curated: Curated::NotSupplied,
             graph_content_hash: None,
             source_revisions: None,
+            repo_names: &[],
         },
     )
 }

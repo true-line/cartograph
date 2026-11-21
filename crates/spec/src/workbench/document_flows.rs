@@ -89,6 +89,36 @@ struct Reading<'a> {
     gaps: usize,
 }
 
+/// A callable `Symbol` with a name of its own: not a declaration, not a
+/// type (a Rust struct/enum/trait, a Java or Kotlin class, interface,
+/// enum, record or object), and not an anonymous function (`anon@…`, Go
+/// `…/func@…`).
+fn named_callable(index: &Index<'_>, id: &str, name: &str) -> bool {
+    let callable = |node: &Node| {
+        let kind = node.props["kind"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        node.label == "Symbol"
+            && !kind.contains("class")
+            && !matches!(
+                kind.as_str(),
+                "struct"
+                    | "enum"
+                    | "trait"
+                    | "interface"
+                    | "record"
+                    | "object"
+                    | "annotation_type"
+                    | "type"
+                    | "type_alias"
+            )
+    };
+    index.by_id.get(id).is_some_and(|n| callable(n))
+        && !name.starts_with("anon@")
+        && !name.contains("func@")
+}
+
 fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
     let mut reading = Reading {
         handlers: Vec::new(),
@@ -99,6 +129,9 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
     };
     let mut participants: Vec<&str> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
+    // Files a process start or scheduled job enters (#1997): the callables
+    // defined in them are what handles it.
+    let mut entered: BTreeSet<&str> = BTreeSet::new();
     for hop in &flow.hops {
         // A Gap destination or a Gap-confidence edge is unresolved: its
         // destination is not named as a reached callable.
@@ -107,7 +140,28 @@ fn read<'a>(index: &Index<'a>, flow: &'a Flow) -> Reading<'a> {
             continue;
         }
         let (src, label, dst) = hop.stored_edge();
-        if hop.label == "HANDLES" && hop.src == flow.trigger {
+        let entry = hop.label == "ENTRY" && hop.src == flow.trigger;
+        if entry {
+            if let Some(edge) = index.edges.get(&(src, label, dst)) {
+                reading.cites.push(edge);
+            }
+            match index.by_id.get(hop.dst.as_str()).map(|n| n.label.as_str()) {
+                Some("File") => {
+                    entered.insert(hop.dst.as_str());
+                }
+                _ => reading
+                    .handlers
+                    .push((hop.dst.as_str(), hop.dst_name.as_str())),
+            }
+        } else if hop.label == "DEFINED_IN" && entered.contains(hop.src.as_str()) {
+            // A named callable of the entered file handles it; a constant
+            // or an anonymous function is not named as a handler.
+            if named_callable(index, hop.dst.as_str(), hop.dst_name.as_str()) {
+                reading
+                    .handlers
+                    .push((hop.dst.as_str(), hop.dst_name.as_str()));
+            }
+        } else if hop.label == "HANDLES" && hop.src == flow.trigger {
             reading
                 .handlers
                 .push((hop.dst.as_str(), hop.dst_name.as_str()));
@@ -206,9 +260,17 @@ pub(super) fn flows_per_capability(
     let operations_of = |story: &Story<'_>| -> Vec<&Flow> {
         let mut operations: Vec<&Flow> = Vec::new();
         for (_, fact) in &story.support {
-            if let Support::Edge(e) = fact
-                && e.label == "HANDLES"
-                && let Some(flow) = by_trigger.get(e.src.as_str())
+            // An operation is the source of a cited `HANDLES` edge, or a
+            // cited process start or scheduled job that triggers a flow
+            // itself (#1997).
+            let trigger = match fact {
+                Support::Edge(e) if e.label == "HANDLES" => e.src.as_str(),
+                Support::Node(n) if matches!(n.label.as_str(), "EntryPoint" | "Schedule") => {
+                    n.id.as_str()
+                }
+                _ => continue,
+            };
+            if let Some(flow) = by_trigger.get(trigger)
                 && !operations.iter().any(|f| f.trigger == flow.trigger)
             {
                 operations.push(flow);
@@ -216,12 +278,8 @@ pub(super) fn flows_per_capability(
         }
         operations
     };
-    let capabilities = || {
-        knowledge
-            .included
-            .iter()
-            .filter(|s| s.node.label == "Capability")
-    };
+    let listed = knowledge.capabilities();
+    let capabilities = || listed.iter().map(|(_, story)| *story);
     let mut placed: BTreeSet<&str> = BTreeSet::new();
     let mut sections = 0usize;
     for story in capabilities() {
@@ -246,12 +304,14 @@ pub(super) fn flows_per_capability(
         sections
     )?;
     let mut cited = 0usize;
-    for story in capabilities() {
+    let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
+    for &(area, story) in &listed {
         let operations = operations_of(story);
         if operations.is_empty() {
             continue;
         }
-        writeln!(out, "### {}\n", Literal(NodeName(story.node)))?;
+        let marks = headings.before(area, out)?;
+        writeln!(out, "{marks} {}\n", Literal(NodeName(story.node)))?;
         let mut handled_only: Vec<String> = Vec::new();
         for flow in operations {
             let reading = read(&index, flow);

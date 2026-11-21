@@ -62,6 +62,7 @@ pub const FLOW_NODE_LABELS: &[&str] = &[
     "ExtensionContext",
     "Command",
     "Schedule",
+    "EntryPoint",
     "Gap",
     "File",
 ];
@@ -267,7 +268,7 @@ fn trace_impl(
         .filter(|n| {
             matches!(
                 n.label.as_str(),
-                "Screen" | "ExtensionContext" | "Command" | "Schedule"
+                "Screen" | "ExtensionContext" | "Command" | "Schedule" | "EntryPoint"
             ) && n.props["server_rendered"].as_bool() != Some(true)
         })
         .collect();
@@ -366,6 +367,10 @@ pub fn anchor_probes(nodes: &[Node], edges: &[Edge]) -> Vec<AnchorProbe> {
         AnchorProbe {
             kind: "scheduled jobs".into(),
             found: count("Schedule"),
+        },
+        AnchorProbe {
+            kind: "process entry points (listeners, workers, commands)".into(),
+            found: count("EntryPoint"),
         },
         AnchorProbe {
             kind: "HTTP endpoints".into(),

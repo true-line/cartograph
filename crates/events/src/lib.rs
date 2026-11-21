@@ -33,13 +33,13 @@ pub enum StitchError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     /// Env files hold values that look like secrets, so the ingest is
-    /// refused until they are removed (#933, AC-0890). Each entry names the
+    /// refused until they are removed (#933, AC-0990). Each entry names the
     /// file, line and key; no value is ever carried.
     #[error("{}", refusal_message(.0))]
     SecretsInEnvFiles(Vec<EnvSecret>),
 }
 
-/// One secret-shaped env-file value that refused an ingest (AC-0890).
+/// One secret-shaped env-file value that refused an ingest (AC-0990).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvSecret {
     /// Repo-relative env file.
@@ -126,7 +126,7 @@ impl ConfigIndex {
     /// the index is deterministic regardless of walk order (US-0014).
     ///
     /// Fails closed with [`StitchError::SecretsInEnvFiles`] when any line
-    /// holds a secret-shaped value (AC-0890), listing every one in file and
+    /// holds a secret-shaped value (AC-0990), listing every one in file and
     /// line order, so one refusal names everything to remove.
     pub fn from_dir(root: &Path) -> Result<Self, StitchError> {
         let mut index = ConfigIndex::default();
@@ -218,7 +218,7 @@ pub fn env_files(root: &Path) -> std::io::Result<Vec<String>> {
     Ok(files)
 }
 
-/// Why an env-file value counts as a secret, or none (#933, AC-0890):
+/// Why an env-file value counts as a secret, or none (#933, AC-0990):
 /// a recognized secret pattern (provider tokens, private keys, cloud access
 /// keys), a token-shaped value, a URL carrying a password, or a value under
 /// a credential key name that is not an obvious placeholder.
@@ -632,6 +632,26 @@ fn resolve_site_url(
     }
 }
 
+/// The base URL of a joined site whose path is computed (#2065): its
+/// origin is known from source although no endpoint can be matched, so
+/// the Gap keeps it as the request's URL for the boundary to place.
+fn computed_path_base(
+    site: &adapters_fw::client::FetchSite,
+    cfg: &ConfigIndex,
+) -> Option<(String, String)> {
+    let base = site.base.as_ref()?;
+    if !matches!(site.url, IdentityExpr::Computed(_)) {
+        return None;
+    }
+    match &base.url {
+        IdentityExpr::Literal(url) => Some((url.clone(), "base:literal".into())),
+        IdentityExpr::EnvRef(key) => cfg
+            .resolve(key)
+            .map(|(value, file)| (value.to_string(), format!("base:config:{file}"))),
+        IdentityExpr::Computed(_) => None,
+    }
+}
+
 /// Stitch data-fetch sites against recovered endpoints (US-0005, AC-0014):
 /// a resolvable URL whose method+path matches exactly one endpoint route is
 /// a Confirmed `FETCHES` edge; anything else — computed URL, unresolved env
@@ -789,6 +809,14 @@ pub fn stitch_fetches_with(
                         "method": site.method,
                         "url": url,
                         "url_source": source,
+                    });
+                } else if let Some((base, source)) = computed_path_base(site, cfg) {
+                    // Only the base is known: the path is computed (#2065).
+                    props["request"] = serde_json::json!({
+                        "method": site.method,
+                        "url": base,
+                        "url_source": source,
+                        "path_computed": true,
                     });
                 }
                 out.nodes.push(Node {

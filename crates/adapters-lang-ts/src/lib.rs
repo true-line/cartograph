@@ -96,6 +96,9 @@ pub struct Extraction {
     /// Next.js API route exports (#1325), proven against the nearest
     /// `package.json` at directory completion.
     next_routes: Vec<next_api::Site>,
+    /// Calls on injected strategies and the classes implementing them
+    /// (#2069), linked at directory completion.
+    strategies: strategies::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -310,6 +313,7 @@ fn retarget_commit(
     for site in &mut extraction.next_routes {
         site.retarget(commit);
     }
+    extraction.strategies.retarget(commit);
     Ok(())
 }
 
@@ -343,6 +347,7 @@ impl Extraction {
         self.client_navigation = client_navigation::Pending::default();
         self.service_worker_registrations.clear();
         self.next_routes.clear();
+        self.strategies = strategies::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3144,7 +3149,12 @@ fn extract_source_recording(
     };
     client_routes::extract(&cx, root, &route_proofs, &mut out.client_routes);
     client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
-    rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
+    // Guards in test code are not business rules (#2009).
+    if !target_tests::in_test_tree(cx.path) {
+        rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
+        state_machines::extract(&cx, &syntax_nodes, &mut out);
+        strategies::sites(&cx, &syntax_nodes, &mut out.strategies);
+    }
     if let Some(evidence) = service_worker {
         service_worker::mark(
             &BTreeMap::from([(file_id(id.repo, path), vec![evidence])]),
@@ -3321,6 +3331,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.service_worker_registrations
         .extend(ex.service_worker_registrations);
     out.next_routes.extend(ex.next_routes);
+    out.strategies.extend(ex.strategies);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3422,6 +3433,12 @@ fn complete_directory(
     resolution::resolve_bare_imports(&mut *facts, &index, id, &known_files)?;
     complete_pending_calls(
         std::mem::take(&mut out.pending_calls),
+        &known_symbols,
+        &mut *facts,
+    )?;
+    strategies::complete(
+        std::mem::take(&mut out.strategies),
+        id.repo,
         &known_symbols,
         &mut *facts,
     )?;
@@ -3679,6 +3696,8 @@ pub(crate) mod resolution;
 mod rule_evidence;
 mod service_worker;
 mod source_expression;
+mod state_machines;
+mod strategies;
 pub mod target_tests;
 mod typeorm;
 pub mod vue;

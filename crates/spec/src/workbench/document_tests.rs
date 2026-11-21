@@ -97,6 +97,7 @@ fn compile(mode: ExportMode, curated: Option<&CuratedProjection>) -> SpecBundle 
         mode,
         &BTreeSet::new(),
         Supplied {
+            repo_names: &[],
             knowledge: None,
             coverage: &[],
             stale_coverage: &[],
@@ -303,6 +304,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
             mode,
             &BTreeSet::new(),
             Supplied {
+                repo_names: &[],
                 knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
@@ -328,6 +330,7 @@ fn header_states_the_graph_hash_when_the_projection_was_not_computed() {
             mode,
             &BTreeSet::new(),
             Supplied {
+                repo_names: &[],
                 knowledge: None,
                 coverage: &[],
                 stale_coverage: &[],
@@ -379,5 +382,142 @@ fn document_is_deterministic_selected_alone_and_bounded() {
                 ..
             }]
         ));
+    }
+}
+
+#[test]
+fn capability_frame_states_the_endpoints_no_capability_groups_and_why() {
+    let tier = (Tier::Deterministic, ConfidenceTier::Confirmed);
+    let mut gapped = node("ep:local/shop@GET:/a", "Endpoint", tier.0, tier.1);
+    gapped.props["framework"] = json!("vercel");
+    let mut handled = node("ep:local/shop@POST:/b", "Endpoint", tier.0, tier.1);
+    handled.props["framework"] = json!("express");
+    let gap = node("gap:handler", "Gap", tier.0, tier.1);
+    let handler = node("sym:local/shop@src/app.ts#b", "Symbol", tier.0, tier.1);
+    let handles = |src: &Node, dst: &Node| {
+        let mut edge = node(
+            &format!("{} HANDLES {}", src.id, dst.id),
+            "",
+            tier.0,
+            tier.1,
+        );
+        edge.props.as_object_mut().unwrap().remove("name");
+        Edge {
+            src: src.id.clone(),
+            dst: dst.id.clone(),
+            label: "HANDLES".into(),
+            props: edge.props,
+        }
+    };
+    // A Gap-confidence endpoint is in the gap register, not counted here.
+    let unproven = node(
+        "ep:local/shop@GET:/c",
+        "Endpoint",
+        tier.0,
+        ConfidenceTier::Gap,
+    );
+    let edges = [handles(&gapped, &gap), handles(&handled, &handler)];
+    let nodes = [gapped, handled, gap, handler, unproven];
+    let bundle = compile_spec(
+        &nodes,
+        &edges,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    );
+    let frame = section(&d1(&bundle).content, "## 1.3 ");
+    assert!(
+        frame.contains(
+            "Operations in no Capability: 2 of 2 HTTP endpoints. 1 have no resolved handler \
+             (their `HANDLES` target is a Gap or missing), so no rule can group them; 1 have a \
+             handler that no capability rule groups (by framework: express 1)."
+        ),
+        "{frame}"
+    );
+}
+
+#[test]
+fn capability_frame_states_a_vercel_front_door_and_the_routes_behind_it() {
+    // AC-0926 (#2010): a Vercel function's endpoints that only pass requests
+    // on to mux routes under its paths are stated as such, counted once.
+    let tier = (Tier::Deterministic, ConfidenceTier::Confirmed);
+    let endpoint = |method: &str, path: &str, framework: &str, handler: &str| {
+        let mut n = node(
+            &format!("ep:local/bot@{method}:{path}"),
+            "Endpoint",
+            tier.0,
+            tier.1,
+        );
+        n.props["path"] = json!(path);
+        n.props["framework"] = json!(framework);
+        n.props["handler_sym"] = json!(handler);
+        // Registered beside the function, so in a package it reaches.
+        n.props["prov"]["evidence"][0]["path"] = json!("api/web/routes.go");
+        n
+    };
+    let nodes = [
+        endpoint(
+            "ANY",
+            "/api/web",
+            "vercel",
+            "sym:local/bot@api/web/index.go#Handler",
+        ),
+        endpoint(
+            "ANY",
+            "/api/web/{path...}",
+            "vercel",
+            "sym:local/bot@api/web/index.go#Handler",
+        ),
+        endpoint("GET", "/api/web/session", "net/http", "gap:a"),
+        endpoint("POST", "/api/web/devices", "net/http", "gap:b"),
+    ];
+    let bundle = compile_spec(&nodes, &[], &[], ExportMode::BestEffort, &BTreeSet::new());
+    let frame = section(&d1(&bundle).content, "## 1.3 ");
+    assert!(
+        frame.contains(
+            "Operations in no Capability: 4 of 4 HTTP endpoints. 2 are Vercel functions that \
+             pass requests on to the 2 routes registered behind them, which are the operations; \
+             2 have no resolved handler"
+        ),
+        "{frame}"
+    );
+}
+
+/// AC-0945: §1.1 points to the drawn system in every export, before and
+/// whatever the drafted prose.
+#[test]
+fn purpose_and_scope_points_to_the_architecture_diagrams() {
+    for mode in MODES {
+        let bundle = compile(mode, None);
+        let content = &d1(&bundle).content;
+        let text = section(content, "## 1.1 ");
+        assert!(
+            text.contains("[`architecture.md`](architecture.md)"),
+            "{mode:?}"
+        );
+        assert!(
+            text.contains("[`architecture.dsl`](architecture.dsl)"),
+            "{mode:?}"
+        );
+        assert!(text.contains(NOT_DRAFTED), "{mode:?}");
+        // The files it names are in the same export.
+        for file in ["architecture.md", "architecture.dsl"] {
+            assert!(
+                bundle.artifacts.iter().any(|a| a.file_name == file),
+                "{file} in {mode:?}"
+            );
+        }
+        assert!(!section(content, "## 1.2 ").contains("architecture.md"));
+        // The bundle manifest lists both under Documents.
+        let manifest = &bundle
+            .artifacts
+            .iter()
+            .find(|a| a.file_name == "bundle-manifest.md")
+            .expect("manifest")
+            .content;
+        let documents = &manifest[manifest.find("1. Documents").expect("part 1")
+            ..manifest.find("2. Requirements").expect("part 2")];
+        assert!(documents.contains("architecture.md"), "{documents}");
+        assert!(documents.contains("architecture.dsl"), "{documents}");
     }
 }

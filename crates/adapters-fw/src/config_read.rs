@@ -7,8 +7,10 @@
 //! whose evidence is the span of every read of that key in that file in byte
 //! order. A read whose key is not a string literal is a dynamic read: one
 //! node per file, id `cfgread:{repo}@{path}:env:?`, `dynamic: true` and no
-//! `key`. Only the key name and the spans are recorded, never a value, a
-//! default or a fallback.
+//! `key`. Only the key name and the spans are recorded here, never a value,
+//! a default or a fallback; an adapter may add a numeric or boolean literal
+//! `defaults` list to an assembled node (ADR-0059 decision 5 as amended,
+//! #1998).
 //!
 //! The adapter decides what a proven read is (ADR-0059 decision 4): a site
 //! reaches this module only when the call is provably the language's own
@@ -157,6 +159,52 @@ pub fn assemble(source: &ObservedSource, sites: &[ConfigReadSite]) -> (Vec<Node>
         }
     }
     (nodes, edges)
+}
+
+/// Environment keys that by a hosting platform's convention hold the
+/// endpoint of one kind of data store (#2065), with that store's provider.
+/// Only a key that names the store's URL is listed: a token or password key
+/// proves nothing about which store it opens.
+pub const STORE_ENDPOINT_KEYS: &[(&str, &str)] = &[
+    // Upstash Redis, and Vercel KV, which is Upstash Redis.
+    ("UPSTASH_REDIS_REST_URL", "redis"),
+    ("KV_REST_API_URL", "redis"),
+    ("KV_URL", "redis"),
+    ("REDIS_URL", "redis"),
+    // Vercel Postgres.
+    ("POSTGRES_URL", "postgres"),
+    ("MONGODB_URI", "mongodb"),
+];
+
+/// Marker on a store inferred from the key of an environment read alone.
+pub const STORE_FROM_ENV_KEY: &str = "store_from_env_key";
+
+/// Observed data stores the reads of [`STORE_ENDPOINT_KEYS`] point to
+/// (#2065): a client that talks to the store by hand (a REST call to its
+/// URL) uses no SDK the observed-client registry knows, yet reads the
+/// conventional key. The store rests on that convention, so the site is
+/// marked and its resource is `InferredStrong`, never `Confirmed`.
+pub fn store_sites(sites: &[ConfigReadSite]) -> Vec<crate::observed::ObservedSite> {
+    sites
+        .iter()
+        .filter_map(|site| {
+            let key = site.key.as_deref()?;
+            let (_, provider) = STORE_ENDPOINT_KEYS.iter().find(|(name, _)| *name == key)?;
+            Some(crate::observed::ObservedSite {
+                family: crate::events::ObservedFamily::SdkClient,
+                provider: (*provider).to_string(),
+                module: None,
+                identity: Some(crate::events::IdentityExpr::EnvRef(key.to_string())),
+                identity_source: None,
+                identity_assumptions: vec![STORE_FROM_ENV_KEY],
+                registry: None,
+                symbol: site.symbol.clone(),
+                path: site.path.clone(),
+                byte_start: site.byte_start,
+                byte_end: site.byte_end,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -467,6 +467,20 @@ struct Fetches {
     os_std: bool,
     /// Proven environment reads (#1789, ADR-0059).
     config: Vec<ConfigReadSite>,
+    /// Numeric and boolean literal defaults of module constants bound to a
+    /// proven environment read (#1998, AC-0903; ADR-0059 amended).
+    defaults: Vec<ConfigDefault>,
+}
+
+/// A module-level constant bound to a proven environment read of `key`,
+/// with the numeric or boolean literal it takes when the variable is unset.
+struct ConfigDefault {
+    path: String,
+    key: String,
+    constant: String,
+    value: serde_json::Value,
+    byte_start: u64,
+    byte_end: u64,
 }
 
 /// Whether a file's `patch("…")`/`monkeypatch.setattr("…")` targets may
@@ -1280,6 +1294,228 @@ fn env_read(cx: &FileCx, node: TsNode, scope: &Scope) -> Option<Option<String>> 
     Some(exact_string(cx, key).filter(|key| !key.is_empty()))
 }
 
+/// A numeric or boolean literal: `5`, `-1`, `0.5`, `True`.
+fn number_literal(cx: &FileCx, node: TsNode) -> Option<serde_json::Value> {
+    let node = unwrap_parens(node);
+    match node.kind() {
+        "integer" => cx
+            .text(&node)
+            .replace('_', "")
+            .parse::<i64>()
+            .ok()
+            .map(Into::into),
+        "float" => cx
+            .text(&node)
+            .replace('_', "")
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Into::into),
+        "true" => Some(true.into()),
+        "false" => Some(false.into()),
+        "unary_operator" if cx.text(&node).starts_with('-') => {
+            match number_literal(cx, node.child_by_field_name("argument")?)? {
+                serde_json::Value::Number(n) => n.as_i64().map(|v| (-v).into()).or_else(|| {
+                    n.as_f64()
+                        .and_then(|v| serde_json::Number::from_f64(-v))
+                        .map(Into::into)
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn unwrap_parens(mut node: TsNode) -> TsNode {
+    while node.kind() == "parenthesized_expression" {
+        match node.named_child(0) {
+            Some(inner) => node = inner,
+            None => break,
+        }
+    }
+    node
+}
+
+/// An environment read with its literal default, through an optional
+/// unshadowed `int(…)`, `float(…)` or `bool(…)`: `os.environ.get("K", 5)`,
+/// `os.getenv("K") or 5`, or `os.environ["K"]` (no default).
+fn env_with_default(
+    cx: &FileCx,
+    node: TsNode,
+    scope: &Scope,
+) -> Option<(String, Option<serde_json::Value>)> {
+    let mut node = unwrap_parens(node);
+    if node.kind() == "call"
+        && let Some(callee) = node.child_by_field_name("function")
+        && callee.kind() == "identifier"
+        && matches!(cx.text(&callee), "int" | "float" | "bool")
+        && !scope.writes.contains_key(cx.text(&callee))
+        && !scope.imports.contains_key(cx.text(&callee))
+        && let [inner] = positional(node.child_by_field_name("arguments")?)[..]
+    {
+        node = unwrap_parens(inner);
+    }
+    if node.kind() == "boolean_operator" {
+        if cx.text(&node.child_by_field_name("operator")?) != "or" {
+            return None;
+        }
+        let read = unwrap_parens(node.child_by_field_name("left")?);
+        if read.kind() != "call" || positional(read.child_by_field_name("arguments")?).len() != 1 {
+            return None;
+        }
+        let key = env_read(cx, read, scope)??;
+        return Some((
+            key,
+            Some(number_literal(cx, node.child_by_field_name("right")?)?),
+        ));
+    }
+    let key = env_read(cx, node, scope)??;
+    if node.kind() == "subscript" {
+        return Some((key, None));
+    }
+    let args = node.child_by_field_name("arguments")?;
+    match positional(args)[..] {
+        [_] => Some((key, None)),
+        [_, default] => Some((key, Some(number_literal(cx, default)?))),
+        _ => None,
+    }
+}
+
+/// `NAME = <expr>` as a statement: the name and the value.
+fn simple_assignment<'t>(
+    cx: &FileCx,
+    statement: TsNode<'t>,
+) -> Option<(String, TsNode<'t>, TsNode<'t>)> {
+    if statement.kind() != "expression_statement" {
+        return None;
+    }
+    let assignment = statement
+        .named_child(0)
+        .filter(|n| n.kind() == "assignment")?;
+    let left = assignment.child_by_field_name("left")?;
+    if left.kind() != "identifier" {
+        return None;
+    }
+    Some((
+        cx.text(&left).to_string(),
+        assignment.child_by_field_name("right")?,
+        assignment,
+    ))
+}
+
+/// Module constants bound to a proven environment read with a numeric or
+/// boolean literal default (#1998): `NAME = int(os.environ.get("K", 5))`,
+/// `NAME = os.getenv("K") or 5`, and a top-level `try:` whose body binds
+/// `NAME = int(os.environ["K"])` and whose one `except` clause binds
+/// `NAME = 5`. The name may be written nowhere else in the module. A string
+/// default is never recorded (ADR-0059).
+fn config_defaults(
+    cx: &FileCx,
+    root: TsNode,
+    scope: &Scope,
+    path: &str,
+    out: &mut Vec<ConfigDefault>,
+) {
+    let mut walk = root.walk();
+    for statement in root.named_children(&mut walk) {
+        if let Some((name, value, assignment)) = simple_assignment(cx, statement) {
+            if scope.writes.get(name.as_str()) != Some(&1) {
+                continue;
+            }
+            if let Some((key, Some(value))) = env_with_default(cx, value, scope) {
+                out.push(ConfigDefault {
+                    path: path.to_string(),
+                    key,
+                    constant: name,
+                    value,
+                    byte_start: assignment.start_byte() as u64,
+                    byte_end: assignment.end_byte() as u64,
+                });
+            }
+            continue;
+        }
+        if statement.kind() != "try_statement" {
+            continue;
+        }
+        let Some(body) = statement.child_by_field_name("body") else {
+            continue;
+        };
+        let mut swalk = statement.walk();
+        let clauses: Vec<TsNode> = statement
+            .named_children(&mut swalk)
+            .filter(|c| matches!(c.kind(), "except_clause" | "else_clause" | "finally_clause"))
+            .collect();
+        let [except] = clauses[..] else {
+            continue;
+        };
+        if except.kind() != "except_clause" {
+            continue;
+        }
+        let mut bwalk = body.walk();
+        let tried: Vec<TsNode> = body.named_children(&mut bwalk).collect();
+        let [tried] = tried[..] else {
+            continue;
+        };
+        let Some((name, value, _)) = simple_assignment(cx, tried) else {
+            continue;
+        };
+        if scope.writes.get(name.as_str()) != Some(&2) {
+            continue;
+        }
+        let Some((key, None)) = env_with_default(cx, value, scope) else {
+            continue;
+        };
+        let mut ewalk = except.walk();
+        let fallback = except
+            .named_children(&mut ewalk)
+            .filter(|c| c.kind() == "block")
+            .last()
+            .and_then(|block| {
+                let mut kwalk = block.walk();
+                let bound: Vec<_> = block
+                    .named_children(&mut kwalk)
+                    .filter_map(|st| simple_assignment(cx, st))
+                    .filter(|(n, _, _)| *n == name)
+                    .collect();
+                match bound[..] {
+                    [(_, value, _)] => number_literal(cx, value),
+                    _ => None,
+                }
+            });
+        if let Some(value) = fallback {
+            out.push(ConfigDefault {
+                path: path.to_string(),
+                key,
+                constant: name,
+                value,
+                byte_start: statement.start_byte() as u64,
+                byte_end: statement.end_byte() as u64,
+            });
+        }
+    }
+}
+
+/// Add each recorded default to the `ConfigRead` node of its file and key as
+/// `defaults: [{constant, value, byte_start, byte_end}]`, in source order.
+fn attach_defaults(repo: &str, nodes: &mut [core_graph::Node], defaults: &[ConfigDefault]) {
+    for default in defaults {
+        let id = format!("cfgread:{repo}@{}:env:{}", default.path, default.key);
+        if let Some(node) = nodes.iter_mut().find(|n| n.id == id) {
+            let entry = serde_json::json!({
+                "constant": default.constant,
+                "value": default.value,
+                "byte_start": default.byte_start,
+                "byte_end": default.byte_end,
+            });
+            match node.props["defaults"].as_array_mut() {
+                Some(list) => list.push(entry),
+                None => node.props["defaults"] = serde_json::json!([entry]),
+            }
+        }
+    }
+}
+
 fn classify(cx: &FileCx, root: TsNode, node: TsNode, scope: &Scope, follow: bool) -> IdentityExpr {
     classify_with(cx, root, node, scope, follow, literal_string)
 }
@@ -1537,6 +1773,9 @@ fn extract_file(
     collect_references(&cx, root, &scope, follows);
     let receivers = receivers(&cx, root, &scope, &fetches.clients);
     let event_receivers = event_receivers(&cx, root, &scope, registries, &fetches.event_modules);
+    if fetches.os_std {
+        config_defaults(&cx, root, &scope, path, &mut fetches.defaults);
+    }
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut walk = node.walk();
@@ -2026,6 +2265,7 @@ pub fn extract_dir_with_sites(
         events: Vec::new(),
         os_std: unshadowed(&files, "os"),
         config: Vec::new(),
+        defaults: Vec::new(),
     };
     for rel in &files {
         let source = std::fs::read(root.join(rel))?;
@@ -2082,7 +2322,8 @@ pub fn extract_dir_with_sites(
     let (mut nodes, mut edges) = assemble(&source, &sites);
     // Configuration reads (#1789, ADR-0059) follow the observed facts, which
     // stay exactly as they were.
-    let (read_nodes, read_edges) = adapters_fw::config_read::assemble(&source, &fetches.config);
+    let (mut read_nodes, read_edges) = adapters_fw::config_read::assemble(&source, &fetches.config);
+    attach_defaults(id.repo, &mut read_nodes, &fetches.defaults);
     nodes.extend(read_nodes);
     edges.extend(read_edges);
     Ok(ObservedWithSites {

@@ -231,7 +231,7 @@ The existing documents do not print the id beside each statement yet; that
 is added one document at a time. Until a document prints its citations, it
 may only make statements whose evidence one of §11.1 to §11.5 already holds.
 
-## 3. Where today's twenty-eight artifacts go
+## 3. Where today's thirty artifacts go
 
 | Artifact | Becomes |
 |----------|---------|
@@ -254,12 +254,13 @@ may only make statements whose evidence one of §11.1 to §11.5 already holds.
 | `external.md` | D7 §7.6, D6 §6.5 |
 | `environments.md` | D7 §7.2 |
 | `documentation-evidence.md` | No section of its own. It lists the target's documentation files, their sections and the facts each names (SPEC-18, ADR-0065); D1 §1.1, D3 §3.4 and D10 §10.2 draw on those sections through `documented_intent` claims |
+| `architecture.md`, `architecture.dsl` | D1 §1.1 (the system at a glance), D7 §7.1; C4 levels 1 to 3 drawn from the recovered facts, with a Structurizr DSL workspace of the same model (#2049) |
 | `curated.md` | No section of its own. It lists the accepted proposals and their states (SPEC-12, ADR-0061); the A and P+A sections draw on them once drafting exists (#1748) |
 | `coverage.md`, `coverage.json` | D2 §2.2, D10 §10.1, D11 §11.6 |
 | `bundle-manifest.md` | No section of its own. It states the export's as-of and lists every exported file under its handoff-bundle part (SPEC-16, AC-0682) |
 | `fact-index.md`, `fact-index.json` | D11 §11.7 |
 
-The twenty-eight files keep being exported under their current names until each
+The thirty files keep being exported under their current names until each
 target document exists, so nothing a current consumer reads disappears.
 
 ## 4. Sections with no source today
@@ -271,7 +272,7 @@ row names the issue that tracks it.
 |---------|-----------------|
 | D1 §1.1, D3 §3.4, D7 §7.5, D10 §10.2 | Target documentation is recovered as `Document` and `DocSection` facts and projected as `documentation-evidence.md` (#1750, SPEC-18). What a section says is not stored: a draft cites the section, and a reader opens the file |
 | D1 §1.2, §1.3, D5 §5.3, D10 §10.3 on a real repository | The knowledge phase now reads a base past 50,000 rows, up to the ADR-0052 ceiling (#1771, fixed). A skip past the ceiling is still not shown in the app (#1782) |
-| D4 §4.1 | Endpoints are projected as `endpoint-inventory.md` (#1658, fixed): every recovered endpoint with method and path as recorded or unknown, and tier, confidence and span. Parameters, responses and authentication are not stated there (D4 §4.2) |
+| D4 §4.1, §4.2 | Endpoints are projected as `endpoint-inventory.md` (#1658, fixed): every recovered endpoint with method and path as recorded or unknown, and tier, confidence and span. Its "Requests and responses" section (#1998) states, per endpoint, the literal input names the handler reads, the statuses, body kinds and top-level JSON keys it returns and its flask-limiter rate limit, each cited. These are recovered for Flask handlers only; other frameworks read "not recovered". JSON keys are not split by status, nested shapes and types are not recovered, and authentication stays in `endpoint-permissions.md` |
 | D6 §6.3 | Endpoints are projected against permission sites as `endpoint-permissions.md` (#1787, fixed). Permission sites are recovered for Flask, Flask-Admin and NestJS GraphQL only, and only on the endpoint's own declaration: an endpoint of any other framework is listed under a coverage note in neither table, and a check made by middleware, a gateway or code inside a handler body is not recovered (#1320 covers Flask in-body checks). "None recovered" therefore never means that no check runs |
 | D6 §6.5, D7 §7.6 | Calls and publishes that leave the system boundary are projected as `external.md` by one predicate (#1788, fixed; ADR-0063, SPEC-13): each literal HTTP origin no declared binding covers, with its sites, the flows that reach it and the entities read or written on them; unclassified targets with their reasons; and a count of calls binding evidence places in a registered repository. The outside list is a lower bound. The binding pass records its outcome on each call and observed HTTP client it evaluates (#1843), so in a system with declared bindings a third-party call is outside and a client of a declared host is not; a system ingested before that keeps such calls unclassified until it is ingested again. Still not covered: operators of SDK providers; inbound channels and webhooks; what a request body contains |
 | D7 §7.2 | Environments are recovered from Compose files, kustomization files and Kubernetes manifests and projected as `environments.md` (#1791, increments 1 and 2; ADR-0070, SPEC-14): one environment for each Compose file and each kustomization file, shown by path and never named from it; one workload for each Compose service and each `Deployment`, `StatefulSet`, `DaemonSet` and `Job` document; a kustomization declares the workloads its `resources` chain reaches inside the repository, and a patch file is shown as what it writes; a Gap for an unreadable file, a construct that is not evaluated (`extends`, `include`, anchors, aliases, tags, kustomize transformers and generators, inline and JSON patches, `target` selectors), a dependency on an undeclared service, a kustomization entry that is remote, missing or outside the repository, a patch that matches nothing, and an environment file that names an environment only by its file name. Still not covered: Helm charts and Helm values files and per-environment settings files (increment 3; Helm files and manifests of other kinds are named in coverage as present and not read); Terraform root modules are not attached to an environment (#1844 first); nothing is merged or applied, so the effective configuration of a deployment is not shown; nothing says which environment is production; no value of an environment key is stored |

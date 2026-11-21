@@ -243,8 +243,7 @@ fn route_outside_recovery_is_under_the_coverage_note_only() {
     }
     assert!(!covered.contains("spring"));
     assert!(content.contains(
-        "Endpoints read: 3. With a recovered permission site: 1. None recovered: 1. Handler \
-         path partial: 0. Outside permission-site recovery: 1."
+        "Endpoints read: 3. With a recovered permission site: 1. None recovered: 1. Handler path partial: 0. Outside permission-site recovery: 1."
     ));
 }
 
@@ -254,12 +253,7 @@ fn route_outside_recovery_is_under_the_coverage_note_only() {
 #[test]
 fn nestjs_graphql_site_from_the_real_adapter_is_listed() {
     let facts = adapters_lang_ts::extract_source(
-        b"import { Query, Resolver } from '@nestjs/graphql';\n\
-          import { Permission } from '@vendure/common/lib/generated-shop-types';\n\
-          import { Allow } from '../../decorators/allow.decorator';\n\
-          @Resolver() export class ShopOrderResolver {\n\
-          @Query()\n@Allow(Permission.Owner)\nactiveOrder() {}\n\
-          @Query()\nnextOrderStates() {}\n}",
+        b"import { Query, Resolver } from '@nestjs/graphql';\nimport { Permission } from '@vendure/common/lib/generated-shop-types';\nimport { Allow } from '../../decorators/allow.decorator';\n@Resolver() export class ShopOrderResolver {\n@Query()\n@Allow(Permission.Owner)\nactiveOrder() {}\n@Query()\nnextOrderStates() {}\n}",
         "src/api/resolvers/shop/shop-order.resolver.ts",
         &adapters_lang_ts::SourceId {
             repo: "acme/shop",
@@ -430,8 +424,7 @@ fn verified_only_omits_a_weak_site_and_best_effort_annotates_it() {
         .unwrap();
     assert!(!verified.content.contains("GET /weak"));
     assert!(verified.content.contains(
-        "1 endpoints are omitted from every table: the permission site recovered for each is \
-         InferredWeak or rejected, which this export withholds."
+        "1 endpoints are omitted from every table: the permission site recovered for each is InferredWeak or rejected, which this export withholds."
     ));
     assert!(
         verified
@@ -673,6 +666,8 @@ fn security_with_capability(fixture: &Fixture, mode: ExportMode) -> String {
                 .collect(),
         }],
         filtered: 0,
+        areas: BTreeMap::new(),
+        file_areas: BTreeMap::new(),
     };
     let nodes: Vec<&Node> = fixture.nodes.iter().collect();
     let edges: Vec<&Edge> = fixture.edges.iter().collect();
@@ -693,11 +688,7 @@ fn security_with_capability(fixture: &Fixture, mode: ExportMode) -> String {
 fn security_lists_access_control_per_capability() {
     let mut fixture = three_routes();
     let ts = adapters_lang_ts::extract_source(
-        b"import { Query, Resolver } from '@nestjs/graphql';\n\
-          import { Permission } from '@vendure/common/lib/generated-shop-types';\n\
-          import { Allow } from '../../decorators/allow.decorator';\n\
-          @Resolver() export class ShopOrderResolver {\n\
-          @Query()\n@Allow(Permission.Owner, Permission.UpdateOrder)\nactiveOrder() {}\n}",
+        b"import { Query, Resolver } from '@nestjs/graphql';\nimport { Permission } from '@vendure/common/lib/generated-shop-types';\nimport { Allow } from '../../decorators/allow.decorator';\n@Resolver() export class ShopOrderResolver {\n@Query()\n@Allow(Permission.Owner, Permission.UpdateOrder)\nactiveOrder() {}\n}",
         "src/api/resolvers/shop/shop-order.resolver.ts",
         &adapters_lang_ts::SourceId {
             repo: "acme/shop",
@@ -898,20 +889,39 @@ fn python_callers_are_named_by_their_recovered_guards() {
     let actors = &d1[d1.find("## 1.2 ").unwrap()..d1.find("## 1.3 ").unwrap()];
     assert!(
         actors.contains(
-            "Callers by recovered guard: 2 callers over 3 guarded operations; 1 operations with \
-             no guard recovered."
+            "Callers by recovered guard: 2 callers over 3 guarded operations; 1 operations with no guard recovered."
         ),
         "{actors}"
     );
-    let rows: Vec<&str> = actors
+    let (callers, checks) = actors
+        .split_once("### What each guard checks")
+        .expect("the repository guard's checks follow the callers (AC-0901)");
+    // AC-0901: the repository guard's wrapper exit and the exit of what it
+    // calls are listed under it; the library guard is not.
+    assert!(checks.contains("#### require\\_api\\_auth\n"), "{checks}");
+    assert!(
+        checks.contains("when error\\_return: returns error\\_return |"),
+        "{checks}"
+    );
+    assert!(!checks.contains("login\\_required"), "{checks}");
+    let rows: Vec<&str> = callers
         .lines()
         .filter(|l| l.starts_with("| ") && !l.starts_with("| Caller |"))
         .collect();
+    // AC-0907: each caller is named in words; the guard is the evidence.
+    for row in &rows {
+        let caller = row.split(" | ").next().unwrap().trim_start_matches("| ");
+        assert_eq!(
+            crate::workbench::neutrality::projected_code_token(&caller.replace('\\', "")),
+            None,
+            "{row}"
+        );
+    }
     assert_eq!(
         rows,
         [
             "| Signed-in user | flask\\_login.login\\_required | Confirmed | 2 | GET /api/coupon; POST /api/coupon |",
-            "| Caller passing require\\_api\\_auth | require\\_api\\_auth | InferredStrong | 1 | DELETE /api/aliases/&lt;int:alias\\_id&gt; |",
+            "| API client | require\\_api\\_auth | InferredStrong | 1 | DELETE /api/aliases/&lt;int:alias\\_id&gt; |",
             "| Any caller | none recovered | InferredStrong | 1 | GET /api/health |",
         ],
         "{actors}"
@@ -949,6 +959,8 @@ fn python_callers_are_named_by_their_recovered_guards() {
                 .collect(),
         }],
         filtered: 0,
+        areas: BTreeMap::new(),
+        file_areas: BTreeMap::new(),
     };
     let refs: Vec<&Node> = nodes.iter().collect();
     let stories = crate::workbench::producers::stories_with_support(
@@ -962,7 +974,7 @@ fn python_callers_are_named_by_their_recovered_guards() {
     for line in [
         "- As a signed-in user, I can view coupon (GET /api/coupon).",
         "- As a signed-in user, I can submit coupon (POST /api/coupon).",
-        "- As a caller passing require\\_api\\_auth, I can delete alias (DELETE /api/aliases/&lt;int:alias\\_id&gt;).",
+        "- As an API client, I can delete alias (DELETE /api/aliases/&lt;int:alias\\_id&gt;).",
         "- As any caller (no guard recovered), I can view health (GET /api/health).",
     ] {
         assert!(stories.contains(line), "{line}\n{stories}");
@@ -996,7 +1008,8 @@ fn python_callers_are_named_by_their_recovered_guards() {
     // Every operation a caller row counts is a statement of D1, with its tier.
     let statements = &d1[d1.find("## Statements in this document").unwrap()..];
     assert!(
-        statements.contains("Cited facts printed in the frames above: 4."),
+        // Four operations and the guard's two exit rows (AC-0901).
+        statements.contains("Cited facts printed in the frames above: 6."),
         "{statements}"
     );
     for operation in ["GET /api/health", "GET /api/coupon", "POST /api/coupon"] {
@@ -1012,7 +1025,7 @@ fn python_callers_are_named_by_their_recovered_guards() {
     assert_eq!(
         super::caller(&admin, ExportMode::BestEffort, &BTreeSet::new()),
         Some(super::Caller::Guarded {
-            role: "signed-in user admitted by Guarded.is_accessible".into(),
+            role: "administrator".into(),
             guards: vec!["Guarded.is_accessible".into()],
         })
     );
@@ -1029,4 +1042,21 @@ fn python_callers_are_named_by_their_recovered_guards() {
         "{permissions}"
     );
     assert!(!permissions.contains("guard: sym:"), "{permissions}");
+}
+
+// AC-0906: a repository guard's caller is named by the role its name
+// speaks of, the guard kept as the evidence.
+#[test]
+fn a_repository_guard_names_a_role() {
+    for (guard, role) in [
+        ("require_api_auth", "API client"),
+        ("require_api_sudo", "API client in sudo mode"),
+        ("admin_required", "administrator"),
+        ("validate_twilio_request", "Twilio webhook"),
+        ("verify_stripe_signature", "Stripe webhook"),
+        ("auth.login_required_custom", "signed-in user"),
+        ("check_quota", "caller the “check quota” check admits"),
+    ] {
+        assert_eq!(super::guard_role(guard), role, "{guard}");
+    }
 }

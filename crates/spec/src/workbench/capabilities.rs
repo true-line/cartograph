@@ -48,7 +48,34 @@ impl std::fmt::Debug for KnowledgeStories<'_> {
     }
 }
 
-impl KnowledgeStories<'_> {
+impl<'a> KnowledgeStories<'a> {
+    /// Arrange the included Capabilities by area (#260, AC-0871). Each
+    /// `subsystems` fact is an overlay Subsystem node citing its member
+    /// files, current for `base`. A Capability's area is the concept
+    /// Subsystem that holds most of the files its cited handlers, or what
+    /// its cited entry points and schedules enter (AC-0913), are defined
+    /// in; a tie goes to the name that sorts first. A Subsystem that
+    /// is malformed, shadows a base fact, is the `shared` group or is
+    /// filtered by the export policy arranges nothing, and a Capability
+    /// whose handler files are in no Subsystem has no area. The stories
+    /// themselves, and every other artifact, are unchanged.
+    #[must_use]
+    pub fn with_areas(
+        mut self,
+        base: &'a RevisionedSnapshot,
+        subsystems: &'a [core_graph::overlay::OverlayFact],
+        mode: ExportMode,
+        rejected: &BTreeSet<String>,
+    ) -> Self {
+        let (arranged, files) = areas(&self.0, base, subsystems, mode, rejected);
+        self.0.areas = arranged;
+        self.0.file_areas = files;
+        self
+    }
+    /// Included Capabilities that were given an area.
+    pub fn arranged(&self) -> usize {
+        self.0.areas.len()
+    }
     /// Stories the export mode and rejections keep.
     pub fn included(&self) -> usize {
         self.0.included.len()
@@ -74,6 +101,131 @@ pub fn validate_knowledge_stories<'a>(
     validated_stories(base, candidates, actors, mode, rejected).map(KnowledgeStories)
 }
 
+fn areas<'a>(
+    stories: &Stories<'a>,
+    base: &'a RevisionedSnapshot,
+    subsystems: &'a [core_graph::overlay::OverlayFact],
+    mode: ExportMode,
+    rejected: &BTreeSet<String>,
+) -> (BTreeMap<&'a str, &'a Node>, BTreeMap<&'a str, &'a Node>) {
+    let base_ids: BTreeSet<&str> = base.graph.0.iter().map(|n| n.id.as_str()).collect();
+    // File id → the concept Subsystem it is a member of.
+    let mut area_of: BTreeMap<&'a str, &'a Node> = BTreeMap::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for fact in subsystems {
+        let core_graph::overlay::OverlayItem::Node(node) = &fact.item else {
+            continue;
+        };
+        let Ok(p) = Provenance::deserialize(&node.props["prov"]) else {
+            continue;
+        };
+        if node.label != "Subsystem"
+            || node.props["kind"] != "cluster"
+            || area_name(node).is_empty()
+            || base_ids.contains(node.id.as_str())
+            || !seen.insert(node.id.as_str())
+            || p.validate().is_err()
+            || p.tier != Tier::Semantic
+            || p.confidence_tier != ConfidenceTier::InferredWeak
+            || !matches!(&p.method, ProducingMethod::Rule { .. })
+            || !included(&p, mode, rejected)
+        {
+            continue;
+        }
+        // The file count the document prints must be the cited membership.
+        let members = fact
+            .cites
+            .iter()
+            .filter(|cite| matches!(cite, BaseRef::Node(_)))
+            .count();
+        if members != fact.cites.len() || node.props["files"].as_u64() != Some(members as u64) {
+            continue;
+        }
+        for cite in &fact.cites {
+            if let BaseRef::Node(file) = cite {
+                area_of.entry(file.as_str()).or_insert(node);
+            }
+        }
+    }
+    if area_of.is_empty() {
+        return (BTreeMap::new(), area_of);
+    }
+    let capabilities = || {
+        stories
+            .included
+            .iter()
+            .filter(|story| story.node.label == "Capability")
+    };
+    // What each Capability's code starts at: the handlers of its cited
+    // `HANDLES` edges and, for work no request starts, what its cited entry
+    // points and schedules enter. Then the file each is defined in.
+    let starts: BTreeSet<&str> = capabilities()
+        .flat_map(|story| &story.support)
+        .filter_map(|(_, fact)| match fact {
+            Support::Node(node) if matches!(node.label.as_str(), "EntryPoint" | "Schedule") => {
+                Some(node.id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut entered: BTreeMap<&str, Vec<&'a str>> = BTreeMap::new();
+    for edge in &base.graph.1 {
+        if edge.label == "ENTRY" && starts.contains(edge.src.as_str()) {
+            entered
+                .entry(edge.src.as_str())
+                .or_default()
+                .push(edge.dst.as_str());
+        }
+    }
+    let handlers_of = |story: &Story<'a>| -> Vec<&'a str> {
+        story
+            .support
+            .iter()
+            .flat_map(|(_, fact)| match fact {
+                Support::Edge(edge) if edge.label == "HANDLES" => vec![edge.dst.as_str()],
+                Support::Node(node) => entered.get(node.id.as_str()).cloned().unwrap_or_default(),
+                Support::Edge(_) => Vec::new(),
+            })
+            .collect()
+    };
+    let handlers: BTreeSet<&str> = capabilities().flat_map(handlers_of).collect();
+    let mut file_of: BTreeMap<&str, &'a str> = BTreeMap::new();
+    for edge in &base.graph.1 {
+        if edge.label == "DEFINED_IN" && handlers.contains(edge.src.as_str()) {
+            file_of
+                .entry(edge.src.as_str())
+                .or_insert(edge.dst.as_str());
+        }
+    }
+    let mut arranged = BTreeMap::new();
+    for story in capabilities() {
+        let mut files: BTreeSet<&str> = BTreeSet::new();
+        let mut held: BTreeMap<(&str, &str), (usize, &'a Node)> = BTreeMap::new();
+        for handler in handlers_of(story) {
+            // An entry may be the file itself.
+            let file = file_of.get(handler).copied().unwrap_or(handler);
+            if files.insert(file)
+                && let Some(area) = area_of.get(file)
+            {
+                held.entry((area_name(area), area.id.as_str()))
+                    .or_insert((0, area))
+                    .0 += 1;
+            }
+        }
+        // Most files first; the map order breaks a tie by name, then id.
+        let mut best: Option<(usize, &'a Node)> = None;
+        for &(count, area) in held.values() {
+            if best.is_none_or(|(most, _)| count > most) {
+                best = Some((count, area));
+            }
+        }
+        if let Some((_, area)) = best {
+            arranged.insert(story.node.id.as_str(), area);
+        }
+    }
+    (arranged, area_of)
+}
+
 pub(crate) enum Support<'a> {
     Node(&'a Node),
     Edge(&'a Edge),
@@ -86,7 +238,44 @@ pub(crate) struct Story<'a> {
 pub(crate) struct Stories<'a> {
     pub included: Vec<Story<'a>>,
     pub filtered: usize,
+    /// The area of each included Capability, by its node id (#260): the
+    /// Subsystem candidate that holds most of its handler files. Empty when
+    /// the host supplied no Subsystems; a Capability with no entry has none.
+    pub areas: BTreeMap<&'a str, &'a Node>,
+    /// The concept Subsystem each member file is in, by File id (#2049):
+    /// the same admitted Subsystems `areas` arranges by. Empty when the
+    /// host supplied none.
+    pub file_areas: BTreeMap<&'a str, &'a Node>,
 }
+impl<'a> Stories<'a> {
+    /// The included Capabilities with their areas, area by area: areas by
+    /// name, then the Capabilities with no area, each group in the order
+    /// the stories were validated. With no areas that order is unchanged.
+    pub(crate) fn capabilities(&self) -> Vec<(Option<&'a Node>, &Story<'a>)> {
+        let mut listed: Vec<(Option<&'a Node>, &Story<'a>)> = self
+            .included
+            .iter()
+            .filter(|story| story.node.label == "Capability")
+            .map(|story| (self.areas.get(story.node.id.as_str()).copied(), story))
+            .collect();
+        // A stable sort keeps the validated order inside each area.
+        listed.sort_by(|(a, _), (b, _)| match (a, b) {
+            (Some(a), Some(b)) => area_name(a).cmp(area_name(b)).then_with(|| a.id.cmp(&b.id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        listed
+    }
+}
+
+/// The name a Subsystem candidate was given.
+pub(crate) fn area_name(area: &Node) -> &str {
+    area.props["name"].as_str().unwrap_or_default()
+}
+
+/// Heading under which Capabilities with no area are listed.
+pub(crate) const NO_AREA: &str = "Other capabilities";
 impl Support<'_> {
     fn visible(
         &self,
@@ -518,6 +707,10 @@ pub fn logical_knowledge_story_compile_bound(
         super::document::acceptance::acceptance_per_capability_workspace(graph)?,
         // D1 §1.6 describes each operation's flow per Capability (AC-0859).
         super::document::flows::flows_per_capability_workspace(graph)?,
+        // D1 §1.3 and §1.5 state operations and rate limits (AC-0882).
+        super::document::operations::operations_per_capability_workspace(graph)?,
+        // D1 §1.3 lists the user actions per Capability (AC-0955).
+        super::document::actions::actions_per_capability_workspace(graph)?,
     ])?;
     Some(KnowledgeStoryCompileWorkspaceBound {
         capability_validation_bytes,

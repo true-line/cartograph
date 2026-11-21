@@ -6,8 +6,14 @@ pub use business_flows::{
 };
 mod controllers;
 pub use controllers::derive_controller_capabilities;
+mod entry_points;
+pub use entry_points::{
+    CAPABILITY_ENTRY_POINT_RULE, CAPABILITY_ENTRY_POINT_RULE_VERSION,
+    derive_entry_point_capabilities,
+};
 pub(crate) mod actors;
 mod naming;
+mod subsystems;
 pub use actors::{
     ACTOR_ALLOW_ASSUMPTION, ACTOR_ALLOW_RULE, ACTOR_ALLOW_RULE_VERSION, ActorReport,
     derive_permission_actors,
@@ -18,6 +24,10 @@ use core_graph::{
 };
 use core_prov::{ConfidenceTier, EvidenceBasis, EvidenceRef, ProducingMethod, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
+pub use subsystems::{
+    MAX_SUBSYSTEM_FILES, SUBSYSTEM_FILE_CAP, SUBSYSTEM_RULE, SUBSYSTEM_RULE_VERSION,
+    SubsystemReport, derive_subsystems,
+};
 
 /// Deterministic recipe naming a semantic resolver-group capability.
 pub const CAPABILITY_GRAPHQL_RULE: &str = "knowledge.capability.graphql-resolver-group";
@@ -27,7 +37,7 @@ pub const CAPABILITY_GRAPHQL_RULE_VERSION: &str = "3";
 /// Deterministic recipe naming a controller class's HTTP operations.
 pub const CAPABILITY_CONTROLLER_RULE: &str = "knowledge.capability.http-controller";
 /// Changed grouping, support or naming semantics require a new recipe version.
-pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "5";
+pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "7";
 
 /// Deterministic recipe projecting a persistence model to a weak domain candidate.
 pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";

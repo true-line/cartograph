@@ -44,7 +44,7 @@
 //! nodes and edges finds the cited facts; with no such draft nothing is
 //! indexed or walked.
 
-use super::capabilities::{Stories, Story, Support};
+use super::capabilities::{NO_AREA, Stories, Story, Support, area_name};
 use super::catalogue::{
     CATALOGUE_VERSION, CatalogueSection, SectionFrame, SectionKind, catalogue_section,
     catalogue_sections,
@@ -65,6 +65,14 @@ pub const SYSTEM_SCOPE: &str = "system";
 
 /// Artifact id of `product-specification.md`.
 pub(super) const D1_ARTIFACT_ID: &str = "d1-product-specification";
+
+/// §1.1 points to the drawn system (#2049): the diagrams are compiled in
+/// every export, whether or not the section's prose is drafted.
+const AT_A_GLANCE: &str = "The system at a glance is drawn in [`architecture.md`](architecture.md): \
+who uses it and what it depends on (C4 level 1), the parts that run on their own with their \
+data stores (level 2) and each part's components (level 3), every box and arrow citing the \
+facts it rests on. [`architecture.dsl`](architecture.dsl) holds the same model as a \
+Structurizr workspace.\n\n";
 
 const NOT_DRAFTED: &str = "_Not drafted._ No accepted draft is recorded for this section.\n";
 
@@ -614,12 +622,154 @@ impl Drafted<'_, '_> {
     }
 }
 
+/// The headings of a frame arranged per capability. With areas (#260) each
+/// area is one `###` heading over its Capabilities' `####` headings;
+/// without, every Capability keeps its own `###` heading.
+pub(super) struct AreaHeadings<'a> {
+    arranged: bool,
+    last: Option<Option<&'a str>>,
+}
+impl<'a> AreaHeadings<'a> {
+    pub(super) fn new(knowledge: &Stories<'a>) -> Self {
+        Self {
+            // Areas exist when the host supplied Subsystems, whether or not
+            // a Capability is in one (#2066).
+            arranged: !knowledge.areas.is_empty() || !knowledge.file_areas.is_empty(),
+            last: None,
+        }
+    }
+    /// Write the area heading when `area` differs from the previous
+    /// Capability's, and return the marks of the Capability's own heading.
+    pub(super) fn before(
+        &mut self,
+        area: Option<&'a Node>,
+        out: &mut Text,
+    ) -> Result<&'static str, RenderLimit> {
+        if !self.arranged {
+            return Ok("###");
+        }
+        let id = area.map(|node| node.id.as_str());
+        if self.last != Some(id) {
+            self.last = Some(id);
+            match area {
+                Some(node) => writeln!(out, "### {}\n", Literal(area_name(node)))?,
+                None => writeln!(out, "### {NO_AREA}\n")?,
+            }
+        }
+        Ok("####")
+    }
+}
+
 /// The Endpoints a derived story cites, in citation order.
 fn cited_endpoints<'s, 'a>(story: &'s Story<'a>) -> impl Iterator<Item = &'a Node> + 's {
     story.support.iter().filter_map(|(_, fact)| match fact {
-        Support::Node(node) if node.label == "Endpoint" => Some(*node),
+        // An HTTP operation, or a process start or scheduled job (#1997).
+        Support::Node(node)
+            if matches!(node.label.as_str(), "Endpoint" | "EntryPoint" | "Schedule") =>
+        {
+            Some(*node)
+        }
         _ => None,
     })
+}
+
+/// The sentence stating how many HTTP endpoints no Capability cites, and
+/// why (#2007): an endpoint whose `HANDLES` edge reaches no Symbol has no
+/// resolved handler, so no rule can group it; one with a handler is in no
+/// capability rule's scope, counted by framework. `None` when every
+/// endpoint is cited, or there is none.
+fn uncovered_endpoints(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    knowledge: Option<&Stories<'_>>,
+) -> Option<String> {
+    // A Gap endpoint is in the gap register, not the inventory: not counted.
+    let endpoints: Vec<&Node> = framed(nodes, "Endpoint")
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect();
+    if endpoints.is_empty() {
+        return None;
+    }
+    let cited: BTreeSet<&str> = knowledge
+        .into_iter()
+        .flat_map(|k| k.included.iter())
+        .filter(|story| story.node.label == "Capability")
+        .flat_map(cited_endpoints)
+        .map(|n| n.id.as_str())
+        .collect();
+    let symbols: BTreeSet<&str> = nodes
+        .iter()
+        .filter(|n| n.label == "Symbol")
+        .map(|n| n.id.as_str())
+        .collect();
+    let handled: BTreeSet<&str> = edges
+        .iter()
+        .filter(|e| e.label == "HANDLES" && symbols.contains(e.dst.as_str()))
+        .map(|e| e.src.as_str())
+        .collect();
+    let front_doors =
+        crate::front_doors::vercel_front_doors(endpoints.iter().copied(), edges.iter().copied());
+    let mut unresolved = 0usize;
+    let mut fronting = 0usize;
+    let mut by_framework: BTreeMap<&str, usize> = BTreeMap::new();
+    for endpoint in endpoints.iter().filter(|n| !cited.contains(n.id.as_str())) {
+        if front_doors.contains_key(endpoint.id.as_str()) {
+            fronting += 1;
+        } else if handled.contains(endpoint.id.as_str()) {
+            *by_framework
+                .entry(endpoint.props["framework"].as_str().unwrap_or("unknown"))
+                .or_default() += 1;
+        } else {
+            unresolved += 1;
+        }
+    }
+    let ungrouped: usize = by_framework.values().sum();
+    if unresolved + ungrouped + fronting == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if fronting > 0 {
+        // Each front door's function serves the same routes: count each once.
+        let behind: usize = front_doors
+            .iter()
+            .filter(|(id, _)| !cited.contains(*id))
+            .filter_map(|(id, n)| {
+                endpoints
+                    .iter()
+                    .find(|e| e.id == *id)
+                    .map(|e| (e.props["handler_sym"].as_str(), *n))
+            })
+            .collect::<BTreeMap<_, _>>()
+            .values()
+            .sum();
+        parts.push(format!(
+            "{fronting} are Vercel functions that pass requests on to the {behind} routes \
+             registered behind them, which are the operations"
+        ));
+    }
+    if unresolved > 0 {
+        parts.push(format!(
+            "{unresolved} have no resolved handler (their `HANDLES` target is a Gap or missing), \
+             so no rule can group them"
+        ));
+    }
+    if ungrouped > 0 {
+        let frameworks: Vec<String> = by_framework
+            .iter()
+            .map(|(framework, n)| format!("{} {n}", Literal(framework)))
+            .collect();
+        parts.push(format!(
+            "{ungrouped} have a handler that no capability rule groups (by framework: {})",
+            frameworks.join(", ")
+        ));
+    }
+    Some(format!(
+        "\nOperations in no Capability: {} of {} HTTP endpoints. {}. Each is listed in \
+         `endpoint-inventory.md`.\n",
+        unresolved + ungrouped + fronting,
+        endpoints.len(),
+        parts.join("; ")
+    ))
 }
 
 /// The knowledge layer's derived facts of `label` (#1443): Capabilities as
@@ -637,6 +787,8 @@ fn derived_frame(
         .iter()
         .filter(|s| s.node.label == label)
         .collect();
+    // Area facts cited beside the stories (#260).
+    let mut extra = 0usize;
     for story in &stories {
         let id = citation_id(&FactKey::Node {
             id: story.node.id.clone(),
@@ -700,17 +852,67 @@ fn derived_frame(
         writeln!(
             out,
             "Derived Capabilities: {}. Each groups the operations one controller or resolver \
-             serves (Semantic / InferredWeak, derived by rule from the cited facts); \
+             serves, or the process starts and scheduled jobs that begin work no HTTP request \
+             starts (Semantic / InferredWeak, derived by rule from the cited facts); \
              `user_stories.md` states them as stories.\n",
             stories.len()
         )?;
-        out.push_str("| Capability | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
-        for story in &stories {
+        let listed = knowledge.capabilities();
+        let arranged = !knowledge.areas.is_empty();
+        if arranged {
+            // Each area once, with its citation, before the rows it heads.
+            let mut areas: Vec<(&Node, usize)> = Vec::new();
+            for (area, _) in &listed {
+                if let Some(area) = area {
+                    match areas.last_mut() {
+                        Some((last, count)) if last.id == area.id => *count += 1,
+                        _ => areas.push((area, 1)),
+                    }
+                }
+            }
+            writeln!(
+                out,
+                "Capability areas: {}. Each is a Subsystem candidate: source files grouped \
+                 by the concept they are named for and what they use, across directories \
+                 (Semantic / InferredWeak, derived by rule from the files it cites). A \
+                 capability is listed under the area that holds most of its handler files. \
+                 Capabilities with no area: {}.\n",
+                areas.len(),
+                listed.iter().filter(|(area, _)| area.is_none()).count()
+            )?;
+            out.push_str("| Area | Capabilities | Files | Citation |\n|---|---|---|---|\n")?;
+            for (area, count) in &areas {
+                let id = citation_id(&FactKey::Node {
+                    id: area.id.clone(),
+                });
+                writeln!(
+                    out,
+                    "| {} | {count} | {} | {id} |",
+                    Literal(area_name(area)),
+                    area.props["files"].as_u64().unwrap_or_default(),
+                )?;
+                if asserted.insert(id) {
+                    assertions.node(area, None)?;
+                    extra += 1;
+                }
+            }
+            out.push_str("\n| Area | Capability | Operations | Examples | Citation |\n|---|---|---|---|---|\n")?;
+        } else {
+            out.push_str("| Capability | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
+        }
+        for (area, story) in &listed {
             let operations: Vec<String> = cited_endpoints(story)
                 .map(|n| NodeName(n).to_string())
                 .collect();
             let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
             let more = operations.len() - shown.len();
+            if arranged {
+                write!(
+                    out,
+                    "| {} ",
+                    Literal(area.map_or(NO_AREA, |node| area_name(node)))
+                )?;
+            }
             writeln!(
                 out,
                 "| {} | {} | {}{} | {} |",
@@ -728,7 +930,7 @@ fn derived_frame(
             )?;
         }
     }
-    Ok(stories.len())
+    Ok(stories.len() + extra)
 }
 
 pub(super) fn d1(
@@ -807,6 +1009,15 @@ pub(super) fn d1(
             section.title,
             section.kind.mark()
         )?;
+        // §1.5 states the source no rule evidence was read from, arranged
+        // per capability or not (#2009).
+        if section.subject == Some("BusinessRule")
+            && let Some(unread) = crate::rules::unread_rule_sentence(
+                &crate::rules::unread_rule_languages(nodes.iter().copied()),
+            )
+        {
+            content.push_str(&unread)?;
+        }
         if let Some(source) = section.frame {
             // The knowledge layer's derived Capabilities and Actor caller
             // sets frame 1.2 and 1.3 beside the base facts (#1443).
@@ -854,6 +1065,12 @@ pub(super) fn d1(
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;
+                cited += operations::limits_per_capability(
+                    knowledge,
+                    mode,
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
             } else if let (SectionFrame::Flows, Some(knowledge)) = (source, knowledge)
                 && let Some(flow_facts) = flows::flows_per_capability(
                     (nodes, edges),
@@ -883,12 +1100,42 @@ pub(super) fn d1(
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;
+                if label == "Capability" {
+                    cited += operations::operations_per_capability(
+                        (nodes, edges),
+                        knowledge,
+                        mode,
+                        (&mut assertions, &mut drafted.asserted),
+                        &mut content,
+                    )?;
+                    // The user actions that reach each capability (#2005).
+                    cited += actions::actions_per_capability(
+                        (nodes, edges),
+                        knowledge,
+                        (&mut assertions, &mut drafted.asserted),
+                        &mut content,
+                    )?;
+                }
+            }
+            // §1.3 states the operations no Capability groups, and why (#2007).
+            if matches!(source, SectionFrame::Nodes("Capability"))
+                && let Some(sentence) = uncovered_endpoints((nodes, edges), knowledge)
+            {
+                content.push_str(&sentence)?;
             }
             // Python callers by their recovered guards frame 1.2 (#1979).
             if matches!(source, SectionFrame::Nodes("Actor")) {
+                let mut guards = BTreeSet::new();
                 cited += super::endpoint_permissions::callers_frame(
                     nodes,
                     (mode, rejected),
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut guards,
+                    &mut content,
+                )?;
+                cited += rules::guard_checks(
+                    (nodes, edges),
+                    &guards,
                     (&mut assertions, &mut drafted.asserted),
                     &mut content,
                 )?;
@@ -897,6 +1144,7 @@ pub(super) fn d1(
         match section.kind {
             SectionKind::Projected => {}
             SectionKind::Framed => content.push_str("\n")?,
+            SectionKind::Authored if section.number == "1.1" => content.push_str(AT_A_GLANCE)?,
             SectionKind::Authored => {}
             SectionKind::Human => content.push_str(HUMAN_BLANK)?,
         }
@@ -944,6 +1192,15 @@ pub(super) mod acceptance;
 #[path = "document_flows.rs"]
 pub(super) mod flows;
 
+#[path = "document_operations.rs"]
+pub(super) mod operations;
+
+#[path = "document_actions.rs"]
+pub(super) mod actions;
+
+#[path = "document_statements.rs"]
+pub(super) mod statements;
+
 #[cfg(test)]
 #[path = "document_tests.rs"]
 mod tests;
@@ -951,3 +1208,7 @@ mod tests;
 #[cfg(test)]
 #[path = "document_draft_tests.rs"]
 mod draft_tests;
+
+#[cfg(test)]
+#[path = "document_area_tests.rs"]
+mod area_tests;

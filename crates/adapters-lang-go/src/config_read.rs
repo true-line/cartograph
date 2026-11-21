@@ -82,4 +82,9 @@ pub(super) fn emit(cx: &FileCx<'_>, sites: &[ConfigReadSite], out: &mut Extracti
     let (nodes, edges) = adapters_fw::config_read::assemble(&source, sites);
     out.nodes.extend(nodes);
     out.edges.extend(edges);
+    // A store reached by hand through its conventional URL key (#2065).
+    let stores = adapters_fw::config_read::store_sites(sites);
+    let (nodes, edges) = adapters_fw::observed::assemble(&source, &stores);
+    out.nodes.extend(nodes);
+    out.edges.extend(edges);
 }

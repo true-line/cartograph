@@ -79,9 +79,11 @@ func routes() {
         .edges
         .iter()
         .find(|edge| edge.src == "ep:local/go-service@GET:/wrapped" && edge.label == "HANDLES")
-        .expect("unresolved handler stays explicit");
-    assert!(wrapped.dst.starts_with("gap:go-handler:"));
-    assert_eq!(wrapped.props["prov"]["confidence_tier"], "Gap");
+        .expect("a wrapped handler is recorded");
+    // #2007: a wrapper call's handler argument is the handler, with the
+    // wrapper kept on the edge.
+    assert_eq!(wrapped.dst, "sym:local/go-service@main.go#create");
+    assert_eq!(wrapped.props["via"], "middleware.Wrap(create)");
 }
 
 #[test]
@@ -223,7 +225,8 @@ fn every_fact_has_confirmed_provenance_and_spans() {
 #[test]
 fn incremental_reingest_is_deterministic_and_skips_noise() {
     // AC-0054/T-0054: unchanged Go contexts are reused, byte changes are
-    // isolated, and vendored/test/build sources never enter application facts.
+    // isolated, and vendored/build sources never enter application facts;
+    // a test file is read for its tests only (#2019).
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("a.go"),
@@ -258,8 +261,16 @@ fn incremental_reingest_is_deterministic_and_skips_noise() {
     .unwrap();
     let mut cache = IncrementalCache::default();
     let (first, first_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
-    assert_eq!(first_stats.recomputed_files, 2);
-    assert!(!first.nodes.iter().any(|node| node.id.contains("Noise")));
+    assert_eq!(first_stats.recomputed_files, 3);
+    assert!(!first.nodes.iter().any(|node| node.id.contains("noise.go")));
+    // Not `func TestX(t *testing.T)`: a function of the test file, no test.
+    assert!(
+        first
+            .nodes
+            .iter()
+            .filter(|node| node.id.contains("Noise"))
+            .all(|node| node.label == "Symbol" && node.id.contains("a_test.go#"))
+    );
     assert!(!first.nodes.iter().any(|node| node.id.contains("Ignored")));
     assert!(
         !first
@@ -269,13 +280,13 @@ fn incremental_reingest_is_deterministic_and_skips_noise() {
     );
     let (same, same_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
     assert_eq!(same_stats.recomputed_files, 0);
-    assert_eq!(same_stats.reused_files, 2);
+    assert_eq!(same_stats.reused_files, 3);
     assert_eq!(first.nodes, same.nodes);
     assert_eq!(first.edges, same.edges);
 
     std::fs::write(dir.path().join("go.mod"), "module example.com/changed\n").unwrap();
     let (_, module_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
-    assert_eq!(module_stats.recomputed_files, 2);
+    assert_eq!(module_stats.recomputed_files, 3);
     assert_eq!(module_stats.reused_files, 0);
 
     std::fs::write(
@@ -285,7 +296,7 @@ fn incremental_reingest_is_deterministic_and_skips_noise() {
     .unwrap();
     let (changed, changed_stats) = extract_dir_incremental(dir.path(), &id(), &mut cache).unwrap();
     assert_eq!(changed_stats.recomputed_files, 1);
-    assert_eq!(changed_stats.reused_files, 1);
+    assert_eq!(changed_stats.reused_files, 2);
     assert!(
         changed
             .nodes
@@ -1065,4 +1076,637 @@ func a() string { return os.Getenv(key) }
         .map(|n| n.id.as_str())
         .collect();
     assert_eq!(ids, ["cfgread:local/go-service@constant.go:env:?"]);
+}
+
+#[test]
+fn routes_on_a_mux_parameter_and_their_handler_forms_resolve() {
+    // AC-0918 (#2006, #2007): a parameter typed `*http.ServeMux` is a
+    // router; a func literal handler is its own callable, a local closure
+    // resolves to its literal, a method value on the receiver resolves to
+    // the method, and a wrapper resolves to the handler it takes or, when
+    // it takes none, to itself. A method value on a field chain stays a Gap.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("pkg/device")).unwrap();
+    std::fs::write(dir.path().join("go.mod"), "module example.com/bot\n").unwrap();
+    std::fs::write(
+        dir.path().join("pkg/device/webapi.go"),
+        r#"package device
+
+import (
+    "context"
+    "net/http"
+)
+
+type Service struct{ Dev *Dev }
+
+func (s *Service) webAPI(mux *http.ServeMux) {
+    mux.HandleFunc("GET /api/web/session", func(w http.ResponseWriter, r *http.Request) {
+        s.session(w)
+    })
+    fleet := func(w http.ResponseWriter, r *http.Request) { s.save(w) }
+    mux.HandleFunc("GET /devices", fleet)
+    {
+        mux := newFake()
+        mux.HandleFunc("/shadowed", fleet)
+    }
+    mux.HandleFunc("GET /api/web/catalog", s.catalog)
+    mux.HandleFunc("POST /api/daemon/pull", wrap("POST", s.pull))
+    mux.HandleFunc("POST /api/web/relay-rules", relayWrite(true))
+    mux.HandleFunc("/.well-known/key", s.Dev.ServerKey)
+}
+
+func (s *Service) more(mux *http.ServeMux, fleet http.HandlerFunc) {
+    mux.HandleFunc("GET /other", fleet)
+    opts := 3
+    mux.HandleFunc("GET /opts", options(s.catalog, opts))
+}
+
+func (s *Service) session(w http.ResponseWriter) {}
+func (s *Service) save(w http.ResponseWriter) {}
+func other() {
+    mux := newFake()
+    mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {})
+}
+func newFake() *Fake { return nil }
+func wrap(method string, h func(context.Context) int) http.HandlerFunc { return nil }
+func relayWrite(on bool) http.HandlerFunc { return nil }
+func options(h http.HandlerFunc, n int) http.HandlerFunc { return nil }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("pkg/device/catalog.go"),
+        "package device\n\nimport \"net/http\"\n\nfunc (s *Service) catalog(w http.ResponseWriter, r *http.Request) {}\nfunc (s *Service) pull() int { return 0 }\n",
+    )
+    .unwrap();
+    let extraction = extract_dir(dir.path(), &id()).unwrap();
+    let handles: BTreeMap<&str, &str> = edge_pairs(&extraction, "HANDLES").into_iter().collect();
+    let ep = |m: &str, p: &str| format!("ep:local/go-service@{m}:{p}");
+    let sym = |path: &str, name: &str| format!("sym:local/go-service@pkg/device/{path}#{name}");
+    let literal = handles[ep("GET", "/api/web/session").as_str()];
+    assert!(
+        literal.starts_with(&sym("webapi.go", "Service.webAPI/func@")),
+        "{literal}"
+    );
+    assert!(
+        handles[ep("GET", "/devices").as_str()]
+            .starts_with(&sym("webapi.go", "Service.webAPI/func@"))
+    );
+    assert_eq!(
+        handles[ep("GET", "/api/web/catalog").as_str()],
+        sym("catalog.go", "Service.catalog")
+    );
+    assert_eq!(
+        handles[ep("POST", "/api/daemon/pull").as_str()],
+        sym("catalog.go", "Service.pull")
+    );
+    assert_eq!(
+        handles[ep("POST", "/api/web/relay-rules").as_str()],
+        sym("webapi.go", "relayWrite")
+    );
+    assert!(handles[ep("ANY", "/.well-known/key").as_str()].starts_with("gap:go-handler:"));
+    // A wrapper's trailing non-handler argument does not hide its handler.
+    assert_eq!(
+        handles[ep("GET", "/opts").as_str()],
+        sym("catalog.go", "Service.catalog")
+    );
+    // A parameter named like another function's closure is not that closure.
+    assert!(handles[ep("GET", "/other").as_str()].starts_with("gap:go-handler:"));
+    // The literal's own calls are its calls, not the enclosing method's.
+    assert!(
+        edge_pairs(&extraction, "CALLS")
+            .contains(&(literal, sym("webapi.go", "Service.session").as_str()))
+    );
+    // So are a bound closure's, though its body precedes its registration.
+    let closure = handles[ep("GET", "/devices").as_str()];
+    assert!(
+        edge_pairs(&extraction, "CALLS")
+            .contains(&(closure, sym("webapi.go", "Service.save").as_str()))
+    );
+    let node = extraction.nodes.iter().find(|n| n.id == literal).unwrap();
+    assert_eq!(node.props["package_dir"], "pkg/device");
+    // A receiver is proven lexically: a shadowing local or a same-named
+    // local in another function is not the router.
+    assert!(!handles.contains_key(ep("ANY", "/shadowed").as_str()));
+    assert!(!handles.contains_key(ep("ANY", "/elsewhere").as_str()));
+}
+
+#[test]
+fn a_reused_files_unresolved_handler_fallback_carries_the_new_commit() {
+    // AC-0918: the Gap fallback kept for a package handler is retargeted
+    // with the rest of a reused file's facts.
+    let source = br#"package main
+
+import (
+    "net/http"
+    "example.com/bot/handlers"
+)
+
+func routes(mux *http.ServeMux) {
+    mux.HandleFunc("/x", handlers.Missing)
+}
+"#;
+    let mut extraction =
+        extract_source_with_module(source, "main.go", &id(), Some("example.com/bot")).unwrap();
+    assert_eq!(extraction.pending_endpoints.len(), 1);
+    retarget_commit(&mut extraction, "def456");
+    let (endpoint, gap, handles) = &extraction.pending_endpoints[0].gap;
+    for props in [&endpoint.props, &gap.props, &handles.props] {
+        let text = props.to_string();
+        assert!(
+            text.contains("def456") && !text.contains("abc123"),
+            "{text}"
+        );
+    }
+}
+
+/// AC-0946 (#2065): a URL read from a struct field or package constant is
+/// joined to the one literal the package binds it to, across files; two
+/// literals, an unproven binding or a test file's binding leave it computed.
+#[test]
+fn a_base_url_held_in_a_field_or_constant_joins_across_the_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("pkg/gh");
+    std::fs::create_dir_all(&gh).unwrap();
+    std::fs::write(
+        gh.join("client.go"),
+        r#"package gh
+import "net/http"
+type Client struct { API string; OAuth string; Hook string; Other string }
+func New() *Client { return &Client{API: "https://api.github.com", OAuth: oauthURL} }
+func (c *Client) Get(path string) { http.NewRequest(http.MethodGet, c.API+path, nil) }
+func (c *Client) Token() { http.NewRequest(http.MethodPost, c.OAuth, nil) }
+func (c *Client) Ping() { http.Get(Status + "/ping") }
+func (c *Client) Hooked() { http.NewRequest(http.MethodPost, c.Hook, nil) }
+func (c *Client) Mixed() { http.NewRequest(http.MethodPost, c.Other, nil) }
+func (c *Client) Local(Status string) { http.Get(Status + "/x") }
+func Plain(o *Client) { http.NewRequest(http.MethodGet, o.API, nil) }
+type Shadow struct{ URL string }
+func NewShadow(Status string) *Shadow { return &Shadow{URL: Status} }
+func (s *Shadow) Fetch() { http.Get(s.URL) }
+type Assigned struct{ Base string }
+func (a *Assigned) Fetch() { http.Get(a.Base) }
+func setup(x *Assigned) { x.Base = "https://assigned.example" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gh.join("consts.go"),
+        r#"package gh
+const (
+    oauthURL = "https://github.com/login/oauth/access_token"
+    Status = "https://www.githubstatus.com"
+)
+type Other struct{ Other string }
+var a = &Client{Hook: hookURL()}
+var b = &Client{Other: "https://one.example"}
+var c = &Other{Other: "https://two.example"}
+func hookURL() string { return "" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gh.join("client_test.go"),
+        "package gh\nvar t = &Client{API: \"http://127.0.0.1\"}\n",
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let mut rows: Vec<(String, String)> = x
+        .fetch_sites
+        .iter()
+        .map(|site| {
+            let url = match (&site.url, &site.base) {
+                (url, Some(base)) => format!("{:?} + {:?}", base.url, url),
+                (url, None) => format!("{url:?}"),
+            };
+            (site.symbol.clone().unwrap_or_default(), url)
+        })
+        .collect();
+    rows.sort();
+    let row = |name: &str| {
+        rows.iter()
+            .find(|(symbol, _)| symbol.ends_with(&format!("Client.{name}")))
+            .map(|(_, url)| url.as_str())
+            .unwrap()
+    };
+    assert_eq!(
+        row("Get"),
+        "Literal(\"https://api.github.com\") + Computed(\"path\")"
+    );
+    assert_eq!(
+        row("Token"),
+        "Literal(\"https://github.com/login/oauth/access_token\")"
+    );
+    assert_eq!(
+        row("Ping"),
+        "Literal(\"https://www.githubstatus.com\") + Literal(\"/ping\")"
+    );
+    // A call result is no proven binding.
+    assert_eq!(row("Hooked"), "Computed(\"c.Hook\")");
+    // The receiver's type picks its own literal out of two.
+    assert_eq!(row("Mixed"), "Literal(\"https://one.example\")");
+    // A parameter shadows the package constant.
+    assert_eq!(row("Local"), "Computed(\"Status + \\\"/x\\\"\")");
+    let symbol_row = |suffix: &str| {
+        rows.iter()
+            .find(|(symbol, _)| symbol.ends_with(suffix))
+            .map(|(_, url)| url.as_str())
+            .unwrap()
+    };
+    // An operand that is not the method receiver has no proven type.
+    assert_eq!(symbol_row("#Plain"), "Computed(\"o.API\")");
+    // A parameter that shadows the constant is not the constant.
+    assert_eq!(symbol_row("Shadow.Fetch"), "Computed(\"s.URL\")");
+    // An assignment of unknown type cannot supply the value alone.
+    assert_eq!(symbol_row("Assigned.Fetch"), "Computed(\"a.Base\")");
+}
+
+/// AC-0947 (#2065): a read of a store's conventional URL key is an observed
+/// store of that provider, InferredStrong and marked, used by the reading
+/// function; a token key and an unlisted key are not.
+#[test]
+fn a_store_reached_through_its_conventional_url_key_is_observed() {
+    let source = br#"
+package store
+import "os"
+func FromEnv() string {
+    u := os.Getenv("KV_REST_API_URL")
+    _ = os.Getenv("KV_REST_API_TOKEN")
+    _ = os.Getenv("BASE_URL")
+    return u
+}
+"#;
+    let x = extract_source(source, "store.go", &id()).unwrap();
+    let resources: Vec<_> = x.nodes.iter().filter(|n| n.label == "Resource").collect();
+    let [store] = resources.as_slice() else {
+        panic!("one store: {resources:?}")
+    };
+    assert_eq!(
+        store.id,
+        "res:local/go-service@observed:redis:env:KV_REST_API_URL"
+    );
+    assert_eq!(store.props["provider"], "redis");
+    assert_eq!(store.props["kind"], "sdk-client");
+    assert_eq!(store.props["env_key"], "KV_REST_API_URL");
+    assert_eq!(store.props["store_from_env_key"], true);
+    assert_eq!(store.props["prov"]["confidence_tier"], "InferredStrong");
+    assert!(
+        x.edges
+            .iter()
+            .any(|e| e.label == "USES" && e.dst == store.id && e.src.ends_with("#FromEnv"))
+    );
+}
+
+/// AC-0960 (#2019): `func TestXxx(t *testing.T)` is a TestCase implemented
+/// by its function, whose calls reach the package's code; the requests it
+/// builds with literal method and target reach the endpoint serving them,
+/// with the statuses it compares; a computed or unserved request is a Gap;
+/// nothing else in a test file is a fact about the system.
+#[test]
+fn go_tests_are_test_cases_linked_to_the_endpoints_they_request() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("server.go"),
+        r#"package app
+import "net/http"
+func Routes(mux *http.ServeMux) {
+    mux.HandleFunc("GET /api/items/{id}", GetItem)
+    mux.HandleFunc("POST /api/items", CreateItem)
+    mux.HandleFunc("GET /{$}", GetItem)
+    mux.HandleFunc("/static/", GetItem)
+    mux.HandleFunc("/static/", GetItem)
+}
+func GetItem(w http.ResponseWriter, r *http.Request) {}
+func CreateItem(w http.ResponseWriter, r *http.Request) { validate() }
+func validate() {}
+func run() {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("server_test.go"),
+        r#"package app
+import (
+    "net/http"
+    "net/http/httptest"
+    "testing"
+)
+func TestGetItem(t *testing.T) {
+    req := httptest.NewRequest(http.MethodGet, "https://x.test/api/items/7?full=1", nil)
+    rec := httptest.NewRecorder()
+    GetItem(rec, req)
+    if rec.Code != http.StatusOK { t.Fatal() }
+    if rec.Code == 404 { t.Fatal() }
+}
+func TestCreate(t *testing.T) {
+    newHelper()
+    req := httptest.NewRequest("POST", "/api/items", nil)
+    _ = req
+    http.Get("https://external.example/should-not-be-a-fetch")
+}
+func TestComputed(t *testing.T) {
+    base := "/api"
+    _ = httptest.NewRequest("GET", base+"/items/1", nil)
+    _ = httptest.NewRequest("DELETE", "/api/items", nil)
+    _ = httptest.NewRequest("GET", "/other", nil)
+}
+func TestStatic(t *testing.T) {
+    _ = httptest.NewRequest("GET", "/static/css/site.css", nil)
+    run()
+}
+func Testing(t *testing.T) {}
+func TestNotATest(x int) {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("helper_test.go"),
+        "package app\nfunc newHelper() { validate() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("worker.go"),
+        "package app\ntype Worker struct{}\nfunc (w *Worker) run() {}\n",
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let tests: BTreeSet<&str> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| n.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tests,
+        BTreeSet::from(["TestComputed", "TestCreate", "TestGetItem", "TestStatic"])
+    );
+    let edge = |src: &str, label: &str| -> Vec<&Edge> {
+        x.edges
+            .iter()
+            .filter(|e| e.src.ends_with(src) && e.label == label)
+            .collect()
+    };
+    // Implemented by its function, whose calls reach the package's code,
+    // through a helper in another test file too.
+    let implemented = edge("server_test.go#TestGetItem", "IMPLEMENTED_BY");
+    assert_eq!(
+        implemented[0].dst,
+        "sym:local/go-service@server_test.go#TestGetItem"
+    );
+    assert!(
+        edge("server_test.go#TestGetItem", "CALLS")
+            .iter()
+            .any(|e| e.dst.ends_with("server.go#GetItem"))
+    );
+    assert!(
+        edge("helper_test.go#newHelper", "CALLS")
+            .iter()
+            .any(|e| e.dst.ends_with("server.go#validate"))
+    );
+    // Requests reach the endpoint serving them, with compared statuses.
+    let get = edge("server_test.go#TestGetItem", "REQUESTS");
+    assert_eq!(get.len(), 1);
+    assert_eq!(get[0].dst, "ep:local/go-service@GET:/api/items/{id}");
+    assert_eq!(get[0].props["statuses"], serde_json::json!([200, 404]));
+    assert_eq!(get[0].props["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(get[0].props["link"], "handler_assumed");
+    assert_eq!(
+        edge("server_test.go#TestCreate", "REQUESTS")[0].dst,
+        "ep:local/go-service@POST:/api/items"
+    );
+    // A `net/http` subtree pattern serves the paths below it, and two
+    // registrations of it are one endpoint.
+    assert_eq!(
+        edge("server_test.go#TestStatic", "REQUESTS")[0].dst,
+        "ep:local/go-service@ANY:/static/"
+    );
+    // An unqualified call reaches the package function, not a method of
+    // the same name.
+    let run: Vec<&str> = edge("server_test.go#TestStatic", "CALLS")
+        .iter()
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert_eq!(run, ["sym:local/go-service@server.go#run"]);
+    // Computed and unserved requests are Gaps naming them.
+    let mut reasons: Vec<&str> = edge("server_test.go#TestComputed", "REQUESTS")
+        .iter()
+        .map(|e| e.props["reason"].as_str().unwrap())
+        .collect();
+    reasons.sort();
+    assert_eq!(
+        reasons,
+        [
+            "no recovered endpoint serves this path and method",
+            "no recovered endpoint serves this path and method",
+            "test request URL is computed"
+        ]
+    );
+    // A test file's client call, routes and the like are not system facts.
+    assert!(x.fetch_sites.iter().all(|s| !s.path.ends_with("_test.go")));
+    assert!(
+        x.nodes
+            .iter()
+            .filter(|n| n.id.contains("_test.go"))
+            .all(
+                |n| matches!(n.label.as_str(), "File" | "Symbol" | "TestCase")
+                    || n.id.starts_with("gap:test-call:")
+            )
+    );
+}
+
+#[test]
+fn literal_sql_reads_and_writes_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("store.go"),
+        r#"package store
+import (
+    "context"
+    "database/sql"
+    "fmt"
+)
+const getUser = `SELECT u.id, u.email FROM users u
+    JOIN "Orgs" o ON o.id = u.org_id WHERE u.id = $1`
+type Store struct{ db *sql.DB }
+func (s *Store) User(ctx context.Context, id int) {
+    s.db.QueryRowContext(ctx, getUser, id)
+}
+func (s *Store) Create(email string) {
+    s.db.Exec("INSERT INTO users (email, org_id) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET email = excluded.email", email, 1)
+}
+func (s *Store) Disable(id int) {
+    s.db.Exec(`UPDATE users SET disabled = true, updated_at = now() WHERE id = $1`, id)
+    s.db.Exec("DELETE FROM sessions WHERE user_id = $1 AND created < (SELECT max(created) FROM audit.logins)", id)
+}
+func (s *Store) Search(table string) {
+    s.db.Query(fmt.Sprintf("SELECT * FROM %s", table))
+    s.db.Query("SELECT extract(year FROM now())")
+    sql.Open("postgres", "SELECT * FROM nothing")
+}
+func (s *Store) Feeds(tagged bool) {
+    query := `SELECT id FROM feeds WHERE true`
+    if tagged {
+        query += " AND id IN (SELECT feed_id FROM " + "tags)"
+    }
+    s.db.Query(query)
+    s.db.Query(fmt.Sprintf("SELECT * FROM icons ORDER BY %s", "id"))
+    s.db.Exec("DECLARE c CURSOR FOR SELECT 1")
+    s.db.QueryRow("FETCH NEXT FROM c")
+}
+func (s *Store) Joined(table string) {
+    s.db.Query("SELECT * FROM users JOIN " + table + " ON true")
+    s.db.Query("SELECT * FROM accou" + "nts")
+    s.db.Query(`WITH recent(id) AS (SELECT id FROM users), top AS MATERIALIZED (SELECT 1 FROM ranks) SELECT * FROM recent, top`)
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("other.go"),
+        "package store\nimport \"database/sql\"\nfunc Touch(db *sql.DB) { db.Exec(`UPDATE users SET seen = 1`) }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("cache.go"),
+        "package store\nfunc Get(c Cache, k string) { c.Query(k); c.Exec(k) }\n",
+    )
+    .unwrap();
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let entities: BTreeMap<&str, Vec<&str>> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "DataEntity")
+        .map(|n| {
+            (
+                n.props["table"].as_str().unwrap(),
+                n.props["columns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c["name"].as_str().unwrap())
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entities,
+        BTreeMap::from([
+            ("Orgs", vec![]),
+            ("accounts", vec![]),
+            ("audit.logins", vec![]),
+            ("feeds", vec![]),
+            ("icons", vec![]),
+            ("ranks", vec![]),
+            ("sessions", vec![]),
+            ("tags", vec![]),
+            (
+                "users",
+                vec!["disabled", "email", "org_id", "seen", "updated_at"]
+            ),
+        ])
+    );
+    let access = |src: &str| -> BTreeSet<(String, String, String)> {
+        x.edges
+            .iter()
+            .filter(|e| {
+                e.src.ends_with(src)
+                    && e.dst.starts_with("data:")
+                    && matches!(e.label.as_str(), "READS" | "WRITES")
+            })
+            .map(|e| {
+                (
+                    e.label.clone(),
+                    e.dst.rsplit(':').next().unwrap().to_string(),
+                    e.props["operations"]
+                        .as_array()
+                        .map(|ops| {
+                            ops.iter()
+                                .map(|o| o.as_str().unwrap())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    let t = |label: &str, table: &str, ops: &str| (label.into(), table.into(), ops.into());
+    assert_eq!(
+        access("#Store.User"),
+        BTreeSet::from([t("READS", "users", ""), t("READS", "Orgs", "")])
+    );
+    assert_eq!(
+        access("#Store.Create"),
+        BTreeSet::from([t("WRITES", "users", "insert")])
+    );
+    assert_eq!(
+        access("#Store.Disable"),
+        BTreeSet::from([
+            t("WRITES", "users", "update"),
+            t("WRITES", "sessions", "delete"),
+            t("READS", "audit.logins", ""),
+        ])
+    );
+    // A variable the function assigns, `+` and `fmt.Sprintf`'s format are
+    // followed; what they leave computed makes the read a fragment's.
+    assert_eq!(
+        access("#Store.Feeds"),
+        BTreeSet::from([
+            t("READS", "feeds", ""),
+            t("READS", "tags", ""),
+            t("READS", "icons", ""),
+        ])
+    );
+    // Go concatenation joins exactly; CTE names, with column lists or
+    // MATERIALIZED, are the statement's own.
+    assert_eq!(
+        access("#Store.Joined"),
+        BTreeSet::from([
+            t("READS", "users", ""),
+            t("READS", "accounts", ""),
+            t("READS", "ranks", ""),
+        ])
+    );
+    for edge in x.edges.iter().filter(|e| e.dst.starts_with("data:")) {
+        // `Joined` reads `users` through a literal too, and the literal's
+        // citation wins.
+        let expected = if edge.src.ends_with("#Store.Feeds") {
+            "sql-fragments"
+        } else {
+            "sql-literal"
+        };
+        assert_eq!(edge.props["resolution"], expected, "{}", edge.dst);
+        assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
+    }
+    // A computed statement is a Gap; a file without a database/sql import
+    // states nothing.
+    let gaps: BTreeSet<(&str, &str)> = x
+        .nodes
+        .iter()
+        .filter(|n| n.id.starts_with("gap:sql:"))
+        .map(|n| {
+            (
+                n.props["reason"].as_str().unwrap(),
+                n.props["expression"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        BTreeSet::from([
+            (
+                "SQL statement is computed",
+                r#"fmt.Sprintf("SELECT * FROM %s", table)"#
+            ),
+            (
+                "SQL statement names a computed table",
+                r#""SELECT * FROM users JOIN " + table + " ON true""#
+            ),
+        ])
+    );
+    assert!(
+        access("#Search")
+            .iter()
+            .all(|(label, _, _)| label == "READS")
+    );
 }

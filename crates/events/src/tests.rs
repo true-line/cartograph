@@ -226,7 +226,7 @@ fn config_index_parses_env_files_deterministically() {
     assert_eq!(cfg.resolve("MISSING"), None);
 }
 
-// AC-0890 (#933): env files holding secret-shaped values refuse the
+// AC-0990 (#933): env files holding secret-shaped values refuse the
 // ingest. The refusal names every file, line and key, never a value, and
 // says how to proceed.
 #[test]
@@ -278,7 +278,7 @@ fn env_file_secrets_refuse_the_ingest_by_file_line_and_key() {
     }
 }
 
-// AC-0890: values that are not secrets still resolve: plain URLs, URLs
+// AC-0990: values that are not secrets still resolve: plain URLs, URLs
 // with a user and no password, empty values and template placeholders under
 // credential keys.
 #[test]
@@ -2337,4 +2337,37 @@ fn cross_repo_fetches_join_all_and_prefix_routes() {
     );
     // Both `/blob/` requests stay gaps.
     assert_eq!(out.kept_nodes.len(), 2, "{:?}", out.kept_nodes);
+}
+
+// AC-0946 (#2065): a literal base with a computed path keeps the base as the
+// Gap's request URL, marked path-computed, so the boundary can place its
+// origin; a computed base keeps no request.
+#[test]
+fn a_literal_base_with_a_computed_path_keeps_its_origin() {
+    let site = |base: IdentityExpr| FetchSite {
+        url: IdentityExpr::Computed("path".into()),
+        ..joined_site("GET", "-", base, BaseJoin::Concat, "client call")
+    };
+    let (gaps, _) = web_gaps(
+        &[site(IdentityExpr::Literal("https://api.github.com".into()))],
+        &ConfigIndex::default(),
+    );
+    assert_eq!(
+        gaps[0].props["reason"],
+        "runtime-computed path of client call"
+    );
+    assert_eq!(
+        gaps[0].props["request"],
+        serde_json::json!({
+            "method": "GET",
+            "url": "https://api.github.com",
+            "url_source": "base:literal",
+            "path_computed": true,
+        })
+    );
+    let (gaps, _) = web_gaps(
+        &[site(IdentityExpr::Computed("c.API".into()))],
+        &ConfigIndex::default(),
+    );
+    assert!(gaps[0].props["request"].is_null());
 }

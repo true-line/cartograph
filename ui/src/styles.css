@@ -4941,6 +4941,7 @@ details.investigation-section { display: block; }
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
 
 /* System manifest preview (#1655): one section per declared repository. */
 .preflight-system {
@@ -4967,4 +4968,135 @@ details.investigation-section { display: block; }
 .preflight-preview-note {
   margin: 0;
   font-size: 0.85rem;
+}
+
+/* Ask an area's expert (#2057, AC-0932). */
+.area-expert select,
+.area-expert textarea {
+  width: min(100%, 32rem);
+  font: inherit;
+}
+
+.area-exchange {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+  padding: 0.6rem 0 0.2rem;
+  border-top: 1px solid var(--border);
+}
+
+.area-question {
+  font-weight: 600;
+}
+
+.area-answer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.4rem;
+}
+
+/* Architecture view (#2049 slice 2): C4 levels 1 to 3 with evidence. */
+.architecture-levels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.architecture-levels button.active {
+  border-color: var(--tier-confirmed);
+  font-weight: 600;
+}
+
+.architecture-hint {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.architecture-view {
+  /* The canvas must not widen the card past its column. */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.architecture-body {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
+  gap: 0.75rem;
+}
+
+.spec-diagram-canvas.architecture-canvas {
+  min-height: 420px;
+}
+
+.architecture-evidence {
+  max-height: 900px;
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+
+.architecture-evidence h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+}
+
+.architecture-facts {
+  display: grid;
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0;
+}
+
+.architecture-fact-kind {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.architecture-fact-source {
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .architecture-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.architecture-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.architecture-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 28px;
+  border-top: 2px solid #8b919f;
+}
+
+.legend-line.dotted {
+  border-top-style: dotted;
+}
+
+.legend-line.dashed {
+  border-top-style: dashed;
+}
+
+.legend-line.gap {
+  border-top: 2px dashed #c0392b;
 }

@@ -1785,3 +1785,63 @@ E = os.environ["AFTER_WRITE"]
     let (nodes, _) = extract(&[("app/reads.py", reads), ("os/__init__.py", "")]);
     assert!(!nodes.iter().any(|n| n.label == "ConfigRead"));
 }
+
+#[test]
+fn numeric_defaults_of_environment_constants_are_recorded() {
+    // AC-0903 (T-0903): a module constant bound to a proven environment read
+    // records its numeric or boolean literal default on the read's node: a
+    // `get` default, an `or` fallback, and a `try`/`except` fallback; a
+    // string default, a rebound constant and a computed default record none.
+    let (nodes, _) = extract(&[(
+        "app/config.py",
+        r#"import os
+
+ALIAS_TRASH_DAYS = int(os.environ.get("ALIAS_TRASH_DAYS", 30))
+RATIO = float(os.getenv("RATIO") or 0.5)
+FLAG = os.environ.get("FLAG", True)
+NAME = os.environ.get("NAME", "simplelogin")
+REBOUND = int(os.environ.get("REBOUND", 3))
+REBOUND = 4
+COMPUTED = int(os.environ.get("COMPUTED", 2 * 3))
+
+try:
+    MAX_FREE = int(os.environ["MAX_FREE"])
+except Exception:
+    print("not set")
+    MAX_FREE = 5
+"#,
+    )]);
+    let defaults = |key: &str| {
+        nodes
+            .iter()
+            .find(|n| n.id == format!("cfgread:local/py@app/config.py:env:{key}"))
+            .unwrap_or_else(|| panic!("{key}"))
+            .props
+            .get("defaults")
+            .map(|d| {
+                d.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| {
+                        (
+                            e["constant"].as_str().unwrap().to_owned(),
+                            e["value"].clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+    };
+    assert_eq!(
+        defaults("ALIAS_TRASH_DAYS"),
+        Some(vec![("ALIAS_TRASH_DAYS".into(), 30.into())])
+    );
+    assert_eq!(defaults("RATIO"), Some(vec![("RATIO".into(), 0.5.into())]));
+    assert_eq!(defaults("FLAG"), Some(vec![("FLAG".into(), true.into())]));
+    assert_eq!(
+        defaults("MAX_FREE"),
+        Some(vec![("MAX_FREE".into(), 5.into())])
+    );
+    for key in ["NAME", "REBOUND", "COMPUTED"] {
+        assert_eq!(defaults(key), None, "{key}");
+    }
+}

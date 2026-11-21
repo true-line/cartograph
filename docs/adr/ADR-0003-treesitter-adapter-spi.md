@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-21
-- **Deciders:** Chris Kane
+- **Deciders:** Project owner
 
 ## Context
 Multiple languages, IaC dialects, cloud providers, event systems, and client frameworks

@@ -394,6 +394,23 @@ impl OverlayStore {
         self.read_nodes_bounded(current, &["Capability", "Actor"], max_facts, max_bytes)
     }
 
+    /// As [`Self::read_capabilities_and_actors_bounded`], also retaining the
+    /// Subsystem nodes a document arranges its Capabilities by (#260), under
+    /// the same combined count and byte charge.
+    pub fn read_story_nodes_bounded(
+        &self,
+        current: &StoreRevision,
+        max_facts: usize,
+        max_bytes: usize,
+    ) -> Result<OverlayRead, OverlayError> {
+        self.read_nodes_bounded(
+            current,
+            &["Capability", "Actor", "Subsystem"],
+            max_facts,
+            max_bytes,
+        )
+    }
+
     fn read_nodes_bounded(
         &self,
         current: &StoreRevision,

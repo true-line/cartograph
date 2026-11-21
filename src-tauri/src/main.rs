@@ -4,6 +4,8 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod area_briefing;
+mod area_expert;
 #[cfg(test)]
 mod conformance_tests;
 mod context;
@@ -331,6 +333,8 @@ struct LayerBreakdown {
     webext: LayerSummary,
     tools: LayerSummary,
     schedules: LayerSummary,
+    /// Process starts beyond HTTP: listeners, workers, commands (#1997).
+    entry_points: LayerSummary,
     /// Ordered workflow and Dockerfile steps (#1790).
     pipelines: LayerSummary,
     /// Environments and workloads from Compose files (#1791).
@@ -351,6 +355,7 @@ impl LayerBreakdown {
         self.webext.add(other.webext);
         self.tools.add(other.tools);
         self.schedules.add(other.schedules);
+        self.entry_points.add(other.entry_points);
         self.pipelines.add(other.pipelines);
         self.environments.add(other.environments);
         self.events.add(other.events);
@@ -1418,6 +1423,10 @@ fn repo_coverage(
                 count(&layers.schedules),
             ),
             (
+                ingest::entry_points::ENTRY_POINT_EXTRACTOR_ID,
+                count(&layers.entry_points),
+            ),
+            (
                 ingest::pipelines::PIPELINE_EXTRACTOR_ID,
                 count(&layers.pipelines),
             ),
@@ -2186,6 +2195,13 @@ fn extract_tree_packed(
             nodes: distinct_node_count(&schedule_facts.nodes),
             edges: distinct_edge_count(&schedule_facts.edges),
         };
+        // Files a job enters are that job's entry, not another (#1997).
+        let scheduled: std::collections::BTreeSet<String> = schedule_facts
+            .nodes
+            .iter()
+            .filter(|node| node.label == "File")
+            .filter_map(|node| node.props["path"].as_str().map(str::to_owned))
+            .collect();
         let known_files = unplaceholdered_set(&facts, "File")?;
         facts
             .extend(
@@ -2194,6 +2210,29 @@ fn extract_tree_packed(
                     .into_iter()
                     .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
                 schedule_facts.edges,
+            )
+            .map_err(pack_err)?;
+        // Entry points beyond HTTP (#1997): each process start (a Python
+        // `__main__` or operator script, the container command, a Procfile
+        // process, a declared console script or `bin`) becomes an
+        // EntryPoint flow trigger with an ENTRY into the file it runs, or a
+        // Gap naming it. An adapter's File node supersedes the reader's.
+        let entry_facts =
+            ingest::entry_points::extract_dir(root, &schedule_id, &symbols, &scheduled)
+                .map_err(|e| e.to_string())?;
+        layers.entry_points = LayerSummary {
+            files: entry_facts.files,
+            nodes: distinct_node_count(&entry_facts.nodes),
+            edges: distinct_edge_count(&entry_facts.edges),
+        };
+        let known_files = unplaceholdered_set(&facts, "File")?;
+        facts
+            .extend(
+                entry_facts
+                    .nodes
+                    .into_iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id)),
+                entry_facts.edges,
             )
             .map_err(pack_err)?;
     }
@@ -3106,38 +3145,93 @@ fn relink_found_adrs(
     documented: &std::collections::BTreeSet<String>,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
+    // The graph is read packed and each step decodes only the labels it
+    // reads, so a large graph never exists as one props tree here (#2003).
     let snapshot = state
         .graph
         .lock()
         .map_err(|e| e.to_string())?
-        .read_snapshot()
+        .read_packed_snapshot()
         .map_err(|e| e.to_string())?;
+    let nodes_where = |select: &dyn Fn(&str) -> bool| {
+        snapshot
+            .nodes
+            .iter()
+            .filter(|node| select(&node.label))
+            .map(PackedNode::unpack)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    };
+    let edges_where = |select: &dyn Fn(&str) -> bool| {
+        snapshot
+            .edges
+            .iter()
+            .filter(|edge| select(&edge.label))
+            .map(PackedEdge::unpack)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    };
+    let repos = nodes_where(&|label| label == "Repo")?;
     // Source guards were acquired before recovery. Root-dependent reads run
     // without a graph mutex and cannot recursively lock an exclusive owner.
-    let updates = collect_found_adrs(&snapshot.0, |repo| {
-        ensure_running_job(state, execution)?;
-        operation.root(repo)
-    })?;
-    let (mut patch, linked) = found_adr_patch(&snapshot.0, &snapshot.1, updates);
+    let candidates: std::collections::BTreeSet<&str> = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.label != "ADR")
+        .map(|node| node.id.as_str())
+        .collect();
+    let updates = collect_found_adrs_among(
+        &repos,
+        |id| candidates.contains(id),
+        |repo| {
+            ensure_running_job(state, execution)?;
+            operation.root(repo)
+        },
+    )?;
+    drop(candidates);
+    let (mut patch, linked) = found_adr_patch(
+        &nodes_where(&|label| label == "ADR")?,
+        &edges_where(&|label| label == "DECIDES")?,
+        updates,
+    );
     // The same pass reads each repository's documentation files as
-    // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1).
-    let published_repos = snapshot
-        .0
+    // `Document` and `DocSection` facts (ADR-0065, SPEC-18 slice 1). A
+    // reference may name any fact of the system, so the index covers the
+    // whole graph while documents are read only for the published
+    // repositories (#2004).
+    let published_repos = repos
         .iter()
         .filter(|node| {
-            node.label == "Repo"
-                && node
-                    .id
-                    .strip_prefix("repo:")
-                    .is_some_and(|repo| documented.contains(repo))
+            node.id
+                .strip_prefix("repo:")
+                .is_some_and(|repo| documented.contains(repo))
         })
         .cloned()
         .collect::<Vec<_>>();
-    let documents = collect_documents(&published_repos, |repo| {
+    let detailed = nodes_where(&spec::ReferenceIndex::reads_props)?;
+    let index = spec::ReferenceIndex::from_parts(
+        snapshot
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.label.as_str())),
+        &detailed,
+    );
+    let documents = collect_documents_indexed(&index, &published_repos, |repo| {
         ensure_running_job(state, execution)?;
         operation.root(repo)
     })?;
-    document_patch(&snapshot.0, &snapshot.1, documents, &mut patch);
+    drop(index);
+    document_patch(
+        &nodes_where(&|label| matches!(label, "Document" | "DocSection" | "Drift"))?,
+        &edges_where(&|label| {
+            matches!(
+                label,
+                "HAS_SECTION" | "MENTIONS" | "DOCUMENTED_AS" | "SERVED_AS"
+            )
+        })?,
+        documents,
+        &mut patch,
+    );
     let mut restated = Vec::new();
     for (repo, entry) in recorded.iter_mut() {
         if let Some(&edges) = linked.get(repo)
@@ -3183,15 +3277,27 @@ fn restate_adr_edges(coverage: &mut ingest::coverage::RepoCoverage, edges: u64) 
     }
 }
 
+#[cfg(test)]
 fn collect_found_adrs<'a>(
     nodes: &[Node],
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::AdrFacts)>, String> {
-    let candidates = nodes
+    let candidates: std::collections::BTreeSet<&str> = nodes
         .iter()
         .filter(|node| node.label != "ADR")
-        .cloned()
-        .collect::<Vec<_>>();
+        .map(|node| node.id.as_str())
+        .collect();
+    collect_found_adrs_among(nodes, |id| candidates.contains(id), root_for)
+}
+
+/// Found ADRs of every `Repo` node in `nodes`. A governed target is matched
+/// by id alone, so `is_candidate` answers for the graph's non-ADR facts and
+/// no fact is decoded for it (#2003).
+fn collect_found_adrs_among<'a>(
+    nodes: &[Node],
+    is_candidate: impl Fn(&str) -> bool,
+    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
+) -> Result<Vec<(String, spec::AdrFacts)>, String> {
     nodes
         .iter()
         .filter(|node| node.label == "Repo")
@@ -3202,7 +3308,7 @@ fn collect_found_adrs<'a>(
                 .ok_or("invalid repository fact identity")?;
             let root = root_for(repo)?;
             let commit = node.props["commit"].as_str().unwrap_or("workdir");
-            let facts = spec::extract_found_adrs(root, repo, commit, &candidates)
+            let facts = spec::extract_found_adrs_among(root, repo, commit, &is_candidate)
                 .map_err(|e| e.to_string())?;
             Ok((repo.to_owned(), facts))
         })
@@ -3278,12 +3384,23 @@ fn document_coverage(
 
 /// Read the documentation files of every repository in the graph, and link
 /// each exact reference to the one fact of the system it names (AC-0678).
+#[cfg(test)]
 fn collect_documents<'a>(
     nodes: &[Node],
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
-    let index = spec::ReferenceIndex::new(nodes);
-    nodes
+    collect_documents_indexed(&spec::ReferenceIndex::new(nodes), nodes, root_for)
+}
+
+/// [`collect_documents`] for the `Repo` nodes in `repos`, resolving references
+/// against `index`, which covers the whole system whichever repositories are
+/// read (#2004).
+fn collect_documents_indexed<'a>(
+    index: &spec::ReferenceIndex<'_>,
+    repos: &[Node],
+    root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
+) -> Result<Vec<(String, spec::DocumentFacts)>, String> {
+    repos
         .iter()
         .filter(|node| node.label == "Repo")
         .map(|node| {
@@ -3295,13 +3412,13 @@ fn collect_documents<'a>(
             let root = root_for(repo)?;
             let mut facts =
                 spec::extract_documents(root, repo, commit).map_err(|e| e.to_string())?;
-            let mentions = spec::link_references(repo, commit, &facts.references, &index);
+            let mentions = spec::link_references(repo, commit, &facts.references, index);
             facts.edges.extend(mentions);
             // Whether a repo-relative path is in the tree: an existence
             // check only, and a link is never followed out of it.
             let exists = |path: &str| tree_has_path(root, path);
             let (drift, compared) =
-                spec::documentation_drift(repo, commit, &facts.references, &index, &exists);
+                spec::documentation_drift(repo, commit, &facts.references, index, &exists);
             facts.nodes.extend(drift);
             facts.edges.extend(compared);
             Ok((repo.to_owned(), facts))
@@ -6495,6 +6612,9 @@ struct SpecInputs {
     curated: CuratedInput,
     /// `None` only when the projection was not read.
     graph_basis: Option<spec::GraphBasis>,
+    /// Display names of the registered repositories, by registry key
+    /// (#2049). Empty when the registry was not read.
+    repo_names: Vec<(String, String)>,
 }
 
 /// The knowledge-layer facts `user-stories` renders beside the base
@@ -6506,6 +6626,8 @@ struct SpecInputs {
 struct KnowledgeInput {
     capabilities: Vec<core_graph::overlay::OverlayFact>,
     actors: Vec<core_graph::overlay::OverlayFact>,
+    /// Subsystem candidates the document set arranges Capabilities by (#260).
+    subsystems: Vec<core_graph::overlay::OverlayFact>,
 }
 
 impl KnowledgeInput {
@@ -6522,11 +6644,17 @@ impl KnowledgeInput {
         let read = overlay
             .lock()
             .map_err(|error| error.to_string())?
-            .read_capabilities_and_actors_bounded(revision, MAX_FACTS, MAX_BYTES)
+            .read_story_nodes_bounded(revision, MAX_FACTS, MAX_BYTES)
             .map_err(|error| format!("The knowledge overlay could not be read: {error}"))?;
         let OverlayRead::Current { mut facts, .. } = read else {
             return Ok(Self::default());
         };
+        let subsystems = facts
+            .extract_if(
+                ..,
+                |f| matches!(&f.item, OverlayItem::Node(n) if n.label == "Subsystem"),
+            )
+            .collect();
         let actors = facts
             .extract_if(
                 ..,
@@ -6536,6 +6664,7 @@ impl KnowledgeInput {
         Ok(Self {
             capabilities: facts,
             actors,
+            subsystems,
         })
     }
 }
@@ -6588,7 +6717,15 @@ impl SpecInputs {
             mode,
             &self.rejected_hashes,
         )
-        .map(Some)
+        .map(|stories| {
+            // Arranged by subsystem area where the overlay holds them (#260).
+            Some(stories.with_areas(
+                &self.base,
+                &self.knowledge.subsystems,
+                mode,
+                &self.rejected_hashes,
+            ))
+        })
         .map_err(|error| format!("The knowledge overlay was refused: {error}"))
     }
 
@@ -6616,6 +6753,7 @@ impl SpecInputs {
                 .graph_basis
                 .as_ref()
                 .map(|basis| basis.sources.as_slice()),
+            repo_names: &self.repo_names,
         }
     }
 
@@ -6643,6 +6781,9 @@ struct SpecRead {
     assertion_decisions: Vec<agents::AssertionDecisionRecord>,
     /// Read after the graph and decision locks are released (#1443).
     knowledge: KnowledgeInput,
+    /// Read from the source registry after the graph lock is released
+    /// (#2049).
+    repo_names: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -6673,6 +6814,7 @@ fn read_spec(
         coverage,
         assertion_decisions,
         knowledge: KnowledgeInput::default(),
+        repo_names: Vec::new(),
     })
 }
 
@@ -6684,7 +6826,25 @@ fn read_spec_locked(state: &AppState) -> Result<SpecRead, String> {
         let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
         read_spec(&graph, &decisions)?
     };
-    read.with_knowledge(state.knowledge_overlay.as_deref())
+    let mut read = read.with_knowledge(state.knowledge_overlay.as_deref())?;
+    read.repo_names = repo_names_of(state, &read.nodes)?;
+    Ok(read)
+}
+
+/// The display name of each repository the graph holds a `Repo` fact for,
+/// as the source registry records it (#2049).
+fn repo_names_of(state: &AppState, nodes: &[Node]) -> Result<Vec<(String, String)>, String> {
+    let registry = state.sources.lock().map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    for node in nodes.iter().filter(|node| node.label == "Repo") {
+        let Some(repo) = node.id.strip_prefix("repo:") else {
+            continue;
+        };
+        if let Some(source) = registry.get_by_repo(repo)? {
+            names.push((repo.to_string(), source.display_name));
+        }
+    }
+    Ok(names)
 }
 
 impl SpecRead {
@@ -6708,6 +6868,7 @@ impl SpecRead {
             coverage,
             assertion_decisions,
             knowledge,
+            repo_names,
         } = self;
         let flows = flowtracer::trace(&nodes, &edges);
         let rejected_hashes = assertion_decisions
@@ -6749,6 +6910,7 @@ impl SpecRead {
             rejected_hashes,
             curated,
             graph_basis,
+            repo_names,
         }
     }
 }
@@ -7694,6 +7856,10 @@ fn main() {
             investigations::section_drafts::section_redraft_question,
             investigations::section_drafts::section_draft_question,
             investigations::section_drafts::section_draft_outcome,
+            area_briefing::area_briefing,
+            area_expert::area_choices,
+            area_expert::area_ask_preview,
+            area_expert::run_area_ask,
             section_compose::section_compose_preview,
             section_compose::run_section_compose,
             section_review::section_document,

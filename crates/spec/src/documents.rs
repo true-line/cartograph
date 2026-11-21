@@ -591,13 +591,36 @@ pub struct ReferenceIndex<'a> {
 impl<'a> ReferenceIndex<'a> {
     /// Index the facts of the whole system.
     pub fn new(nodes: &'a [Node]) -> Self {
+        Self::from_parts(
+            nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node.label.as_str())),
+            nodes,
+        )
+    }
+
+    /// Whether the index reads the props of a node with this label. Every
+    /// other node is indexed by its id and label alone.
+    pub fn reads_props(label: &str) -> bool {
+        label == "Endpoint" || NAMED_LABELS.contains(&label)
+    }
+
+    /// [`Self::new`] for a caller that holds the graph packed (#2003): `keys`
+    /// is every node's `(id, label)` and `detailed` the decoded nodes whose
+    /// label [`Self::reads_props`], in graph order. The index equals the one
+    /// [`Self::new`] builds over the same graph.
+    pub fn from_parts(
+        keys: impl IntoIterator<Item = (&'a str, &'a str)>,
+        detailed: &'a [Node],
+    ) -> Self {
         let mut index = Self::default();
-        for node in nodes {
-            let label = node.label.as_str();
-            if UNLINKED_LABELS.contains(&label) {
-                continue;
+        for (id, label) in keys {
+            if !UNLINKED_LABELS.contains(&label) {
+                index.labels.insert(id, label);
             }
-            index.labels.insert(&node.id, label);
+        }
+        for node in detailed {
+            let label = node.label.as_str();
             if label == "Endpoint"
                 && node.props["protocol"] != "graphql"
                 && let (Some(method), Some(path)) =

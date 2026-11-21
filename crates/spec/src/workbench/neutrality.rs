@@ -76,6 +76,48 @@ fn code_shaped(name: &str) -> bool {
                 .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase()))
 }
 
+/// The first token of a projected statement that is shaped like code
+/// (#1999): the sibling of the AC-0683 check for statements Cartograph
+/// renders by rule rather than drafts. A projected statement cites no
+/// particular symbol, so any code-shaped token outside a quotation (“…”)
+/// is a finding. A sentence's own full stop, a decimal number and an HTTP
+/// path are not.
+pub(crate) fn projected_code_token(statement: &str) -> Option<&str> {
+    let mut quoted = false;
+    let mut start = None;
+    let mut found = None;
+    for (i, c) in statement.char_indices().chain([(statement.len(), ' ')]) {
+        match c {
+            '“' => quoted = true,
+            '”' => quoted = false,
+            _ => {}
+        }
+        let boundary = c.is_whitespace() || matches!(c, ',' | ';' | '“' | '”' | ':');
+        if boundary {
+            if let Some(from) = start.take() {
+                let token = statement[from..i].trim_end_matches(['.', '!', '?']);
+                // Parentheses around a token are prose; a call's are not.
+                let token = if token.contains('(') {
+                    token.trim_start_matches('(')
+                } else {
+                    token.trim_matches(['(', ')'])
+                };
+                let token = token.trim_end_matches(['.', '!', '?']);
+                if !token.starts_with('/')
+                    && !token.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    && code_shaped(token)
+                {
+                    found = Some(token);
+                    break;
+                }
+            }
+        } else if start.is_none() && !quoted {
+            start = Some(i);
+        }
+    }
+    found
+}
+
 /// The file name of `path` when it has an extension.
 fn file_name(path: &str) -> Option<&str> {
     let name = path.rsplit(['/', '\\']).next()?;
@@ -360,5 +402,31 @@ mod tests {
         let names = SourceIdentifiers::of(&graph(), &edges, &ids.iter().cloned().collect());
         assert!(names.named_in("Handled in routes.py.", &ids[..1]));
         assert!(!names.named_in("README.md mentions the route.", &ids[1..]));
+    }
+
+    // AC-0907: a projected statement carries no code-shaped token outside
+    // a quotation.
+    #[test]
+    fn a_projected_statement_with_a_code_token_is_found() {
+        assert_eq!(
+            projected_code_token("When not user.can_create_new_alias(), it is refused."),
+            Some("user.can_create_new_alias()")
+        );
+        assert_eq!(
+            projected_code_token("The configured max is 5 unless MAX_ALIAS is set."),
+            Some("MAX_ALIAS")
+        );
+        assert_eq!(
+            projected_code_token("An isPremium user."),
+            Some("isPremium")
+        );
+        for clean in [
+            "When the user is not active, the request is refused with status 401.",
+            "The check “is premium” decides as follows (matched by name, 2 call hops):",
+            "It fails with an error (“wrong api_key”).",
+            "A transfer at 0.5 is refused for GET /api/aliases.",
+        ] {
+            assert_eq!(projected_code_token(clean), None, "{clean}");
+        }
     }
 }

@@ -24,6 +24,7 @@ mod flask_admin_library;
 mod flask_pages;
 pub mod observed_infra;
 mod queries;
+mod rate_limits;
 mod request_inputs;
 mod responses;
 mod rule_evidence;
@@ -87,6 +88,9 @@ pub struct Extraction {
     module_attr_writes: BTreeSet<String>,
     /// Module-level flask-limiter `Limiter` instances (#1157).
     limiter_defs: Vec<(String, String)>,
+    /// Limit decorators on route handlers and module limit constants (#1998).
+    pending_limits: Vec<rate_limits::PendingLimit>,
+    limit_constants: Vec<rate_limits::LimitConstant>,
     /// Names an attribute write or `setattr` / `delattr` goes through.
     attribute_write_objects: BTreeSet<String>,
     /// Attribute names written anywhere, through any object or a literal
@@ -308,7 +312,7 @@ fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
 }
 
 /// Endpoint props whose objects carry a nested `prov`.
-const NESTED_PROV: &[&str] = &["request_inputs", "responses", "auth"];
+const NESTED_PROV: &[&str] = &["request_inputs", "responses", "auth", "rate_limits"];
 
 fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     for node in &mut extraction.nodes {
@@ -342,6 +346,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     sqlalchemy::retarget(extraction, commit);
     responses::retarget(extraction, commit);
     auth_guards::retarget(extraction, commit);
+    rate_limits::retarget(extraction, commit);
     target_tests::retarget(extraction, commit);
     flask_admin::retarget(extraction, commit);
     flask_pages::retarget(extraction, commit);
@@ -1793,11 +1798,156 @@ pub fn extract_source(
 ) -> Result<Extraction, ExtractError> {
     let mut out = extract_file(source, path, id)?;
     let functions = responses::resolve(&mut out, id.repo);
+    rate_limits::resolve_proven(&mut out);
     auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     flask_pages::resolve(&mut out, id.repo, id.commit, None);
     Ok(out)
+}
+
+/// Constants recorded per file, and the longest value recorded (#2027).
+const MAX_STRING_CONSTANTS: usize = 256;
+const MAX_STRING_CONSTANT_BYTES: usize = 160;
+
+/// Top-level `UPPER_NAME = "plain literal"` bound once in the module, by
+/// name (#2027). A sensitive name, a secret-shaped or token-shaped value, an
+/// f-string, a prefixed or escaped literal and a long value are not
+/// recorded; at most [`MAX_STRING_CONSTANTS`] per file.
+fn string_constants(cx: &FileCx<'_>, root: tree_sitter::Node<'_>) -> BTreeMap<String, String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut found: Vec<(String, String)> = Vec::new();
+    // Every module-scope binding counts toward a name being bound once,
+    // including one under module-level `if`/`try`/`for`/`with`; nested
+    // functions and classes are their own scopes.
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        if node.kind() == "assignment"
+            && node.parent().is_some_and(|p| p.parent() != Some(root))
+            && let Some(left) = node.child_by_field_name("left")
+            && left.kind() == "identifier"
+        {
+            *seen.entry(cx.text(&left).to_string()).or_default() += 1;
+        }
+    }
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        let Some(assignment) = (statement.kind() == "expression_statement")
+            .then(|| statement.named_child(0))
+            .flatten()
+            .filter(|n| n.kind() == "assignment")
+        else {
+            continue;
+        };
+        let (Some(left), Some(right)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.kind() != "identifier" {
+            continue;
+        }
+        let name = cx.text(&left).to_string();
+        *seen.entry(name.clone()).or_default() += 1;
+        if !name.starts_with(|c: char| c.is_ascii_uppercase())
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            || right.kind() != "string"
+        {
+            continue;
+        }
+        let text = cx.text(&right);
+        let Some(q) = text.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+            continue;
+        };
+        if text.len() < 2
+            || !text.ends_with(q)
+            || text.starts_with("\"\"\"")
+            || text.starts_with("'''")
+        {
+            continue;
+        }
+        let value = &text[1..text.len() - 1];
+        if value.is_empty()
+            || value.len() > MAX_STRING_CONSTANT_BYTES
+            || value.contains(['\\', '\n', q])
+            || core_redact::is_sensitive_name(&name)
+            || core_redact::is_token_shaped(value)
+            || !core_redact::recognized_secrets(value).is_empty()
+        {
+            continue;
+        }
+        found.push((name, value.to_owned()));
+    }
+    found
+        .into_iter()
+        .filter(|(name, _)| seen.get(name) == Some(&1))
+        .take(MAX_STRING_CONSTANTS)
+        .collect()
+}
+
+/// Local names a function binds to a module constant (`res_status =
+/// status.E502`), with every constant bound to each and the byte where it
+/// is first bound, in source order (#2027): what a later `return
+/// res_status` may answer. Nested functions and classes are not entered.
+fn constant_locals(
+    cx: &FileCx<'_>,
+    function: tree_sitter::Node<'_>,
+) -> BTreeMap<String, Vec<serde_json::Value>> {
+    fn constant(text: &str) -> bool {
+        let name = text.rsplit('.').next().unwrap_or(text);
+        text.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }) && name.len() > 1
+            && name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    }
+    let mut found: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    let Some(body) = function.child_by_field_name("body") else {
+        return found;
+    };
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if matches!(
+            node.kind(),
+            "function_definition" | "class_definition" | "lambda"
+        ) {
+            continue;
+        }
+        if node.kind() == "assignment"
+            && let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            )
+            && left.kind() == "identifier"
+            && matches!(right.kind(), "attribute" | "identifier")
+        {
+            let name = cx.text(&left);
+            let value = cx.text(&right);
+            if name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && constant(value) {
+                let values = found.entry(name.to_string()).or_default();
+                if !values.iter().any(|v| v["value"] == value) && values.len() < 8 {
+                    values.push(serde_json::json!({ "value": value, "at": node.start_byte() }));
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    found
 }
 
 fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extraction, ExtractError> {
@@ -1819,6 +1969,11 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             "prov": cx.prov(&root, &format!("File {path}")),
         }),
     });
+    // Module string constants a rule can name (#2027): `E502 = "550 …"`.
+    let constants = string_constants(&cx, root);
+    if !constants.is_empty() {
+        out.nodes[0].props["string_constants"] = serde_json::json!(constants);
+    }
 
     let bindings = parse_imports(&cx, root, &mut out);
     let receivers = assignment_receivers(&cx, root, &bindings, &mut out);
@@ -1856,15 +2011,20 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         if qualified_name == simple_name {
             locals.insert(simple_name.clone(), symbol.clone());
         }
+        let mut props = serde_json::json!({
+            "name": qualified_name,
+            "kind": "function",
+            "language": "python",
+            "prov": cx.prov(&function, &format!("Symbol {symbol}")),
+        });
+        let bound = constant_locals(&cx, function);
+        if !bound.is_empty() {
+            props["constant_locals"] = serde_json::json!(bound);
+        }
         out.nodes.push(Node {
             id: symbol.clone(),
             label: "Symbol".into(),
-            props: serde_json::json!({
-                "name": qualified_name,
-                "kind": "function",
-                "language": "python",
-                "prov": cx.prov(&function, &format!("Symbol {symbol}")),
-            }),
+            props,
         });
         out.edges.push(Edge {
             src: symbol.clone(),
@@ -1897,6 +2057,7 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
     auth_guards::collect(
         &cx, root, &bindings, &resolver, &locals, &functions, &mut out,
     );
+    rate_limits::collect(&cx, root, &bindings, &functions, &mut out);
     flask_pages::collect(&cx, root, &functions, &mut out);
     for (function, handler) in &functions {
         let Some(parent) = function
@@ -2028,7 +2189,10 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         }
     }
 
-    rule_evidence::extract(&cx, root, &locals, &mut out);
+    // Guards in test code are not business rules (#2009).
+    if !target_tests::in_test_tree(cx.path) {
+        rule_evidence::extract(&cx, root, &locals, &mut out);
+    }
 
     let call_query =
         crate::queries::query("(call function: [(identifier) (attribute)] @callee) @call");
@@ -2070,10 +2234,55 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             continue;
         }
 
+        // `self.m()` in a method `C.f` is taken as a call of `C.m` when this
+        // file defines that method. A subclass may
+        // override `m`, so the edge is InferredStrong (#1998).
+        if let Some(member) = callee.strip_prefix("self.")
+            && !member.contains('.')
+            && let Some((_, qualified)) = src.rsplit_once('#')
+            && let Some((class, _)) = qualified.split_once('.')
+            && !qualified[class.len() + 1..].contains('.')
+        {
+            let dst = symbol_id(id.repo, path, &format!("{class}.{member}"));
+            if dst != src && functions_by_start.values().any(|symbol| *symbol == dst) {
+                out.edges.push(Edge {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                    label: "CALLS".into(),
+                    props: serde_json::json!({
+                        "resolution": "self-method",
+                        "prov": cx.prov_with_confidence(
+                            &call,
+                            ConfidenceTier::InferredStrong,
+                            &format!("CALLS {src} -> {dst}"),
+                        ),
+                    }),
+                });
+            }
+            continue;
+        }
+        // `from pkg import sub; sub.f()` is taken as a call of `f` in the
+        // submodule `pkg/sub.py` when that file defines `f` (the edge is
+        // kept only for a recovered Symbol). Whether the package binds a
+        // `sub` of its own is not checked, so the edge is InferredStrong
+        // (#1998).
+        let mut submodule = false;
         let imported = if let Some((base, member)) = callee.split_once('.') {
             match bindings.get(base) {
                 Some(ImportBinding::Module { module }) => module_file(path, module)
                     .map(|target| (target, member.to_string(), module.starts_with('.'))),
+                Some(ImportBinding::Symbol {
+                    module, exported, ..
+                }) if !member.contains('.') && !module.is_empty() => {
+                    let joined = if module.ends_with('.') {
+                        format!("{module}{exported}")
+                    } else {
+                        format!("{module}.{exported}")
+                    };
+                    submodule = true;
+                    module_file(path, &joined)
+                        .map(|target| (target, member.to_string(), module.starts_with('.')))
+                }
                 _ => None,
             }
         } else {
@@ -2097,12 +2306,23 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             src: src.clone(),
             dst: dst.clone(),
             label: "CALLS".into(),
-            props: serde_json::json!({
-                "resolution": "directory-proven",
-                "prov": cx.prov(&call, &format!("CALLS {src} -> {dst}")),
-            }),
+            props: if submodule {
+                serde_json::json!({
+                    "resolution": "submodule-attribute",
+                    "prov": cx.prov_with_confidence(
+                        &call,
+                        ConfidenceTier::InferredStrong,
+                        &format!("CALLS {src} -> {dst}"),
+                    ),
+                })
+            } else {
+                serde_json::json!({
+                    "resolution": "directory-proven",
+                    "prov": cx.prov(&call, &format!("CALLS {src} -> {dst}")),
+                })
+            },
         };
-        let gap = relative.then(|| {
+        let gap = (relative && !submodule).then(|| {
             let gap_id = format!("gap:call:{}@{}@{}", id.repo, path, call.start_byte());
             let node = Node {
                 id: gap_id.clone(),
@@ -2258,6 +2478,8 @@ pub fn extract_dir_incremental_with_progress(
             out.wild_mounts.extend(extraction.wild_mounts);
             out.module_attr_writes.extend(extraction.module_attr_writes);
             out.limiter_defs.extend(extraction.limiter_defs);
+            out.pending_limits.extend(extraction.pending_limits);
+            out.limit_constants.extend(extraction.limit_constants);
             out.attribute_write_objects
                 .extend(extraction.attribute_write_objects);
             // A pytest module runs under pytest unless the product imports
@@ -2308,6 +2530,7 @@ pub fn extract_dir_incremental_with_progress(
     flask_admin::resolve(&mut out, id.repo, root, id.commit);
     resolve_routes(&mut out, id.repo);
     let functions = responses::resolve(&mut out, id.repo);
+    rate_limits::resolve_proven(&mut out);
     auth_guards::resolve(&mut out, id.repo, &functions);
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
