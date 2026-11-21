@@ -78,15 +78,16 @@ impl<'a> Index<'a> {
     }
 
     /// The page an action sits on: the routes of the Screens rendering its
-    /// template (or its posting handler), else the template or component.
-    fn page(&self, src: &Node) -> String {
+    /// template (or, for a form that posts back, its handler), else the
+    /// template or component.
+    fn page(&self, edge: &Edge, src: &Node) -> String {
         let handlers: Vec<&str> = match src.label.as_str() {
             "Template" => self
                 .rendered_by
                 .get(src.id.as_str())
                 .cloned()
                 .unwrap_or_default(),
-            "Symbol" => vec![src.id.as_str()],
+            "Symbol" if edge.label == "SUBMITS" => vec![src.id.as_str()],
             _ => Vec::new(),
         };
         let mut routes: BTreeSet<String> = handlers
@@ -108,6 +109,34 @@ impl<'a> Index<'a> {
         } else {
             routes.into_iter().collect::<Vec<_>>().join(", ")
         }
+    }
+}
+
+impl<'a> Index<'a> {
+    /// The action edges that reach `story`'s operations or the pages its
+    /// handlers render, each with its source and what it reaches.
+    fn reaching<'s>(
+        &'s self,
+        story: &Story<'a>,
+    ) -> impl Iterator<Item = (&'a Edge, &'a Node, String)> + 's {
+        let (endpoints, handlers) = reached(story);
+        self.actions.iter().filter_map(move |edge| {
+            let src = *self.by_id.get(edge.src.as_str())?;
+            let dst = *self.by_id.get(edge.dst.as_str())?;
+            let reaches = if dst.label == "Endpoint" {
+                endpoints
+                    .contains(dst.id.as_str())
+                    .then(|| NodeName(dst).to_string())
+            } else {
+                self.renders
+                    .get(dst.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .any(|h| handlers.contains(h))
+                    .then(|| format!("page {}", screen_name(dst)))
+            }?;
+            Some((*edge, src, reaches))
+        })
     }
 }
 
@@ -194,56 +223,40 @@ pub(super) fn actions_per_capability(
     if index.actions.is_empty() {
         return Ok(0);
     }
-    let mut units: Vec<(&Story<'_>, Vec<Row<'_>>)> = Vec::new();
+    // First the counts, then each capability's rows built and printed in
+    // turn, so at most one capability's rows are held at once.
+    let mut total = 0usize;
+    let mut reached_capabilities = 0usize;
     for (_, story) in knowledge.capabilities() {
-        let (endpoints, handlers) = reached(story);
-        let mut rows: Vec<Row<'_>> = Vec::new();
-        for edge in &index.actions {
-            let (Some(src), Some(dst)) = (
-                index.by_id.get(edge.src.as_str()),
-                index.by_id.get(edge.dst.as_str()),
-            ) else {
-                continue;
-            };
-            let reaches = if dst.label == "Endpoint" {
-                endpoints
-                    .contains(dst.id.as_str())
-                    .then(|| NodeName(dst).to_string())
-            } else {
-                index
-                    .renders
-                    .get(dst.id.as_str())
-                    .into_iter()
-                    .flatten()
-                    .any(|h| handlers.contains(h))
-                    .then(|| format!("page {}", screen_name(dst)))
-            };
-            if let Some(reaches) = reaches {
-                rows.push((index.page(src), action(edge, src), reaches, edge));
-            }
-        }
-        if !rows.is_empty() {
-            rows.sort_by(|a, b| (&a.0, &a.2, &a.1).cmp(&(&b.0, &b.2, &b.1)));
-            rows.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.2 == b.2);
-            units.push((story, rows));
+        let count = index.reaching(story).count();
+        if count > 0 {
+            total += count;
+            reached_capabilities += 1;
         }
     }
-    if units.is_empty() {
+    if total == 0 {
         return Ok(0);
     }
-    let total: usize = units.iter().map(|(_, rows)| rows.len()).sum();
     writeln!(
         out,
-        "\nUser actions that reach each capability: {total} actions under {} capabilities. \
-         Each is a form, link or client request on a page whose target is one of the \
-         capability's operations or a page its handlers render; the words are those the \
-         page shows, where they were recorded. Actions on the same page are listed together, \
-         so the ways of doing one thing (a form and the sign-in links beside it) read as one \
-         place. That an action is shown to every user, or enabled, is not established.\n",
-        units.len()
+        "\nUser actions that reach each capability: {total} actions under \
+         {reached_capabilities} capabilities. Each is a form, link or client request on a page \
+         whose target is one of the capability's operations or a page its handlers render; the \
+         words are those the page shows, where they were recorded. Actions on the same page are \
+         listed together, so the ways of doing one thing (a form and the sign-in links beside \
+         it) read as one place. That an action is shown to every user, or enabled, is not \
+         established.\n"
     )?;
     let mut cited = 0usize;
-    for (story, rows) in units {
+    for (_, story) in knowledge.capabilities() {
+        let mut rows: Vec<Row<'_>> = index
+            .reaching(story)
+            .map(|(edge, src, reaches)| (index.page(edge, src), action(edge, src), reaches, edge))
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        rows.sort_by(|a, b| (&a.0, &a.2, &a.1).cmp(&(&b.0, &b.2, &b.1)));
         writeln!(
             out,
             "#### User actions: {}\n",
@@ -470,5 +483,55 @@ app.register_blueprint(auth_bp, url_prefix="/auth")
         };
         assert!(actions_per_capability_workspace(graph(1 << 10, 16, 64)).is_some());
         assert!(actions_per_capability_workspace(graph(usize::MAX, 1, 1)).is_none());
+    }
+
+    // A client request from a component that a Screen also renders sits on
+    // the component, not on the Screen's route; a form posting back to its
+    // handler sits on that handler's page.
+    #[test]
+    fn only_a_postback_form_takes_its_handlers_page() {
+        let node = |id: &str, label: &str, props| Node {
+            id: id.into(),
+            label: label.into(),
+            props,
+        };
+        let edge = |src: &str, label: &str, dst: &str| Edge {
+            src: src.into(),
+            dst: dst.into(),
+            label: label.into(),
+            props: serde_json::json!({}),
+        };
+        let nodes = [
+            node(
+                "screen:r@flask:/login",
+                "Screen",
+                serde_json::json!({ "route": "/login" }),
+            ),
+            node(
+                "sym:r@a.py#login",
+                "Symbol",
+                serde_json::json!({ "name": "login" }),
+            ),
+            node(
+                "endpoint:r@POST /login",
+                "Endpoint",
+                serde_json::json!({ "method": "POST", "path": "/login" }),
+            ),
+        ];
+        let edges = [
+            edge("screen:r@flask:/login", "RENDERS", "sym:r@a.py#login"),
+            edge("sym:r@a.py#login", "SUBMITS", "endpoint:r@POST /login"),
+            edge("sym:r@a.py#login", "FETCHES", "endpoint:r@POST /login"),
+        ];
+        let nodes: Vec<&Node> = nodes.iter().collect();
+        let edge_refs: Vec<&Edge> = edges.iter().collect();
+        let index = Index::new(&nodes, &edge_refs);
+        let handler = nodes[1];
+        assert_eq!(index.page(&edges[1], handler), "/login");
+        assert!(
+            index.page(&edges[2], handler).starts_with("component "),
+            "{}",
+            index.page(&edges[2], handler)
+        );
     }
 }
