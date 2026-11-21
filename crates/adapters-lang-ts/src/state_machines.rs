@@ -246,7 +246,7 @@ export const spread = { transitions: { ...base, b: { to: [] } } };
 export const single = { transitions: { a: { to: [] } } };
 ";
 
-    // AC-0946: a `transitions` table of states with `to` string arrays is a
+    // AC-0951: a `transitions` table of states with `to` string arrays is a
     // StateMachine named by its outermost declaration, with its declared
     // type, every state (sources and targets, in order) and each state's
     // allowed targets; a computed target, a spread or a single entry is not

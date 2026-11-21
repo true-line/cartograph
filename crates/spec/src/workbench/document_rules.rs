@@ -2725,7 +2725,7 @@ def create(user):
         assert_eq!(text.matches("| MAX\\_FREE |").count(), 1, "{text}");
     }
 
-    // AC-0945: with areas, each area's own code that none of its
+    // AC-0950: with areas, each area's own code that none of its
     // capabilities reach is stated after them: an area with no reaching
     // capability gets its rejections and changes; a rule a capability of
     // the area already lists is not repeated.
@@ -2877,7 +2877,7 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         assert!(!out.finish().contains("own code"));
     }
 
-    // AC-0946: a state machine is stated under the area of the file that
+    // AC-0951: a state machine is stated under the area of the file that
     // declares it, with each state and where it may move; the guard of its
     // `onTransitionStart` hook is a row of the area's own code; with no
     // areas the machine is listed under "State machines".
