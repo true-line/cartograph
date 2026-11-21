@@ -22,6 +22,7 @@ fn observation(
         declared: declared.iter().map(|path| path.to_string()).collect(),
         targets,
         selected: true,
+        uncaptured: Vec::new(),
     }
 }
 
@@ -265,6 +266,35 @@ fn excluded_observation_reports_a_declared_input_as_unread() {
     );
     assert!(coverage.missing_inputs.is_empty());
     assert!(coverage.limited);
+}
+
+// AC-1041: a declared observation input read without a capture is named as
+// unverified in its producer's reason; a captured one is not, and another
+// producer's uncaptured path is not named here.
+#[test]
+fn uncaptured_observation_input_is_named_unverified() {
+    let mut state = observation("t1.terraform-state", "state_json", &["../state.json"], 2);
+    state.uncaptured = vec!["../state.json".into(), "../trace.jsonl".into()];
+    let mut traces = observation("t1.otel-trace", "otel_jsonl", &["trace.jsonl"], 1);
+    traces.uncaptured = state.uncaptured.clone();
+    let facts = CoverageFacts {
+        repo: "acme/api",
+        commit: "0123abc",
+        observations: vec![state, traces],
+        ..CoverageFacts::default()
+    };
+    let coverage = RepoCoverage::from_facts(&facts);
+    let (state, reason) = state_of(&coverage, "t1.terraform-state");
+    assert_eq!(state, &ProducerState::Ran);
+    assert!(
+        reason.ends_with(
+            "; not captured, so unverified (outside the manifest folder or past the capture \
+             limits): ../state.json"
+        ),
+        "{reason}"
+    );
+    let (_, reason) = state_of(&coverage, "t1.otel-trace");
+    assert!(!reason.contains("unverified"), "{reason}");
 }
 
 // AC-0282: declarations the TypeScript adapter left without a primary receipt
