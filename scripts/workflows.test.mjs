@@ -420,6 +420,7 @@ test('workflow runtime policy is pinned and installer processes are centrally bo
     'ci.yml',
     'close-linked-issues.yml',
     'codeql.yml',
+    'codeql-rust.yml',
     'package.yml',
     'release.yml',
     'version-cut.yml',
@@ -441,10 +442,11 @@ test('Advanced CodeQL is governed, immutable, and preserves Rust coverage', () =
   const dependabot = readFileSync(path.join(root, '.github/dependabot.yml'), 'utf8');
   assert.match(workflow, /^\s{2}workflow_call:/mu);
   assert.doesNotMatch(workflow, /^\s{2}(push|pull_request|schedule):/mu);
-  // #634: Rust analysis runs on pushes to main only; pull requests keep the rest.
+  // #634: Rust analysis runs on pushes to main only, in its own workflow run;
+  // every CI lane keeps the rest.
   assert.match(
     workflow,
-    /language: \$\{\{ fromJSON\(github\.event_name == 'push' && '\["actions", "javascript-typescript", "rust"\]' \|\| '\["actions", "javascript-typescript"\]'\) \}\}/u,
+    /language: \$\{\{ fromJSON\(inputs\.rust && '\["rust"\]' \|\| '\["actions", "javascript-typescript"\]'\) \}\}/u,
   );
   assert.match(
     workflow,
@@ -459,6 +461,23 @@ test('Advanced CodeQL is governed, immutable, and preserves Rust coverage', () =
     dependabot,
     /codeql-action:\n\s+patterns:\n\s+- github\/codeql-action\/\*/u,
   );
+});
+
+test('a superseded Rust CodeQL analysis never fails a main commit\'s CI, so version merges get tagged', () => {
+  // Rust extractions run one at a time and the newest pending commit replaces
+  // an older pending one. Inside ci.yml that cancellation failed the older
+  // commit's CI gate, and version-cut refuses to tag a commit whose CI failed.
+  const ci = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const codeql = ci.match(/^ {2}codeql:\n(?: {4}.*\n| *\n)+/mu)?.[0] ?? '';
+  assert.match(codeql, /uses: \.\/\.github\/workflows\/codeql\.yml\n/u);
+  assert.doesNotMatch(codeql, /rust:/u);
+  const rust = readFileSync(path.join(root, '.github/workflows/codeql-rust.yml'), 'utf8');
+  assert.match(triggers(rust), /push:\n +branches:\n +- main\n/u);
+  assert.doesNotMatch(triggers(rust), /pull_request|workflow_run/u);
+  assert.match(rust, /uses: \.\/\.github\/workflows\/codeql\.yml\n +with:\n +image: \$\{\{ needs\.ci-image\.outputs\.image \}\}\n +rust: true\n/u);
+  assert.match(rust, /security-events: write/u);
+  const version = readFileSync(path.join(root, '.github/workflows/version-cut.yml'), 'utf8');
+  assert.match(version, /workflow_run:\n +workflows: \[CI\]\n/u);
 });
 
 test('Dependabot batches minor/patch bumps and skips auto-rebase fan-out', () => {
