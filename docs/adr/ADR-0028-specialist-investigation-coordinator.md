@@ -2,7 +2,7 @@
 
 - **Status:** Accepted for implementation in #404
 - **Date:** 2026-09-11
-- **Deciders:** Chris Kane (product direction), Cartograph implementation agent
+- **Deciders:** Project owner (product direction), Cartograph implementation agent
 
 ## Context
 

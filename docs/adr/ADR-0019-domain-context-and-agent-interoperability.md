@@ -2,7 +2,7 @@
 
 - **Status:** Accepted direction; implementation staged by SPEC-01
 - **Date:** 2026-09-10
-- **Deciders:** Chris Kane (product direction), implementation agents
+- **Deciders:** Project owner (product direction), implementation agents
 
 ## Context
 
