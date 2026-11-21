@@ -348,9 +348,11 @@ fn system_job_removed_during_extraction_stops_before_publication() {
         "[[repos]]\nurl = \"project\"\nlayers = [\"client\"]\n",
     )
     .unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(registered_source_tests::app_state(&app_data));
     let handle = app.handle().clone();
     let event_handle = handle.clone();

@@ -670,9 +670,11 @@ pub(crate) mod tests {
         let project = dir.path().join("project");
         let sha = init_clean_repo(&project, &[("app.ts", b"export const ok = 1;\n")]);
 
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         app.manage(crate::PreflightRuns::default());
         app.manage(crate::registered_source_tests::app_state(&app_data));
         let handle = app.handle().clone();
