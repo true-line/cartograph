@@ -334,3 +334,28 @@ fn a_reused_kotlin_files_rules_carry_the_new_commit() {
         "{text}"
     );
 }
+
+// AC-1106: a scope-function name the file rebinds (a declared function or a
+// named import) is no proven inline call, so exits in its lambda are not the
+// enclosing function's; the standard-library `let` still is.
+#[test]
+fn rebound_scope_function_names_keep_their_lambdas_apart() {
+    let source = r#"package com.acme
+
+import com.acme.jobs.later as also
+
+class Jobs {
+    fun <T> T.run(block: () -> Unit) { queue.add(block) }
+
+    fun plan(n: Int): Int {
+        run { if (n < 0) throw IllegalStateException("stored, not run") }
+        also { if (n > 9) throw IllegalStateException("aliased") }
+        n.let { if (it == 1) throw IllegalStateException("inline") }
+        return n
+    }
+}
+"#;
+    let out = extract(source, "src/main/kotlin/com/acme/Jobs.kt");
+    let read: Vec<_> = rules(&out).iter().map(|rule| effect(rule).1).collect();
+    assert_eq!(read, ["IllegalStateException(\"inline\")"], "{read:?}");
+}

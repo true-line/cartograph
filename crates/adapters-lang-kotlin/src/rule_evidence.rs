@@ -106,7 +106,7 @@ fn is_comment(node: TsNode<'_>) -> bool {
 /// initializer or a class body, whose exits are not the function's, and for
 /// a local function or a member of an object expression.
 fn owner<'f>(
-    source: &[u8],
+    inline: &Inline<'_>,
     mut node: TsNode<'_>,
     functions: &'f HashMap<usize, String>,
 ) -> Option<&'f String> {
@@ -117,7 +117,7 @@ fn owner<'f>(
                     .then(|| functions.get(&parent.start_byte()))
                     .flatten();
             }
-            "lambda_literal" if scope_lambda(source, parent) => node = parent,
+            "lambda_literal" if scope_lambda(inline, parent) => node = parent,
             kind if BOUNDARIES.contains(&kind) => return None,
             _ => node = parent,
         }
@@ -146,9 +146,59 @@ fn member_of_named_type(declaration: TsNode<'_>) -> bool {
 /// `throw` leave that function.
 const SCOPE_FUNCTIONS: &[&str] = &["let", "run", "also", "apply", "with", "use"];
 
+/// The file's source and the scope-function names it may rebind: a function
+/// it declares (top level, member or local) or a name it imports from
+/// outside `kotlin.` by a named import or alias. A call of such a name is no
+/// proven standard-library scope function, so its lambda stays a boundary.
+struct Inline<'a> {
+    source: &'a [u8],
+    shadowed: BTreeSet<String>,
+}
+
+impl<'a> Inline<'a> {
+    fn new(source: &'a [u8], root: TsNode<'_>) -> Self {
+        let mut shadowed = BTreeSet::new();
+        let text = |n: TsNode<'_>| n.utf8_text(source).unwrap_or_default().to_owned();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            match node.kind() {
+                "function_declaration" => {
+                    if let Some(name) = node.child_by_field_name("name") {
+                        shadowed.insert(text(name));
+                    }
+                }
+                "import" => {
+                    let raw = text(node).replace(['\n', '\\'], " ");
+                    let rest = raw.trim().trim_start_matches("import").trim();
+                    let rest = rest.trim_end_matches(';').trim();
+                    let (module, alias) = match rest.rsplit_once(" as ") {
+                        Some((module, alias)) => (module.trim(), Some(alias.trim())),
+                        None => (rest, None),
+                    };
+                    if let Some(alias) = alias {
+                        shadowed.insert(alias.to_owned());
+                    } else if !module.ends_with(".*")
+                        && !module.starts_with("kotlin.")
+                        && let Some(simple) = module.rsplit('.').next()
+                    {
+                        shadowed.insert(simple.to_owned());
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+        }
+        shadowed.retain(|name| SCOPE_FUNCTIONS.contains(&name.as_str()));
+        Self { source, shadowed }
+    }
+}
+
 /// Whether `lambda` is the trailing lambda of a scope-function call
-/// (`x?.let { … }`, `run { … }`), which belongs to the enclosing function.
-fn scope_lambda(source: &[u8], lambda: TsNode<'_>) -> bool {
+/// (`x?.let { … }`, `run { … }`) whose name the file does not rebind, which
+/// belongs to the enclosing function.
+fn scope_lambda(inline: &Inline<'_>, lambda: TsNode<'_>) -> bool {
     if lambda.kind() != "lambda_literal" {
         return false;
     }
@@ -171,8 +221,8 @@ fn scope_lambda(source: &[u8], lambda: TsNode<'_>) -> bool {
         _ => None,
     };
     name.is_some_and(|name| {
-        name.utf8_text(source)
-            .is_ok_and(|text| SCOPE_FUNCTIONS.contains(&text))
+        name.utf8_text(inline.source)
+            .is_ok_and(|text| SCOPE_FUNCTIONS.contains(&text) && !inline.shadowed.contains(text))
     })
 }
 
@@ -215,11 +265,11 @@ fn if_branch(
 /// The `if` / `else` branches around `node` up to its function, outermost
 /// first: the consequence's condition truthy, an `else` (or `else if`) the
 /// earlier condition falsy.
-fn branches<'t>(source: &[u8], mut node: TsNode<'t>) -> (Vec<Branch<'t>>, bool) {
+fn branches<'t>(inline: &Inline<'_>, mut node: TsNode<'t>) -> (Vec<Branch<'t>>, bool) {
     let mut conditions: Vec<Branch<'_>> = Vec::new();
     let mut steps = 0;
     while let Some(parent) = node.parent() {
-        if BOUNDARIES.contains(&parent.kind()) && !scope_lambda(source, parent) {
+        if BOUNDARIES.contains(&parent.kind()) && !scope_lambda(inline, parent) {
             break;
         }
         steps += 1;
@@ -240,7 +290,7 @@ fn branches<'t>(source: &[u8], mut node: TsNode<'t>) -> (Vec<Branch<'t>>, bool) 
     (conditions, limited)
 }
 
-fn control_reason(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
+fn control_reason(cx: &FileCx<'_>, inline: &Inline<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
     match node.kind() {
         "for_statement" | "while_statement" | "do_while_statement" => {
             Some(RuleGapReason::LoopDependency)
@@ -265,7 +315,7 @@ fn control_reason(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
                 .any(|c| !c.is_named() && c.kind() != "=" && c.kind().ends_with('='));
             let field = match left.kind() {
                 "navigation_expression" | "index_expression" => true,
-                "identifier" => !declares_local(cx, node, cx.text(&left)),
+                "identifier" => !declares_local(cx, inline, node, cx.text(&left)),
                 _ => true,
             };
             (compound || field).then_some(RuleGapReason::Mutation)
@@ -278,7 +328,7 @@ fn control_reason(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
 /// declared earlier in an enclosing block, or a catch, `for` or function
 /// binding). Without one, a bare assignment binds a property, so it counts
 /// as a mutation.
-fn declares_local(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+fn declares_local(cx: &FileCx<'_>, inline: &Inline<'_>, node: TsNode<'_>, name: &str) -> bool {
     let named = |n: TsNode<'_>| cx.text(&n) == name;
     let binds = |declaration: TsNode<'_>| {
         let mut walk = declaration.walk();
@@ -351,7 +401,7 @@ fn declares_local(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
             return true;
         }
         // A function or class body ends the scopes this one can see.
-        if BOUNDARIES.contains(&scope.kind()) && !scope_lambda(cx.source, scope) {
+        if BOUNDARIES.contains(&scope.kind()) && !scope_lambda(inline, scope) {
             return false;
         }
         child = scope;
@@ -478,6 +528,7 @@ pub(super) fn extract(
     if adapters_fw::in_jvm_test_source_set(cx.path) {
         return;
     }
+    let inline = Inline::new(cx.source, root);
     if root.has_error() {
         let mut at = root;
         let mut stack = vec![root];
@@ -495,7 +546,7 @@ pub(super) fn extract(
                     .rev(),
             );
         }
-        let owner = owner(cx.source, at, functions)
+        let owner = owner(&inline, at, functions)
             .cloned()
             .unwrap_or_else(|| file_id(cx.id.repo, cx.path));
         omission_gap(cx, at, &owner, RuleGapReason::UnsupportedRuleSyntax, out);
@@ -513,7 +564,7 @@ pub(super) fn extract(
                 .into_iter()
                 .rev(),
         );
-        let Some(owner) = owner(cx.source, node, functions) else {
+        let Some(owner) = owner(&inline, node, functions) else {
             continue;
         };
         match node.kind() {
@@ -524,7 +575,7 @@ pub(super) fn extract(
                 }
             }
             _ => {
-                if let Some(reason) = control_reason(cx, node) {
+                if let Some(reason) = control_reason(cx, &inline, node) {
                     controls
                         .entry(owner.clone())
                         .or_default()
@@ -540,7 +591,7 @@ pub(super) fn extract(
     for (owner_id, exits) in observed {
         let mut prior: Option<TsNode<'_>> = None;
         for (order, exit) in exits.iter().copied().enumerate() {
-            let (ancestors, limited) = branches(cx.source, exit);
+            let (ancestors, limited) = branches(&inline, exit);
             let earlier = prior.replace(exit);
             if exit_value(exit).is_none() || (ancestors.is_empty() && !limited) {
                 continue;

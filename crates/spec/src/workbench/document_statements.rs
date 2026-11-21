@@ -1336,7 +1336,12 @@ pub(super) fn is_java(evidence: &GuardedExitEvidence) -> bool {
 
 /// Whether a rule was recovered from Kotlin source (#2021).
 pub(super) fn is_kotlin(evidence: &GuardedExitEvidence) -> bool {
-    evidence.exit_source.path.ends_with(".kt")
+    kotlin_path(&evidence.exit_source.path)
+}
+
+/// A Kotlin source or script path.
+fn kotlin_path(path: &str) -> bool {
+    path.ends_with(".kt") || path.ends_with(".kts")
 }
 
 /// The error a Kotlin `throw` raises: Kotlin constructs without `new`, so
@@ -2525,6 +2530,8 @@ mod tests {
             Some("a “login already used” error")
         );
         assert_eq!(kotlin_thrown("failure(\"x\")"), None);
+        assert!(kotlin_path("build.gradle.kts") && kotlin_path("src/A.kt"));
+        assert!(!kotlin_path("src/A.java"));
         // A literal with an apostrophe or escapes is still the message.
         assert_eq!(
             java_thrown("new ValidationException(\"User's id is \\\"bad\\\"\\nnow\")").as_deref(),
