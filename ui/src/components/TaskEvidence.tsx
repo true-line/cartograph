@@ -72,7 +72,10 @@ export function TaskEvidence({ basis, compact = false }: TaskEvidenceProps) {
             <ul className="consent-notes">
               {selection.omissions.map((item) => (
                 <li key={item.request_index}>Request {item.request_index}: {item.reason === 'missing_citation'
-                  ? 'No citation supplied' : 'Legacy working-tree read unavailable'}.</li>
+                  ? 'No citation supplied'
+                  : item.reason === 'captured_span_over_limit'
+                    ? 'Captured span over the payload limit'
+                    : 'Legacy working-tree read unavailable'}.</li>
               ))}
             </ul>
             <p>Prepared graph: <code>{basis.graph_snapshot_id}</code></p>
