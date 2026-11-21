@@ -8,8 +8,9 @@ use super::HostError;
 use crate::AppState;
 use agents::investigation::InvestigationScope;
 use core_graph::overlay::{BaseRef, MAX_BYTES, MAX_FACTS, OverlayItem, OverlayRead};
-use core_graph::{Edge, Node, StoreRevision};
-use std::collections::BTreeSet;
+use core_graph::scoped::{Remaining, ScopedGraphReader};
+use core_graph::{Edge, GraphError, Node, StoreRevision};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The member file ids of the area a scope names, or `None` for any other
 /// scope. The caller holds no graph lock.
@@ -78,4 +79,58 @@ pub(super) fn members(
         .cloned()
         .collect();
     (nodes, edges)
+}
+
+/// [`members`] read through one pinned scoped reader (#1602, AC-1301): the
+/// same files, facts and edges, found from the files' incoming `DEFINED_IN`
+/// edges and each member's outgoing edges, so the rest of the graph is never
+/// read. Every page charges the reader's cumulative limits; running out is an
+/// error, never a smaller area.
+pub(super) fn scoped_members(
+    reader: &mut ScopedGraphReader<'_>,
+    files: &BTreeSet<String>,
+) -> Result<(Vec<Node>, Vec<Edge>), GraphError> {
+    let page_rows = reader.limits().max_rows;
+    let mut ids: BTreeSet<String> = files.clone();
+    for file in files {
+        let mut after = None;
+        loop {
+            let page = reader.incoming(file, after, page_rows)?;
+            for edge in page.edges {
+                if edge.label == "DEFINED_IN" {
+                    ids.insert(edge.src);
+                }
+            }
+            match page.remaining {
+                Remaining::Exhausted => break,
+                Remaining::More => after = page.next_incoming,
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    for id in &ids {
+        if let Some(node) = reader.node(id)? {
+            nodes.push(node);
+        }
+    }
+    let mut edges = BTreeMap::new();
+    for id in &ids {
+        let mut after = None;
+        loop {
+            let page = reader.outgoing(id, after.as_ref(), page_rows)?;
+            for edge in page.edges {
+                if ids.contains(&edge.dst) {
+                    edges.insert(
+                        (edge.src.clone(), edge.label.clone(), edge.dst.clone()),
+                        edge,
+                    );
+                }
+            }
+            match page.remaining {
+                Remaining::Exhausted => break,
+                Remaining::More => after = page.next_outgoing,
+            }
+        }
+    }
+    Ok((nodes, edges.into_values().collect()))
 }
