@@ -444,3 +444,80 @@ fn showcase_ask_areas() {
     .unwrap();
     std::fs::write(output.join("answers.md"), report).unwrap();
 }
+
+/// A third manual run (#2083, AC-0980, AC-0981): draft D1 1.5 through the
+/// gated `draft-rules@1` workflow on a local model, one draft per area, and
+/// write the staged drafts and what the run did.
+/// `CARTOGRAPH_SHOWCASE_LOCAL_URL` is a loopback Ollama endpoint (a
+/// forwarder may stand in for a LAN host) and
+/// `CARTOGRAPH_SHOWCASE_LOCAL_MODEL` the completion model. Nothing leaves
+/// the loopback interface from this process.
+#[test]
+#[ignore = "manual gated drafting run over local checkouts; calls a local model"]
+fn showcase_compose_rules_gated() {
+    use crate::section_compose::compose_gated_by_area;
+    use llm::bounded::CallDirective;
+    use std::fmt::Write as _;
+    let url = std::env::var("CARTOGRAPH_SHOWCASE_LOCAL_URL")
+        .unwrap_or_else(|_| llm::OllamaProvider::DEFAULT_URL.into());
+    let model = required("CARTOGRAPH_SHOWCASE_LOCAL_MODEL");
+    let (output, app) = showcase_output();
+    recover(&app, &output);
+    let state = app.state::<AppState>();
+    let provider = llm::OllamaProvider::with_models(
+        &url,
+        llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+        model.clone(),
+        std::time::Duration::from_secs(600),
+    )
+    .expect("a loopback endpoint");
+    let (_, job) = start_job(&state, "section-compose-gated:D1:1.5:system:local").unwrap();
+    let started = std::time::Instant::now();
+    let drafts = compose_gated_by_area(
+        &state,
+        &provider,
+        (spec::CATALOGUE_VERSION, "D1", "1.5"),
+        &|| CallDirective::Continue,
+        job.id(),
+    )
+    .expect("the gated run completes");
+    let seconds = started.elapsed().as_secs();
+    let store = state.drafts.lock().unwrap();
+    let mut report = format!("# D1 1.5 drafted through draft-rules@1 on {model}\n\n{seconds} s.\n");
+    let mut written = Vec::new();
+    for draft in &drafts {
+        let _ = write!(
+            report,
+            "\n## {}\n\n{}\n\n",
+            draft.area.as_deref().unwrap_or("Rules outside an area"),
+            serde_json::to_string(&draft.outcome).unwrap()
+        );
+        let claims = match &draft.outcome.outcome {
+            crate::investigations::section_drafts::DraftingOutcome::Staged { draft_id } => store
+                .get(draft_id)
+                .unwrap()
+                .map(|stored| stored.draft.claims),
+            _ => None,
+        };
+        for claim in claims.iter().flatten() {
+            let _ = writeln!(
+                report,
+                "- {} ({})",
+                claim.statement,
+                claim.citations.join(", ")
+            );
+        }
+        written.push(serde_json::json!({
+            "area": draft.area, "scope": draft.scope, "outcome": draft.outcome, "claims": claims,
+        }));
+    }
+    std::fs::write(
+        output.join("gated-rules.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "model": model, "seconds": seconds, "drafts": written,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(output.join("gated-rules.md"), report).unwrap();
+}
