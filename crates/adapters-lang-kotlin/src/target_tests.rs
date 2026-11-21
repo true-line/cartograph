@@ -460,7 +460,7 @@ pub(crate) fn extract(
     // The file's test clients, read once from its root.
     let clients = &clients(cx, root, imports);
     // Kotest specs (AC-1112).
-    kotest(cx, root, imports, clients, nodes, edges, requests);
+    kotest(cx, root, package, imports, clients, nodes, edges, requests);
     for (function, symbol) in functions {
         let proofs: Vec<(String, bool)> = declaration_annotations(cx, *function)
             .iter()
@@ -854,6 +854,20 @@ const STYLES: &[Style] = &[
     },
 ];
 
+/// Whether `spelled` names Kotest's `style`: `Some(false)` when a qualified
+/// spelling or a named import (under its own name or an alias) proves it,
+/// `Some(true)` when only a star import does.
+fn kotest_style(spelled: &str, imports: &Imports, style: &str) -> Option<bool> {
+    let fqn = format!("{KOTEST}.{style}");
+    if spelled == fqn || imports.bindings.get(spelled) == Some(&fqn) {
+        return Some(false);
+    }
+    (spelled == style
+        && !imports.bindings.contains_key(spelled)
+        && imports.wildcard_packages.iter().any(|p| p == KOTEST))
+    .then_some(true)
+}
+
 /// A function a style declares, and whether it is the disabled form.
 fn styled(names: &[&str], called: &str) -> Option<bool> {
     if names.contains(&called) {
@@ -882,6 +896,7 @@ enum Step<'t> {
     },
     Container {
         name: Option<String>,
+        disabled: bool,
         body: TsNode<'t>,
     },
 }
@@ -916,7 +931,11 @@ fn step<'t>(cx: &FileCx<'_>, style: &Style, node: TsNode<'t>) -> Option<Step<'t>
                     body: lambda,
                 });
             }
-            styled(style.containers, &called).map(|_| Step::Container { name, body: lambda })
+            styled(style.containers, &called).map(|disabled| Step::Container {
+                name,
+                disabled,
+                body: lambda,
+            })
         }
         "binary_expression" if style.minus_container => {
             let left = node.child_by_field_name("left")?;
@@ -927,6 +946,7 @@ fn step<'t>(cx: &FileCx<'_>, style: &Style, node: TsNode<'t>) -> Option<Step<'t>
             (minus && left.kind() == "string_literal" && right.kind() == "lambda_literal").then(
                 || Step::Container {
                     name: literal(left),
+                    disabled: false,
                     body: right,
                 },
             )
@@ -942,6 +962,7 @@ fn step<'t>(cx: &FileCx<'_>, style: &Style, node: TsNode<'t>) -> Option<Step<'t>
                 && right.kind() == "lambda_literal")
                 .then(|| Step::Container {
                     name: literal(*left),
+                    disabled: false,
                     body: *right,
                 })
         }
@@ -955,9 +976,11 @@ fn step<'t>(cx: &FileCx<'_>, style: &Style, node: TsNode<'t>) -> Option<Step<'t>
 /// (framework `kotest`) named by its class and container chain,
 /// `DEFINED_IN` its file; its requests are read as a JUnit test's are. A
 /// test or container whose name is not a plain literal is a Gap.
+#[allow(clippy::too_many_arguments)]
 fn kotest(
     cx: &FileCx<'_>,
     root: TsNode<'_>,
+    package: Option<&str>,
     imports: &Imports,
     clients: &Clients,
     nodes: &mut Vec<Node>,
@@ -976,6 +999,7 @@ fn kotest(
         };
         let class_name = cx.text(&name).to_string();
         let mut style = None;
+        let mut shadowed_by: Option<String> = None;
         let mut bodies = Vec::new();
         for specifier in named_children(class)
             .into_iter()
@@ -995,13 +1019,21 @@ fn kotest(
                 continue;
             };
             let spelled: String = cx.text(&ty).split_whitespace().collect();
-            let Some(found) = STYLES
+            let Some((found, star)) = STYLES
                 .iter()
-                .find(|style| names_type(&spelled, imports, (KOTEST, style.name)))
+                .find_map(|style| kotest_style(&spelled, imports, style.name).map(|s| (style, s)))
             else {
                 continue;
             };
             style = Some(found);
+            // Proven only by a star import: a same-package product type of
+            // that name obscures it, settled at the join.
+            if star {
+                shadowed_by = Some(match package {
+                    Some(package) => format!("{package}.{}", found.name),
+                    None => found.name.to_owned(),
+                });
+            }
             bodies.extend(
                 value_arguments(invocation)
                     .unwrap_or_default()
@@ -1023,18 +1055,34 @@ fn kotest(
                     .filter(|m| m.kind() == "anonymous_initializer"),
             );
         }
-        let mut pending: Vec<(TsNode<'_>, Vec<String>, bool)> = bodies
+        // (node, container chain, every name literal, a container disabled)
+        let mut pending: Vec<(TsNode<'_>, Vec<String>, bool, bool)> = bodies
             .into_iter()
-            .map(|body| (body, vec![class_name.clone()], true))
+            .map(|body| (body, vec![class_name.clone()], true, false))
             .collect();
-        while let Some((node, chain, named)) = pending.pop() {
+        while let Some((node, chain, named, off)) = pending.pop() {
             for child in named_children(node) {
+                // A local function, class or anonymous function body runs
+                // only when called: its calls register nothing provably.
+                if matches!(
+                    child.kind(),
+                    "function_declaration"
+                        | "class_declaration"
+                        | "object_declaration"
+                        | "anonymous_function"
+                ) {
+                    continue;
+                }
                 match step(cx, style, child) {
-                    Some(Step::Container { name, body }) => {
+                    Some(Step::Container {
+                        name,
+                        disabled,
+                        body,
+                    }) => {
                         let mut inner = chain.clone();
                         let ok = named && name.is_some();
                         inner.push(name.unwrap_or_default());
-                        pending.push((body, inner, ok));
+                        pending.push((body, inner, ok, off || disabled));
                     }
                     Some(Step::Leaf {
                         name,
@@ -1078,8 +1126,11 @@ fn kotest(
                             "path": cx.path,
                             "prov": cx.prov(&child, &format!("TestCase {test}")),
                         });
-                        if disabled {
+                        if disabled || off {
                             props["modifier"] = "disabled".into();
+                        }
+                        if let Some(shadow) = &shadowed_by {
+                            props["shadowed_by"] = serde_json::json!([shadow]);
                         }
                         nodes.push(Node {
                             id: test.clone(),
@@ -1098,7 +1149,7 @@ fn kotest(
                     }
                     // A statement around the tests (a loop, a `val`): its
                     // nested tests are read too.
-                    None => pending.push((child, chain.clone(), named)),
+                    None => pending.push((child, chain.clone(), named, off)),
                 }
             }
         }

@@ -7249,3 +7249,76 @@ class NotKotest : FunSpec({
         .count();
     assert_eq!(gaps, 1);
 }
+
+/// AC-1112: an aliased style import proves a spec; tests under an
+/// `x`-prefixed container are disabled; a local function's calls register
+/// no tests; a star-imported style a same-package product type obscures is
+/// no spec.
+#[test]
+fn kotest_aliases_disabled_containers_shadows_and_local_functions() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/a/Alias.kt",
+        r#"package com.shop.a
+
+import io.kotest.core.spec.style.FunSpec as KFunSpec
+
+class Aliased : KFunSpec({
+    xcontext("off") {
+        test("inner") { }
+    }
+    fun helper() {
+        test("never") { }
+    }
+})
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/star/FunSpec.kt",
+        "package com.shop.star\n\nopen class FunSpec(body: () -> Unit)\n",
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/star/Shadowed.kt",
+        r#"package com.shop.star
+
+import io.kotest.core.spec.style.*
+
+class Shadowed : FunSpec({
+    test("obscured") { }
+})
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/ok/Kept.kt",
+        r#"package com.shop.ok
+
+import io.kotest.core.spec.style.*
+
+class Kept : StringSpec({
+    "kept" { }
+})
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut tests: Vec<(&str, &str)> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "TestCase")
+        .map(|node| {
+            assert!(node.props.get("shadowed_by").is_none(), "{node:?}");
+            (
+                node.props["qualified_name"].as_str().unwrap(),
+                node.props["modifier"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    tests.sort();
+    assert_eq!(
+        tests,
+        [("Aliased > off > inner", "disabled"), ("Kept > kept", "")]
+    );
+}
