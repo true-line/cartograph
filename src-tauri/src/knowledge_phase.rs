@@ -16,7 +16,7 @@ use core_graph::overlay::{
 use core_graph::{RevisionedSnapshot, SnapshotReadLimits, SqliteGraphStore};
 use llm::LlmProvider;
 use semantic::embedding_cache::EmbeddingCache;
-use semantic::knowledge_ingest::{self, PhaseOutcome};
+use semantic::knowledge_ingest::{self, PhaseOutcome, SectionText};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
@@ -64,6 +64,12 @@ pub(crate) struct KnowledgeReport {
     /// Whether the overlay was republished for the embedded base revision;
     /// false when the base moved on before publication.
     pub published: bool,
+    /// Admitted documentation sections whose text was read from the source
+    /// and matched the section's provenance hash (AC-1505).
+    pub sections_read: usize,
+    /// Admitted sections embedded by heading alone: the source was busy,
+    /// moved or unreadable, or the span no longer matches the graph.
+    pub sections_unread: usize,
     /// Test-only census of producer nodes in a successfully published full set.
     /// Zero for a moved base, refusal fallback or a phase that never derived.
     #[cfg(test)]
@@ -131,12 +137,34 @@ pub(crate) fn run(
     overlay: &Arc<Mutex<OverlayStore>>,
     provider: Option<&dyn LlmProvider>,
 ) -> Result<KnowledgeReport, String> {
-    run_within(graph, cache, overlay, provider, PHASE_LIMITS)
+    run_with_sections(graph, cache, overlay, provider, &no_sections)
+}
+
+/// Reads the text of the admitted documentation sections from their
+/// sources. ADR-0065 keeps document text out of the graph, so the phase asks
+/// the host; a section missing from the answer is embedded by its heading.
+pub(crate) type SectionReader<'a> = dyn Fn(&[&core_graph::Node]) -> SectionText + 'a;
+
+/// No source access: every section is embedded by its heading.
+pub(crate) fn no_sections(_: &[&core_graph::Node]) -> SectionText {
+    SectionText::new()
+}
+
+/// [`run`] with the host's section reader (AC-1505).
+pub(crate) fn run_with_sections(
+    graph: &Mutex<SqliteGraphStore>,
+    cache: &Arc<Mutex<EmbeddingCache>>,
+    overlay: &Arc<Mutex<OverlayStore>>,
+    provider: Option<&dyn LlmProvider>,
+    sections: &SectionReader<'_>,
+) -> Result<KnowledgeReport, String> {
+    run_within(graph, cache, overlay, provider, PHASE_LIMITS, sections)
 }
 
 /// Run the phase as the T2 setting allows (#1782). With T2 off no provider is
 /// used and nothing is embedded, which the report names; the deterministic
 /// producers need no provider and publish either way.
+#[cfg(test)]
 pub(crate) fn run_for_setting(
     graph: &Mutex<SqliteGraphStore>,
     cache: &Arc<Mutex<EmbeddingCache>>,
@@ -144,9 +172,22 @@ pub(crate) fn run_for_setting(
     semantic: bool,
     provider: impl FnOnce() -> Option<Box<dyn LlmProvider>>,
 ) -> Result<KnowledgeReport, String> {
+    run_for_setting_with_sections(graph, cache, overlay, semantic, provider, &no_sections)
+}
+
+/// [`run_for_setting`] with the host's section reader, which is only asked
+/// when the provider phase runs (AC-1505).
+pub(crate) fn run_for_setting_with_sections(
+    graph: &Mutex<SqliteGraphStore>,
+    cache: &Arc<Mutex<EmbeddingCache>>,
+    overlay: &Arc<Mutex<OverlayStore>>,
+    semantic: bool,
+    provider: impl FnOnce() -> Option<Box<dyn LlmProvider>>,
+    sections: &SectionReader<'_>,
+) -> Result<KnowledgeReport, String> {
     if semantic {
         let provider = provider();
-        return run(graph, cache, overlay, provider.as_deref());
+        return run_with_sections(graph, cache, overlay, provider.as_deref(), sections);
     }
     let mut report = run(graph, cache, overlay, None)?;
     if report.omission == Some(knowledge_ingest::NO_PROVIDER) {
@@ -210,6 +251,7 @@ fn run_within(
     overlay: &Arc<Mutex<OverlayStore>>,
     provider: Option<&dyn LlmProvider>,
     limits: SnapshotReadLimits,
+    sections: &SectionReader<'_>,
 ) -> Result<KnowledgeReport, String> {
     let _phase = PHASE.lock().map_err(|e| e.to_string())?;
     let (snapshot, lease) = {
@@ -244,9 +286,18 @@ fn run_within(
             _ => None,
         })
         .collect();
+    // Section text is read only when it can be embedded, and outside the
+    // graph lock (AC-1505).
+    let admitted = knowledge_ingest::admitted_sections(&snapshot.graph.0);
+    let section_text = if provider.is_some_and(|p| p.capabilities().embeddings) {
+        sections(&admitted)
+    } else {
+        SectionText::new()
+    };
     let (recipe, mut report) = match knowledge_ingest::run(
         &snapshot.graph.0,
         &flows,
+        &section_text,
         provider,
         Arc::clone(cache),
         lease,
@@ -265,6 +316,13 @@ fn run_within(
         }
         Err(_) => (recipe(None, false), report(0, 0, Some(PROVIDER_FAILED))),
     };
+    if report.omission.is_none() {
+        report.sections_read = admitted
+            .iter()
+            .filter(|node| section_text.contains_key(&node.id))
+            .count();
+        report.sections_unread = admitted.len() - report.sections_read;
+    }
     report.oversized = derived.oversized;
     report.producer_omissions = derived.omissions;
     // Count the already-held vector before publication consumes it; expose the
@@ -421,6 +479,8 @@ fn report(embedded: usize, omitted: usize, omission: Option<&'static str>) -> Kn
         omitted,
         omission,
         published: false,
+        sections_read: 0,
+        sections_unread: 0,
         derived: 0,
         oversized: 0,
         derived_omission: None,
@@ -544,6 +604,87 @@ fn semantic_enabled(settings: &Mutex<crate::settings::SettingsStore>) -> bool {
 /// outcome as `knowledge-phase`. Skipped without a cache or overlay. With T2
 /// disabled it still runs for the deterministic producers and embeds nothing
 /// (#1782). A failed thread start never affects the ingest.
+/// Section text bytes kept per section: the unit is cut to
+/// [`knowledge_ingest::MAX_UNIT_BYTES`] after its heading anyway.
+const SECTION_TEXT_BYTES: usize = 4096;
+
+/// Read each admitted section's span from its registered source through the
+/// confined evidence read, under one read-only source operation released
+/// before anything is embedded (AC-1505). A section's text is kept only when
+/// its bytes still hash to the section's provenance, so a working tree that
+/// moved since ingest never puts other text under a section. A source that
+/// is busy, unregistered or unreadable leaves its sections unread.
+pub(crate) fn source_sections(
+    registry: &Mutex<crate::sources::SourceRegistry>,
+    sections: &[&core_graph::Node],
+) -> SectionText {
+    let mut by_repo: std::collections::BTreeMap<
+        String,
+        Vec<(&str, core_prov::EvidenceRef, String)>,
+    > = std::collections::BTreeMap::new();
+    for node in sections {
+        let Ok(prov) = serde_json::from_value::<core_prov::Provenance>(node.props["prov"].clone())
+        else {
+            continue;
+        };
+        let [evidence] = prov.evidence.as_slice() else {
+            continue;
+        };
+        if evidence.byte_end <= evidence.byte_start
+            || evidence.byte_end - evidence.byte_start > crate::evidence::MAX_EVIDENCE_BYTES
+        {
+            continue;
+        }
+        by_repo.entry(evidence.repo.clone()).or_default().push((
+            node.id.as_str(),
+            evidence.clone(),
+            prov.content_hash.clone(),
+        ));
+    }
+    let mut texts = SectionText::new();
+    if by_repo.is_empty() {
+        return texts;
+    }
+    let Ok(listed) = registry
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.list())
+    else {
+        return texts;
+    };
+    let wanted = listed
+        .into_iter()
+        .filter(|source| by_repo.contains_key(&source.repo_key))
+        .map(|source| (source, false));
+    let Ok(operation) = crate::source_access::SourceOperation::acquire(registry, wanted) else {
+        return texts;
+    };
+    for (repo, items) in &by_repo {
+        let Ok(root) = operation.root(repo) else {
+            continue;
+        };
+        for (id, evidence, hash) in items {
+            let Ok(text) = crate::evidence::read_span_exact(
+                root,
+                &evidence.path,
+                &(evidence.byte_start..evidence.byte_end),
+            ) else {
+                continue;
+            };
+            if spec::section_content_hash(id, &text) != *hash {
+                continue;
+            }
+            let mut end = text.len().min(SECTION_TEXT_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            texts.insert((*id).to_string(), text[..end].to_string());
+        }
+    }
+    drop(operation);
+    texts
+}
+
 pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::{Emitter, Manager};
     {
@@ -566,12 +707,13 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                 return;
             };
             drain(&WORKER, || {
-                let status = KnowledgeStatus::from(run_for_setting(
+                let status = KnowledgeStatus::from(run_for_setting_with_sections(
                     &state.graph,
                     cache,
                     overlay,
                     semantic_enabled(&state.settings),
                     || local_provider().map(|p| Box::new(p) as Box<dyn LlmProvider>),
+                    &|sections| source_sections(&state.sources, sections),
                 ));
                 remember(&status);
                 let _ = app.emit("knowledge-phase", status);
