@@ -315,6 +315,7 @@ fn run_inner<R: tauri::Runtime>(
         id: &id,
         live: &live,
     };
+    let mut rejected = None;
     let outcome = (|| {
         let request = request?;
         let (detail, request_timeout_ms) = state
@@ -325,6 +326,7 @@ fn run_inner<R: tauri::Runtime>(
         clock.apply_saved_limits(&detail.limits);
         let mut worker = Worker {
             pending_patch: None,
+            last_completion: None,
             app: &app,
             state: &state,
             id: &id,
@@ -339,27 +341,30 @@ fn run_inner<R: tauri::Runtime>(
             #[cfg(test)]
             audit_probe: None,
         };
-        worker
+        let result = worker
             .execute_inner(&request, completion_request.as_ref(), provider.as_ref())
             .map_err(|failure| {
                 failure.preparation_after_call(
                     request.specialist_id,
                     worker.detail.usage.model_invocations,
                 )
-            })
+            });
+        rejected = worker.last_completion.take();
+        result
     })();
     if let Err(failure) = outcome
         && let Some(reason) = failure.reason()
     {
         // No source/provider retry. If even terminal publication fails, the
         // durable pending phase remains available to exact-owner recovery.
-        stop(
+        stop_keeping(
             &app,
             &state,
             &id,
             &execution,
             reason,
             clock.active_milliseconds(),
+            rejected.as_ref(),
         );
     }
 }
@@ -410,6 +415,8 @@ struct Worker<'a, R: tauri::Runtime> {
     clock: &'a mut RunClock,
     task_limits: Option<super::mcp_dispatch::TaskReadLimits>,
     pending_patch: Option<agents::investigation::finish_patch::VolatileFinish>,
+    /// The latest completed response, kept if it ends the task (AC-1403).
+    last_completion: Option<crate::jobs::investigations::RejectedCompletion>,
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
@@ -800,6 +807,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             // Complete response bytes are still untrusted. A custom bounded
             // provider does not bypass output or immutable model identity checks.
             validate_completion(&completion, &prepared)?;
+            self.last_completion = Some(crate::jobs::investigations::RejectedCompletion {
+                step_id: step_id.clone(),
+                text: completion.text.clone(),
+            });
             input
                 .validate_response_metadata(completion.response_model.as_deref())
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponseMetadata))?;
@@ -1617,6 +1628,18 @@ fn stop<R: tauri::Runtime>(
     reason: InvestigationStopReason,
     active_milliseconds: u64,
 ) {
+    stop_keeping(app, state, id, execution, reason, active_milliseconds, None);
+}
+/// Stop the task; a rejected response that caused the stop is kept with it.
+fn stop_keeping<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    id: &str,
+    execution: &JobExecution,
+    reason: InvestigationStopReason,
+    active_milliseconds: u64,
+    rejected: Option<&crate::jobs::investigations::RejectedCompletion>,
+) {
     for _ in 0..3 {
         let mut next_family = false;
         let attempt = (|| {
@@ -1631,19 +1654,27 @@ fn stop<R: tauri::Runtime>(
             next_family = current.summary.specialist_id.uses_next_prompt_admission();
             let elapsed = active_milliseconds.max(current.usage.active_milliseconds);
             if next_family {
-                jobs.stop_next_prompt_investigation(
+                jobs.stop_next_prompt_investigation_keeping(
                     execution,
                     current.summary.revision,
                     reason,
                     elapsed,
+                    rejected,
                 )
             } else {
                 jobs.advance_investigation(
                     execution,
                     current.summary.revision,
-                    InvestigationTransition::StopWithElapsed {
-                        reason,
-                        active_milliseconds: elapsed,
+                    match rejected {
+                        Some(rejected) => InvestigationTransition::StopRejected {
+                            reason,
+                            active_milliseconds: elapsed,
+                            rejected: rejected.clone(),
+                        },
+                        None => InvestigationTransition::StopWithElapsed {
+                            reason,
+                            active_milliseconds: elapsed,
+                        },
                     },
                 )
             }
@@ -1702,6 +1733,7 @@ pub(super) fn handle_gated_response(
         .mode;
     let mut worker = Worker {
         pending_patch: None,
+        last_completion: None,
         app,
         state: &state,
         id: saved.id(),
