@@ -11,8 +11,9 @@
 //! (`table_source: "default"`). Its columns are the fields of scalar types
 //! (numbers, strings, booleans, bytes, times, `sql.Null*`, `gorm.DeletedAt`),
 //! each named in snake case or by its `column:` tag. A field tagged `-`
-//! is left out. An embedded `gorm.Model` adds `id`, `created_at`,
-//! `updated_at` and `deleted_at`. Relation fields are not columns.
+//! or `-:all` is left out (`-:migration` is kept). An embedded
+//! `gorm.Model` adds `id`, `created_at`, `updated_at` and `deleted_at`.
+//! Relation fields are not columns.
 //!
 //! A GORM method call names the model it reads or writes by its argument.
 //! That argument can be a composite literal (`&T{…}`, `T{}`). It can be a
@@ -373,7 +374,10 @@ fn model(
             }
             continue;
         }
-        if tag_value(&tag, "-").is_some() || !scalar(cx, field_type, bindings) {
+        // `-` and `-:all` leave the field out; `-:migration` only skips
+        // migration, so the column is still read and written.
+        let ignored = tag_value(&tag, "-").is_some_and(|v| v.is_empty() || v == "all");
+        if ignored || !scalar(cx, field_type, bindings) {
             continue;
         }
         for field_name in names {
@@ -418,12 +422,23 @@ fn model(
     });
 }
 
-/// `func (T) TableName() string { return "literal" }`.
+/// `func (T) TableName() string { return "literal" }`; a `TableName` with
+/// parameters or another result is no `Tabler` and names no table.
 fn table_name(cx: &FileCx<'_>, method: TsNode<'_>, dir: &str, out: &mut Extraction) {
     if method
         .child_by_field_name("name")
         .is_none_or(|name| cx.text(&name) != "TableName")
     {
+        return;
+    }
+    // GORM's `Tabler` is exactly `TableName() string`.
+    let no_parameters = method
+        .child_by_field_name("parameters")
+        .is_some_and(|p| p.named_child_count() == 0);
+    let returns_string = method
+        .child_by_field_name("result")
+        .is_some_and(|r| cx.text(&r) == "string");
+    if !no_parameters || !returns_string {
         return;
     }
     let Some(type_name) = receiver_type(cx, method) else {

@@ -1726,6 +1726,8 @@ type UserModel struct {
     Username     string `gorm:"column:username;uniqueIndex"`
     PasswordHash string `gorm:"column:password;not null"`
     Secret       string `gorm:"-"`
+    Hidden       string `gorm:"-:all"`
+    Legacy       string `gorm:"-:migration"`
     Follows      []FollowModel
     lower        string
 }
@@ -1743,7 +1745,7 @@ type Plain struct{ Name string }
     .unwrap();
     std::fs::write(
         dir.path().join("users/table.go"),
-        "package users\nfunc (FollowModel) TableName() string { return \"follows\" }\n",
+        "package users\nfunc (FollowModel) TableName() string { return \"follows\" }\nfunc (Category) TableName(prefix string) string { return \"archive_categories\" }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1860,7 +1862,8 @@ func Authors(db *gorm.DB) {
                         "updated_at",
                         "deleted_at",
                         "username",
-                        "password"
+                        "password",
+                        "legacy"
                     ]
                 )
             ),

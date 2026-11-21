@@ -42,7 +42,7 @@ pub const CAPABILITY_CONTROLLER_RULE_VERSION: &str = "7";
 /// Deterministic recipe projecting a persistence model to a weak domain candidate.
 pub const DOMAIN_ENTITY_ORM_RULE: &str = "knowledge.domain-entity.orm-model";
 /// Changed eligibility, identity or projection semantics require a new version.
-pub const DOMAIN_ENTITY_ORM_RULE_VERSION: &str = "1";
+pub const DOMAIN_ENTITY_ORM_RULE_VERSION: &str = "2";
 
 /// Candidates and mappings admitted under the overlay's per-fact byte cap.
 #[derive(Debug, Default, PartialEq, Eq)]
