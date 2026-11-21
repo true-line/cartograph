@@ -598,19 +598,27 @@ pub(super) fn extract(
             parameters: parameters(cx, function),
             rebound: rebound(cx, function),
         };
+        // A method that answers `True` or `False` somewhere is a predicate
+        // whatever its name (`lifetime_or_active_subscription`, AC-1030).
+        let answers_bool = owner_exits.iter().any(|exit| {
+            exit.kind() == "return_statement"
+                && exit_value(*exit).is_some_and(|v| matches!(v.kind(), "true" | "false"))
+        });
         for (order, exit) in owner_exits.iter().copied().enumerate() {
             let (ancestors, limited) = branches(exit);
             let value = exit_value(exit);
             // An unguarded exit is a rule only as the answer of a predicate
-            // (`def is_active(self): return self.delete_on is None`, #2029);
-            // a constant `return True` with no exit before it answers no
-            // question, and "otherwise" would invent a branch.
+            // (`def is_active(self): return self.delete_on is None`, #2029),
+            // or as the last answer of a method that answers a boolean
+            // after an earlier exit (AC-1030); a constant `return True`
+            // with no exit before it answers no question, and "otherwise"
+            // would invent a branch.
             let constant = value.is_some_and(|v| matches!(v.kind(), "true" | "false" | "none"));
             if ancestors.is_empty()
                 && !limited
                 && !(exit.kind() == "return_statement"
                     && value.is_some()
-                    && predicate_name(&owner_id)
+                    && (predicate_name(&owner_id) || (order > 0 && answers_bool && !constant))
                     && !(order == 0 && constant))
             {
                 continue;
