@@ -91,6 +91,8 @@ pub struct Extraction {
     system_rebound: bool,
     /// Ktor routing DSL routes and mounts, composed at the join (AC-1023).
     ktor_routes: ktor_routes::Pending,
+    /// Room entities and DAO accesses, joined repo-wide (AC-1025).
+    room: room::Pending,
 }
 
 /// A top-level class, interface, object, enum, annotation class or type
@@ -329,6 +331,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     }
     extraction.navigation3.retarget(commit);
     extraction.ktor_routes.retarget(commit);
+    extraction.room.retarget(commit);
     hilt_binds::retarget(&mut extraction.hilt_binds, commit);
 }
 
@@ -1541,6 +1544,12 @@ pub fn extract_source(
         &mut out.nodes,
         &mut out.edges,
     );
+    room::resolve(
+        std::mem::take(&mut out.room),
+        &names,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     Ok(out)
 }
 
@@ -2078,6 +2087,16 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             &mut out.nodes,
             &mut out.edges,
         );
+        // Room entities and DAOs (AC-1025).
+        out.room = room::extract(
+            &cx,
+            root,
+            package.as_deref(),
+            &imports,
+            &functions_by_start,
+            &mut out.nodes,
+            &mut out.edges,
+        );
     }
 
     // Calls: same-scope unqualified/this calls resolve locally; calls
@@ -2537,6 +2556,7 @@ pub fn extract_dir_incremental_with_progress(
             out.hilt_binds.extend(extraction.hilt_binds);
             out.pending_endpoints.extend(extraction.pending_endpoints);
             out.ktor_routes.extend(extraction.ktor_routes);
+            out.room.extend(extraction.room);
             out.shadow_names.extend(extraction.shadow_names);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
@@ -2593,6 +2613,12 @@ pub fn extract_dir_incremental_with_progress(
         id.repo,
         std::mem::take(&mut out.ktor_routes),
         |fqn| functions_by_fqn.contains_key(fqn),
+        &mut out.nodes,
+        &mut out.edges,
+    );
+    room::resolve(
+        std::mem::take(&mut out.room),
+        &out.shadow_names,
         &mut out.nodes,
         &mut out.edges,
     );
@@ -2838,6 +2864,7 @@ mod queries;
 mod receivers;
 mod rest_template;
 mod retrofit;
+mod room;
 mod spring_kafka;
 mod webclient;
 

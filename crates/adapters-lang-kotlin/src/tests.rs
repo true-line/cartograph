@@ -5872,3 +5872,212 @@ fun Application.module() {
     assert!(out.nodes.iter().any(|node| node.label == "Gap"
         && node.props["reason"] == "Ktor routing name obscured by a same-package declaration"));
 }
+
+// AC-1025: import-proven Room entities are SQL tables with their columns,
+// a DAO `@Query` literal reads and writes the entity tables it names, and
+// `@Insert`/`@Delete`/`@Upsert` write the entity their parameter names,
+// across files. A computed query, an undeclared table or type, an
+// `entity =` argument and a computed table name are Gaps; lookalike
+// annotations without the Room import assert nothing.
+#[test]
+fn room_entities_and_dao_accesses_join_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app/src/main/kotlin/com/demo/data/User.kt",
+        r#"package com.demo.data
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.Ignore
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "users")
+data class User(
+    @PrimaryKey val id: Long,
+    @ColumnInfo(name = "e_mail") val email: String,
+    val name: String,
+) {
+    @Ignore var cached: Int = 0
+}
+
+@Entity
+class Alias(@PrimaryKey val id: Long, val userId: Long)
+
+@Entity(tableName = TABLE)
+class Computed(@PrimaryKey val id: Long)
+
+const val TABLE = "computed"
+"#,
+    );
+    write(
+        dir.path(),
+        "app/src/main/kotlin/com/demo/dao/UserDao.kt",
+        r#"package com.demo.dao
+
+import androidx.room.*
+import com.demo.data.User
+import com.demo.data.Alias
+
+@Dao
+interface UserDao {
+    @Query("SELECT * FROM users WHERE id = :id")
+    suspend fun byId(id: Long): User?
+
+    @Query("""
+        DELETE FROM alias WHERE userId IN (SELECT id FROM users WHERE name = :name)
+    """)
+    fun purge(name: String)
+
+    @Query(QUERY)
+    fun computed(): List<User>
+
+    @Query("SELECT * FROM audit_log")
+    fun audit(): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertAll(vararg users: User)
+
+    @Delete
+    fun deleteAll(aliases: List<Alias>)
+
+    @Upsert(entity = User::class)
+    fun upsertPartial(partial: Any)
+
+    @Update
+    fun touch(other: NotAnEntity)
+}
+
+const val QUERY = "SELECT * FROM users"
+"#,
+    );
+    write(
+        dir.path(),
+        "app/src/main/kotlin/com/demo/fake/Fake.kt",
+        r#"package com.demo.fake
+
+annotation class Entity
+annotation class Dao
+annotation class Query(val value: String)
+
+@Entity
+class Fake(val id: Long)
+
+@Dao
+interface FakeDao {
+    @Query("SELECT * FROM fake")
+    fun all(): List<Fake>
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut entities: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    entities.sort();
+    assert_eq!(
+        entities,
+        ["data:local/demo@sql:alias", "data:local/demo@sql:users"]
+    );
+    let users = node(&out.nodes, "data:local/demo@sql:users");
+    assert_eq!(users.props["framework"], "room");
+    assert_eq!(users.props["class"], "com.demo.data.User");
+    assert_eq!(
+        users.props["columns"],
+        serde_json::json!([{"name": "id"}, {"name": "e_mail"}, {"name": "name"}])
+    );
+
+    let dao = "sym:local/demo@app/src/main/kotlin/com/demo/dao/UserDao.kt#UserDao";
+    let reads = edge(
+        &out.edges,
+        &format!("{dao}.byId"),
+        "data:local/demo@sql:users",
+        "READS",
+    );
+    assert_eq!(reads.props["resolution"], "sql-literal");
+    edge(
+        &out.edges,
+        &format!("{dao}.purge"),
+        "data:local/demo@sql:users",
+        "READS",
+    );
+    let purge = edge(
+        &out.edges,
+        &format!("{dao}.purge"),
+        "data:local/demo@sql:alias",
+        "WRITES",
+    );
+    assert_eq!(purge.props["operation"], "delete");
+    let insert = edge(
+        &out.edges,
+        &format!("{dao}.insertAll"),
+        "data:local/demo@sql:users",
+        "WRITES",
+    );
+    assert_eq!(insert.props["operation"], "insert");
+    assert_eq!(insert.props["prov"]["confidence_tier"], "Confirmed");
+    edge(
+        &out.edges,
+        &format!("{dao}.deleteAll"),
+        "data:local/demo@sql:alias",
+        "WRITES",
+    );
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "room")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "Room query is not a string literal",
+            "Room query table `audit_log` is not a recovered @Entity",
+            "Room write names its entity by argument, not read at T0",
+            "Room write type `NotAnEntity` is not a recovered @Entity",
+            "computed Room entity table name",
+        ]
+    );
+    assert!(
+        !out.edges.iter().any(|edge| edge.src.contains("FakeDao")
+            && matches!(edge.label.as_str(), "READS" | "WRITES"))
+    );
+}
+
+// AC-1025: a star-imported `@Entity` that a same-package declaration
+// obscures is no entity, so a write naming it is a Gap.
+#[test]
+fn room_star_import_obscured_by_same_package_type_is_no_entity() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/User.kt",
+        r#"package com.demo
+
+import androidx.room.*
+
+@Entity
+class User(@PrimaryKey val id: Long)
+
+@Dao
+interface UserDao {
+    @Insert
+    fun add(user: User)
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/demo/Entity.kt",
+        "package com.demo\n\nannotation class Entity\n",
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    assert!(!out.nodes.iter().any(|node| node.label == "DataEntity"));
+    assert!(out.nodes.iter().any(|node| node.label == "Gap"
+        && node.props["reason"] == "Room write type `User` is not a recovered @Entity"));
+}
