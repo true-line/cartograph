@@ -5653,10 +5653,24 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         nodes: &mut listed,
         edges: &mut listed_edges,
     };
-    complete_pending_calls(calls(), &known, &mut lists).unwrap();
+    complete_pending_calls(
+        calls(),
+        &known,
+        &crate::reexports::Index::default(),
+        &id(),
+        &mut lists,
+    )
+    .unwrap();
     complete_pulumi_edges(pulumi(), &bindings, &mut lists).unwrap();
     let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
-    complete_pending_calls(calls(), &known, &mut store).unwrap();
+    complete_pending_calls(
+        calls(),
+        &known,
+        &crate::reexports::Index::default(),
+        &id(),
+        &mut store,
+    )
+    .unwrap();
     complete_pulumi_edges(pulumi(), &bindings, &mut store).unwrap();
     assert_eq!(
         store.into_facts().unwrap(),
