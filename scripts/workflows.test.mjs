@@ -714,6 +714,30 @@ test('Rust lanes run in the CI image their inputs name, built only when missing'
   }
 });
 
+test('the app crate compiles incrementally from state main saves, and only main saves it (#1924)', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+  const job = (name) => workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
+  const shards = job('rust-app-tests');
+  const seed = job('app-incremental');
+  const key = /echo "key=app-incremental-\$LOCK_HASH-\$\(date -u \+%Y%m%d%H\)" >> "\$GITHUB_OUTPUT"/u;
+  for (const contents of [shards, seed]) {
+    assert.match(contents, /RUSTC_WORKSPACE_WRAPPER=\$GITHUB_WORKSPACE\/scripts\/rustc-app-incremental\.sh/u);
+    assert.match(contents, /SCCACHE_PATH=\$wrapper/u);
+    assert.match(contents, /LOCK_HASH: \$\{\{ hashFiles\('rust-toolchain\.toml', 'Cargo\.lock'\) \}\}/u);
+    assert.match(contents, /APP_INCREMENTAL_DIR=\$RUNNER_TEMP\/app-incremental/u);
+    assert.match(contents, key);
+    assert.match(contents, /uses: actions\/cache\/restore@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
+  }
+  // A shard restores and never writes: a pull request's cache would be
+  // visible to that pull request alone, and six writers a run would evict
+  // the other lanes' caches.
+  assert.doesNotMatch(shards, /actions\/cache(?:\/save)?@/u);
+  assert.match(seed, /if: github\.event_name == 'push' && needs\.ci-image\.result == 'success'/u);
+  assert.match(seed, /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
+  assert.match(seed, /run: cargo test -p app --bin app --no-run/u);
+  assert.match(seed, /save-if: false/u);
+});
+
 test('every job runs on GitHub-hosted runners except release packaging', () => {
   // The repository is public, so no job a pull request can start may run on
   // a self-hosted runner (fork PRs would execute on it), and a workflow that
