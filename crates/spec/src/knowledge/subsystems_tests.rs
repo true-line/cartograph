@@ -655,3 +655,57 @@ fn leftovers_named_for_one_subject_are_its_group() {
         every_group()
     );
 }
+
+const MORE_EVENTS: [&str; 10] = [
+    "packages/core/src/event-bus/events/refund-state-transition-event.ts",
+    "packages/core/src/event-bus/events/payment-event.ts",
+    "packages/core/src/event-bus/events/product-event.ts",
+    "packages/core/src/event-bus/events/customer-event.ts",
+    "packages/core/src/event-bus/events/channel-event.ts",
+    "packages/core/src/event-bus/events/asset-event.ts",
+    "packages/core/src/event-bus/events/zone-event.ts",
+    "packages/core/src/event-bus/events/role-event.ts",
+    "packages/core/src/event-bus/events/facet-event.ts",
+    "packages/core/src/event-bus/events/seller-event.ts",
+];
+const REFUND: [&str; 3] = [
+    "src/entity/refund/refund.entity.ts",
+    "src/api/resolvers/entity/refund-entity.resolver.ts",
+    "src/config/refund/default-refund-process.ts",
+];
+
+// AC-1003: a group named for a phrase holds a second subject too, measured
+// against the files the first leaves out: the refund entity, resolver and
+// process are a small share of a large event bus, yet every file there
+// without an event in it is a refund file, so they are their own group.
+#[test]
+fn a_phrase_group_with_a_second_subject_outside_it_is_two_groups() {
+    let mut fixture = mixed();
+    for path in MORE_EVENTS {
+        fixture.file(path, &["publish"]);
+    }
+    for path in REFUND {
+        fixture.file(path, &["refund"]);
+    }
+    let (base, mut report) = read(&fixture);
+    let signals = signals(&base, REPO, &mut report).unwrap();
+    let events: Vec<&str> = EVENT.iter().chain(&MORE_EVENTS).copied().collect();
+    let both: Vec<&str> = events.iter().chain(&REFUND).copied().collect();
+    // The refund files are fewer than a quarter of the group.
+    assert!(REFUND.len() * 4 < both.len());
+    let groups: Vec<Vec<usize>> = [&both[..], &ALIAS, &MAILBOX, &ABUSER, &DOMAIN]
+        .iter()
+        .map(|paths| files(&signals, paths))
+        .collect();
+    let name = named(&groups, &signals).remove(0).1.unwrap();
+    assert_eq!(name.title, "Event bus and refund");
+    let mut expected = every_group();
+    expected.retain(|(title, _)| title != "Event bus");
+    expected.push(("Event bus".to_owned(), paths(&events)));
+    expected.push(("Refund".to_owned(), paths(&REFUND)));
+    expected.sort();
+    assert_eq!(
+        regrouped(&signals, &[&both, &ALIAS, &MAILBOX, &ABUSER, &DOMAIN]),
+        expected
+    );
+}

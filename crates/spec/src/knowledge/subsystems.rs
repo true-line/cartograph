@@ -44,7 +44,7 @@ use core_graph::Edge;
 /// Deterministic recipe grouping source files into named subsystems.
 pub const SUBSYSTEM_RULE: &str = "knowledge.subsystems";
 /// Changed units, signals, clustering or naming require a new recipe version.
-pub const SUBSYSTEM_RULE_VERSION: &str = "4";
+pub const SUBSYSTEM_RULE_VERSION: &str = "5";
 /// Files clustered per repository. Similarity is computed per pair of files
 /// that share a signal, so the bound keeps one run's work and memory fixed.
 pub const MAX_SUBSYSTEM_FILES: usize = 8192;
@@ -82,8 +82,9 @@ const NAME_SCORE_SHARE: f64 = 0.6;
 /// share of its files. Below it the group is leftovers that only resemble
 /// each other weakly, and naming it would claim a subject it does not have.
 const MIN_COHERENCE: f64 = 0.3;
-/// A second subject names at least this share of a group's files.
-const SECOND_SUBJECT_SHARE: f64 = 0.25;
+/// A second subject names at least this share of the group's files that the
+/// first subject leaves out.
+const SECOND_SUBJECT_SHARE: f64 = 0.5;
 /// Rounds of dropping, splitting and merging groups by their names.
 const REGROUP_ROUNDS: usize = 6;
 /// A file carries a subject when the word has at least a directory's weight
@@ -589,6 +590,7 @@ fn title(
         .map(|(_, term)| term)?;
     let first = &first.word;
     // Side by side in the members' paths: one phrase.
+    let mut named = one(first);
     if let Some(second) = leading.iter().find(|term| &term.word != first) {
         let second = &second.word;
         let (mut either, mut forward, mut backward) = (0usize, 0usize, 0usize);
@@ -614,27 +616,35 @@ fn title(
             } else {
                 (first, second)
             };
-            if spelled(a) == spelled(b) {
-                return Some(one(a));
-            }
-            return Some(Name {
-                title: capitalized(&format!("{} {}", spelled(a), spelled(b))),
-                subject: vec![a.clone(), b.clone()],
-                second: None,
-            });
+            named = if spelled(a) == spelled(b) {
+                one(a)
+            } else {
+                Name {
+                    title: capitalized(&format!("{} {}", spelled(a), spelled(b))),
+                    subject: vec![a.clone(), b.clone()],
+                    second: None,
+                }
+            };
         }
     }
     // A second subject: the ranked term in the names of the most files the
-    // first is absent from, when those are a real part of the group.
+    // first is absent from, when it names most of those files. A phrase name
+    // is checked too: an event bus holding a refund's entity and process is
+    // two subjects.
+    let lead = named.subject.first()?.clone();
+    let outside = members
+        .iter()
+        .filter(|&&file| !raw[file].contains_key(&lead))
+        .count();
     let second = terms
         .iter()
         .take(NAME_TERMS)
-        .filter(|term| &term.word != first)
+        .filter(|term| !named.subject.contains(&term.word))
         .filter_map(|term| {
             let (mut both, mut only) = (0usize, 0usize);
             for &file in members {
                 if units[file].stem.contains(&term.word) {
-                    if raw[file].contains_key(first) {
+                    if raw[file].contains_key(&lead) {
                         both += 1;
                     } else {
                         only += 1;
@@ -643,19 +653,26 @@ fn title(
             }
             (only >= MIN_FILES
                 && only * 2 >= both + only
-                && only as f64 >= SECOND_SUBJECT_SHARE * members.len() as f64)
+                && only as f64 >= SECOND_SUBJECT_SHARE * outside as f64)
                 .then_some((only, &term.word))
         })
         .enumerate()
         .max_by(|(i, a), (j, b)| a.0.cmp(&b.0).then_with(|| j.cmp(i)))
         .map(|(_, (_, word))| word);
     match second {
-        Some(second) if spelled(second) != spelled(first) => Some(Name {
-            title: capitalized(&format!("{} and {}", spelled(first), spelled(second))),
-            subject: vec![first.clone()],
-            second: Some(second.clone()),
-        }),
-        _ => Some(one(first)),
+        Some(second)
+            if !named
+                .subject
+                .iter()
+                .any(|word| spelled(word) == spelled(second)) =>
+        {
+            Some(Name {
+                title: capitalized(&format!("{} and {}", named.title, spelled(second))),
+                subject: named.subject,
+                second: Some(second.clone()),
+            })
+        }
+        _ => Some(named),
     }
 }
 
