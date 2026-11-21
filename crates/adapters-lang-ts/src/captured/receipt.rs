@@ -42,7 +42,7 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.adapter-python/direct-lexical-v1",
             domain: b"cartograph:py-primary-receipt:v1\0",
             grammar_package: PYTHON_GRAMMAR_PACKAGE,
-            parser_package: PARSER_PACKAGE,
+            parser_package: LANE_PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
         Grammar::Go => Some(Contract {
@@ -50,7 +50,7 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.adapter-go/direct-lexical-v1",
             domain: b"cartograph:go-primary-receipt:v1\0",
             grammar_package: GO_GRAMMAR_PACKAGE,
-            parser_package: PARSER_PACKAGE,
+            parser_package: LANE_PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
         Grammar::TypeScript | Grammar::Tsx => None,
@@ -108,6 +108,9 @@ const PARSER_PACKAGE: &str = "tree-sitter@0.27.0";
 const PYTHON_GRAMMAR_PACKAGE: &str = "tree-sitter-python@0.25.0";
 // The Go adapter's exact grammar pin (crates/adapters-lang-go).
 const GO_GRAMMAR_PACKAGE: &str = "tree-sitter-go@0.25.0";
+// The parser the Python and Go adapters link, pinned exactly in their
+// manifests; `lane_pins_match_the_adapter_manifests` keeps them in step.
+const LANE_PARSER_PACKAGE: &str = "tree-sitter@0.27.2";
 
 /// Actual grammar selected by the ordinary parser for the retained path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
