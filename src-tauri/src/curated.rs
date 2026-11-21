@@ -38,13 +38,11 @@ use crate::task_evidence::assessment::{self, Availability, BasisComparison};
 /// A store that holds more fails the read; nothing is projected from a part
 /// of it.
 pub(crate) const MAX_CURATED_RECORD_SCAN: usize = MAX_STAGED_REFERENCE_SCAN;
-/// Most accepted proposals one projection takes. Each one that could be
+/// Most accepted records one projection takes. Each one that could be
 /// eligible costs one SPEC-09 assessment, which reads its retained bytes
 /// and its source associations, so this bounds the work of one read. The
 /// graph is copied once for all of them while the store does not move
-/// (`assessment::SharedObservation`). More than this fails the read. An
-/// accepted section draft or finding costs no assessment, only a hash
-/// lookup, so those are bounded by [`MAX_CURATED_RECORD_SCAN`] alone (#2040).
+/// (`assessment::SharedObservation`). More than this fails the read.
 pub(crate) const MAX_CURATED_ACCEPTED: usize = 256;
 
 /// What [`gather`] read: the reviewed records and the assessments made for
@@ -273,7 +271,6 @@ fn reviewed_records(
             if staged.review_decision.is_none() {
                 continue;
             }
-            let record = agents::curated::curated_record(staged);
             if staged.review_decision == Some(ProposalDecision::Accepted) {
                 accepted += 1;
                 if accepted > MAX_CURATED_ACCEPTED {
@@ -282,7 +279,7 @@ fn reviewed_records(
                     });
                 }
             }
-            records.push(record);
+            records.push(agents::curated::curated_record(staged));
         }
         match page.next_cursor {
             Some(next) => cursor = Some(next),
@@ -293,15 +290,14 @@ fn reviewed_records(
 
 /// Every reviewed draft of `store`, in pages of
 /// [`agents::draft_store::MAX_DRAFT_PAGE_ITEMS`], newest first; the caller
-/// holds the draft store lock across all of them. More drafts than
-/// [`MAX_CURATED_RECORD_SCAN`] fail the read; an accepted draft needs no
-/// assessment, so there is no separate bound on accepted ones (#2040).
+/// holds the draft store lock across all of them. The bounds are those of
+/// the staged records: more drafts, or more accepted ones, fail the read.
 fn reviewed_drafts(
     store: &agents::draft_store::DraftStore,
 ) -> Result<Vec<ReviewedDraft>, CuratedFailure> {
-    use agents::draft_store::MAX_DRAFT_PAGE_ITEMS;
+    use agents::draft_store::{DraftDecision, MAX_DRAFT_PAGE_ITEMS};
     let mut drafts = Vec::new();
-    let mut scanned = 0usize;
+    let (mut scanned, mut accepted) = (0usize, 0usize);
     let mut before: Option<u64> = None;
     loop {
         let page = store
@@ -314,8 +310,17 @@ fn reviewed_drafts(
             });
         }
         for stored in &page.items {
-            if stored.review_decision.is_none() {
-                continue;
+            match stored.review_decision {
+                None => continue,
+                Some(DraftDecision::Accepted) => {
+                    accepted += 1;
+                    if accepted > MAX_CURATED_ACCEPTED {
+                        return Err(CuratedFailure::TooManyAccepted {
+                            limit: MAX_CURATED_ACCEPTED,
+                        });
+                    }
+                }
+                Some(DraftDecision::Rejected | DraftDecision::Returned) => {}
             }
             drafts.push(agents::curated::reviewed_draft(stored));
         }
@@ -327,13 +332,12 @@ fn reviewed_drafts(
 }
 
 /// Every finding of `store` with a curation review, oldest first; the
-/// caller holds the draft store lock. More findings than
-/// [`MAX_CURATED_RECORD_SCAN`] fail the read; an accepted finding needs no
-/// assessment, so there is no separate bound on accepted ones (#2040).
+/// caller holds the draft store lock. The bounds are those of the staged
+/// records: more findings, or more accepted ones, fail the read.
 fn reviewed_findings(
     store: &agents::draft_store::DraftStore,
 ) -> Result<Vec<ReviewedFinding>, CuratedFailure> {
-    use agents::finding_curation::reviewed_finding;
+    use agents::finding_curation::{CurationDecision, reviewed_finding};
     let read = store
         .finding_curation()
         .reviewed(MAX_CURATED_RECORD_SCAN)
@@ -341,6 +345,16 @@ fn reviewed_findings(
     if read.more {
         return Err(CuratedFailure::TooManyRecords {
             limit: MAX_CURATED_RECORD_SCAN,
+        });
+    }
+    let accepted = read
+        .items
+        .iter()
+        .filter(|stored| stored.review_decision == CurationDecision::Accepted)
+        .count();
+    if accepted > MAX_CURATED_ACCEPTED {
+        return Err(CuratedFailure::TooManyAccepted {
+            limit: MAX_CURATED_ACCEPTED,
         });
     }
     Ok(read.items.iter().map(reviewed_finding).collect())

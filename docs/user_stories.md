@@ -1525,9 +1525,6 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Security:** Agents propose only; acceptance never upgrades a tier or writes a fact (R-INT-1, R-INT-3). Egress consent and redaction per step are unchanged. No write to the ingested target.
 - **Performance:** A drafting run is bounded by the existing call, byte and time limits; a draft is at most 64 claims and 256 KiB.
 - **Trace:** W13 (#1748) · `spec`, `agents`, `context-hub`, `app`, `ui` · ADR-0064, ADR-0061, ADR-0058 · T-0663..0670, T-0682..0684, T-0861, T-0862, T-0925
-- **AC-0979** Given a draft store that holds more than 256 accepted section drafts, when the curated projection reads it, then every reviewed draft is read and projected: an accepted draft costs no SPEC-09 assessment, so only the 4096-record scan bounds them, and `too_many_accepted` is stated only for more than 256 accepted proposals (#2040).
-- **AC-0980** Given a finding curation store that holds more than 256 accepted findings, when the curated projection reads it, then every reviewed finding is read: an accepted finding costs no SPEC-09 assessment, so only the 4096-record scan bounds them (#2040).
-- **Trace:** W13 (#2040) · `app` · ADR-0064, ADR-0074 · T-0979, T-0980
 
 ### US-0048 — Keep authored sections current as the code changes
 - **Actor:** Engineer or product owner
