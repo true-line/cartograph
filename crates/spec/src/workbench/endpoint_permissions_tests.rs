@@ -1183,3 +1183,52 @@ fn go_middleware_guards_are_permission_sites_and_go_is_never_none() {
     }
     assert!(content.contains("/feed"), "{content}");
 }
+
+// AC-1305 (#2163): a Rust extractor or layer guard is its permission site and
+// names its caller; a Rust route with none is never "none recovered".
+#[test]
+fn rust_auth_guards_are_permission_sites_and_rust_is_never_none() {
+    let mut fixture = Fixture::new();
+    fixture.route(
+        "/me",
+        "axum",
+        "rust",
+        (10, 40),
+        json!({
+            "state": "required", "authenticated": true,
+            "guards": ["TypedHeader<Authorization<Bearer>>"],
+            "basis": ["library extractor TypedHeader<Authorization<Bearer>>"],
+            "prov": confirmed("src/lib.rs", (50, 71), "auth"),
+        }),
+    );
+    fixture.route(
+        "/feed",
+        "actix-web",
+        "rust",
+        (80, 120),
+        json!({"state": "unknown", "reasons": ["no_guard_recovered"]}),
+    );
+    let content = fixture.artifact(ExportMode::VerifiedOnly).content;
+    let guarded = row(section(&content, SITED), "/me").expect("Rust guard is a site");
+    assert!(
+        guarded.contains("guard: TypedHeader&lt;Authorization&lt;Bearer&gt;&gt;"),
+        "{guarded}"
+    );
+    for other in [NONE, OUTSIDE] {
+        assert!(row(section(&content, other), "/feed").is_none(), "{other}");
+    }
+    assert!(content.contains("/feed"), "{content}");
+    for (guard, role) in [
+        (
+            "actix_web_httpauth.BearerAuth",
+            "caller with a bearer token",
+        ),
+        (
+            "tower_http.ValidateRequestHeaderLayer::basic",
+            "caller with HTTP Basic credentials",
+        ),
+    ] {
+        let endpoint = &fixture.nodes[0];
+        assert_eq!(super::role(endpoint, &[guard]), role, "{guard}");
+    }
+}
