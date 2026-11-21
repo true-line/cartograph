@@ -694,6 +694,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
     )?;
     let tree = Tree::read(&walked);
     let charts = helm::Index::read(&walked);
+    let spring = settings::Index::read(&walked);
     let mut out = EnvironmentExtraction::default();
     for file in &walked {
         let emitter = Emitter { id, rel: &file.rel };
@@ -748,8 +749,19 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
                 out.files += 1;
                 out.nodes.push(emitter.name_only());
             }
+        } else if let Some(parsed) = spring.files.get(&file.rel) {
+            if emitter.spring(&file.name, parsed, &spring, &mut out) {
+                out.files += 1;
+            }
         } else if emitter.manifest(tree.documents(&file.rel), &mut out) {
             out.files += 1;
+        } else if settings::names_an_environment(&file.rel)
+            && std::fs::read_to_string(&file.path).is_ok()
+        {
+            // A settings module or configuration file named like an
+            // environment: the name alone declares nothing.
+            out.files += 1;
+            out.nodes.push(emitter.name_only());
         }
     }
     Ok(out)
@@ -912,6 +924,135 @@ impl Emitter<'_> {
                     .push(self.gap("compose-service", Some(&service.name), service.findings));
             }
         }
+    }
+
+    /// One Spring Boot configuration file: an `Environment` per profile it
+    /// is activated for, or, for a profile-specific file, one environment
+    /// when a base file of its directory declares the profile; a name-only
+    /// Gap when none does. True when a fact was emitted.
+    fn spring(
+        &self,
+        name: &str,
+        parsed: &Result<Vec<settings::Document>, (&'static str, Span)>,
+        index: &settings::Index,
+        out: &mut EnvironmentExtraction,
+    ) -> bool {
+        let Some((profile, _)) = settings::spring_file(name) else {
+            return false;
+        };
+        let documents = match parsed {
+            Ok(documents) => documents,
+            Err((reason, span)) => {
+                let mut findings = Findings::default();
+                findings.add(*reason, *span);
+                out.nodes.push(self.gap("spring-config", None, findings));
+                return true;
+            }
+        };
+        let mut findings = Findings::default();
+        for document in documents {
+            for reason in &document.findings.reasons {
+                if !findings.reasons.contains(reason) {
+                    findings.reasons.push(reason.clone());
+                }
+            }
+            findings
+                .spans
+                .extend(document.findings.spans.iter().copied());
+        }
+        let mut emitted = false;
+        match profile {
+            None => {
+                // Documents activated for one profile are one environment.
+                let mut by_profile: BTreeMap<&str, (Vec<Span>, BTreeSet<&str>, usize)> =
+                    BTreeMap::new();
+                for document in documents {
+                    let Some((profile, span)) = &document.on_profile else {
+                        continue;
+                    };
+                    let entry = by_profile.entry(profile.as_str()).or_default();
+                    entry.0.push(*span);
+                    entry.1.extend(document.keys.iter().map(String::as_str));
+                    entry.2 += document.omitted;
+                }
+                for (profile, (spans, keys, omitted)) in by_profile {
+                    let environment = format!("env:{}@{}#{profile}", self.id.repo, self.rel);
+                    let mut props = Props::new();
+                    props.insert("declared_by".into(), "spring-profile".into());
+                    props.insert("path".into(), format!("{}#{profile}", self.rel).into());
+                    props.insert("file".into(), self.rel.into());
+                    props.insert("name".into(), profile.into());
+                    props.insert(
+                        "name_span".into(),
+                        serde_json::json!([spans[0].0, spans[0].1]),
+                    );
+                    props.insert("settings_keys".into(), serde_json::json!(keys));
+                    if omitted > 0 {
+                        props.insert("settings_keys_omitted".into(), omitted.into());
+                    }
+                    out.nodes.push(Node {
+                        props: self.seal(props, ConfidenceTier::Confirmed, &spans, &environment),
+                        id: environment,
+                        label: "Environment".into(),
+                    });
+                    emitted = true;
+                }
+            }
+            Some(profile) => {
+                for document in documents {
+                    if let Some((_, span)) = &document.on_profile {
+                        findings.add(
+                            "a profile-specific file states a profile activation, which Spring \
+                             Boot rejects",
+                            *span,
+                        );
+                    }
+                }
+                match index.declared(self.rel, profile) {
+                    Some((declared_in, span)) => {
+                        let environment = format!("env:{}@{}", self.id.repo, self.rel);
+                        let keys: BTreeSet<&str> = documents
+                            .iter()
+                            .flat_map(|document| document.keys.iter().map(String::as_str))
+                            .collect();
+                        let omitted: usize =
+                            documents.iter().map(|document| document.omitted).sum();
+                        let mut props = Props::new();
+                        props.insert("declared_by".into(), "spring-profile".into());
+                        props.insert("path".into(), self.rel.into());
+                        props.insert("name".into(), profile.into());
+                        props.insert("profile_declared_in".into(), declared_in.as_str().into());
+                        props.insert("settings_keys".into(), serde_json::json!(keys));
+                        if omitted > 0 {
+                            props.insert("settings_keys_omitted".into(), omitted.into());
+                        }
+                        // Cited where the profile is declared: the file itself
+                        // may hold credentials.
+                        out.nodes.push(Node {
+                            props: self.seal_at(
+                                props,
+                                ConfidenceTier::Confirmed,
+                                &[(declared_in.as_str(), *span)],
+                                &environment,
+                            ),
+                            id: environment,
+                            label: "Environment".into(),
+                        });
+                        emitted = true;
+                    }
+                    None if settings::profile_names_an_environment(profile) => {
+                        out.nodes.push(self.name_only());
+                        emitted = true;
+                    }
+                    None => {}
+                }
+            }
+        }
+        if !findings.reasons.is_empty() {
+            out.nodes.push(self.gap("spring-config", None, findings));
+            emitted = true;
+        }
+        emitted
     }
 
     /// The key paths of the values file `rel`, or why none are read.
@@ -1268,6 +1409,7 @@ impl Emitter<'_> {
 mod helm;
 mod kubernetes;
 mod kustomize;
+mod settings;
 
 #[cfg(test)]
 mod tests;
