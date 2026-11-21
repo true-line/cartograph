@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DEFAULT_WEIGHT, loadWeights, parseShard, parseTestList, parseTotals, selectShard, verifyRun, weightsFromReport } from './rust-test-shard.mjs';
+import { DEFAULT_WEIGHT, loadWeights, parseShard, parseTestList, parseTotals, selectShard, parseExecutable, parseTimes, verifyRun, weightsFromTimes } from './rust-test-shard.mjs';
 
 const listing = [
   'jobs::tests::b: test',
@@ -76,18 +76,34 @@ test('measured weights spread the slow tests and still partition the list (#1924
   for (const shard of shards) assert.deepEqual(shard, [...shard].sort());
 });
 
-test('weights come from libtest\'s JSON report and only list tests of two seconds or more', () => {
-  const report = [
-    '{ "type": "suite", "event": "started", "test_count": 3 }',
-    '{ "type": "test", "event": "started", "name": "b::slow" }',
-    '{ "type": "test", "name": "b::slow", "event": "ok", "exec_time": 12.345 }',
-    '{ "type": "test", "name": "a::quick", "event": "ok", "exec_time": 0.2 }',
-    '{ "type": "test", "name": "a::fail", "event": "failed", "exec_time": 30 }',
-    '{ "type": "test", "name": "a::slow", "event": "ok", "exec_time": 2 }',
-    '{ "type": "test", "name": "a::second", "event": "ok", "exec_time": 1.9 }',
-    'not json',
+test('libtest --report-time lines give each passed test its seconds', () => {
+  const output = [
+    'running 3 tests',
+    'test b::slow ... ok <12.345s>',
+    'test a::quick ... ok <0.200s>',
+    'test a::fail ... FAILED <3.000s>',
+    'test a::ignored ... ignored',
+    'test a::plain ... ok',
+    '',
   ].join('\n');
-  assert.equal(weightsFromReport(report), `${JSON.stringify({ seconds: { 'a::slow': 2, 'b::slow': 12.3 } }, null, 2)}\n`);
+  assert.deepEqual(parseTimes(output), { 'b::slow': 12.345, 'a::quick': 0.2 });
+});
+
+test('weights merge the shard time files and only list tests of two seconds or more', () => {
+  const files = [{ 'b::slow': 12.345, 'a::quick': 0.2 }, { 'a::slow': 2, 'a::second': 1.9 }];
+  assert.equal(weightsFromTimes(files), `${JSON.stringify({ seconds: { 'a::slow': 2, 'b::slow': 12.3 } }, null, 2)}\n`);
+});
+
+test('the shard runs the one test executable cargo built, from its package directory', () => {
+  const message = (fields) => JSON.stringify({ reason: 'compiler-artifact', ...fields });
+  const messages = [
+    message({ profile: { test: false }, executable: null, manifest_path: '/w/crates/x/Cargo.toml' }),
+    message({ profile: { test: true }, executable: '/w/target/debug/deps/app-1', manifest_path: '/w/src-tauri/Cargo.toml' }),
+    JSON.stringify({ reason: 'build-finished', success: true }),
+    '',
+  ].join('\n');
+  assert.deepEqual(parseExecutable(messages), { executable: '/w/target/debug/deps/app-1', directory: '/w/src-tauri' });
+  assert.throws(() => parseExecutable(messages.split('\n').slice(0, 1).join('\n')), /expected one test executable, cargo built 0/u);
 });
 
 test('the committed weights name tests in sorted order with positive seconds', () => {
