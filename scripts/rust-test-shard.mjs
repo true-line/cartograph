@@ -45,8 +45,8 @@ export function parseTestList(output) {
 // tests spread across shards instead of landing together by name order.
 // Tests absent from the file weigh DEFAULT_WEIGHT. Each CI shard writes the
 // times libtest reported for its tests to SHARD_TIMES_FILE, which ci.yml keeps
-// as an `app-test-times-*` artifact; regenerate the weights from one run's
-// four files with
+// as an `app-test-times-*` artifact; regenerate the weights from all of one
+// run's files (one per shard) with
 //   node scripts/rust-test-shard.mjs --weights-from times-1.json times-2.json ... > scripts/rust-test-weights.json
 export const WEIGHTS_PATH = fileURLToPath(new URL('./rust-test-weights.json', import.meta.url));
 export const DEFAULT_WEIGHT = 0.2;
