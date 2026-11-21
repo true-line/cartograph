@@ -35,6 +35,21 @@ folder is still queued or ingesting. A later drop is listed below the
 earlier outcomes. A drop that arrives while intake is running is rejected,
 not lost.
 
+## Env-file values
+
+Cartograph reads key names from `.env` and `.env.*` files, never their
+values, unless you list a key. To let it resolve a queue name or a base URL
+from an env file, list the key exactly (no globs):
+
+- in `cartograph.system.toml`: `env_read = ["ORDERS_QUEUE", "API_BASE"]`;
+- in any repository, in `.cartograph/env.toml`: `read = ["ORDERS_QUEUE"]`.
+
+A key a site uses that an env file sets but no list names is reported as a
+gap that names the key and the file. A URL value never keeps a `user@`
+part. An env file that holds a secret still stops the ingest, whether the
+key is listed or not. A value declared under `[env]` in
+`cartograph.system.toml` needs no listing.
+
 ## Coverage inventory
 
 After a recovery, the Workspace lists each repo's coverage inventory before
