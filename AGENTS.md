@@ -168,7 +168,9 @@ npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run
 ```
 
 CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
-every package except `app`, `agents` and `spec`, "Rust agents & spec
+every package except `app`, `agents` and `spec`, split into three matrix
+groups (`adapters` and `ingest` name their packages, `core` runs the rest of
+the workspace, so a new crate lands there), "Rust agents & spec
 tests" runs `cargo test -p agents -p spec`, and four "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
 run does not account for exactly the tests it selected. Clippy runs in its
