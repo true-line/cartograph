@@ -144,17 +144,29 @@ fn proof(
     package: Option<&str>,
     name: &str,
 ) -> Option<Vec<String>> {
+    proof_in(PACKAGES, annotation, imports, package, name)
+}
+
+/// Whether an annotation is proven as `name` from one of `packages`, and if
+/// so the same-package names that would obscure a star-import proof.
+pub(crate) fn proof_in(
+    packages: &[&str],
+    annotation: &AnnotationUse<'_>,
+    imports: &Imports,
+    package: Option<&str>,
+    name: &str,
+) -> Option<Vec<String>> {
     if annotation.simple != name {
         return None;
     }
     if annotation.spelled.contains('.') {
-        return PACKAGES
+        return packages
             .iter()
             .any(|room| annotation.spelled == format!("{room}.{name}"))
             .then(Vec::new);
     }
     if let Some(bound) = imports.bindings.get(name) {
-        return PACKAGES
+        return packages
             .iter()
             .any(|room| *bound == format!("{room}.{name}"))
             .then(Vec::new);
@@ -162,7 +174,7 @@ fn proof(
     imports
         .wildcard_packages
         .iter()
-        .any(|wildcard| PACKAGES.contains(&wildcard.as_str()))
+        .any(|wildcard| packages.contains(&wildcard.as_str()))
         .then(|| {
             vec![match package {
                 Some(package) => format!("{package}.{name}"),
@@ -186,7 +198,7 @@ fn find<'a, 't>(
 /// An annotation's arguments as `(name, value)` pairs, the name `None` for
 /// a positional one; `Some(empty)` without parentheses, `None` when its
 /// arguments are not where the grammar normally puts them.
-fn arguments<'t>(
+pub(crate) fn arguments<'t>(
     cx: &FileCx<'_>,
     annotation: TsNode<'t>,
 ) -> Option<Vec<(Option<String>, TsNode<'t>)>> {
@@ -217,7 +229,7 @@ fn arguments<'t>(
 
 /// The value of the argument named `key`, or of the first positional one
 /// when `positional` is set. `Err` when the arguments cannot be read.
-fn argument<'t>(
+pub(crate) fn argument<'t>(
     cx: &FileCx<'_>,
     annotation: TsNode<'t>,
     key: &str,
@@ -313,7 +325,10 @@ pub(crate) fn framework_gap(
 
 /// The annotations on a class, including those the grammar attaches to a
 /// preceding expression statement.
-fn class_annotations<'t>(cx: &FileCx<'_>, declaration: TsNode<'t>) -> Vec<AnnotationUse<'t>> {
+pub(crate) fn class_annotations<'t>(
+    cx: &FileCx<'_>,
+    declaration: TsNode<'t>,
+) -> Vec<AnnotationUse<'t>> {
     let mut found = declaration_annotations(cx, declaration);
     found.extend(preceding_expression_annotations(cx, declaration));
     found
@@ -350,6 +365,19 @@ fn columns(
     imports: &Imports,
     package: Option<&str>,
 ) -> Vec<String> {
+    stored_properties(cx, class)
+        .into_iter()
+        .filter_map(|(declaration, name)| column(cx, declaration, cx.text(&name), imports, package))
+        .collect()
+}
+
+/// A class's stored properties in declaration order: `val`/`var`
+/// constructor parameters and body properties with a backing field, each
+/// as its declaration and name.
+pub(crate) fn stored_properties<'t>(
+    cx: &FileCx<'_>,
+    class: TsNode<'t>,
+) -> Vec<(TsNode<'t>, TsNode<'t>)> {
     let mut found = Vec::new();
     for child in named_children(class) {
         match child.kind() {
@@ -370,11 +398,8 @@ fn columns(
                         else {
                             continue;
                         };
-                        if is_property
-                            && let Some(column) =
-                                column(cx, parameter, cx.text(&name), imports, package)
-                        {
-                            found.push(column);
+                        if is_property {
+                            found.push((parameter, name));
                         }
                     }
                 }
@@ -411,9 +436,7 @@ fn columns(
                     {
                         continue;
                     }
-                    if let Some(column) = column(cx, member, cx.text(&name), imports, package) {
-                        found.push(column);
-                    }
+                    found.push((member, name));
                 }
             }
             _ => {}
@@ -857,11 +880,13 @@ pub(crate) fn resolve(
 }
 
 /// Folds a second access of the same table by the same function into the
-/// edge already emitted, keeping the union of their operations and
-/// statements, so an `insert` then an `update` keep both.
+/// edge already emitted, keeping the union of their operations,
+/// statements and relation fields, so an `insert` then an `update` keep both.
 fn merge_access_props(kept: &mut serde_json::Value, other: &serde_json::Value) {
     union(kept, other, "operations", "operation");
     union(kept, other, "statements", "statement");
+    // Two JPA relation properties to one entity (AC-1028).
+    union(kept, other, "fields", "field");
 }
 
 /// `kept[plural]` becomes the distinct values of both sides' `plural`
