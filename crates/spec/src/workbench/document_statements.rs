@@ -1415,6 +1415,12 @@ fn rendered(
         constant,
         failed: None,
     };
+    if evidence.conditions.is_empty()
+        && let LocalExit::Return { value: Some(value) } = &evidence.effect
+        && let Some(said) = ts_choice(evidence, value.display.as_str(), class, method)
+    {
+        return Some(said);
+    }
     let conditions: Option<Vec<String>> = evidence
         .conditions
         .iter()
@@ -1562,6 +1568,152 @@ fn rendered(
         let s = format!("{who} {verb} {} when {when}.", words(rest));
         format!("{}{}", s[..1].to_uppercase(), &s[1..])
     })
+}
+
+/// A TypeScript answer stating how a value is chosen (AC-0956):
+/// `rate || this.defaultTaxRate`, where `rate` is a `.find(r => …)`, reads
+/// "It picks the first of the active tax rates whose test with the zone and
+/// tax category holds; when none does, the default tax rate", and a
+/// boolean answer of comparisons (`idsAreEqual(a, this.b) && x === y`)
+/// reads "A tax rate's test holds when the a equals the b, and …".
+fn ts_choice(
+    evidence: &GuardedExitEvidence,
+    value: &str,
+    class: Option<&str>,
+    method: &str,
+) -> Option<String> {
+    let path = evidence.exit_source.path.as_str();
+    if ![".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
+    {
+        return None;
+    }
+    let value = value.trim();
+    // A pick with a fallback.
+    for operator in [" || ", " ?? "] {
+        if let Some((found, fallback)) = value.split_once(operator) {
+            let found = found.trim();
+            let initializer = if found.contains(".find(") {
+                Some(found.to_owned())
+            } else {
+                evidence
+                    .local_definitions
+                    .iter()
+                    .flatten()
+                    .filter(|_| found.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                    .find(|d| {
+                        let exit = &evidence.exit_source;
+                        d.initializer.display.as_str().contains(".find(")
+                            && d.uses.iter().any(|u| {
+                                u.byte_start >= exit.byte_start
+                                    && u.byte_end <= exit.byte_end
+                                    && u.byte_end - u.byte_start == found.len() as u64
+                            })
+                    })
+                    .map(|d| d.initializer.display.as_str().to_owned())
+            }?;
+            let (collection, predicate) = initializer.rsplit_once(".find(")?;
+            let predicate = predicate.strip_suffix(')')?;
+            let (parameter, body) = predicate.split_once("=>")?;
+            let parameter = parameter.trim().trim_matches(['(', ')']).trim();
+            let what = ts_noun(collection)?;
+            let test = ts_member_test(body.trim(), parameter)?;
+            let otherwise = ts_noun(fallback)?;
+            return Some(format!(
+                "It picks the first of {what} {test}; when none does, {otherwise}."
+            ));
+        }
+    }
+    // A boolean answer of comparisons.
+    let clauses: Option<Vec<String>> = value.split(" && ").map(ts_equality).collect();
+    let clauses = clauses?;
+    let who = match class {
+        Some(class) => format!("a {}'s", words(class)),
+        None => "the".to_owned(),
+    };
+    let s = format!(
+        "{who} {} holds when {}.",
+        words(method),
+        clauses.join(", and ")
+    );
+    Some(format!("{}{}", s[..1].to_uppercase(), &s[1..]))
+}
+
+/// `(await this.getActiveTaxRates(ctx))` → "the active tax rates";
+/// `this.defaultTaxRate` → "the default tax rate"; `channel.defaultTaxZone`
+/// → "the channel's default tax zone".
+fn ts_noun(text: &str) -> Option<String> {
+    let mut text = text.trim();
+    loop {
+        let inner = text
+            .strip_prefix('(')
+            .and_then(|t| t.strip_suffix(')'))
+            .map(str::trim)
+            .or_else(|| text.strip_prefix("await ").map(str::trim));
+        match inner {
+            Some(inner) => text = inner,
+            None => break,
+        }
+    }
+    let path = match text.split_once('(') {
+        Some((callee, args)) if !args.contains('(') && args.ends_with(')') => callee,
+        Some(_) => return None,
+        None => text,
+    };
+    let segments: Vec<&str> = path.split('.').collect();
+    if !segments
+        .iter()
+        .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    {
+        return None;
+    }
+    let last = segments.last()?;
+    let last = last
+        .strip_prefix("get")
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+        .unwrap_or(last);
+    Some(match &segments[..segments.len() - 1] {
+        [] | ["this"] => format!("the {}", words(last)),
+        [.., owner] => format!("the {}'s {}", words(owner), words(last)),
+    })
+}
+
+/// `r.test(zone, taxCategory)` with `r` → "whose test with the zone and tax
+/// category holds"; `r.enabled` → "whose enabled is set".
+fn ts_member_test(body: &str, parameter: &str) -> Option<String> {
+    let rest = body.strip_prefix(parameter)?.strip_prefix('.')?;
+    let ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if let Some((name, args)) = rest.split_once('(') {
+        let args = args.strip_suffix(')')?;
+        let args: Vec<&str> = args.split(',').map(str::trim).collect();
+        if !ident(name) || !args.iter().all(|a| ident(a)) {
+            return None;
+        }
+        let with = args
+            .iter()
+            .map(|a| format!("the {}", words(a)))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        return Some(format!("whose {} with {with} holds", words(name)));
+    }
+    ident(rest).then(|| format!("whose {} is set", words(rest)))
+}
+
+/// `idsAreEqual(a, this.b)`, `a === b`, `a == b` → "the a equals the b".
+fn ts_equality(clause: &str) -> Option<String> {
+    let clause = clause.trim();
+    let (left, right) = if let Some(args) = clause
+        .strip_prefix("idsAreEqual(")
+        .and_then(|a| a.strip_suffix(')'))
+    {
+        args.split_once(',')?
+    } else if let Some(pair) = clause.split_once(" === ") {
+        pair
+    } else {
+        clause.split_once(" == ")?
+    };
+    Some(format!("{} equals {}", ts_noun(left)?, ts_noun(right)?))
 }
 
 #[cfg(test)]
@@ -1969,5 +2121,55 @@ mod tests {
         assert_eq!(said("foo().bar", t, None), None);
         assert_eq!(words("MAX_NB_EMAIL_FREE_PLAN"), "max nb email free plan");
         assert_eq!(words("apiKeyId"), "API key ID");
+    }
+
+    // AC-0956: a TypeScript answer stating how a value is chosen is said in
+    // words: a pick with a fallback and a boolean answer of comparisons.
+    #[test]
+    fn a_typescript_choice_is_said_in_words() {
+        let out = adapters_lang_ts::extract_source(
+            b"export class TaxRate {
+    test(zone: Zone, taxCategory: TaxCategory): boolean {
+        return idsAreEqual(taxCategory.id, this.categoryId) && zone.id === this.zoneId;
+    }
+}
+export class TaxRateService {
+    async getApplicableTaxRate(ctx: RequestContext, zone: Zone, taxCategory: TaxCategory): Promise<TaxRate> {
+        const rate = (await this.getActiveTaxRates(ctx)).find(r => r.test(zone, taxCategory));
+        return rate || this.defaultTaxRate;
+    }
+}
+",
+            "src/tax.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let said = |owner: &str| {
+            let rule = out
+                .nodes
+                .iter()
+                .filter(|n| n.label == "BusinessRule")
+                .map(|n| GuardedExitEvidence::from_value(n.props["rule"].clone()).unwrap())
+                .find(|r| r.owner_id.ends_with(owner))
+                .unwrap();
+            statement(&rule, owner, None, &[])
+        };
+        assert_eq!(
+            said("TaxRateService.getApplicableTaxRate").as_deref(),
+            Some(
+                "It picks the first of the active tax rates whose test with the zone and the \
+                 tax category holds; when none does, the default tax rate."
+            )
+        );
+        assert_eq!(
+            said("TaxRate.test").as_deref(),
+            Some(
+                "A tax rate's test holds when the tax category's ID equals the category ID, \
+                 and the zone's ID equals the zone ID."
+            )
+        );
     }
 }
