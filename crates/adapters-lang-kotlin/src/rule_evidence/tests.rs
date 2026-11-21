@@ -497,6 +497,17 @@ fn names_rebound_in_other_files_drop_the_rules_relying_on_them() {
         "package com.acme\n\nopen class Base {\n    fun run(block: () -> Unit) {}\n}\n",
     );
     let svc = "package com.acme\n\nclass Svc : Base() {\n    fun a(n: Int) {\n        require(n > 0) { \"positive\" }\n    }\n\n    fun b(n: Int?) {\n        n?.let { if (it < 0) throw IllegalStateException(\"neg\") }\n    }\n\n    fun c(n: Int) {\n        run { if (n < 0) throw IllegalStateException(\"run\") }\n    }\n\n    fun d(n: Int) {\n        check(n > 0)\n    }\n}\n";
+    // A test source set is not compiled with the product, and a private
+    // top-level declaration is visible in its own file only: neither
+    // rebinds `check` or `let` for Svc.
+    write(
+        "src/test/kotlin/com/acme/Helpers.kt",
+        "package com.acme\n\nfun check(ok: Boolean) {}\n",
+    );
+    write(
+        "src/main/kotlin/com/acme/Local.kt",
+        "package com.acme\n\nprivate fun <T> T.let(block: (T) -> Unit) {}\n",
+    );
     write("src/main/kotlin/com/acme/Svc.kt", svc);
     let id = SourceId {
         repo: "acme/shop",
@@ -558,4 +569,38 @@ class Owners(private val owners: Repo) {
         ],
         "{values:?}"
     );
+}
+
+// AC-1108: in the default package, a top-level `require` and a supertype's
+// `run` declared in other files rebind those names too.
+#[test]
+fn default_package_rebinding_drops_the_rules_relying_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let full = dir.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    };
+    write(
+        "src/main/kotlin/Checks.kt",
+        "fun require(ok: Boolean, message: () -> String) {}\n",
+    );
+    write(
+        "src/main/kotlin/Base.kt",
+        "open class Base {\n    fun run(block: () -> Unit) {}\n}\n",
+    );
+    write(
+        "src/main/kotlin/Svc.kt",
+        "class Svc : Base() {\n    fun a(n: Int) {\n        require(n > 0) { \"positive\" }\n    }\n\n    fun c(n: Int) {\n        run { if (n < 0) throw IllegalStateException(\"run\") }\n    }\n\n    fun d(n: Int) {\n        check(n > 0)\n    }\n}\n",
+    );
+    let id = SourceId {
+        repo: "acme/shop",
+        commit: "c0ffee",
+    };
+    let out = crate::extract_dir(dir.path(), &id).expect("extracts");
+    let owners: Vec<String> = rules(&out)
+        .iter()
+        .map(|rule| rule.owner_id.rsplit('#').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(owners, ["Svc.d"], "{owners:?}");
 }

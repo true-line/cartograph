@@ -101,6 +101,9 @@ pub struct Extraction {
     /// Rules relying on standard-library names another file may rebind,
     /// settled repo-wide (AC-1108).
     pending_rules: Vec<rule_evidence::PendingRule>,
+    /// Product declarations that may rebind those names, default package
+    /// included (AC-1108).
+    rebinding: rule_evidence::Rebinding,
 }
 
 /// A top-level class, interface, object, enum, annotation class or type
@@ -314,46 +317,44 @@ fn settle_rules(out: &mut Extraction) {
     if pending.is_empty() {
         return;
     }
-    let top_level: BTreeSet<&str> = out
-        .declared_types
-        .iter()
-        .chain(&out.declared_functions)
-        .chain(&out.declared_importables)
-        .map(|item| item.fqn.as_str())
-        .collect();
-    let types: BTreeMap<&str, &Declared> = out
-        .declared_types
-        .iter()
-        .map(|ty| (ty.fqn.as_str(), ty))
-        .collect();
-    let top = |fqn: &str| top_level.contains(fqn);
-    // The type or a repository supertype declares the member; an
-    // unresolved (external) supertype is not read.
+    // Only product, non-private declarations take part in a product
+    // call's resolution: a test source set is not compiled with it, and a
+    // private top-level declaration is visible in its own file only (which
+    // the file's own reading already handled).
+    let rebinding = &out.rebinding;
+    let top = |fqn: &str| rebinding.top_level.contains(fqn);
+    // The type (its private members included) or a repository supertype
+    // (its non-private members) declares the member; an unresolved
+    // (external) supertype is not read.
     let member_of = |fqn: &str, name: &str| {
-        let mut queue = vec![fqn.to_owned()];
+        let mut queue = vec![(fqn.to_owned(), true)];
         let mut seen = BTreeSet::new();
-        while let Some(fqn) = queue.pop() {
+        while let Some((fqn, own)) = queue.pop() {
             if !seen.insert(fqn.clone()) || seen.len() > 64 {
                 continue;
             }
-            let Some(ty) = types.get(fqn.as_str()) else {
+            let Some(ty) = rebinding.types.get(fqn.as_str()) else {
                 continue;
             };
-            if ty.members.contains(name) {
+            if ty.members.contains(name) || (own && ty.private_members.contains(name)) {
                 return true;
             }
             for candidates in &ty.supers {
-                if let Some(found) = candidates.iter().find(|c| types.contains_key(c.as_str())) {
-                    queue.push(found.clone());
+                if let Some(found) = candidates
+                    .iter()
+                    .find(|c| rebinding.types.contains_key(c.as_str()))
+                {
+                    queue.push((found.clone(), false));
                 }
             }
         }
         false
     };
     let any_member = |name: &str| {
-        out.declared_types
-            .iter()
-            .any(|ty| ty.members.contains(name))
+        rebinding
+            .types
+            .values()
+            .any(|ty| ty.members.contains(name) || ty.private_members.contains(name))
     };
     let declared = rule_evidence::Declarations {
         top_level: &top,
@@ -1745,6 +1746,38 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         });
         type_decls.push((decl, qualified));
     }
+    // Declarations that may rebind a standard-library name a rule relies
+    // on, default package included (AC-1108).
+    if !adapters_fw::in_jvm_test_source_set(path) {
+        for (decl, qualified) in &type_decls {
+            let fqn = package.as_ref().map_or_else(
+                || qualified.clone(),
+                |package| format!("{package}.{qualified}"),
+            );
+            let (members, private_members) = rule_evidence::rebinding_members(source, *decl);
+            out.rebinding.types.insert(
+                fqn,
+                rule_evidence::RebindingType {
+                    supers: declaration_supers(
+                        &cx,
+                        *decl,
+                        &imports,
+                        package.as_deref(),
+                        &local_types,
+                    ),
+                    members,
+                    private_members,
+                },
+            );
+        }
+        out.rebinding
+            .top_level
+            .extend(rule_evidence::rebinding_top_level(
+                source,
+                root,
+                package.as_deref(),
+            ));
+    }
     if let Some(package) = &package {
         for (decl, qualified) in type_decls {
             let kind = declaration_kind(&cx, decl);
@@ -2759,6 +2792,7 @@ fn extract_dir_with(
             out.room.extend(extraction.room);
             out.test_requests.extend(extraction.test_requests);
             out.pending_rules.extend(extraction.pending_rules);
+            out.rebinding.extend(extraction.rebinding);
             out.shadow_names.extend(extraction.shadow_names);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
