@@ -1487,7 +1487,11 @@ mod tests {
         assert!(!output.content.contains("Go file"), "{}", output.content);
         assert!(!output.content.contains("Java file"), "{}", output.content);
         assert!(!output.content.contains("Rust file"), "{}", output.content);
-        assert!(!output.content.contains("Kotlin file"), "{}", output.content);
+        assert!(
+            !output.content.contains("Kotlin file"),
+            "{}",
+            output.content
+        );
         let only_python: Vec<Node> = nodes
             .into_iter()
             .filter(|n| n.props["language"] != "swift")
