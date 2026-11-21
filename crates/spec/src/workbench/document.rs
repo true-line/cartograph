@@ -1091,6 +1091,7 @@ pub(super) fn d1(
                     &mut content,
                 )?;
             }
+            let mut actions_listed = false;
             if let (SectionFrame::Nodes(label), Some(knowledge)) = (source, knowledge)
                 && derived > 0
             {
@@ -1115,7 +1116,17 @@ pub(super) fn d1(
                         (&mut assertions, &mut drafted.asserted),
                         &mut content,
                     )?;
+                    actions_listed = true;
                 }
+            }
+            // With no derived Capability, the actions whose target is not
+            // recovered are still listed (AC-0976).
+            if matches!(source, SectionFrame::Nodes("Capability")) && !actions_listed {
+                cited += actions::unresolved_actions_only(
+                    (nodes, edges),
+                    (&mut assertions, &mut drafted.asserted),
+                    &mut content,
+                )?;
             }
             // §1.3 states the operations no Capability groups, and why (#2007).
             if matches!(source, SectionFrame::Nodes("Capability"))

@@ -1,5 +1,5 @@
 use crate::{SourceId, extract_dir};
-use core_graph::Edge;
+use core_graph::{Edge, Node};
 
 fn id() -> SourceId<'static> {
     SourceId {
@@ -205,7 +205,8 @@ fn flask_pages_become_screens_linked_by_redirects_links_and_forms() {
     );
 
     // Links: only to pages, conditional inside `{% if %}`; a commented-out
-    // link, a plain `href`, an unknown name and a JSON route are not.
+    // link, a plain `href` and a JSON route are not; an unknown name is a
+    // Gap (AC-0975).
     let nav = edge(
         edges,
         "templates/base.html",
@@ -224,7 +225,15 @@ fn flask_pages_become_screens_linked_by_redirects_links_and_forms() {
         .filter(|e| e.src.starts_with("template:") && e.label == "NAVIGATES_TO")
         .map(|e| e.dst.as_str())
         .collect();
-    assert_eq!(from_templates.len(), 3, "{from_templates:?}");
+    assert_eq!(from_templates.len(), 4, "{from_templates:?}");
+    assert_eq!(
+        from_templates
+            .iter()
+            .filter(|d| d.starts_with("gap:user-action:"))
+            .count(),
+        1,
+        "{from_templates:?}"
+    );
 
     // Forms: a POST form submits to its named route; a GET form navigates;
     // an action-less POST form posts back to the page that rendered it.
@@ -433,4 +442,86 @@ fn template_sites_record_what_a_reader_sees() {
         "@flask:/dashboard/",
     );
     assert_eq!(labels(token), [None]);
+}
+
+// AC-0975: a template link or form whose `url_for` name no recovered route
+// answers with its method, or whose name is relative, is a Gap naming the
+// endpoint, the method, why, and the words the page shows; the site's edge
+// points at it with tier Gap. Flask's static files are not actions, and a
+// link to a route that is not a page is reached, not a Gap.
+#[test]
+fn template_actions_with_no_recovered_target_are_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app/auth.py", AUTH);
+    write(dir.path(), "app/helpers.py", HELPERS);
+    write(dir.path(), "app/dashboard.py", DASHBOARD);
+    write(dir.path(), "app/main.py", MAIN);
+    write(dir.path(), "templates/auth/login.html", LOGIN);
+    write(dir.path(), "templates/base.html", BASE);
+    write(
+        dir.path(),
+        "templates/dashboard/index.html",
+        r#"{% extends 'base.html' %}
+<a href="{{ url_for('billing.upgrade') }}">Upgrade</a>
+<form action="{{ url_for('dashboard.index') }}" method="POST">
+  <button>Save</button>
+</form>
+<a href="{{ url_for('.settings') }}">Settings</a>
+<link href="{{ url_for('static', filename='app.css') }}">
+<a href="{{ url_for('static', filename='help.pdf') }}">Help</a>
+<a href="{{ url_for('dashboard.static', filename='x.png') }}">Logo</a>
+<a href="{{ url_for('dashboard.stats') }}">Stats</a>
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let gaps: Vec<&Node> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap" && n.id.starts_with("gap:user-action:"))
+        .collect();
+    let named = |name: &str| {
+        gaps.iter()
+            .find(|n| n.props["endpoint_name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {gaps:?}"))
+    };
+    let upgrade = named("billing.upgrade");
+    assert_eq!(upgrade.props["kind"], "user-action-unresolved");
+    assert_eq!(upgrade.props["method"], "GET");
+    assert_eq!(upgrade.props["label"], "Upgrade");
+    assert_eq!(
+        upgrade.props["reason"],
+        "no recovered route has this endpoint name"
+    );
+    assert_eq!(upgrade.props["prov"]["confidence_tier"], "Gap");
+    let save = named("dashboard.index");
+    assert_eq!(save.props["method"], "POST");
+    assert_eq!(
+        save.props["reason"],
+        "the named route does not accept this method"
+    );
+    assert_eq!(save.props["label"], "Save");
+    let settings = named(".settings");
+    assert!(
+        settings.props["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("relative endpoint name")
+    );
+    // The login page's unknown `auth.register` is the fourth; static files
+    // and a JSON route are not Gaps.
+    named("auth.register");
+    assert_eq!(gaps.len(), 4, "{gaps:?}");
+
+    // The site's edge points at the Gap with tier Gap, citing the tag.
+    let link = edge(
+        &out.edges,
+        "dashboard/index.html",
+        "NAVIGATES_TO",
+        &upgrade.id,
+    );
+    assert_eq!(link.props["prov"]["confidence_tier"], "Gap");
+    let span = &link.props["sites"][0];
+    assert_eq!(span["label"], "Upgrade");
+    let submit = edge(&out.edges, "dashboard/index.html", "SUBMITS", &save.id);
+    assert_eq!(submit.props["method"], "POST");
 }

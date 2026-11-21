@@ -25,8 +25,14 @@
 //!
 //! Every navigation and submission lists its `sites`, each with its span
 //! and whether it is `conditional` (under a Python branch, loop, `try` or
-//! `with`, or inside a template `{% if %}` / `{% for %}` block). Names no
-//! route answers record nothing. `INCLUDES`, `RENDERS_TEMPLATE` and
+//! `with`, or inside a template `{% if %}` / `{% for %}` block). A template
+//! link or form whose `url_for` name no recovered route answers with its
+//! method, or whose name is relative (`.x`, resolved against the request's
+//! Blueprint at run time), is a `Gap` (`gap:user-action:{repo}@{path}@{start}`,
+//! `kind: "user-action-unresolved"`) naming the endpoint, its method, why,
+//! and the words the site shows; the site's edge points at it with tier
+//! `Gap` (AC-0975). Flask's `static` names are files, not actions. A
+//! redirect to a name no route answers records nothing. `INCLUDES`, `RENDERS_TEMPLATE` and
 //! `SUBMITS` are read only by journey recovery, so traced server flows and
 //! other artifacts are unchanged.
 use crate::{Extraction, FileCx, literal_string, prov_from};
@@ -781,6 +787,83 @@ impl Routes {
     }
 }
 
+impl Routes {
+    /// Why a template link or form naming `name` with `method` reaches no
+    /// recovered route, or `None` when one answers or the name is Flask's
+    /// own static files (#2005, AC-0975). A link reaching a `GET` route
+    /// that is not a page is reached, not a Gap.
+    fn unreached(&self, name: &str, method: &str) -> Option<&'static str> {
+        if name == "static" || name.ends_with(".static") {
+            return None;
+        }
+        if name.starts_with('.') {
+            return Some("relative endpoint name: the Blueprint of the request is not established");
+        }
+        if self
+            .by_name
+            .contains_key(&(name.to_owned(), method.to_owned()))
+        {
+            return None;
+        }
+        if self.by_name.keys().any(|(n, _)| n == name) {
+            Some("the named route does not accept this method")
+        } else {
+            Some("no recovered route has this endpoint name")
+        }
+    }
+}
+
+/// Id prefix of a user action whose target is not recovered.
+const GAP_PREFIX: &str = "gap:user-action:";
+
+/// Template links and forms whose target is not recovered, by Gap id.
+#[derive(Default)]
+struct Gaps(BTreeMap<String, (EvidenceRef, String, String, &'static str)>);
+
+impl Gaps {
+    /// Record the site at `evidence` naming `name` and return its Gap id.
+    fn add(
+        &mut self,
+        repo: &str,
+        evidence: &EvidenceRef,
+        name: &str,
+        method: &str,
+        reason: &'static str,
+    ) -> String {
+        let id = format!(
+            "{GAP_PREFIX}{repo}@{}@{}",
+            evidence.path, evidence.byte_start
+        );
+        self.0
+            .entry(id.clone())
+            .or_insert_with(|| (evidence.clone(), name.to_owned(), method.to_owned(), reason));
+        id
+    }
+
+    fn into_nodes(self, labels: &BTreeMap<(String, u64), String>, out: &mut Vec<Node>) {
+        for (id, (evidence, name, method, reason)) in self.0 {
+            let fact = format!("Gap {id}");
+            let mut props = serde_json::json!({
+                "kind": "user-action-unresolved",
+                "reason": reason,
+                "endpoint_name": name,
+                "method": method,
+                "framework": "flask",
+                "attempted_tiers": ["T0"],
+            });
+            if let Some(label) = labels.get(&(evidence.path.clone(), evidence.byte_start)) {
+                props["label"] = label.as_str().into();
+            }
+            props["prov"] = prov_from(vec![evidence], ConfidenceTier::Gap, &fact);
+            out.push(Node {
+                id,
+                label: "Gap".into(),
+                props,
+            });
+        }
+    }
+}
+
 fn screen_id(repo: &str, path: &str) -> String {
     format!("screen:{repo}@flask:{path}")
 }
@@ -818,6 +901,11 @@ impl Sites {
         for ((src, label, dst), (sites, method)) in self.0 {
             let evidence: Vec<EvidenceRef> = sites.iter().map(|(e, _)| e.clone()).collect();
             let fact = format!("{label} {src} -> {dst}");
+            let tier = if dst.starts_with(GAP_PREFIX) {
+                ConfidenceTier::Gap
+            } else {
+                ConfidenceTier::InferredStrong
+            };
             let mut props = serde_json::json!({
                 "router": "flask",
                 "conditional": sites.iter().all(|(_, c)| *c),
@@ -836,7 +924,7 @@ impl Sites {
                         site
                     })
                     .collect::<Vec<_>>(),
-                "prov": prov_from(evidence, ConfidenceTier::InferredStrong, &fact),
+                "prov": prov_from(evidence, tier, &fact),
             });
             if let Some(method) = method {
                 props["method"] = method.into();
@@ -895,6 +983,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, commit: &str, root: Opti
         });
     }
     let mut sites = Sites::default();
+    let mut gaps = Gaps::default();
     let files = root.map(template_files).unwrap_or_default();
     let unique = |name: &str| match files.get(name).map(Vec::as_slice) {
         Some([path]) => Some(path.clone()),
@@ -987,6 +1076,10 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, commit: &str, root: Opti
                     for screen in routes.screens(repo, name) {
                         sites.add(&id, "NAVIGATES_TO", &screen, at.clone(), None);
                     }
+                    if let Some(reason) = routes.unreached(name, "GET") {
+                        let gap = gaps.add(repo, &at.0, name, "GET", reason);
+                        sites.add(&id, "NAVIGATES_TO", &gap, at.clone(), None);
+                    }
                 }
                 TemplateSite::Form {
                     action: Some(name),
@@ -996,15 +1089,25 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, commit: &str, root: Opti
                         for screen in routes.screens(repo, name) {
                             sites.add(&id, "NAVIGATES_TO", &screen, at.clone(), None);
                         }
-                        continue;
+                    } else {
+                        for endpoint in routes
+                            .by_name
+                            .get(&(name.clone(), method.clone()))
+                            .into_iter()
+                            .flatten()
+                        {
+                            sites.add(&id, "SUBMITS", endpoint, at.clone(), Some(method));
+                        }
                     }
-                    for endpoint in routes
-                        .by_name
-                        .get(&(name.clone(), method.clone()))
-                        .into_iter()
-                        .flatten()
-                    {
-                        sites.add(&id, "SUBMITS", endpoint, at.clone(), Some(method));
+                    if let Some(reason) = routes.unreached(name, method) {
+                        let gap = gaps.add(repo, &at.0, name, method, reason);
+                        let label = if method == "GET" {
+                            "NAVIGATES_TO"
+                        } else {
+                            "SUBMITS"
+                        };
+                        let method = (method != "GET").then_some(method.as_str());
+                        sites.add(&id, label, &gap, at.clone(), method);
                     }
                 }
                 TemplateSite::Form { action: None, .. } => {}
@@ -1046,6 +1149,7 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, commit: &str, root: Opti
                 .map(|(at, label)| ((t.path.clone(), *at as u64), label.clone()))
         })
         .collect();
+    gaps.into_nodes(&labels, &mut nodes);
     sites.into_edges(&labels, &mut edges);
     out.nodes.extend(nodes);
     out.edges.extend(edges);

@@ -18,7 +18,10 @@
 //! citation. Rows on the same page sit together, so the options of one
 //! action (a password form and the social sign-in links on a login page) are
 //! read as one place. A redirect a handler returns is not a user action and
-//! is not listed. Nothing is read from source.
+//! is not listed. A link or form whose target is a Gap (its route is not
+//! recovered) is listed after the capabilities with the name it gives and
+//! why, since no capability can claim it (AC-0976). Nothing is read from
+//! source.
 
 use crate::workbench::capabilities::{Stories, Story, Support};
 use crate::workbench::citation_id;
@@ -41,6 +44,8 @@ struct Index<'a> {
     rendered_by: BTreeMap<&'a str, Vec<&'a str>>,
     /// The action edges: `SUBMITS`, `NAVIGATES_TO` from a page, `FETCHES`.
     actions: Vec<&'a Edge>,
+    /// Actions whose target is a Gap (AC-0976).
+    unresolved: Vec<&'a Edge>,
 }
 
 impl<'a> Index<'a> {
@@ -52,6 +57,7 @@ impl<'a> Index<'a> {
             screens_of: BTreeMap::new(),
             rendered_by: BTreeMap::new(),
             actions: Vec::new(),
+            unresolved: Vec::new(),
         };
         for edge in edges {
             let (Some(src), Some(dst)) = (
@@ -71,6 +77,7 @@ impl<'a> Index<'a> {
                 ("SUBMITS", "Template" | "Symbol" | "Screen", "Endpoint")
                 | ("NAVIGATES_TO", "Template" | "Screen", "Screen")
                 | ("FETCHES", "Symbol" | "Screen", "Endpoint") => index.actions.push(edge),
+                ("SUBMITS" | "NAVIGATES_TO", "Template", "Gap") => index.unresolved.push(edge),
                 _ => {}
             }
         }
@@ -220,6 +227,37 @@ pub(super) fn actions_per_capability(
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
     let index = Index::new(nodes, edges);
+    let mut cited = reached_actions(&index, knowledge, (assertions, asserted), out)?;
+    cited += unresolved_actions(&index, (assertions, asserted), out)?;
+    Ok(cited)
+}
+
+/// Cite `edge` once in the document; returns its citation and whether it
+/// was new.
+fn cite(
+    edge: &Edge,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+) -> Result<(String, bool), RenderLimit> {
+    let key = FactKey::Edge {
+        source: edge.src.clone(),
+        label: edge.label.clone(),
+        destination: edge.dst.clone(),
+    };
+    let citation = citation_id(&key);
+    let new = asserted.insert(citation.clone());
+    if new {
+        assertions.edge(edge)?;
+    }
+    Ok((citation, new))
+}
+
+/// The capability blocks of §1.3's user actions.
+fn reached_actions(
+    index: &Index<'_>,
+    knowledge: &Stories<'_>,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
     if index.actions.is_empty() {
         return Ok(0);
     }
@@ -264,16 +302,8 @@ pub(super) fn actions_per_capability(
         )?;
         out.push_str("| On | User action | Reaches | Citation |\n|---|---|---|---|\n")?;
         for (page, act, reaches, edge) in rows.iter().take(MAX_ACTION_ROWS) {
-            let key = FactKey::Edge {
-                source: edge.src.clone(),
-                label: edge.label.clone(),
-                destination: edge.dst.clone(),
-            };
-            let citation = citation_id(&key);
-            if asserted.insert(citation.clone()) {
-                assertions.edge(edge)?;
-                cited += 1;
-            }
+            let (citation, new) = cite(edge, (&mut *assertions, &mut *asserted))?;
+            cited += usize::from(new);
             writeln!(
                 out,
                 "| {} | {} | {} | {citation} |",
@@ -294,6 +324,80 @@ pub(super) fn actions_per_capability(
     Ok(cited)
 }
 
+/// §1.3's user actions whose target is not recovered, when no derived
+/// Capability is listed (so [`actions_per_capability`] does not run).
+pub(super) fn unresolved_actions_only(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    cited: (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    unresolved_actions(&Index::new(nodes, edges), cited, out)
+}
+
+/// §1.3's user actions whose target is not recovered: each Gap a page's
+/// link or form points at, with the name it gives and why nothing answers
+/// it (AC-0976).
+fn unresolved_actions(
+    index: &Index<'_>,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    let mut rows: Vec<(String, String, String, String, &Edge)> = index
+        .unresolved
+        .iter()
+        .filter_map(|edge| {
+            let src = *index.by_id.get(edge.src.as_str())?;
+            let gap = *index.by_id.get(edge.dst.as_str())?;
+            let name = gap.props["endpoint_name"].as_str().unwrap_or("?");
+            let method = gap.props["method"].as_str().unwrap_or("GET");
+            let reason = gap.props["reason"]
+                .as_str()
+                .unwrap_or("the target is not recovered");
+            Some((
+                index.page(edge, src),
+                action(edge, src),
+                format!("{name} ({method})"),
+                reason.to_owned(),
+                *edge,
+            ))
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    rows.sort_by(|a, b| (&a.0, &a.2, &a.1).cmp(&(&b.0, &b.2, &b.1)));
+    writeln!(
+        out,
+        "#### User actions with no recovered target\n\nLinks and forms that name a route no \
+         recovered operation answers: {}. Each is a Gap: what it reaches, and so which capability \
+         it starts, is not established.\n",
+        rows.len()
+    )?;
+    out.push_str("| On | User action | Names | Why | Citation |\n|---|---|---|---|---|\n")?;
+    let mut cited = 0usize;
+    for (page, act, names, reason, edge) in rows.iter().take(MAX_ACTION_ROWS) {
+        let (citation, new) = cite(edge, (&mut *assertions, &mut *asserted))?;
+        cited += usize::from(new);
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {citation} |",
+            Literal(page),
+            Literal(act),
+            Literal(names),
+            Literal(reason)
+        )?;
+    }
+    if rows.len() > MAX_ACTION_ROWS {
+        writeln!(
+            out,
+            "\n{} more actions are left out.",
+            rows.len() - MAX_ACTION_ROWS
+        )?;
+    }
+    out.push_str("\n")?;
+    Ok(cited)
+}
+
 /// The retained workspace of [`actions_per_capability`]: the id and render
 /// indexes, the action list, one capability's reached sets and its rows of
 /// text. `None` on overflow.
@@ -306,7 +410,8 @@ pub(crate) fn actions_per_capability_workspace(
         map_slots::<&str, &Node>(rows)?,
         map_slots::<&str, Vec<&str>>(rows)?.checked_mul(3)?,
         slots::<&str>(rows)?.checked_mul(3)?,
-        slots::<&Edge>(rows)?,
+        slots::<&Edge>(rows)?.checked_mul(2)?,
+        slots::<(String, String, String, String, &Edge)>(rows)?,
         set_slots::<&str>(rows)?.checked_mul(2)?,
         slots::<(String, String, String, &Edge)>(rows)?,
         graph.bytes.checked_mul(4)?,
@@ -472,6 +577,90 @@ app.register_blueprint(auth_bp, url_prefix="/auth")
             "{logout}"
         );
         assert_eq!(logout.matches("| /auth").count(), 1, "{logout}");
+    }
+
+    // AC-0976: a link or form whose target is a Gap is listed after the
+    // capabilities, with its page, its words, the name it gives and why no
+    // operation answers it, citing its edge; with no such Gap there is no
+    // block.
+    #[test]
+    fn actions_with_no_recovered_target_are_listed_as_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let login =
+            format!("{LOGIN}<a href=\"{{{{ url_for('auth.forgot') }}}}\">Forgot password?</a>\n");
+        for (path, text) in [
+            ("app/__init__.py", ""),
+            ("app/auth.py", AUTH),
+            ("app/main.py", MAIN),
+            ("templates/auth/login.html", login.as_str()),
+        ] {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        }
+        let facts = adapters_lang_python::extract_dir(
+            dir.path(),
+            &adapters_lang_python::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let render = |nodes: &[&Node], edges: &[&Edge]| {
+            let knowledge = Stories {
+                included: Vec::new(),
+                filtered: 0,
+                areas: BTreeMap::new(),
+                file_areas: BTreeMap::new(),
+            };
+            let budget = Budget::new(None).unwrap();
+            let mut assertions = Assertions::new(&budget);
+            let mut asserted = BTreeSet::new();
+            let mut out = Text::new(&budget, "").unwrap();
+            let cited = actions_per_capability(
+                (nodes, edges),
+                &knowledge,
+                (&mut assertions, &mut asserted),
+                &mut out,
+            )
+            .unwrap();
+            (cited, out.finish())
+        };
+        let nodes: Vec<&Node> = facts.nodes.iter().collect();
+        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        let (cited, text) = render(&nodes, &edges);
+        assert_eq!(cited, 1, "{text}");
+        assert!(
+            text.contains("#### User actions with no recovered target\n\nLinks and forms that name a route no \
+                 recovered operation answers: 1."),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "| /auth/login | Follow \"Forgot password?\" | auth.forgot (GET) | no recovered \
+                 route has this endpoint name |"
+            ),
+            "{text}"
+        );
+        // Without the Gap edge there is no block.
+        let resolved: Vec<&Edge> = edges
+            .iter()
+            .copied()
+            .filter(|e| !e.dst.starts_with("gap:user-action:"))
+            .collect();
+        let (cited, text) = render(&nodes, &resolved);
+        assert_eq!((cited, text.as_str()), (0, ""));
+        // Without derived Capabilities the block is still rendered.
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        let cited =
+            unresolved_actions_only((&nodes, &edges), (&mut assertions, &mut asserted), &mut out)
+                .unwrap();
+        let only = out.finish();
+        assert_eq!(cited, 1, "{only}");
+        assert!(only.contains("Forgot password?"), "{only}");
     }
 
     #[test]
