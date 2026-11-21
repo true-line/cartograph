@@ -105,6 +105,9 @@ pub struct Extraction {
     /// `(file, name)` of each top-level binding a file exports itself; an
     /// `export *` hop only reaches these (AC-1504).
     exported: Vec<(String, String)>,
+    /// Calls through configured instances and lookups of them (#2165),
+    /// linked at directory completion.
+    instances: instances::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -320,6 +323,7 @@ fn retarget_commit(
         site.retarget(commit);
     }
     extraction.strategies.retarget(commit);
+    extraction.instances.retarget(commit);
     Ok(())
 }
 
@@ -356,6 +360,7 @@ impl Extraction {
         self.strategies = strategies::Pending::default();
         self.reexports.clear();
         self.exported.clear();
+        self.instances = instances::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3308,6 +3313,7 @@ fn extract_source_recording(
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
         state_machines::extract(&cx, &syntax_nodes, &mut out);
         strategies::sites(&cx, &syntax_nodes, &mut out.strategies);
+        instances::sites(&cx, &syntax_nodes, &mut out.instances);
     }
     if let Some(evidence) = service_worker {
         service_worker::mark(
@@ -3488,6 +3494,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.strategies.extend(ex.strategies);
     out.reexports.extend(ex.reexports);
     out.exported.extend(ex.exported);
+    out.instances.extend(ex.instances);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3619,6 +3626,12 @@ fn complete_directory(
     )?;
     strategies::complete(
         std::mem::take(&mut out.strategies),
+        id.repo,
+        &known_symbols,
+        &mut *facts,
+    )?;
+    instances::complete(
+        std::mem::take(&mut out.instances),
         id.repo,
         &known_symbols,
         &mut *facts,
@@ -3869,6 +3882,7 @@ pub mod declarations;
 mod grammar;
 pub mod graphql_resolvers;
 pub mod indexeddb;
+mod instances;
 mod local_definitions;
 pub mod next_api;
 pub mod node_http;
