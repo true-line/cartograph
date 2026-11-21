@@ -598,3 +598,153 @@ fn a_go_main_package_is_a_start_by_kind() {
         .collect();
     assert_eq!(entries.len(), 3, "{entries:?}");
 }
+
+/// AC-0966: Java mains, listeners, `@Scheduled` methods and runners are
+/// starts by kind, proven by imports; test sources start nothing.
+#[test]
+fn java_mains_listeners_schedules_and_runners_are_starts() {
+    let app = "src/main/java/com/acme/App.java";
+    let symbols = BTreeSet::from([
+        format!("sym:{REPO}@{app}#App.main(String[])"),
+        format!("sym:{REPO}@src/main/java/com/acme/Orders.java#Orders.onOrder(String)"),
+    ]);
+    let out = extract_with(
+        &[
+            (
+                app,
+                "package com.acme;\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\npublic class App {\n    public static void main(String[] args) {\n        SpringApplication.run(App.class, args);\n    }\n}\n",
+            ),
+            (
+                "src/main/java/com/acme/web/Hello.java",
+                "package com.acme.web;\nimport org.springframework.web.bind.annotation.*;\n@RestController\nclass Hello {}\n",
+            ),
+            (
+                "src/main/java/com/acme/Orders.java",
+                "package com.acme;\nimport org.springframework.kafka.annotation.KafkaListener;\nimport org.springframework.amqp.rabbit.annotation.*;\nclass Orders {\n    @KafkaListener(topics = {\"orders\", \"refunds\"}, groupId = \"g\")\n    void onOrder(String m) {}\n    @RabbitListener(queues = \"mail\")\n    void onMail(String m) {}\n    @JmsListener(destination = \"q\")\n    void notProven(String m) {}\n}\n",
+            ),
+            (
+                "src/main/java/com/acme/Jobs.java",
+                "package com.acme;\nimport org.springframework.scheduling.annotation.Scheduled;\nimport org.springframework.boot.CommandLineRunner;\nimport org.springframework.boot.ApplicationRunner;\nimport org.springframework.context.annotation.Bean;\nclass Jobs implements CommandLineRunner {\n    @Scheduled(cron = \"0 0 * * * *\")\n    void purge() {}\n    public void run(String... args) {}\n    @Bean\n    ApplicationRunner seed() { return a -> {}; }\n}\n",
+            ),
+            (
+                "tools/Migrate.java",
+                "public class Migrate {\n    public static void main(final String... args) {}\n    static void main(int x) {}\n}\n",
+            ),
+            (
+                "src/main/java/com/acme/Old.java",
+                "class Old {\n    public static void main(String args[]) {}\n    public void main(String[] args) {}\n}\n",
+            ),
+            (
+                "src/test/java/com/acme/AppTest.java",
+                "class AppTest { public static void main(String[] a) {} }\n",
+            ),
+        ],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let main = entry(&out, app, "App.main");
+    assert_eq!(main.props["kind"], "http-server");
+    assert_eq!(main.props["how"], "public static void main");
+    assert_eq!(
+        main.props["kind_evidence"],
+        "src/main/java/com/acme/web/Hello.java"
+    );
+    assert_eq!(
+        entry_edge(&out, app, "App.main").dst,
+        format!("sym:{REPO}@{app}#App.main(String[])")
+    );
+    let orders = "src/main/java/com/acme/Orders.java";
+    let kafka = entry(&out, orders, "Orders.onOrder");
+    assert_eq!(kafka.props["kind"], "queue-consumer");
+    assert_eq!(kafka.props["how"], "@KafkaListener");
+    assert_eq!(
+        kafka.props["sources"],
+        serde_json::json!(["orders", "refunds"])
+    );
+    assert_eq!(
+        kafka.props["name"],
+        format!("Queue messages ({orders}: Orders.onOrder)")
+    );
+    assert_eq!(
+        entry_edge(&out, orders, "Orders.onOrder").dst,
+        format!("sym:{REPO}@{orders}#Orders.onOrder(String)")
+    );
+    // Not emitted by the adapter: the start enters the file.
+    assert_eq!(
+        entry_edge(&out, orders, "Orders.onMail").dst,
+        format!("file:{REPO}@{orders}")
+    );
+    let jobs = "src/main/java/com/acme/Jobs.java";
+    let purge = entry(&out, jobs, "Jobs.purge");
+    assert_eq!(purge.props["kind"], "scheduled-job");
+    assert_eq!(purge.props["schedule"], "cron = \"0 0 * * * *\"");
+    assert_eq!(
+        entry(&out, jobs, "Jobs.run").props["how"],
+        "CommandLineRunner"
+    );
+    assert_eq!(entry(&out, jobs, "Jobs.seed").props["kind"], "startup-task");
+    assert_eq!(
+        entry(&out, "tools/Migrate.java", "Migrate.main").props["kind"],
+        "command"
+    );
+    assert_eq!(
+        entry(&out, "src/main/java/com/acme/Old.java", "Old.main").props["kind"],
+        "process"
+    );
+    let entries: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 8, "{entries:?}");
+}
+
+/// AC-0966: a Spring Boot main with no Spring web endpoint is a process.
+#[test]
+fn a_spring_main_without_web_endpoints_is_a_process() {
+    let out = extract(&[(
+        "src/main/java/Batch.java",
+        "import org.springframework.boot.*;\npublic class Batch {\n    public static void main(String[] args) { var app = new SpringApplication(Batch.class); app.run(args); }\n}\n",
+    )]);
+    let batch = entry(&out, "src/main/java/Batch.java", "Batch.main");
+    assert_eq!(batch.props["kind"], "process");
+    assert!(batch.props.get("kind_evidence").is_none());
+    // `new SpringApplication(…)` runs it as well, so with an endpoint it serves.
+    let source = "import org.springframework.boot.*;\npublic class Batch {\n    public static void main(String[] args) { var app = new SpringApplication(Batch.class); app.run(args); }\n}\n";
+    let web = "import org.springframework.web.bind.annotation.GetMapping;\nclass Api {}\n";
+    let out = extract(&[
+        ("src/main/java/Batch.java", source),
+        ("src/main/java/Api.java", web),
+    ]);
+    assert_eq!(
+        entry(&out, "src/main/java/Batch.java", "Batch.main").props["kind"],
+        "http-server"
+    );
+}
+
+/// AC-0966: overloaded entry methods are told apart by their signature, a
+/// runner's other `run` overloads start nothing, and an `it` package is
+/// production source.
+#[test]
+fn java_overloads_have_their_own_entries_and_it_packages_are_read() {
+    let file = "src/main/java/it/acme/Inbox.java";
+    let symbols = BTreeSet::from([format!("sym:{REPO}@{file}#Inbox.onMessage(byte[])")]);
+    let out = extract_with(
+        &[(
+            file,
+            "package it.acme;\nimport org.springframework.jms.annotation.JmsListener;\nimport org.springframework.boot.CommandLineRunner;\nclass Inbox implements CommandLineRunner {\n    @JmsListener(destination = \"a\")\n    void onMessage(String m) {}\n    @JmsListener(destination = \"b\")\n    void onMessage(byte[] m) {}\n    public void run(String[] args) {}\n    void run(int times) {}\n}\n",
+        )],
+        &symbols,
+        &BTreeSet::new(),
+    );
+    let text = entry(&out, file, "Inbox.onMessage(String)");
+    assert_eq!(text.props["handler"], "Inbox.onMessage(String)");
+    assert_eq!(
+        entry_edge(&out, file, "Inbox.onMessage(byte[])").dst,
+        format!("sym:{REPO}@{file}#Inbox.onMessage(byte[])")
+    );
+    assert_eq!(entry(&out, file, "Inbox.run").props["kind"], "startup-task");
+    let entries = out.nodes.iter().filter(|n| n.label == "EntryPoint").count();
+    assert_eq!(entries, 3, "{:#?}", out.nodes);
+}

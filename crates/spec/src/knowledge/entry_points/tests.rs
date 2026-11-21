@@ -277,3 +277,39 @@ fn a_scripts_subcommands_are_one_capability() {
             "entry:repo@hq/main.mjs#status".to_string()
         ])));
 }
+
+// AC-0966: a Java class's `@Scheduled` methods are one scheduled-jobs
+// capability, and a startup runner is titled by its class in words.
+#[test]
+fn java_scheduled_methods_are_one_capability_and_runners_run_at_startup() {
+    let mut base = snapshot();
+    let jobs = "src/main/java/com/acme/ReportJobs.java";
+    let loader = "src/main/java/com/acme/DataLoader.java";
+    for (path, key, kind, how) in [
+        (jobs, "ReportJobs.purge", "scheduled-job", "@Scheduled"),
+        (jobs, "ReportJobs.mail", "scheduled-job", "@Scheduled"),
+        (
+            loader,
+            "DataLoader.run",
+            "startup-task",
+            "CommandLineRunner",
+        ),
+    ] {
+        let (node, edge) = entry(path, key, kind, how, &format!("file:{REPO}@{path}"));
+        base.graph.0.push(node);
+        base.graph.1.push(edge);
+    }
+    base.graph.0.extend([file(jobs), file(loader)]);
+    let caps = capabilities(&derive_entry_point_capabilities(&base));
+    let scheduled = caps
+        .iter()
+        .find(|(_, ids)| ids.contains(&format!("entry:{REPO}@{jobs}#ReportJobs.purge")))
+        .unwrap_or_else(|| panic!("{caps:#?}"));
+    assert!(scheduled.0.starts_with("Run scheduled jobs"), "{caps:#?}");
+    assert_eq!(scheduled.1.len(), 2);
+    assert!(
+        caps.get("Run data loader at startup")
+            .is_some_and(|ids| ids.contains(&format!("entry:{REPO}@{loader}#DataLoader.run"))),
+        "{caps:#?}"
+    );
+}

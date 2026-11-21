@@ -11,7 +11,8 @@
 //!
 //! Operator commands are grouped by the directory, or the manifest or
 //! script that declares them (a Node script's subcommands are one group); every other process start is a capability of its own;
-//! the jobs of one schedule file are one capability. The title restates the
+//! the jobs of one schedule file, and a Java class's `@Scheduled` methods,
+//! are one capability. The title restates the
 //! kind the reader recorded and the file's name, never what the code does
 //! beyond it.
 use super::*;
@@ -33,6 +34,23 @@ fn stem_words(path: &str) -> String {
     } else {
         stem
     };
+    // A Java class file names its class in CamelCase: `DataLoader` reads
+    // `data loader`.
+    if path.ends_with(".java") {
+        let mut words = String::new();
+        let chars: Vec<char> = stem.chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            let boundary = i > 0
+                && c.is_uppercase()
+                && (chars[i - 1].is_lowercase()
+                    || chars.get(i + 1).is_some_and(|n| n.is_lowercase()));
+            if boundary {
+                words.push(' ');
+            }
+            words.extend(c.to_lowercase());
+        }
+        return words.replace(['_', '-'], " ").trim().to_string();
+    }
     stem.replace(['_', '-'], " ").trim().to_string()
 }
 
@@ -44,6 +62,7 @@ fn title(kind: &str, file: &str) -> String {
         "operator-shell" => "Open the operator shell".into(),
         "polling-loop" => format!("Run the {} loop", stem_words(file)),
         "http-server" => "Serve HTTP requests".into(),
+        "startup-task" => format!("Run {} at startup", stem_words(file)),
         _ => format!("Run {}", stem_words(file)),
     }
 }
@@ -105,6 +124,10 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
                         _ => file.rsplit_once('/').map_or("", |(d, _)| d).to_owned(),
                     };
                     ("command".to_owned(), place)
+                } else if kind == "scheduled-job" {
+                    // A Java class's `@Scheduled` methods are one capability,
+                    // as a schedule file's jobs are.
+                    ("schedule".to_owned(), file.to_owned())
                 } else {
                     ("entry".to_owned(), node.id.clone())
                 };
@@ -114,6 +137,11 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
                         place
                     } else {
                         file.to_owned()
+                    };
+                    let kind = if kind == "scheduled-job" {
+                        "schedule"
+                    } else {
+                        kind
                     };
                     (kind.to_owned(), shown, Group::default())
                 });
