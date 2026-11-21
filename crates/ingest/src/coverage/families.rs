@@ -94,13 +94,19 @@ pub const PRODUCERS: &[(&str, &[Family])] = &[
 ];
 
 /// One not-covered entry for each family with no producer for a language
-/// the run detected, in detection order and then family order. The site is
-/// the adapter that read the language, and the count its source files.
-pub(super) fn missing(languages: &[LanguageDetection]) -> Vec<UnsupportedCapability> {
+/// the run detected and whose adapter ran (`ran`, by producer id), in
+/// detection order and then family order. The site is the adapter that read
+/// the language, and the count its source files. A language whose adapter
+/// did not run, as when layer hints exclude it, states nothing here: its
+/// adapter's own row says why it did not run.
+pub(super) fn missing(languages: &[LanguageDetection], ran: &[&str]) -> Vec<UnsupportedCapability> {
     let mut out = Vec::new();
     for detection in languages {
         let (Some(adapter), Some((_, families))) = (
-            detection.adapter.as_deref(),
+            detection
+                .adapter
+                .as_deref()
+                .filter(|adapter| ran.contains(adapter)),
             PRODUCERS
                 .iter()
                 .find(|(language, _)| *language == detection.language),
@@ -246,15 +252,20 @@ mod tests {
     }
 
     // AC-1306: a language with a family missing states it; one with every
-    // family, an unlisted language and an uncovered one state nothing.
+    // family, an unlisted language, an uncovered one and one whose adapter
+    // did not run state nothing.
     #[test]
     fn missing_families_are_named_per_language() {
-        let found = missing(&[
-            detected("Kotlin", 4, Some("t0.adapter-kotlin")),
-            detected("Python", 9, Some("t0.adapter-python")),
-            detected("Vue", 2, Some("t0.adapter-ts")),
-            detected("Ruby", 3, None),
-        ]);
+        let ran = ["t0.adapter-kotlin", "t0.adapter-python", "t0.adapter-ts"];
+        let found = missing(
+            &[
+                detected("Kotlin", 4, Some("t0.adapter-kotlin")),
+                detected("Python", 9, Some("t0.adapter-python")),
+                detected("Vue", 2, Some("t0.adapter-ts")),
+                detected("Ruby", 3, None),
+            ],
+            &ran,
+        );
         assert_eq!(found.len(), 1, "{found:?}");
         let kotlin = &found[0];
         assert_eq!(kotlin.capability, "extractor-not-run:endpoint-auth:Kotlin");
@@ -267,6 +278,14 @@ mod tests {
             "{}",
             kotlin.reason
         );
-        assert!(missing(&[detected("Python", 9, Some("t0.adapter-python"))]).is_empty());
+        assert!(missing(&[detected("Python", 9, Some("t0.adapter-python"))], &ran).is_empty());
+        // An adapter that did not run (layer hints left it out) read nothing.
+        assert!(
+            missing(
+                &[detected("Kotlin", 4, Some("t0.adapter-kotlin"))],
+                &["t0.adapter-python"]
+            )
+            .is_empty()
+        );
     }
 }

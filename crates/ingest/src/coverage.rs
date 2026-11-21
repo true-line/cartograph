@@ -782,7 +782,13 @@ impl RepoCoverage {
                 first_site: format!("{}:{}", finding.path, finding.line),
             });
         }
-        unsupported.extend(families::missing(&report.languages));
+        let ran: Vec<&str> = self
+            .producers
+            .iter()
+            .filter(|producer| producer.state == ProducerState::Ran)
+            .map(|producer| producer.id.as_str())
+            .collect();
+        unsupported.extend(families::missing(&report.languages, &ran));
         unsupported.extend(self.refused_capabilities());
         self.unsupported = unsupported;
         self.refresh_limited();
