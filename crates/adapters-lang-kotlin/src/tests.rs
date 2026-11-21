@@ -6254,6 +6254,320 @@ object Lookalike : Table("lookalike")
     );
 }
 
+// AC-1102: JUnit and kotlin.test functions are TestCases; MockMvc Kotlin
+// DSL, `MockMvcRequestBuilders` and Ktor test client requests in their
+// bodies link to the Spring and Ktor endpoints they reach, with expected
+// statuses. Computed URLs and unserved paths are Gaps; lookalike and
+// shadowed annotations are no tests.
+#[test]
+fn junit_tests_link_mockmvc_and_ktor_requests_to_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/web/OwnerController.kt",
+        r#"package com.shop.web
+
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class OwnerController {
+    @GetMapping("/owners/{id}")
+    fun show(): String = ""
+
+    @GetMapping("/owners/new")
+    fun form(): String = ""
+
+    @PostMapping("/owners")
+    fun create(): String = ""
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/api/Routes.kt",
+        r#"package com.shop.api
+
+import io.ktor.server.routing.*
+
+fun Route.health() {
+    get("/health") { }
+}
+
+fun Application.module() {
+    routing { health() }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/star/Test.kt",
+        r#"package com.shop.star
+
+annotation class Test
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/web/OwnerControllerTest.kt",
+        r#"package com.shop.web
+
+import org.junit.jupiter.api.Test
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.get
+import org.springframework.test.web.servlet.post
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+
+class OwnerControllerTest(private val mockMvc: MockMvc) {
+    @Test
+    fun showsOwner() {
+        val id = 7
+        mockMvc.get("/owners/$id").andExpect { status { isOk() } }
+        mockMvc.get("/owners/{id}", 1).andExpect { status { isNotFound() } }
+    }
+
+    @Test
+    fun formAndCreate() {
+        mockMvc.perform(MockMvcRequestBuilders.get("/owners/new")).andExpect(status().isOk())
+        mockMvc.post("/owners") { param("name", "x") }.andExpect { status { is3xxRedirection() } }
+    }
+
+    @Test
+    fun computedAndMissing() {
+        mockMvc.get(URL)
+        mockMvc.get("/nowhere")
+    }
+
+    fun helper() {
+        mockMvc.get("/owners/new")
+    }
+
+    companion object {
+        const val URL = "/owners/new"
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/api/HealthTest.kt",
+        r#"package com.shop.api
+
+import io.ktor.client.request.get
+import io.ktor.server.testing.testApplication
+import kotlin.test.Test
+
+class HealthTest {
+    @Test
+    fun healthy() = testApplication {
+        client.get("http://localhost/health?x=1")
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/star/StarTest.kt",
+        r#"package com.shop.star
+
+import org.junit.jupiter.api.*
+
+class StarTest {
+    @Test
+    fun shadowed() {}
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/fake/FakeTest.kt",
+        r#"package com.shop.fake
+
+annotation class Test
+
+class FakeTest {
+    @Test
+    fun notATest() {}
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut tests: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "TestCase")
+        .map(|node| node.props["name"].as_str().unwrap())
+        .collect();
+    tests.sort();
+    assert_eq!(
+        tests,
+        [
+            "HealthTest.healthy",
+            "OwnerControllerTest.computedAndMissing",
+            "OwnerControllerTest.formAndCreate",
+            "OwnerControllerTest.showsOwner",
+        ]
+    );
+    let show = "test:local/demo@src/test/kotlin/com/shop/web/OwnerControllerTest.kt#OwnerControllerTest.showsOwner";
+    edge(
+        &out.edges,
+        show,
+        "sym:local/demo@src/test/kotlin/com/shop/web/OwnerControllerTest.kt#OwnerControllerTest.showsOwner",
+        "IMPLEMENTED_BY",
+    );
+    let mut links: Vec<(&str, &str, String)> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS" && edge.dst.starts_with("ep:"))
+        .map(|edge| {
+            (
+                edge.src.rsplit('#').next().unwrap(),
+                edge.dst.as_str(),
+                edge.props["statuses"].to_string(),
+            )
+        })
+        .collect();
+    links.sort();
+    assert_eq!(
+        links,
+        [
+            (
+                "HealthTest.healthy",
+                "ep:local/demo@GET:/health",
+                "[]".to_string()
+            ),
+            (
+                "OwnerControllerTest.formAndCreate",
+                "ep:local/demo@GET:/owners/new",
+                "[200]".to_string()
+            ),
+            (
+                "OwnerControllerTest.formAndCreate",
+                "ep:local/demo@POST:/owners",
+                "[200]".to_string()
+            ),
+            (
+                "OwnerControllerTest.showsOwner",
+                "ep:local/demo@GET:/owners/{id}",
+                "[200,404]".to_string()
+            ),
+        ]
+    );
+    let shown = edge(
+        &out.edges,
+        show,
+        "ep:local/demo@GET:/owners/{id}",
+        "REQUESTS",
+    );
+    assert_eq!(shown.props["link"], "handler_assumed");
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("gap:test-call:"))
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "no recovered endpoint serves this path and method",
+            "test request URL is computed",
+        ]
+    );
+}
+
+/// AC-1102: an aliased JUnit import proves a test; MockK stub and verify
+/// blocks perform nothing; a verb call on a receiver that is not a
+/// declared test client is no request; a product Java type obscures a star
+/// import even when nothing else in the repository waits on Java sources.
+#[test]
+fn junit_aliases_stubs_receivers_and_java_shadows() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/web/OwnerController.kt",
+        r#"package com.shop.web
+
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class OwnerController {
+    @GetMapping("/owners")
+    fun list(): String = ""
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/java/com/shop/star/Test.java",
+        "package com.shop.star;\n\npublic @interface Test {}\n",
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/web/AliasTest.kt",
+        r#"package com.shop.web
+
+import io.mockk.every
+import io.mockk.verify
+import org.junit.jupiter.api.Test as JTest
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.get
+
+class AliasTest {
+    lateinit var mockMvc: MockMvc
+    val cache = mutableMapOf<String, String>()
+
+    @JTest
+    fun aliased() {
+        every { mockMvc.get("/stubbed") } returns null
+        verify { mockMvc.get("/verified") }
+        cache.get("/cached")
+        mockMvc.get("/owners")
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/star/StarTest.kt",
+        r#"package com.shop.star
+
+import org.junit.jupiter.api.*
+
+class StarTest {
+    @Test
+    fun shadowed() {}
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let tests: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "TestCase")
+        .map(|node| node.props["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tests, ["AliasTest.aliased"]);
+    let links: Vec<&str> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REQUESTS")
+        .map(|edge| edge.dst.as_str())
+        .collect();
+    assert_eq!(links, ["ep:local/demo@GET:/owners"]);
+    assert!(
+        !out.nodes.iter().any(|n| n.id.starts_with("gap:test-call:")),
+        "{:?}",
+        out.nodes
+            .iter()
+            .filter(|n| n.id.starts_with("gap:"))
+            .collect::<Vec<_>>()
+    );
+}
+
 // AC-1028: import-proven JPA `@Entity` classes are `jpa` DataEntities with
 // their stored properties as fields (`@Id`, `@Column` names, `@Transient`
 // skipped), named by `@Entity(name)` or the class and tabled by `@Table`;
