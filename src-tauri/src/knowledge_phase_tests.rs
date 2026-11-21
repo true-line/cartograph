@@ -632,24 +632,32 @@ fn a_refused_derived_set_publishes_the_phase_without_it() {
     assert!(!recipe.provider_ran);
 }
 
-// AC-0514: each producer rule version is part of the overlay identity.
+// AC-0514, AC-0978: each producer rule version is part of the overlay
+// identity, and the name has one length however many producers land.
 #[test]
 fn the_recipe_names_every_producer_rule_within_the_name_bound() {
     let name = recipe_name();
-    assert!(name.starts_with(RECIPE));
+    assert!(
+        name.starts_with(&format!("{RECIPE};producers@blake3:")),
+        "{name}"
+    );
     assert_eq!(PRODUCER_RULES.len(), 7);
-    for (rule, version) in PRODUCER_RULES {
-        let short = rule
-            .strip_prefix("knowledge.")
-            .expect("knowledge namespace");
-        assert!(name.contains(&format!(";{short}@{version}")), "{name}");
+    // Every rule's version is in the identity: changing any one changes it.
+    for at in 0..PRODUCER_RULES.len() {
+        let mut moved = PRODUCER_RULES;
+        moved[at].1 = "changed";
+        assert_ne!(recipe_over(&moved), name, "{}", PRODUCER_RULES[at].0);
     }
-    assert!(name.contains(&format!(
-        "entry-point@{}",
-        spec::CAPABILITY_ENTRY_POINT_RULE_VERSION
-    )));
-    // AC-0870: the subsystem rule is part of the identity too.
-    assert!(name.contains(&format!(";subsystems@{}", spec::SUBSYSTEM_RULE_VERSION)));
+    // So is the order.
+    let mut reordered = PRODUCER_RULES;
+    reordered.swap(0, 1);
+    assert_ne!(recipe_over(&reordered), name);
+    // A hundred producers name the same length as seven.
+    let many: Vec<(String, String)> = (0..100)
+        .map(|n| (format!("knowledge.producer-{n}"), "1".to_owned()))
+        .collect();
+    let many: Vec<(&str, &str)> = many.iter().map(|(r, v)| (r.as_str(), v.as_str())).collect();
+    assert_eq!(recipe_over(&many).len(), name.len());
     assert!(format!("{name};{DERIVED_REJECTED}").len() <= MAX_NAME_BYTES);
 }
 
