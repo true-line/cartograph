@@ -141,6 +141,8 @@ pub(crate) struct Section {
 enum Format {
     Markdown,
     Text,
+    /// A declared OpenAPI reference (`.json`): a document with no sections.
+    OpenApi,
 }
 
 impl Format {
@@ -159,6 +161,7 @@ impl Format {
         match self {
             Self::Markdown => "markdown",
             Self::Text => "text",
+            Self::OpenApi => "openapi",
         }
     }
 }
@@ -404,6 +407,7 @@ fn sections(format: Format, text: &str) -> Vec<Section> {
             start: 0,
             end: text.len(),
         }],
+        Format::OpenApi => Vec::new(),
     }
 }
 
@@ -450,117 +454,332 @@ fn hashed(parts: &impl Serialize) -> Vec<u8> {
 /// Every file with a documentation extension is counted as read or as skipped
 /// with one reason. The same tree yields the same facts in the same order.
 pub fn extract_documents(root: &Path, repo: &str, commit: &str) -> std::io::Result<DocumentFacts> {
-    let skip = |name: &str| {
-        let name = name.to_ascii_lowercase();
-        name.starts_with('.')
-            || matches!(
-                name.as_str(),
-                "node_modules" | "target" | "dist" | "build" | "vendor"
-            )
+    let cases = DocumentationCases {
+        documents: true,
+        api_references: &[],
+        decisions: None,
     };
-    let mut facts = DocumentFacts::default();
+    read_documentation(root, repo, commit, &cases).map(|read| read.documents)
+}
+
+/// The role a document plays besides being documentation (ADR-0065
+/// decision 6), stored on the `Document` as `roles`.
+pub const ROLE_API_REFERENCE: &str = "api_reference";
+/// A found decision record (ADR or RFC).
+pub const ROLE_DECISION_RECORD: &str = "decision_record";
+
+/// Which readers one documentation walk serves (ADR-0065 decision 6). The
+/// document reader, the found-decision reader and the declared API
+/// references are cases of one read: each file is found by one walk and its
+/// bytes are read once, under one size bound.
+pub struct DocumentationCases<'a> {
+    /// Emit `Document` and `DocSection` facts and count them.
+    pub documents: bool,
+    /// The repository's declared API reference files, validated by their
+    /// loader. Each is a document with the `api_reference` role, read from
+    /// its validated contents when the walk does not reach it (a dot
+    /// directory, or an OpenAPI `.json` file).
+    pub api_references: &'a [crate::DeclaredApiDoc],
+    /// Read found decision records as `ADR` facts, linking the ids for which
+    /// this answers true.
+    pub decisions: Option<&'a dyn Fn(&str) -> bool>,
+}
+
+/// What one documentation walk read.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct Documentation {
+    /// `Document` and `DocSection` facts, `HAS_SECTION` and `RECORDS` edges.
+    pub documents: DocumentFacts,
+    /// Found decision records.
+    pub decisions: crate::FoundAdrRead,
+}
+
+/// Directories the documentation walk never enters: dot directories and
+/// dependency or compiler output.
+fn walk_skips(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "dist")
+}
+
+/// Whether a file at `rel` sits under build output that holds no documents
+/// of the target's own (`build`, `vendor`). Decision records there are
+/// still read, as they were before the readers were one walk.
+fn under_build_output(rel: &str) -> bool {
+    let mut directories = rel.split('/').collect::<Vec<_>>();
+    directories.pop();
+    directories
+        .iter()
+        .any(|part| matches!(part.to_ascii_lowercase().as_str(), "build" | "vendor"))
+}
+
+/// Read a repository's documentation in one walk and serve each case of
+/// `cases` from it (ADR-0065 decision 6, AC-1600).
+///
+/// A Markdown or plain-text file is a `Document`; a Markdown file under a
+/// decision directory, or named like a decision, is also a found decision
+/// record, and its `Document` carries the `decision_record` role; when the
+/// decision case runs, a `RECORDS` edge joins the two. A declared API
+/// reference is a `Document` with the `api_reference` role. Facts, ids and
+/// counts of each case equal what its reader yielded on its own.
+pub fn read_documentation(
+    root: &Path,
+    repo: &str,
+    commit: &str,
+    cases: &DocumentationCases<'_>,
+) -> std::io::Result<Documentation> {
+    let mut read = Documentation::default();
+    let declared: BTreeMap<&str, &crate::DeclaredApiDoc> = cases
+        .api_references
+        .iter()
+        .map(|doc| (doc.path.as_str(), doc))
+        .collect();
+    // Declared references the walk counted, read or not.
+    let mut walked = BTreeSet::new();
     let skipped = |facts: &mut DocumentFacts, reason: DocumentSkip| {
         *facts.counts.skipped.entry(reason.code()).or_default() += 1;
     };
-    for file in source_walk::files(root, &skip, source_walk::Gitignores::Honor)? {
-        let Some(format) = Format::of(&file.name) else {
-            continue;
-        };
-        facts.counts.found += 1;
-        if facts.counts.read as usize >= MAX_DOCUMENTS_PER_REPO {
-            skipped(&mut facts, DocumentSkip::OverFileLimit);
+    for file in source_walk::files(root, &walk_skips, source_walk::Gitignores::Honor)? {
+        let path = file.rel.as_str();
+        let format =
+            Format::of(&file.name).filter(|_| cases.documents && !under_build_output(path));
+        let decision = crate::adr::is_decision_record(path, &file.name);
+        let decision_case = cases.decisions.filter(|_| decision);
+        if format.is_none() && decision_case.is_none() {
             continue;
         }
+        let mut document = format;
+        if document.is_some() {
+            read.documents.counts.found += 1;
+            if declared.contains_key(path) {
+                walked.insert(path.to_string());
+            }
+            if read.documents.counts.read as usize >= MAX_DOCUMENTS_PER_REPO {
+                skipped(&mut read.documents, DocumentSkip::OverFileLimit);
+                document = None;
+                if decision_case.is_none() {
+                    continue;
+                }
+            }
+        }
+        // One size bound for every case: both readers kept 1 MiB.
         if file.path.metadata()?.len() > MAX_DOCUMENT_BYTES {
-            skipped(&mut facts, DocumentSkip::TooLarge);
+            if document.is_some() {
+                skipped(&mut read.documents, DocumentSkip::TooLarge);
+            }
+            if decision_case.is_some() {
+                crate::adr::skip_found_adr(
+                    &mut read.decisions,
+                    path,
+                    crate::UnreadAdrReason::TooLarge,
+                );
+            }
             continue;
         }
         let Ok(text) = String::from_utf8(std::fs::read(&file.path)?) else {
-            skipped(&mut facts, DocumentSkip::NotUtf8);
+            if document.is_some() {
+                skipped(&mut read.documents, DocumentSkip::NotUtf8);
+            }
+            if decision_case.is_some() {
+                crate::adr::skip_found_adr(
+                    &mut read.decisions,
+                    path,
+                    crate::UnreadAdrReason::NotUtf8,
+                );
+            }
             continue;
         };
-        facts.counts.read += 1;
-        let all = sections(format, &text);
-        if all.len() > MAX_SECTIONS_PER_DOCUMENT {
-            facts.counts.sections_truncated += 1;
+        if let Some(is_candidate) = decision_case {
+            crate::adr::read_found_adr(
+                &mut read.decisions,
+                repo,
+                commit,
+                path,
+                &text,
+                is_candidate,
+            );
         }
-        let found = &all[..all.len().min(MAX_SECTIONS_PER_DOCUMENT)];
-        facts.counts.sections += found.len() as u64;
-        let path = file.rel.as_str();
-        let id = document_id(repo, path);
-        let title = found
-            .iter()
-            .find(|section| section.level == 1 && !section.heading.is_empty())
-            .map_or(file.name.as_str(), |section| section.heading.as_str());
-        facts.nodes.push(Node {
-            id: id.clone(),
-            label: "Document".into(),
-            props: serde_json::json!({
-                "path": path,
-                "format": format.code(),
-                "title": core_redact::redact_text(title).0,
-                "sections": found.len(),
-                "bytes": text.len(),
-                "prov": provenance(
-                    evidence(repo, path, commit, 0, text.len()),
-                    &hashed(&(&id, &text)),
-                ),
-            }),
-        });
-        for (ordinal, section) in found.iter().enumerate() {
-            let section_id = section_id(repo, path, ordinal);
-            let span = evidence(repo, path, commit, section.start, section.end);
-            facts.nodes.push(Node {
-                id: section_id.clone(),
-                label: "DocSection".into(),
-                props: serde_json::json!({
-                    "path": path,
-                    "ordinal": ordinal,
-                    "level": section.level,
-                    "heading": core_redact::redact_text(&section.heading).0,
-                    "prov": provenance(
-                        span.clone(),
-                        &hashed(&(&section_id, &text[section.start..section.end])),
-                    ),
-                }),
-            });
-            facts.edges.push(Edge {
-                src: id.clone(),
-                dst: section_id.clone(),
-                label: "HAS_SECTION".into(),
-                props: serde_json::json!({
-                    "prov": provenance(span, format!("{id} HAS_SECTION {section_id}").as_bytes()),
-                }),
-            });
-        }
-        if format == Format::Markdown {
-            for (reference, link, start, end) in markdown_references(&text) {
-                // The innermost section that holds the reference, decided
-                // before the bound: a reference in a section past it is not
-                // credited to an enclosing section that was kept.
-                let Some(ordinal) = all
-                    .iter()
-                    .rposition(|section| (section.start..section.end).contains(&start))
-                    .filter(|ordinal| *ordinal < found.len())
-                else {
-                    continue;
-                };
-                facts.references.push(DocumentReference {
-                    section: section_id(repo, path, ordinal),
-                    path: path.to_string(),
-                    text: reference,
-                    link,
-                    start,
-                    end,
-                });
+        if let Some(format) = document {
+            let mut roles = Vec::new();
+            if declared.contains_key(path) {
+                roles.push(ROLE_API_REFERENCE);
+            }
+            if decision {
+                roles.push(ROLE_DECISION_RECORD);
+            }
+            push_document(
+                &mut read.documents,
+                repo,
+                commit,
+                path,
+                &file.name,
+                format,
+                &text,
+                &roles,
+            );
+            if decision_case.is_some() {
+                push_records_edge(&mut read.documents, repo, commit, path, text.len());
             }
         }
     }
+    if cases.documents {
+        // A declared reference the walk did not reach is read from the
+        // contents its loader validated, so it is a document too.
+        for (path, doc) in &declared {
+            if walked.contains(*path) {
+                continue;
+            }
+            let lower = path.to_ascii_lowercase();
+            let format = if lower.ends_with(".json") {
+                Format::OpenApi
+            } else {
+                Format::of(path).unwrap_or(Format::Text)
+            };
+            let name = path.rsplit('/').next().unwrap_or(path);
+            read.documents.counts.found += 1;
+            push_document(
+                &mut read.documents,
+                repo,
+                commit,
+                path,
+                name,
+                format,
+                &doc.contents,
+                &[ROLE_API_REFERENCE],
+            );
+        }
+    }
+    let facts = &mut read.documents;
     facts.nodes.sort_by(|left, right| left.id.cmp(&right.id));
     facts.edges.sort_by(|left, right| {
         (&left.src, &left.dst, &left.label).cmp(&(&right.src, &right.dst, &right.label))
     });
-    Ok(facts)
+    // A declared reference read from its contents may sort before a walked
+    // file: references stay in file and offset order.
+    facts
+        .references
+        .sort_by(|left, right| (&left.path, left.start).cmp(&(&right.path, right.start)));
+    crate::adr::finish_found_adrs(&mut read.decisions);
+    Ok(read)
+}
+
+/// The `RECORDS` edge from the document of a found decision record to its
+/// `ADR` fact.
+fn push_records_edge(
+    facts: &mut DocumentFacts,
+    repo: &str,
+    commit: &str,
+    path: &str,
+    bytes: usize,
+) {
+    let id = document_id(repo, path);
+    let adr = format!("adr:{repo}@{path}");
+    facts.edges.push(Edge {
+        src: id.clone(),
+        dst: adr.clone(),
+        label: "RECORDS".into(),
+        props: serde_json::json!({
+            "prov": provenance(
+                evidence(repo, path, commit, 0, bytes),
+                format!("{id} RECORDS {adr}").as_bytes(),
+            ),
+        }),
+    });
+}
+
+/// Add one read file's `Document`, `DocSection` and `HAS_SECTION` facts and
+/// its references.
+#[allow(clippy::too_many_arguments)]
+fn push_document(
+    facts: &mut DocumentFacts,
+    repo: &str,
+    commit: &str,
+    path: &str,
+    name: &str,
+    format: Format,
+    text: &str,
+    roles: &[&str],
+) {
+    facts.counts.read += 1;
+    let all = sections(format, text);
+    if all.len() > MAX_SECTIONS_PER_DOCUMENT {
+        facts.counts.sections_truncated += 1;
+    }
+    let found = &all[..all.len().min(MAX_SECTIONS_PER_DOCUMENT)];
+    facts.counts.sections += found.len() as u64;
+    let id = document_id(repo, path);
+    let title = found
+        .iter()
+        .find(|section| section.level == 1 && !section.heading.is_empty())
+        .map_or(name, |section| section.heading.as_str());
+    let mut props = serde_json::json!({
+        "path": path,
+        "format": format.code(),
+        "title": core_redact::redact_text(title).0,
+        "sections": found.len(),
+        "bytes": text.len(),
+        "prov": provenance(
+            evidence(repo, path, commit, 0, text.len()),
+            &hashed(&(&id, text)),
+        ),
+    });
+    // Present only for a document with a role, so every other document
+    // keeps the fact it had (AC-1600).
+    if !roles.is_empty() {
+        props["roles"] = serde_json::json!(roles);
+    }
+    facts.nodes.push(Node {
+        id: id.clone(),
+        label: "Document".into(),
+        props,
+    });
+    for (ordinal, section) in found.iter().enumerate() {
+        let section_id = section_id(repo, path, ordinal);
+        let span = evidence(repo, path, commit, section.start, section.end);
+        facts.nodes.push(Node {
+            id: section_id.clone(),
+            label: "DocSection".into(),
+            props: serde_json::json!({
+                "path": path,
+                "ordinal": ordinal,
+                "level": section.level,
+                "heading": core_redact::redact_text(&section.heading).0,
+                "prov": provenance(
+                    span.clone(),
+                    &hashed(&(&section_id, &text[section.start..section.end])),
+                ),
+            }),
+        });
+        facts.edges.push(Edge {
+            src: id.clone(),
+            dst: section_id.clone(),
+            label: "HAS_SECTION".into(),
+            props: serde_json::json!({
+                "prov": provenance(span, format!("{id} HAS_SECTION {section_id}").as_bytes()),
+            }),
+        });
+    }
+    if format == Format::Markdown {
+        for (reference, link, start, end) in markdown_references(text) {
+            // The innermost section that holds the reference, decided
+            // before the bound: a reference in a section past it is not
+            // credited to an enclosing section that was kept.
+            let Some(ordinal) = all
+                .iter()
+                .rposition(|section| (section.start..section.end).contains(&start))
+                .filter(|ordinal| *ordinal < found.len())
+            else {
+                continue;
+            };
+            facts.references.push(DocumentReference {
+                section: section_id(repo, path, ordinal),
+                path: path.to_string(),
+                text: reference,
+                link,
+                start,
+                end,
+            });
+        }
+    }
 }
 
 /// Labels a reference is never linked to: findings, and documentation
@@ -1092,3 +1311,7 @@ pub fn documentation_drift(
 #[cfg(test)]
 #[path = "documents_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "documents_cases_tests.rs"]
+mod cases_tests;
