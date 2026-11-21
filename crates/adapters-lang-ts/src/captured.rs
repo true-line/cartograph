@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+mod python;
+pub use python::{admit_after, mint_python_file_receipts};
 mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_RANGES, MintedHeader, MintedReceipt,
@@ -624,10 +626,13 @@ fn extract_captured_dir_packed_with_policy(
         measure_source,
     } = policy;
     receipt::validate_source_repo(&capture.manifest().source_id, id.repo)?;
+    // A capture may also hold the Python lane's files (AC-1023); this walk
+    // reads only the TS/JS selection.
     let paths: Vec<String> = capture
         .manifest()
         .files
         .iter()
+        .filter(|entry| supported(&entry.path))
         .map(|entry| entry.path.clone())
         .collect();
     let mut extraction = Extraction::default();
