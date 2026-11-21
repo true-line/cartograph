@@ -249,7 +249,8 @@ fn records_added_to_the_session_and_query_deletes_are_guarded_effects() {
     // AC-0910 (T-0910, #1998): `Session.add` of an imported class's
     // constructor, directly or through a local assigned before it, is an
     // effect whose value is the constructor; `Model.filter(…).delete()` is
-    // one too. A local not built from an imported class is not.
+    // one too. A local not built from an imported class, reassigned, or
+    // assigned in another block is not.
     let code = r#"
 from app.models import DeletedAlias, DomainDeletedAlias, Alias
 from app.db import Session
@@ -262,6 +263,13 @@ def perform(alias, reason):
         Session.add(DomainDeletedAlias(email=alias.email))
     other = make(alias)
     Session.add(other)
+    item = alias
+    if reason:
+        item = DeletedAlias(email=alias.email)
+    Session.add(item)
+    if reason:
+        late = DeletedAlias(email=alias.email)
+    Session.add(late)
     Alias.filter(Alias.id == alias.id).delete()
     Local.filter(x=1).delete()
 "#;

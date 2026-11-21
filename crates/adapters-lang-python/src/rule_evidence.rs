@@ -1310,9 +1310,12 @@ fn session_added<'t>(
     match argument.kind() {
         "call" => constructs(argument).then_some(argument),
         "identifier" => {
+            // Only the local's one assignment in the function, earlier in the
+            // same block as the statement, so it is the value added on every
+            // path; a reassigned local is withheld.
             let name = cx.text(&argument);
             let function = owner_function(statement)?;
-            let mut found = None;
+            let mut found = Vec::new();
             let mut stack = vec![function];
             while let Some(node) = stack.pop() {
                 if node != function
@@ -1323,20 +1326,32 @@ fn session_added<'t>(
                 {
                     continue;
                 }
-                if node.kind() == "assignment"
-                    && node.end_byte() <= statement.start_byte()
-                    && node
-                        .child_by_field_name("left")
-                        .is_some_and(|l| l.kind() == "identifier" && cx.text(&l) == name)
-                    && let Some(value) = node.child_by_field_name("right")
-                    && found.is_none_or(|(at, _)| at < node.start_byte())
-                {
-                    found = Some((node.start_byte(), constructs(value).then_some(value)));
+                if matches!(
+                    node.kind(),
+                    "assignment" | "augmented_assignment" | "for_statement"
+                ) && node.child_by_field_name("left").is_some_and(|left| {
+                    cx.text(&left)
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|word| word == name)
+                }) {
+                    found.push(node);
                 }
                 let mut cursor = node.walk();
                 stack.extend(node.named_children(&mut cursor));
             }
-            found.and_then(|(_, value)| value)
+            let [assignment] = found[..] else {
+                return None;
+            };
+            let same_block = assignment.parent().and_then(|p| p.parent()) == statement.parent();
+            let value = assignment.child_by_field_name("right")?;
+            (assignment.kind() == "assignment"
+                && assignment
+                    .child_by_field_name("left")
+                    .is_some_and(|left| left.kind() == "identifier")
+                && assignment.end_byte() <= statement.start_byte()
+                && same_block
+                && constructs(value))
+            .then_some(value)
         }
         _ => None,
     }
