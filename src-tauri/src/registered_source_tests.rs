@@ -1618,8 +1618,9 @@ fn extraction_facts_are_independent_of_checkout_location() {
             "{extractor} produced no facts"
         );
     }
-    let module = format!("res:{repo}@module.m");
-    let child = format!("res:{repo}@module.m.aws_sns_topic.t");
+    // Root module `infra/` scopes the ids (ADR-0077).
+    let module = format!("res:{repo}@infra/module.m");
+    let child = format!("res:{repo}@infra/module.m.aws_sns_topic.t");
     assert!(first_facts.0.iter().any(|node| node.id == child));
     assert!(
         first_facts
