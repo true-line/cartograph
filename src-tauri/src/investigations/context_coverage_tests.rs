@@ -698,10 +698,12 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         let qualified = prepared.qualified.as_ref().unwrap();
         assert!(qualified.shares_snapshot(&prepared.snapshot));
         assert_eq!(Arc::strong_count(&prepared.snapshot), 2);
-        assert_eq!(before.constructions, 2 * after.constructions);
-        assert_eq!(before.nodes, 2 * after.nodes);
-        assert_eq!(before.edges, 2 * after.edges);
+        // `All` halves the full-read work; a neighborhood (AC-1301) builds only
+        // its scope's projection, its complete identity streamed instead.
         let expected = if matches!(scope, InvestigationScope::All) {
+            assert_eq!(before.constructions, 2 * after.constructions);
+            assert_eq!(before.nodes, 2 * after.nodes);
+            assert_eq!(before.edges, 2 * after.edges);
             ProjectionWork {
                 constructions: 1,
                 nodes: 128,
@@ -709,9 +711,9 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
             }
         } else {
             ProjectionWork {
-                constructions: 2,
-                nodes: 130,
-                edges: 128,
+                constructions: 1,
+                nodes: 2,
+                edges: 1,
             }
         };
         assert_eq!(after, expected);
@@ -735,6 +737,15 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
             "{scope:?}: projection constructor work {before:?} -> {after:?}; distinct retained scoped projections 2 -> 1; immutable handles 2 (not allocator-byte measurement)"
         );
     }
+}
+
+fn expected_nodes(graph: &(Vec<Node>, Vec<Edge>)) -> Vec<Node> {
+    graph
+        .0
+        .iter()
+        .filter(|n| n.id != "mod:2")
+        .cloned()
+        .collect()
 }
 
 // AC-0328: scope preparation selects references, not public response pages.
@@ -792,7 +803,8 @@ fn qualified_neighborhood_preparation_keeps_large_facts_without_response_pages()
         };
         let prepared = fixture.prepare(&requested).unwrap();
         assert_eq!(prepared.snapshot.id(), expected.id());
-        assert_eq!(prepared.graph, graph);
+        // AC-1301: only the neighborhood is retained.
+        assert_eq!(prepared.graph, (expected_nodes(&graph), graph.1.clone()));
         assert!(
             prepared
                 .qualified
@@ -1153,4 +1165,155 @@ fn a_query_cannot_name_an_area() {
         serde_json::to_value(InvestigationScope::Area { id: "a".into() }).unwrap(),
         json!({"type":"area","id":"a"})
     );
+}
+
+/// The complete-graph preparation of `requested` over the fixture's whole
+/// graph, as the context the scope-aware path must equal (#1602).
+fn complete_graph_context(
+    fixture: &Fixture,
+    requested: &StartInvestigationRequest,
+) -> FrozenContext {
+    let base = fixture
+        .state
+        .graph
+        .lock()
+        .unwrap()
+        .read_snapshot_with_revision_bounded(SnapshotReadLimits::investigation())
+        .unwrap();
+    let area = super::super::area::files(&fixture.state, &base.revision, &requested.scope).unwrap();
+    FrozenContext::from_graph_in(base.graph, requested, &[], area.as_ref()).unwrap()
+}
+
+// AC-1301 (#1602): a neighborhood or area task reads only its scope, and keeps exactly
+// the complete-graph identity and scope identity the whole-graph read gave, for
+// qualified and unqualified roles.
+#[test]
+fn scoped_preparation_keeps_both_identities_and_retains_only_the_scope() {
+    let (fixture, area) = area_fixture();
+    let scopes = [
+        InvestigationScope::Area { id: area },
+        InvestigationScope::Neighborhood {
+            anchor: "sym:alias".into(),
+            hops: 1,
+        },
+    ];
+    for scope in scopes {
+        let mut qualified = request();
+        qualified.scope = scope.clone();
+        let mut legacy = request();
+        legacy.schema_version = 1;
+        legacy.specialist_id = SpecialistId::DomainAnalystV1;
+        legacy.scope = scope.clone();
+        for (prepared, requested) in [
+            (fixture.prepare(&qualified).unwrap(), &qualified),
+            (
+                FrozenContext::prepare(&fixture.state, &legacy, &[]).unwrap(),
+                &legacy,
+            ),
+        ] {
+            let complete = complete_graph_context(&fixture, requested);
+            assert_eq!(
+                prepared.ledger.graph_snapshot_id, complete.ledger.graph_snapshot_id,
+                "{scope:?}"
+            );
+            assert_eq!(
+                prepared.ledger.scope_snapshot_id, complete.ledger.scope_snapshot_id,
+                "{scope:?}"
+            );
+            assert!(prepared.scoped_revision.is_some());
+            // Only the scope is retained, never the rest of the graph.
+            let retained = prepared.graph.0.len() + prepared.graph.1.len();
+            assert_eq!(
+                retained,
+                prepared
+                    .snapshot
+                    .references_in_scope(QueryScope::All)
+                    .unwrap()
+                    .len()
+            );
+            assert!(retained < complete.graph.0.len() + complete.graph.1.len());
+            assert!(!prepared.graph.0.iter().any(|node| node.id == "mod:0"));
+        }
+    }
+    // `All` still freezes the complete graph.
+    let all = fixture.prepare(&request()).unwrap();
+    assert!(all.scoped_revision.is_none());
+}
+
+// AC-1301 (#1602): preparation cost tracks the scope, not the estate. Under retained
+// limits the whole graph exceeds, a neighborhood task still prepares (the identity
+// pass streams one row at a time under the ADR-0052 ceilings), while an `All` task
+// stops at the limit as before.
+#[test]
+fn a_scope_prepares_under_limits_the_whole_graph_exceeds() {
+    let (fixture, _) = area_fixture();
+    for index in 0..60 {
+        fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .put_node(&Node {
+                id: format!("pad:{index:03}"),
+                label: "Module".into(),
+                props: json!({"name": index}),
+            })
+            .unwrap();
+    }
+    let retained = SnapshotReadLimits {
+        max_rows: 40,
+        ..SnapshotReadLimits::default()
+    };
+    let mut legacy = request();
+    legacy.schema_version = 1;
+    legacy.specialist_id = SpecialistId::DomainAnalystV1;
+    assert!(matches!(
+        FrozenContext::prepare_bounded(&fixture.state, &legacy, &[], retained),
+        Err(HostError::LimitExceeded)
+    ));
+    legacy.scope = InvestigationScope::Neighborhood {
+        anchor: "sym:alias".into(),
+        hops: 1,
+    };
+    let prepared = FrozenContext::prepare_bounded(&fixture.state, &legacy, &[], retained).unwrap();
+    assert_eq!(
+        prepared.ledger.graph_snapshot_id,
+        complete_graph_context(&fixture, &legacy)
+            .ledger
+            .graph_snapshot_id
+    );
+    assert_eq!(prepared.graph.0.len(), 3);
+}
+
+// AC-1302 (#1602): a scope-aware context rereads only the selected facts, at the
+// revision it pinned; once the store has moved on, selection is a changed input.
+#[test]
+fn scoped_selection_rereads_selected_facts_at_the_pinned_revision() {
+    let (fixture, _) = area_fixture();
+    let mut requested = request();
+    requested.scope = InvestigationScope::Neighborhood {
+        anchor: "sym:alias".into(),
+        hops: 1,
+    };
+    let prepared = fixture.prepare(&requested).unwrap();
+    let keys = [FactKey::Node {
+        id: "sym:alias".into(),
+    }];
+    let selected = prepared.select(&fixture.state, &keys).unwrap();
+    assert_eq!(selected.len(), 1);
+    fixture
+        .state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "mod:later".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert!(matches!(
+        prepared.select(&fixture.state, &keys),
+        Err(HostError::InputChanged)
+    ));
 }
