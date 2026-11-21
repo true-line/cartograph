@@ -615,3 +615,68 @@ fn legacy_uses_typed_citation_correction(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV28
     )
 }
+
+// ADR-0071 slice (b): the offered set is unchanged from the hand-kept desktop
+// catalog it replaces; only its order now follows the table.
+#[test]
+fn offered_set_matches_the_pre_table_desktop_catalog() {
+    let mut before = vec![
+        S::DomainAnalystV3,
+        S::EvidenceAuditorV3,
+        S::DomainAnalystV4,
+        S::EvidenceAuditorV4,
+        S::DomainAnalystV5,
+        S::EvidenceAuditorV5,
+        S::DomainAnalystV6,
+        S::EvidenceAuditorV6,
+        S::DomainAnalystV7,
+        S::EvidenceAuditorV7,
+        S::SpecWriterV1,
+        S::SpecWriterV2,
+        S::GapTriagerV1,
+        S::GapTriagerV2,
+        S::SectionWriterV1,
+    ];
+    if crate::investigation::InvestigationPolicy::for_profile("investigation-v2").is_some() {
+        before.extend([
+            S::DomainAnalystV10,
+            S::EvidenceAuditorV10,
+            S::DomainAnalystV11,
+            S::DomainAnalystV12,
+            S::EvidenceAuditorV11,
+            S::EvidenceAuditorV12,
+            S::EvidenceAuditorV13,
+            S::EvidenceAuditorV14,
+            S::DomainAnalystV18,
+            S::DomainAnalystV19,
+            S::DomainAnalystV20,
+            S::DomainAnalystV21,
+            S::DomainAnalystV22,
+            S::DomainAnalystV23,
+            S::DomainAnalystV27,
+            S::DomainAnalystV28,
+        ]);
+    }
+    let offered = offered_specialists();
+    assert_eq!(offered.len(), before.len());
+    for id in before {
+        assert!(offered.contains(&id), "{id:?}");
+    }
+}
+
+#[test]
+fn each_role_has_exactly_one_current_version_and_it_is_the_newest() {
+    for role in SpecialistRole::ALL {
+        let rows: Vec<_> = SPECIALIST_TABLE
+            .iter()
+            .filter(|row| row.role == role)
+            .collect();
+        let current: Vec<_> = rows
+            .iter()
+            .filter(|row| row.availability == Availability::Current)
+            .collect();
+        assert_eq!(current.len(), 1, "{role:?}");
+        let newest = rows.iter().map(|row| row.version).max().unwrap();
+        assert_eq!(current[0].version, newest, "{role:?}");
+    }
+}

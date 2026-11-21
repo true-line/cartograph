@@ -96,12 +96,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
     let specialist: SpecialistId =
         serde_json::from_value(serde_json::Value::String(request.specialist_id.clone()))
             .map_err(|error| rejected("invalid_input", error))?;
-    if !available_specialists().contains(&specialist) {
-        return Err(rejected(
-            "invalid_input",
-            "This specialist version is not available.",
-        ));
-    }
+    offered_for_start(specialist)?;
     // A drafting run names one drafted catalogue section (SPEC-15 slice 6).
     // An outside agent starts one over MCP under the same check (ADR-0066).
     super::super::section_drafts::validate_start(&request.specialist_id, &request.question)

@@ -155,6 +155,21 @@ impl CapabilitySet {
     }
 }
 
+/// Whether a new start may use a specialist version (ADR-0071 decision 1).
+///
+/// Every version still decodes, so a stored run made with any of them reopens;
+/// availability only decides which versions the catalog offers for new work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Availability {
+    /// The role's current version: the one a role-based start uses.
+    Current,
+    /// Still offered for a new start, as an explicit version choice.
+    Offered,
+    /// Kept only so stored runs reopen; no new start may use it.
+    Retired,
+}
+
 /// One row of the specialist capability table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpecialistRow {
@@ -166,6 +181,8 @@ pub struct SpecialistRow {
     pub version: u32,
     /// The private prompt protocol generation; independent of the role version.
     pub prompt_generation: u32,
+    /// Whether a new start may use this version.
+    pub availability: Availability,
     /// The protocol behaviours this version opts into.
     pub capabilities: CapabilitySet,
 }
@@ -175,6 +192,7 @@ const fn row(
     role: SpecialistRole,
     version: u32,
     prompt_generation: u32,
+    availability: Availability,
     capabilities: &[Capability],
 ) -> SpecialistRow {
     SpecialistRow {
@@ -182,64 +200,66 @@ const fn row(
         role,
         version,
         prompt_generation,
+        availability,
         capabilities: CapabilitySet::of(capabilities),
     }
 }
 
+use Availability as A;
 use Capability as C;
 use SpecialistId as S;
 use SpecialistRole as R;
 
 /// Every built-in specialist version, in `SpecialistId` declaration order:
-/// id, role, role version, prompt generation, capabilities.
+/// id, role, role version, prompt generation, availability, capabilities.
 #[rustfmt::skip]
 pub const SPECIALIST_TABLE: [SpecialistRow; 46] = [
-    row(S::DomainAnalystV1, R::DomainAnalyst, 1, 1, &[]),
-    row(S::EvidenceAuditorV1, R::EvidenceAuditor, 1, 1, &[]),
-    row(S::DomainAnalyst, R::DomainAnalyst, 2, 2, &[]),
-    row(S::EvidenceAuditor, R::EvidenceAuditor, 2, 2, &[]),
-    row(S::DomainAnalystV3, R::DomainAnalyst, 3, 3, &[C::CompactDisclosure]),
-    row(S::EvidenceAuditorV3, R::EvidenceAuditor, 3, 3, &[C::CompactDisclosure]),
-    row(S::DomainAnalystV4, R::DomainAnalyst, 4, 4, &[C::CompactDisclosure, C::TurnProgress]),
-    row(S::EvidenceAuditorV4, R::EvidenceAuditor, 4, 4, &[C::CompactDisclosure, C::TurnProgress]),
-    row(S::DomainAnalystV5, R::DomainAnalyst, 5, 5, &[C::CompactDisclosure, C::TurnProgress, C::InspectionRequirements]),
-    row(S::EvidenceAuditorV5, R::EvidenceAuditor, 5, 5, &[C::CompactDisclosure, C::TurnProgress, C::InspectionRequirements]),
-    row(S::DomainAnalystV6, R::DomainAnalyst, 6, 6, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification]),
-    row(S::EvidenceAuditorV6, R::EvidenceAuditor, 6, 6, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification]),
-    row(S::DomainAnalystV7, R::DomainAnalyst, 7, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
-    row(S::EvidenceAuditorV7, R::EvidenceAuditor, 7, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
-    row(S::DomainAnalystV8, R::DomainAnalyst, 8, 8, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection]),
-    row(S::EvidenceAuditorV8, R::EvidenceAuditor, 8, 8, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection]),
-    row(S::DomainAnalystV9, R::DomainAnalyst, 9, 9, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure]),
-    row(S::EvidenceAuditorV9, R::EvidenceAuditor, 9, 9, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure]),
-    row(S::DomainAnalystV10, R::DomainAnalyst, 10, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::EvidenceAuditorV10, R::EvidenceAuditor, 10, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::DomainAnalystV11, R::DomainAnalyst, 11, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::DomainAnalystV12, R::DomainAnalyst, 12, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::DomainAnalystV13, R::DomainAnalyst, 13, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::DomainAnalystV14, R::DomainAnalyst, 14, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::DomainAnalystV15, R::DomainAnalyst, 15, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::DomainAnalystV17, R::DomainAnalyst, 17, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::ExactNodeQueries]),
-    row(S::DomainAnalystV18, R::DomainAnalyst, 18, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries]),
-    row(S::DomainAnalystV19, R::DomainAnalyst, 19, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries]),
-    row(S::DomainAnalystV20, R::DomainAnalyst, 20, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV21, R::DomainAnalyst, 21, 11, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV22, R::DomainAnalyst, 22, 12, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV23, R::DomainAnalyst, 23, 13, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV24, R::DomainAnalyst, 24, 14, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV25, R::DomainAnalyst, 25, 14, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV26, R::DomainAnalyst, 26, 14, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV27, R::DomainAnalyst, 27, 14, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::DomainAnalystV28, R::DomainAnalyst, 28, 14, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::EvidenceAuditorV11, R::EvidenceAuditor, 11, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
-    row(S::EvidenceAuditorV12, R::EvidenceAuditor, 12, 10, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries]),
-    row(S::EvidenceAuditorV13, R::EvidenceAuditor, 13, 12, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::EvidenceAuditorV14, R::EvidenceAuditor, 14, 13, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
-    row(S::SpecWriterV1, R::SpecWriter, 1, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
-    row(S::SpecWriterV2, R::SpecWriter, 2, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::CitedNarrative]),
-    row(S::GapTriagerV1, R::GapTriager, 1, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
-    row(S::GapTriagerV2, R::GapTriager, 2, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::CitedNarrative]),
-    row(S::SectionWriterV1, R::SectionWriter, 1, 7, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
+    row(S::DomainAnalystV1, R::DomainAnalyst, 1, 1, A::Retired, &[]),
+    row(S::EvidenceAuditorV1, R::EvidenceAuditor, 1, 1, A::Retired, &[]),
+    row(S::DomainAnalyst, R::DomainAnalyst, 2, 2, A::Retired, &[]),
+    row(S::EvidenceAuditor, R::EvidenceAuditor, 2, 2, A::Retired, &[]),
+    row(S::DomainAnalystV3, R::DomainAnalyst, 3, 3, A::Offered, &[C::CompactDisclosure]),
+    row(S::EvidenceAuditorV3, R::EvidenceAuditor, 3, 3, A::Offered, &[C::CompactDisclosure]),
+    row(S::DomainAnalystV4, R::DomainAnalyst, 4, 4, A::Offered, &[C::CompactDisclosure, C::TurnProgress]),
+    row(S::EvidenceAuditorV4, R::EvidenceAuditor, 4, 4, A::Offered, &[C::CompactDisclosure, C::TurnProgress]),
+    row(S::DomainAnalystV5, R::DomainAnalyst, 5, 5, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::InspectionRequirements]),
+    row(S::EvidenceAuditorV5, R::EvidenceAuditor, 5, 5, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::InspectionRequirements]),
+    row(S::DomainAnalystV6, R::DomainAnalyst, 6, 6, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification]),
+    row(S::EvidenceAuditorV6, R::EvidenceAuditor, 6, 6, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification]),
+    row(S::DomainAnalystV7, R::DomainAnalyst, 7, 7, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
+    row(S::EvidenceAuditorV7, R::EvidenceAuditor, 7, 7, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
+    row(S::DomainAnalystV8, R::DomainAnalyst, 8, 8, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection]),
+    row(S::EvidenceAuditorV8, R::EvidenceAuditor, 8, 8, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection]),
+    row(S::DomainAnalystV9, R::DomainAnalyst, 9, 9, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure]),
+    row(S::EvidenceAuditorV9, R::EvidenceAuditor, 9, 9, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure]),
+    row(S::DomainAnalystV10, R::DomainAnalyst, 10, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::EvidenceAuditorV10, R::EvidenceAuditor, 10, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::DomainAnalystV11, R::DomainAnalyst, 11, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::DomainAnalystV12, R::DomainAnalyst, 12, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::DomainAnalystV13, R::DomainAnalyst, 13, 10, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::DomainAnalystV14, R::DomainAnalyst, 14, 10, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::DomainAnalystV15, R::DomainAnalyst, 15, 10, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::DomainAnalystV17, R::DomainAnalyst, 17, 10, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::ExactNodeQueries]),
+    row(S::DomainAnalystV18, R::DomainAnalyst, 18, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries]),
+    row(S::DomainAnalystV19, R::DomainAnalyst, 19, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries]),
+    row(S::DomainAnalystV20, R::DomainAnalyst, 20, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV21, R::DomainAnalyst, 21, 11, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV22, R::DomainAnalyst, 22, 12, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV23, R::DomainAnalyst, 23, 13, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV24, R::DomainAnalyst, 24, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV25, R::DomainAnalyst, 25, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV26, R::DomainAnalyst, 26, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV27, R::DomainAnalyst, 27, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::DomainAnalystV28, R::DomainAnalyst, 28, 14, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::EvidenceAuditorV11, R::EvidenceAuditor, 11, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
+    row(S::EvidenceAuditorV12, R::EvidenceAuditor, 12, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries]),
+    row(S::EvidenceAuditorV13, R::EvidenceAuditor, 13, 12, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::EvidenceAuditorV14, R::EvidenceAuditor, 14, 13, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
+    row(S::SpecWriterV1, R::SpecWriter, 1, 7, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
+    row(S::SpecWriterV2, R::SpecWriter, 2, 7, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::CitedNarrative]),
+    row(S::GapTriagerV1, R::GapTriager, 1, 7, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
+    row(S::GapTriagerV2, R::GapTriager, 2, 7, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::CitedNarrative]),
+    row(S::SectionWriterV1, R::SectionWriter, 1, 7, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations]),
 ];
 
 impl SpecialistId {
@@ -263,10 +283,35 @@ impl SpecialistId {
         self.row().capabilities
     }
 
+    /// Whether a new start may use this version.
+    pub fn availability(self) -> Availability {
+        self.row().availability
+    }
+
     /// Whether this version opts into `capability`.
     pub fn has(self, capability: Capability) -> bool {
         self.row().capabilities.contains(capability)
     }
+}
+
+/// The versions a new start may use, in table order. Versions that select an
+/// investigation policy are offered only while `investigation-v2` is
+/// registered. Every start path checks this list (ADR-0071 decision 2).
+pub fn offered_specialists() -> Vec<SpecialistId> {
+    let expanded = super::InvestigationPolicy::for_profile("investigation-v2").is_some();
+    SPECIALIST_TABLE
+        .iter()
+        .filter(|row| row.availability != Availability::Retired)
+        .filter(|row| expanded || !row.capabilities.contains(Capability::PolicySelection))
+        .map(|row| row.id)
+        .collect()
+}
+
+/// The role's current version, if the role has one on offer.
+pub fn current_specialist(role: SpecialistRole) -> Option<SpecialistId> {
+    offered_specialists()
+        .into_iter()
+        .find(|id| id.role() == role && id.availability() == Availability::Current)
 }
 
 #[cfg(test)]
