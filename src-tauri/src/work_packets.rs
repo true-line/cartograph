@@ -1623,9 +1623,11 @@ mod tests {
         write_file(&unrecovered_dir, "lib/only.rb", "puts 'hi'\n");
 
         let state = crate::registered_source_tests::app_state(&data);
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         app.manage(crate::PreflightRuns::default());
         let handle = app.handle();
 
@@ -1787,9 +1789,11 @@ mod tests {
             )],
         );
         let state = crate::registered_source_tests::app_state(&data);
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         app.manage(crate::PreflightRuns::default());
         let handle = app.handle();
         let source = crate::register_local_source(&state, &project).unwrap();
@@ -1836,9 +1840,11 @@ mod tests {
         let project = directory.path().join("ruby");
         write_file(&project, "lib/user.rb", "class User\nend\n");
         let state = crate::registered_source_tests::app_state(&data);
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         app.manage(crate::PreflightRuns::default());
         let source = recovered(&state, app.handle(), &project);
         assert_eq!(
@@ -1866,9 +1872,11 @@ mod tests {
             )],
         );
         let state = crate::registered_source_tests::app_state(&data);
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .expect("mock app");
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
         app.manage(crate::PreflightRuns::default());
         let source = recovered(&state, app.handle(), &project);
         let file = project.join("lib/user.rb");
