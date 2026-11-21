@@ -1960,21 +1960,27 @@ impl PrimarySourceStore {
                 source_capture::capture_working_tree(root, &id, paths, CaptureLimits::default())
             }
         };
-        // The Python lane's `.py` files join the same capture (AC-1024). When
-        // they cannot be listed or retained with the TS/JS selection, Python
-        // keeps its ordinary uncaptured lane and the TS/JS capture stands alone.
-        let wants_python = ingest::coverage::wants(layers, ingest::coverage::APPLICATION_LAYERS);
-        let combined = wants_python
-            .then(|| adapters_lang_python::python_paths(root).ok())
-            .flatten()
-            .filter(|python| !python.is_empty())
-            .and_then(|python| {
+        // The Python (AC-1024) and Go (AC-1026) lanes' files join the same
+        // capture. A lane whose files cannot be listed is left out; when the
+        // combined set cannot be retained, those lanes keep their ordinary
+        // uncaptured reads and the TS/JS capture stands alone.
+        let wants_lanes = ingest::coverage::wants(layers, ingest::coverage::APPLICATION_LAYERS);
+        let lanes: Vec<String> = if wants_lanes {
+            let python = adapters_lang_python::python_paths(root).unwrap_or_default();
+            let go = adapters_lang_go::go_paths(root).unwrap_or_default();
+            python.into_iter().chain(go).collect()
+        } else {
+            Vec::new()
+        };
+        let combined = (!lanes.is_empty())
+            .then(|| {
                 let mut paths = selection.files.clone();
-                paths.extend(python);
+                paths.extend(lanes);
                 paths.sort();
                 paths.dedup();
                 capture_paths(&paths).ok()
-            });
+            })
+            .flatten();
         let capture = match combined {
             Some(capture) => capture,
             None => capture_paths(&selection.files).map_err(|_| match commit {

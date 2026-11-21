@@ -292,6 +292,7 @@ fn receipt_id(value: &str) -> bool {
         .or_else(|| value.strip_prefix("ts-primary-v2:"))
         .or_else(|| value.strip_prefix("ts-primary-v3:"))
         .or_else(|| value.strip_prefix("py-primary-v1:"))
+        .or_else(|| value.strip_prefix("go-primary-v1:"))
         .is_some_and(hash)
 }
 
