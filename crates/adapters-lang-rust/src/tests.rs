@@ -2062,3 +2062,171 @@ pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
         ["sym:local/rust-ws@src/lib.rs#count READS data:local/rust-ws@sql:outer_table -"]
     );
 }
+
+// AC-1016 (#2018): `#[test]` and runtime `#[tokio::test]` functions are
+// TestCases implemented by their Symbols; an axum `Request::builder()` and
+// an actix `TestRequest` with literal targets REQUESTS the endpoint they
+// reach with the statuses the test asserts; a computed target and a path no
+// endpoint serves are Gaps; a plain function and `#[cfg(test)]` SQL are not
+// facts about the system.
+#[test]
+fn rust_tests_are_test_cases_requesting_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "Cargo.toml",
+        "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        dir.path(),
+        "src/lib.rs",
+        r#"use axum::{routing, Router};
+use axum::http::{Method, Request, StatusCode};
+use rusqlite::Connection;
+
+async fn create() {}
+async fn show() {}
+
+pub fn app() -> Router {
+    Router::new()
+        .route("/users", routing::post(create))
+        .route("/users/:id", routing::get(show))
+}
+
+pub fn helper() {}
+
+pub mod local {
+    pub struct Request;
+    impl Request {
+        pub fn get(_: &str) -> Self {
+            Request
+        }
+    }
+}
+
+#[cfg(test)]
+mod fixtures;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creates_a_user() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/users")
+            .body(())
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn shows_and_misses() {
+        let id = 7;
+        let _ = Request::get("http://localhost/users/42?x=1").body(());
+        let _ = Request::get(format!("/users/{id}")).body(());
+        let _ = Request::builder().uri("/nowhere").body(());
+        // A workspace type named `Request` builds no HTTP request.
+        let _ = crate::local::Request::get("/users");
+        let response = fake();
+        assert!(response.status() == 404);
+        helper();
+    }
+
+    fn fake() {}
+
+    #[test]
+    fn seeds() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("INSERT INTO users (email) VALUES (?1)", ["a"]).unwrap();
+    }
+}
+"#,
+    );
+    // A `*_tests` module's helpers are test code too, though their
+    // `#[cfg(test)]` is on the declaring `mod` in another file.
+    write(
+        dir.path(),
+        "src/store_tests.rs",
+        r#"pub fn fixture(conn: &rusqlite::Connection) {
+    conn.execute("DELETE FROM users", []).unwrap();
+}
+"#,
+    );
+    // So is any module an out-of-line `#[cfg(test)] mod fixtures;` declares.
+    write(
+        dir.path(),
+        "src/fixtures.rs",
+        r#"pub fn seed(conn: &rusqlite::Connection) {
+    conn.execute("UPDATE accounts SET balance = 0", []).unwrap();
+}
+"#,
+    );
+    let x = extract_dir(dir.path(), &id()).unwrap();
+    let mut tests: Vec<(&str, &str)> = x
+        .nodes
+        .iter()
+        .filter(|n| n.label == "TestCase")
+        .map(|n| (n.id.as_str(), n.props["attribute"].as_str().unwrap()))
+        .collect();
+    tests.sort();
+    assert_eq!(
+        tests,
+        [
+            (
+                "test:local/rust-ws@src/lib.rs#tests::creates_a_user",
+                "tokio::test"
+            ),
+            ("test:local/rust-ws@src/lib.rs#tests::seeds", "test"),
+            (
+                "test:local/rust-ws@src/lib.rs#tests::shows_and_misses",
+                "test"
+            ),
+        ]
+    );
+    assert!(has_edge(
+        &x,
+        "IMPLEMENTED_BY",
+        "test:local/rust-ws@src/lib.rs#tests::shows_and_misses",
+        "sym:local/rust-ws@src/lib.rs#tests::shows_and_misses"
+    ));
+    let mut requests: Vec<String> = x
+        .edges
+        .iter()
+        .filter(|e| e.label == "REQUESTS")
+        .map(|e| {
+            let dst = if e.dst.starts_with("gap:") {
+                "gap"
+            } else {
+                &e.dst
+            };
+            let detail = e.props["statuses"]
+                .as_array()
+                .map(|s| format!("{s:?}"))
+                .or_else(|| e.props["reason"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            format!("{} -> {dst} {detail}", e.src.rsplit('#').next().unwrap())
+        })
+        .collect();
+    requests.sort();
+    assert_eq!(
+        requests,
+        [
+            "tests::creates_a_user -> ep:local/rust-ws@POST:/users [Number(201)]",
+            "tests::shows_and_misses -> ep:local/rust-ws@GET:/users/:id [Number(404)]",
+            "tests::shows_and_misses -> gap no recovered endpoint serves this path and method",
+            "tests::shows_and_misses -> gap test request URL is computed",
+        ],
+        "{requests:#?}"
+    );
+    let request = x
+        .edges
+        .iter()
+        .find(|e| e.label == "REQUESTS" && e.dst == "ep:local/rust-ws@POST:/users")
+        .unwrap();
+    assert_eq!(request.props["link"], "handler_assumed");
+    // The test's fixture SQL is not a table the system writes.
+    assert!(!x.nodes.iter().any(|n| n.id.contains("@sql:")));
+}

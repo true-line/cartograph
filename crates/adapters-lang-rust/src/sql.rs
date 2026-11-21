@@ -105,6 +105,10 @@ pub(super) fn extract(
         let Some((argument, framework)) = statement(cx, bindings, node) else {
             continue;
         };
+        // A test's statements set up its fixture; they are not the system's.
+        if target_tests::in_test_code(cx, node) {
+            continue;
+        }
         let mut statements = Statements::default();
         let Some(computed) = piece(
             cx,
