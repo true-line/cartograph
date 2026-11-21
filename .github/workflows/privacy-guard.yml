@@ -24,7 +24,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: privacy-guard-${{ github.event.workflow_run.head_sha || github.sha }}
+  group: privacy-guard-${{ github.event_name }}-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
