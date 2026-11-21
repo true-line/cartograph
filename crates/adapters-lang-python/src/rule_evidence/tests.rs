@@ -193,6 +193,11 @@ def new_random_alias(alias, hostname):
 
 def rebound(Alias):
     Alias.create(x=1)
+
+def local_import(src: Alias, n: int = Alias):
+    from app.models import Contact
+    Contact.create(x=1)
+    Alias.delete(src.id)
 "#;
     let out = recover(code);
     type Found = (String, String, Vec<(String, BranchPolarity)>);
@@ -210,6 +215,16 @@ def rebound(Alias):
     assert_eq!(
         found,
         [
+            (
+                "local_import".to_owned(),
+                "Contact.create(x=1)".to_owned(),
+                vec![],
+            ),
+            (
+                "local_import".to_owned(),
+                "Alias.delete(src.id)".to_owned(),
+                vec![],
+            ),
             (
                 "new_random_alias".to_owned(),
                 "AliasUsedOn.create(alias_id=alias.id, hostname=hostname, commit=True)".to_owned(),

@@ -1099,17 +1099,15 @@ fn bound_locally(cx: &FileCx<'_>, function: TsNode<'_>, name: &str) -> bool {
             continue;
         }
         let bound = match node.kind() {
+            // A parameter's name, not its annotation or default value.
             "identifier" => node.parent().is_some_and(|p| {
-                matches!(
-                    p.kind(),
-                    "parameters"
-                        | "default_parameter"
-                        | "typed_parameter"
-                        | "typed_default_parameter"
-                ) || (matches!(
-                    p.kind(),
-                    "assignment" | "augmented_assignment" | "for_statement"
-                ) && p.child_by_field_name("left") == Some(node))
+                matches!(p.kind(), "parameters" | "typed_parameter")
+                    || (matches!(p.kind(), "default_parameter" | "typed_default_parameter")
+                        && p.child_by_field_name("name") == Some(node))
+                    || (matches!(
+                        p.kind(),
+                        "assignment" | "augmented_assignment" | "for_statement"
+                    ) && p.child_by_field_name("left") == Some(node))
                     || p.kind() == "as_pattern_target"
             }),
             _ => false,
@@ -1214,7 +1212,8 @@ fn effect_statement<'t>(
                         && receiver.starts_with(|c: char| c.is_ascii_uppercase())
                         && receiver != "Session"
                         && function.is_none_or(|f| !bound_locally(cx, f, receiver))
-                        && modules.contains(receiver)
+                        && (modules.contains(receiver)
+                            || function.is_some_and(|f| function_imports(cx, f).contains(receiver)))
                 };
                 object.kind() == "identifier"
                     && !LOGGING.contains(&receiver)
