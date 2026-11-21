@@ -363,6 +363,85 @@ struct Template {
     path: String,
     len: usize,
     sites: Vec<(TemplateSite, usize, usize, bool)>,
+    /// The words a reader sees on a link or a form's submit control, by the
+    /// site's start (#2005).
+    labels: BTreeMap<usize, String>,
+}
+
+/// Most characters of a visible label kept.
+const MAX_LABEL_CHARS: usize = 80;
+
+/// The visible words of `html`: tags and template expressions removed,
+/// whitespace collapsed, at most [`MAX_LABEL_CHARS`]; `None` when nothing
+/// readable is left or what is left is token-shaped.
+fn visible_words(html: &str) -> Option<String> {
+    let mut words = String::new();
+    let mut i = 0;
+    let bytes = html.as_bytes();
+    while i < bytes.len() {
+        let rest = &html[i..];
+        let skip = if rest.starts_with("{{") {
+            rest.find("}}").map(|e| e + 2)
+        } else if rest.starts_with("{%") {
+            rest.find("%}").map(|e| e + 2)
+        } else if rest.starts_with("{#") {
+            rest.find("#}").map(|e| e + 2)
+        } else if rest.starts_with('<') {
+            rest.find('>').map(|e| e + 1)
+        } else {
+            None
+        };
+        if let Some(skip) = skip {
+            words.push(' ');
+            i += skip;
+            continue;
+        }
+        if rest.starts_with(['{', '<']) {
+            break;
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        words.push(c);
+        i += c.len_utf8();
+    }
+    let words = words
+        .replace("&amp;", "&")
+        .replace("&nbsp;", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let words: String = words.chars().take(MAX_LABEL_CHARS).collect();
+    (words.chars().any(char::is_alphabetic)
+        && !words.split_whitespace().any(core_redact::is_token_shaped))
+    .then_some(words)
+}
+
+/// The label of a link (its text) or a form (its first submit button's text
+/// or value) whose opening tag ends at `end`.
+fn site_label(text: &str, end: usize, form: bool) -> Option<String> {
+    let lower = text[end..].to_ascii_lowercase();
+    let close = if form { "</form" } else { "</a" };
+    let body = &text[end..end + lower.find(close)?];
+    if !form {
+        return visible_words(body);
+    }
+    let lower = body.to_ascii_lowercase();
+    if let Some(at) = lower.find("<button") {
+        let open = tag_end(body, at)?;
+        let close = lower[open..].find("</button")? + open;
+        if let Some(words) = visible_words(&body[open..close]) {
+            return Some(words);
+        }
+    }
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("<input").map(|a| a + from) {
+        let open = tag_end(body, at)?;
+        let tag = &body[at..open];
+        if attribute(tag, "type").is_some_and(|t| t.eq_ignore_ascii_case("submit")) {
+            return attribute(tag, "value").and_then(visible_words);
+        }
+        from = open;
+    }
+    None
 }
 
 /// Template files below a `templates/` directory, keyed by the name
@@ -497,6 +576,7 @@ fn tag_end(text: &str, start: usize) -> Option<usize> {
 /// comments are skipped.
 fn parse_template(path: &str, text: &str) -> Template {
     let mut sites = Vec::new();
+    let mut labels = BTreeMap::new();
     let mut depth = 0usize;
     let mut i = 0;
     while i < text.len() {
@@ -546,6 +626,9 @@ fn parse_template(path: &str, text: &str) -> Template {
                 break;
             };
             let tag = &text[i..end];
+            if let Some(label) = site_label(text, end, lower_tag("form")) {
+                labels.insert(i, label);
+            }
             if lower_tag("a") {
                 if let Some(name) = attribute(tag, "href").and_then(url_for_name) {
                     sites.push((TemplateSite::Link(name), i, end, depth > 0));
@@ -585,10 +668,12 @@ fn parse_template(path: &str, text: &str) -> Template {
         }
         i += rest.chars().next().map_or(1, char::len_utf8);
     }
+    labels.retain(|at, _| sites.iter().any(|(_, start, ..)| start == at));
     Template {
         path: path.to_owned(),
         len: text.len(),
         sites,
+        labels,
     }
 }
 
@@ -729,7 +814,7 @@ impl Sites {
         }
     }
 
-    fn into_edges(self, out: &mut Vec<Edge>) {
+    fn into_edges(self, labels: &BTreeMap<(String, u64), String>, out: &mut Vec<Edge>) {
         for ((src, label, dst), (sites, method)) in self.0 {
             let evidence: Vec<EvidenceRef> = sites.iter().map(|(e, _)| e.clone()).collect();
             let fact = format!("{label} {src} -> {dst}");
@@ -738,12 +823,18 @@ impl Sites {
                 "conditional": sites.iter().all(|(_, c)| *c),
                 "sites": sites
                     .iter()
-                    .map(|(e, conditional)| serde_json::json!({
-                        "path": e.path,
-                        "byte_start": e.byte_start,
-                        "byte_end": e.byte_end,
-                        "conditional": conditional,
-                    }))
+                    .map(|(e, conditional)| {
+                        let mut site = serde_json::json!({
+                            "path": e.path,
+                            "byte_start": e.byte_start,
+                            "byte_end": e.byte_end,
+                            "conditional": conditional,
+                        });
+                        if let Some(label) = labels.get(&(e.path.clone(), e.byte_start)) {
+                            site["label"] = label.as_str().into();
+                        }
+                        site
+                    })
                     .collect::<Vec<_>>(),
                 "prov": prov_from(evidence, ConfidenceTier::InferredStrong, &fact),
             });
@@ -947,7 +1038,15 @@ pub(crate) fn resolve(out: &mut Extraction, repo: &str, commit: &str, root: Opti
             }
         }
     }
-    sites.into_edges(&mut edges);
+    let labels: BTreeMap<(String, u64), String> = parsed
+        .values()
+        .flat_map(|t| {
+            t.labels
+                .iter()
+                .map(|(at, label)| ((t.path.clone(), *at as u64), label.clone()))
+        })
+        .collect();
+    sites.into_edges(&labels, &mut edges);
     out.nodes.extend(nodes);
     out.edges.extend(edges);
 }
