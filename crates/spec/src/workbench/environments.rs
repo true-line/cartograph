@@ -91,9 +91,12 @@ const NOT_COVERED: &[&str] = &[
      generators are not evaluated; each is listed under Not established.",
     "A kustomization is followed only inside the ingested repository and at most 16 \
      kustomizations deep. A remote resource is not fetched.",
-    "Helm charts and Helm values files are not read, and a manifest that is not valid YAML (a \
-     Helm template) is not a manifest here. The coverage document lists Helm charts and values \
-     files as present and not read.",
+    "Helm charts are read from `Chart.yaml` and the key paths of their values files; templates \
+     are not rendered, so the objects a chart creates are not listed, and a manifest that is not \
+     valid YAML (a Helm template) is not a manifest here. A helmfile release is an environment; \
+     a templated helmfile, `bases`, `helmfiles`, inline values, `set` and `secrets` are not read. \
+     No value of a values file is read or stored. Argo CD applications and kustomize \
+     `helmCharts` are not read.",
     "Terraform resources are not attached to an environment.",
     "Nothing is merged. Which Compose files a deployment combines is not written in them, and no \
      kustomize patch or transformer is applied, so the effective configuration of a deployment \
@@ -188,6 +191,12 @@ fn is_manifest(node: &Node) -> bool {
         .is_some_and(|kind| kind.starts_with("k8s-"))
 }
 
+/// True for the `Workload` of a Helm chart: reached by any number of
+/// helmfile releases, like a manifest workload.
+fn is_chart(node: &Node) -> bool {
+    node.props["kind"] == "helm-chart"
+}
+
 /// The repository of a manifest workload's id,
 /// `workload:{repo}@{path}#{document index}:{Kind}/{name}`.
 fn manifest_repo<'a>(id: &'a str, path: &str, name: &str) -> Option<&'a str> {
@@ -228,6 +237,8 @@ struct Environment<'a> {
     workloads: Vec<Workload<'a>>,
     /// The manifest workloads a kustomization reaches, by workload id.
     reached: Vec<Reached<'a>>,
+    /// The Helm charts a helmfile release declares.
+    charts: Vec<Reached<'a>>,
     /// The paths of the environments that include this one.
     included_by: Vec<&'a str>,
     /// `namePrefix` and `nameSuffix`, where the kustomization sets them.
@@ -258,6 +269,8 @@ struct Model<'a> {
     environments: BTreeMap<(&'a str, &'a str), Environment<'a>>,
     /// Manifest workloads by id.
     manifests: BTreeMap<&'a str, Manifest<'a>>,
+    /// Helm chart workloads by id.
+    charts: BTreeMap<&'a str, Manifest<'a>>,
     /// By repository, then path, then service.
     gaps: Vec<Gap<'a>>,
     /// Facts whose id does not say where they are.
@@ -280,6 +293,12 @@ impl<'a> Model<'a> {
                 .get(id)
                 .is_some_and(|node| node.label == WORKLOAD && is_manifest(node))
         };
+        let chart = |id: &str| {
+            by_id
+                .get(id)
+                .is_some_and(|node| node.label == WORKLOAD && is_chart(node))
+        };
+        let mut installs: BTreeMap<(&'a str, &'a str), &'a Edge> = BTreeMap::new();
         let mut declares: BTreeMap<&'a str, &'a Edge> = BTreeMap::new();
         let mut depends: BTreeMap<&'a str, BTreeMap<&'a str, &'a Edge>> = BTreeMap::new();
         // By environment id, then workload id.
@@ -289,6 +308,8 @@ impl<'a> Model<'a> {
             let ends = (edge.src.as_str(), edge.dst.as_str());
             if edge.label == PATCHES {
                 patches.insert(ends, edge);
+            } else if edge.label == DECLARES && chart(&edge.dst) {
+                installs.insert(ends, edge);
             } else if edge.label == DECLARES && manifest(&edge.dst) {
                 reaches.insert(ends, edge);
             } else if edge.label == DECLARES {
@@ -303,6 +324,7 @@ impl<'a> Model<'a> {
         let mut model = Self {
             environments: BTreeMap::new(),
             manifests: BTreeMap::new(),
+            charts: BTreeMap::new(),
             gaps: Vec::new(),
             unplaced: 0,
             loose: 0,
@@ -319,6 +341,7 @@ impl<'a> Model<'a> {
                             node,
                             workloads: Vec::new(),
                             reached: Vec::new(),
+                            charts: Vec::new(),
                             included_by: Vec::new(),
                             renames: Vec::new(),
                         },
@@ -331,7 +354,9 @@ impl<'a> Model<'a> {
         for node in by_id.values().copied().filter(|n| n.label == WORKLOAD) {
             let placed = path_of(node).and_then(|path| {
                 let name = node.props["name"].as_str()?;
-                let repo = if is_manifest(node) {
+                let repo = if is_chart(node) {
+                    repo_of(&node.id, WORKLOAD_ID, path, "")?
+                } else if is_manifest(node) {
                     manifest_repo(&node.id, path, name)?
                 } else {
                     repo_of(&node.id, WORKLOAD_ID, path, &format!("#{name}"))?
@@ -342,6 +367,19 @@ impl<'a> Model<'a> {
                 model.unplaced += 1;
                 continue;
             };
+            if is_chart(node) {
+                model.charts.insert(
+                    node.id.as_str(),
+                    Manifest {
+                        node,
+                        repo,
+                        path,
+                        name,
+                        reached_by: Vec::new(),
+                    },
+                );
+                continue;
+            }
             if is_manifest(node) {
                 model.manifests.insert(
                     node.id.as_str(),
@@ -388,6 +426,23 @@ impl<'a> Model<'a> {
                     workload,
                     declares,
                     patches: patches.get(&(id, *workload)).copied(),
+                });
+            }
+            for ((_, workload), declares) in
+                installs.range((id, "")..).take_while(|(k, _)| k.0 == id)
+            {
+                let Some(chart) = model
+                    .charts
+                    .get_mut(workload)
+                    .filter(|chart| chart.repo == *repo)
+                else {
+                    continue;
+                };
+                chart.reached_by.push(path);
+                environment.charts.push(Reached {
+                    workload,
+                    declares,
+                    patches: None,
                 });
             }
             for include in environment.node.props["includes"]
@@ -452,7 +507,7 @@ impl<'a> Model<'a> {
     }
 
     fn workloads(&self) -> usize {
-        self.compose_workloads() + self.manifests.len()
+        self.compose_workloads() + self.manifests.len() + self.charts.len()
     }
 
     fn name_only(&self) -> usize {
@@ -660,6 +715,40 @@ impl fmt::Display for Patch<'_> {
             }
             if !any {
                 f.write_str("none of the recorded properties")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The values files a helmfile release names, each with its key paths.
+struct ReleaseValues<'a>(Option<&'a Edge>);
+impl fmt::Display for ReleaseValues<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(edge) = self.0 else {
+            return f.write_str("—");
+        };
+        let values = edge.props["values"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if values.is_empty() {
+            return f.write_str("none named");
+        }
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                f.write_str(" / ")?;
+            }
+            match value["path"].as_str() {
+                Some(path) => write!(f, "{}: ", Literal(path))?,
+                None => f.write_str("a values file: ")?,
+            }
+            match value["keys"].as_array() {
+                Some(keys) if !keys.is_empty() => write!(f, "{}", Names(keys))?,
+                _ => f.write_str("no keys")?,
+            }
+            if let Some(omitted) = value["keys_omitted"].as_u64() {
+                write!(f, " and {omitted} more")?;
             }
         }
         Ok(())
@@ -1024,6 +1113,9 @@ fn gap_kind(node: &Node) -> &'static str {
         Some("compose-service") => "Compose service",
         Some("kustomization") => "kustomization",
         Some("manifest-document") => "Kubernetes manifest document",
+        Some("helm-chart") => "Helm chart",
+        Some("helmfile") => "helmfile",
+        Some("helmfile-release") => "helmfile release",
         _ => "not recorded",
     }
 }
@@ -1099,9 +1191,15 @@ pub(super) fn output(
                 assertions.edge(edge)?;
             }
         }
+        for installed in &environment.charts {
+            assertions.edge(installed.declares)?;
+        }
     }
     for manifest in model.manifests.values() {
         assertions.node(manifest.node, None)?;
+    }
+    for chart in model.charts.values() {
+        assertions.node(chart.node, None)?;
     }
     for gap in &model.gaps {
         assertions.node(gap.node, None)?;
@@ -1176,7 +1274,7 @@ pub(super) fn output(
                 absent: "none stated",
             },
             cell(environment.node, "declared_by"),
-            environment.workloads.len() + environment.reached.len(),
+            environment.workloads.len() + environment.reached.len() + environment.charts.len(),
             Evidence(environment.node),
             Notes {
                 weak: weak(&environment.node.props),
@@ -1265,6 +1363,63 @@ pub(super) fn output(
             "| — | None in this export | — | — | — | — | — | — | — | — | — | — | — | — | — | — \
              | — |\n",
         )?;
+    }
+
+    content.push_str(
+        "\nHelm charts, under the path of each helmfile release that installs them, then the \
+         charts no release installs. Templates are not rendered: a chart's objects are not \
+         listed. Values files are shown by their key paths only; no value is read.\n\n\
+         | Repository | Environment path | Chart | Declared in | Version | App version | \
+         Default values keys | Release values files and their keys | Tier | Confidence | Span \
+         | Note |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|\n",
+    )?;
+    let mut chart_rows = false;
+    let mut chart_row = |content: &mut Text,
+                         repo: &str,
+                         environment: &str,
+                         chart: &Manifest,
+                         declares: Option<&Edge>|
+     -> fmt::Result {
+        chart_rows = true;
+        writeln!(
+            content,
+            "| {} | {environment} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            Literal(repo),
+            Literal(chart.name),
+            Literal(chart.path),
+            cell(chart.node, "version"),
+            cell(chart.node, "app_version"),
+            cell(chart.node, "values_keys"),
+            ReleaseValues(declares),
+            Evidence(chart.node),
+            note(weak(&chart.node.props) || declares.is_some_and(|edge| weak(&edge.props)))
+        )
+    };
+    for ((repo, path), environment) in &model.environments {
+        for installed in &environment.charts {
+            let chart = &model.charts[installed.workload];
+            chart_row(
+                &mut content,
+                repo,
+                &Literal(path).to_string(),
+                chart,
+                Some(installed.declares),
+            )?;
+        }
+    }
+    let mut lone: Vec<&Manifest> = model
+        .charts
+        .values()
+        .filter(|chart| chart.reached_by.is_empty())
+        .collect();
+    lone.sort_by_key(|chart| (chart.repo, chart.path, chart.node.id.as_str()));
+    for chart in lone {
+        chart_row(&mut content, chart.repo, "no environment", chart, None)?;
+    }
+    if !chart_rows {
+        content
+            .push_str("| — | None in this export | — | — | — | — | — | — | — | — | — | — |\n")?;
     }
 
     content.push_str(
