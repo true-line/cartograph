@@ -171,7 +171,8 @@ CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
 every package except `app`, `agents` and `spec`, "Rust agents & spec
 tests" runs `cargo test -p agents -p spec`, and four "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
-run does not account for exactly the tests it selected.
+run does not account for exactly the tests it selected. Clippy runs in its
+own "Rust clippy" lane.
 
 The Rust lanes keep dependencies in rust-cache and workspace library crates
 in sccache (GitHub Actions cache). rust-cache keys on the job id and on the

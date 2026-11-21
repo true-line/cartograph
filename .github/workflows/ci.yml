@@ -381,12 +381,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # The app unit-test binary runs in the Rust app tests shards and the
-      # agents and spec packages in Rust agents & spec tests (#1924); `app` is
-      # a binary-only package, so excluding it drops nothing else.
+      # Clippy runs in the Rust clippy lane, the app unit-test binary in the
+      # Rust app tests shards and the agents and spec packages in Rust agents
+      # & spec tests (#1924); `app` is a binary-only package, so excluding it
+      # drops nothing else.
       - name: Test
         run: cargo test --workspace --exclude app --exclude agents --exclude spec
 
@@ -737,6 +735,68 @@ jobs:
         if: ${{ !cancelled() }}
         run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
 
+  # Clippy runs beside the tests instead of before them in the Rust job
+  # (#1924): about a minute off the critical path warm. `cargo clippy` sets
+  # its own workspace wrapper, so this lane does not use sccache.
+  rust-clippy:
+    name: Rust clippy
+    needs: [policy, merge-evidence, preflight-evidence, ci-image]
+    if: >-
+      !cancelled() && needs.policy.result == 'success' &&
+      ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
+      (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
+    runs-on: ubuntu-latest
+    container:
+      # A digest reference: ci-image resolves the hashed tag to its digest.
+      image: ${{ needs.ci-image.outputs.image }} # zizmor: ignore[unpinned-images]
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      # Not root: root passes the tests that expect permission-denied errors.
+      options: --user 1001
+      # bounded-command runs `${{ github.action_path }}`, which the runner
+      # leaves as the host path in a container (actions/runner#716,
+      # true-line/trueline-agent-ci#8). Mount the work tree there too; a
+      # symlink would not do, as the script's main-module check compares
+      # real paths and silently skips the task.
+      volumes:
+        - /home/runner/work:/home/runner/work
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      pull-requests: read
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 6
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # Fixed, so the cache key is stable across jobs (see the Rust lane).
+      - name: Use a fixed cargo home
+        run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Enable Rust problem matcher
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Placeholder frontend dist
+        run: mkdir -p ui/dist
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   compliance:
     name: License & supply-chain
     needs: [policy, merge-evidence, preflight-evidence, ci-image]
@@ -978,7 +1038,7 @@ jobs:
 
   complete:
     name: Complete suite
-    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, rust-heavy-tests, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
+    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, rust-heavy-tests, rust-clippy, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
@@ -993,6 +1053,7 @@ jobs:
           RUST: ${{ needs.rust.result }}
           RUST_APP_TESTS: ${{ needs.rust-app-tests.result }}
           RUST_HEAVY_TESTS: ${{ needs.rust-heavy-tests.result }}
+          RUST_CLIPPY: ${{ needs.rust-clippy.result }}
           WINDOWS_JOB_OWNERSHIP: ${{ needs.windows-job-ownership.result }}
           COMPLIANCE: ${{ needs.compliance.result }}
           ZIZMOR: ${{ needs.zizmor.result }}
@@ -1005,6 +1066,7 @@ jobs:
           test "$RUST" = success
           test "$RUST_APP_TESTS" = success
           test "$RUST_HEAVY_TESTS" = success
+          test "$RUST_CLIPPY" = success
           test "$WINDOWS_JOB_OWNERSHIP" = success
           test "$COMPLIANCE" = success
           test "$ZIZMOR" = success
