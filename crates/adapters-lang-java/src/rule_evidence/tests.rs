@@ -315,3 +315,46 @@ public class Outer {
         .collect();
     assert!(gaps.contains(&"preceding_exit".to_owned()), "{gaps:?}");
 }
+
+// AC-0967: assigning a bare field name through the implicit receiver is a
+// mutation; rebinding a parameter or local of that name is not.
+#[test]
+fn java_implicit_receiver_field_writes_are_mutations() {
+    let source = r#"package com.acme;
+public class Toggle {
+    private boolean enabled;
+    public int enable(boolean force) {
+        if (!force) { return 0; }
+        enabled = true;
+        return 1;
+    }
+    public int rebind(boolean enabled) {
+        if (!enabled) { return 0; }
+        enabled = true;
+        return 1;
+    }
+    public int local(int n) {
+        int count = 0;
+        if (n < 0) { return -1; }
+        count = n;
+        java.util.function.IntUnaryOperator f = x -> { x = x + 1; return x; };
+        return count;
+    }
+}
+"#;
+    let out = extract(source, "src/main/java/com/acme/Toggle.java");
+    let mutation = |method: &str| -> bool {
+        rules(&out)
+            .iter()
+            .filter(|rule| rule.owner_id.contains(method))
+            .any(|rule| {
+                rule.interpretation
+                    .gap_ids
+                    .iter()
+                    .any(|id| id.ends_with(":mutation"))
+            })
+    };
+    assert!(mutation("Toggle.enable(boolean)"));
+    assert!(!mutation("Toggle.rebind(boolean)"));
+    assert!(!mutation("Toggle.local(int)"));
+}

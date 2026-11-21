@@ -198,17 +198,89 @@ fn control_reason(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<RuleGapReason> {
         }
         "update_expression" => Some(RuleGapReason::Mutation),
         // Rebinding a local name is not a mutation; writing through a field
-        // or an array element, or compounding a value, is.
+        // or an array element, compounding a value, or assigning a bare name
+        // the callable does not declare (an implicit-receiver field), is.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
             let compound = node
                 .child_by_field_name("operator")
                 .is_some_and(|op| cx.text(&op) != "=");
-            (compound || matches!(left.kind(), "field_access" | "array_access"))
-                .then_some(RuleGapReason::Mutation)
+            let field = match left.kind() {
+                "field_access" | "array_access" => true,
+                "identifier" => !declares_local(cx, node, cx.text(&left)),
+                _ => false,
+            };
+            (compound || field).then_some(RuleGapReason::Mutation)
         }
         _ => None,
     }
+}
+
+/// Whether the callable enclosing `node` declares `name` as a parameter or
+/// local (a variable, catch, for-each, resource or lambda binding). Without
+/// one, a bare assignment may bind a field, so it counts as a mutation.
+fn declares_local(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    let mut scope = node;
+    while let Some(parent) = scope.parent() {
+        scope = parent;
+        if BOUNDARIES.contains(&scope.kind()) {
+            break;
+        }
+    }
+    if !matches!(
+        scope.kind(),
+        "method_declaration"
+            | "constructor_declaration"
+            | "compact_constructor_declaration"
+            | "lambda_expression"
+            | "static_initializer"
+    ) {
+        return false;
+    }
+    let mut stack = vec![scope];
+    while let Some(current) = stack.pop() {
+        let bound = match current.kind() {
+            "variable_declarator"
+            | "formal_parameter"
+            | "spread_parameter"
+            | "catch_formal_parameter"
+            | "enhanced_for_statement"
+            | "resource" => current.child_by_field_name("name"),
+            _ => None,
+        };
+        if bound.is_some_and(|n| cx.text(&n) == name) {
+            return true;
+        }
+        // A lambda's bare parameter names, `x -> …` or `(x, y) -> …`.
+        if current.kind() == "lambda_expression"
+            && let Some(params) = current.child_by_field_name("parameters")
+        {
+            if params.kind() == "identifier" && cx.text(&params) == name {
+                return true;
+            }
+            if params.kind() == "inferred_parameters" {
+                let mut walk = params.walk();
+                if params
+                    .named_children(&mut walk)
+                    .any(|p| p.kind() == "identifier" && cx.text(&p) == name)
+                {
+                    return true;
+                }
+            }
+        }
+        // A nested class body declares its own fields, not this callable's.
+        if current != scope
+            && matches!(
+                current.kind(),
+                "class_body" | "enum_body" | "interface_body"
+            )
+        {
+            continue;
+        }
+        let mut walk = current.walk();
+        stack.extend(current.named_children(&mut walk));
+    }
+    false
 }
 
 fn omission_gap(
