@@ -1803,6 +1803,10 @@ func Upsert(db *gorm.DB, c Category) {
 func Dynamic(db *gorm.DB, value any) {
     db.Model(value).Create(&Category{})
 }
+func Churn(db *gorm.DB, u UserModel) {
+    db.Create(&u)
+    db.Delete(&u)
+}
 func Pair(db *gorm.DB) {
     var plain, cat = Plain{}, Category{}
     _ = plain
@@ -1923,8 +1927,27 @@ func Authors(db *gorm.DB) {
             row("Upsert", "WRITES", "Category", "update,insert"),
             // Each name of `var a, b = A{}, B{}` takes its own value's type.
             row("Pair", "WRITES", "Category", "insert"),
+            row("Churn", "WRITES", "UserModel", "delete,insert"),
         ])
     );
+    // Merged accesses keep every call's method and evidence.
+    let churn = x
+        .edges
+        .iter()
+        .find(|e| e.src.ends_with("#Churn") && e.label == "WRITES")
+        .unwrap();
+    assert_eq!(
+        churn.props["methods"],
+        serde_json::json!(["Create", "Delete"])
+    );
+    let starts: Vec<u64> = churn.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["byte_start"].as_u64().unwrap())
+        .collect();
+    assert_eq!(starts.len(), 2, "{churn:#?}");
+    assert_ne!(starts[0], starts[1]);
     // An explicit table is cited from its `TableName()` method as well.
     let follow = x
         .nodes

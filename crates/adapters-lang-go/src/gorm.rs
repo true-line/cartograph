@@ -596,6 +596,35 @@ fn access(
     });
 }
 
+/// Folds a later access's calls into the edge kept for its function, model
+/// and label: every distinct method in `methods` (sorted) and every call cited in
+/// `prov.evidence`, so each merged operation keeps its own source.
+fn merge_evidence(kept: &mut serde_json::Value, later: &serde_json::Value) {
+    let mut methods: Vec<serde_json::Value> = match kept["methods"].as_array() {
+        Some(methods) => methods.clone(),
+        None => kept["method"]
+            .as_str()
+            .map(Into::into)
+            .into_iter()
+            .collect(),
+    };
+    if let Some(method) = later["method"].as_str()
+        && !methods.iter().any(|m| m == method)
+    {
+        methods.push(method.into());
+    }
+    methods.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    kept["methods"] = methods.into();
+    let Some(evidence) = kept["prov"]["evidence"].as_array_mut() else {
+        return;
+    };
+    for cited in later["prov"]["evidence"].as_array().into_iter().flatten() {
+        if !evidence.contains(cited) {
+            evidence.push(cited.clone());
+        }
+    }
+}
+
 /// The argument of a `Model(…)` call earlier in the chain `operand` ends.
 fn chain_model<'t>(cx: &FileCx<'_>, mut operand: TsNode<'t>) -> Option<TsNode<'t>> {
     while operand.kind() == "call_expression" {
@@ -882,6 +911,7 @@ pub(super) fn resolve(out: &mut Extraction) {
                     operations.remove("read");
                 }
                 kept.props["operations"] = operations.iter().cloned().collect::<Vec<_>>().into();
+                merge_evidence(&mut kept.props, &edge.props);
             }
         }
     }
