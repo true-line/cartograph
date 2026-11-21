@@ -771,7 +771,11 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
             ),
             (
                 "src-tauri/src/more.rs",
-                "use tauri::command;\n\n/// Lists.\n#[command(rename_all = \"snake_case\")]\nasync fn list_items() -> Vec<String> { vec![] }\n",
+                "use tauri::{Manager, command};\n\n/// Lists.\n#[command(rename_all = \"snake_case\")]\nasync fn list_items() -> Vec<String> { vec![] }\n\nmod cli {\n    use clap::command;\n    #[command]\n    fn not_ipc() {}\n}\n",
+            ),
+            (
+                "daemon/src/main.rs",
+                "fn main() { run(); }\n\n#[allow(dead_code)]\nfn unused() {\n    tauri::Builder::default();\n    axum::serve(listener, app());\n}\n",
             ),
             (
                 "grpc/src/main.rs",
@@ -835,11 +839,16 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
         entry(&out, "worker/src/main.rs", "main").props["kind"],
         "process"
     );
+    // A helper `main` never calls does not decide its kind.
+    assert_eq!(
+        entry(&out, "daemon/src/main.rs", "main").props["kind"],
+        "process"
+    );
     let entries: Vec<&str> = out
         .nodes
         .iter()
         .filter(|n| n.label == "EntryPoint")
         .map(|n| n.id.as_str())
         .collect();
-    assert_eq!(entries.len(), 8, "{entries:?}");
+    assert_eq!(entries.len(), 9, "{entries:?}");
 }

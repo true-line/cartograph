@@ -128,11 +128,13 @@ impl File<'_> {
             return None;
         }
         let dirs = self.dirs();
-        let kind = if self.code.contains("tauri::Builder") {
+        // What `main` itself runs, not a helper elsewhere in the file.
+        let body = &self.code[function.byte_range()];
+        let kind = if body.contains("tauri::Builder") {
             "desktop-app"
-        } else if self.code.contains("tonic") && self.code.contains("Server::builder(") {
+        } else if self.code.contains("tonic") && body.contains("Server::builder(") {
             "grpc-server"
-        } else if HTTP_SERVES.iter().any(|call| self.code.contains(call)) {
+        } else if HTTP_SERVES.iter().any(|call| body.contains(call)) {
             "http-server"
         } else if dirs
             .iter()
@@ -154,8 +156,7 @@ impl File<'_> {
 
     /// A `#[tauri::command]` function.
     fn tauri_command(&self, function: TsNode) -> Option<Start> {
-        let imported =
-            self.code.contains("use tauri::command;") || self.code.contains("use tauri::{command");
+        let imported = self.imports_tauri_command(function);
         let annotated = outer_attributes(function).into_iter().any(|attr| {
             let attr: String = self.text(attr).split_whitespace().collect();
             let path = attr
@@ -179,6 +180,46 @@ impl File<'_> {
             ],
             &local,
         ))
+    }
+
+    /// Whether a `use` in the module enclosing `node` (the file or its inline
+    /// `mod {}`) brings `tauri::command` in as `command`.
+    fn imports_tauri_command(&self, node: TsNode) -> bool {
+        let mut scope = node;
+        while let Some(parent) = scope.parent() {
+            scope = parent;
+            if scope.kind() == "source_file" {
+                break;
+            }
+            if scope.kind() == "mod_item" {
+                match scope.child_by_field_name("body") {
+                    Some(body) => {
+                        scope = body;
+                        break;
+                    }
+                    None => return false,
+                }
+            }
+        }
+        let mut walk = scope.walk();
+        let uses: Vec<TsNode> = scope
+            .named_children(&mut walk)
+            .filter(|child| child.kind() == "use_declaration")
+            .collect();
+        uses.into_iter().any(|decl| {
+            let Some(argument) = decl.child_by_field_name("argument") else {
+                return false;
+            };
+            let path: String = self.code[argument.byte_range()]
+                .split_whitespace()
+                .collect();
+            let path = path.strip_prefix("::").unwrap_or(&path);
+            path == "tauri::command"
+                || path
+                    .strip_prefix("tauri::{")
+                    .and_then(|rest| rest.strip_suffix('}'))
+                    .is_some_and(|list| list.split(',').any(|item| item == "command"))
+        })
     }
 
     /// The gRPC methods of a tonic service implementation.
