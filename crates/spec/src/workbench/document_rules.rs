@@ -2248,7 +2248,7 @@ def move_alias_to_trash(alias, user):
     alias.enabled = False
 
 def perform_alias_deletion(alias, user):
-    alias.note = compute(alias) * 2
+    alias.note = compute(alias) + 1
 "#;
         let (text, printed) = python_rows(source, "delete_alias_view");
         assert!(
@@ -2271,7 +2271,7 @@ def perform_alias_deletion(alias, user):
         // A value outside the rendering rules is a Gap, with its source kept.
         assert!(
             text.contains(&format!(
-                "{NOT_STATED} | always: sets alias.note to compute(alias) \\* 2 |"
+                "{NOT_STATED} | always: sets alias.note to compute(alias) + 1 |"
             )),
             "{text}"
         );

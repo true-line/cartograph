@@ -654,11 +654,6 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                 _ => None,
             }
         }
-        // `a + b` (AC-1030): "the active alias count plus the num aliases".
-        Expr::Sum(terms) => {
-            let parts: Option<Vec<String>> = terms.iter().map(|t| noun(t, cx)).collect();
-            Some(parts?.join(" plus "))
-        }
         Expr::Shift(unit, amount, ago) => {
             let amount = noun(amount, cx)?;
             // `ALIAS_TRASH_DAYS` already names its unit.
@@ -674,6 +669,19 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
             })
         }
         _ => None,
+    }
+}
+
+/// A compared value as a noun phrase: a sum only here, where a condition
+/// compares it (AC-1030), "the active alias count plus the num aliases";
+/// an assigned or returned sum stays outside the rendering rules.
+fn compared(expr: &Expr, cx: &Context<'_>) -> Option<String> {
+    match expr {
+        Expr::Sum(terms) => {
+            let parts: Option<Vec<String>> = terms.iter().map(|t| noun(t, cx)).collect();
+            Some(parts?.join(" plus "))
+        }
+        other => noun(other, cx),
     }
 }
 
@@ -1105,7 +1113,7 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     format!("{whole} does not contain “{text}”")
                 });
             }
-            let left_np = noun(left, cx)?;
+            let left_np = compared(left, cx)?;
             let timed = matches!(right.as_ref(), Expr::Shift(..))
                 || noun(right, cx).is_some_and(|r| r == "the current time");
             let positive = |op: &str| -> Option<String> {
@@ -1145,12 +1153,12 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                     }
                     ("is" | "==", Expr::Lit(Lit::None)) => format!("{left_np} is not set"),
                     ("is not" | "!=", Expr::Lit(Lit::None)) => format!("{left_np} is set"),
-                    ("==" | "is", r) => format!("{left_np} is {}", noun(r, cx)?),
-                    ("!=" | "is not", r) => format!("{left_np} is not {}", noun(r, cx)?),
-                    (">", r) => format!("{left_np} is more than {}", noun(r, cx)?),
-                    (">=", r) => format!("{left_np} is at least {}", noun(r, cx)?),
-                    ("<", r) => format!("{left_np} is less than {}", noun(r, cx)?),
-                    ("<=", r) => format!("{left_np} is at most {}", noun(r, cx)?),
+                    ("==" | "is", r) => format!("{left_np} is {}", compared(r, cx)?),
+                    ("!=" | "is not", r) => format!("{left_np} is not {}", compared(r, cx)?),
+                    (">", r) => format!("{left_np} is more than {}", compared(r, cx)?),
+                    (">=", r) => format!("{left_np} is at least {}", compared(r, cx)?),
+                    ("<", r) => format!("{left_np} is less than {}", compared(r, cx)?),
+                    ("<=", r) => format!("{left_np} is at most {}", compared(r, cx)?),
                     ("in", Expr::Set(set)) => format!(
                         "{left_np} is one of {}",
                         set.iter().map(literal).collect::<Vec<_>>().join(", ")
@@ -2797,6 +2805,7 @@ mod tests {
             set("alias.note", "compute(alias)").unwrap(),
             "the alias's note is set to the “compute” result"
         );
+        assert_eq!(set("alias.note", "compute(alias) + 1"), None);
         assert_eq!(set("alias.note", "compute(alias) * 2"), None);
         assert_eq!(set("alias", "None").unwrap(), "the alias is discarded");
         assert_eq!(
