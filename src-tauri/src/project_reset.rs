@@ -1,4 +1,4 @@
-//! Start a new project without reinstalling (#1994, AC-1012).
+//! Start a new project without reinstalling (#1994, AC-1013).
 //!
 //! Cartograph keeps one workspace under the app data directory, and every
 //! ingest adds to it. **New project** removes everything tied to the system

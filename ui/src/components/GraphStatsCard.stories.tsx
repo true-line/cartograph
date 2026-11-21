@@ -111,7 +111,7 @@ export const SameNamedRepositoriesRemainDistinct: Story = {
 };
 
 export const NewProject: Story = {
-  // AC-1012 (#1994): New project names the repos it removes and what is
+  // AC-1013 (#1994): New project names the repos it removes and what is
   // kept, and starts only once confirmed.
   args: {
     stats: { nodes: 1284, edges: 4021 },
@@ -138,7 +138,7 @@ export const NewProject: Story = {
 };
 
 export const NewProjectWhileWorkRuns: Story = {
-  // AC-1012: refused while a job is queued or running.
+  // AC-1013: refused while a job is queued or running.
   args: {
     stats: { nodes: 12, edges: 18 },
     newProject: { can: false, starting: false, error: null, onStart: fn() },

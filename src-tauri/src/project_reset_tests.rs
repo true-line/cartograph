@@ -1,4 +1,4 @@
-//! AC-1012 (T-1012): a new project removes the loaded system and keeps the
+//! AC-1013 (T-1013): a new project removes the loaded system and keeps the
 //! application's settings.
 use super::*;
 use core_graph::{GraphStore, Node};
