@@ -13,9 +13,18 @@ fn extract_sites(dir: &Path) -> Vec<EventSite> {
         .event_sites
 }
 
+/// The env keys a test lets the resolver read (ADR-0075).
+fn reading(keys: &[&str]) -> BTreeSet<String> {
+    keys.iter().map(|key| key.to_string()).collect()
+}
+
 fn stitch_dir(dir: &Path) -> Extraction {
+    stitch_dir_reading(dir, &[])
+}
+
+fn stitch_dir_reading(dir: &Path, read: &[&str]) -> Extraction {
     let sites = extract_sites(dir);
-    let cfg = ConfigIndex::from_dir(dir).expect("config scan");
+    let cfg = ConfigIndex::from_dir(dir, &reading(read)).expect("config scan");
     let id = SourceId {
         repo: "test",
         commit: "deadbeef",
@@ -109,7 +118,7 @@ export function enqueue(body: string) {
     )
     .unwrap();
 
-    let out = stitch_dir(dir.path());
+    let out = stitch_dir_reading(dir.path(), &["ORDERS_QUEUE"]);
     let chan = out
         .nodes
         .iter()
@@ -218,12 +227,72 @@ fn config_index_parses_env_files_deterministically() {
     )
     .unwrap();
 
-    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let cfg =
+        ConfigIndex::from_dir(dir.path(), &reading(&["ORDERS_TOPIC", "QUOTED", "EXTRA"])).unwrap();
     // Sorted file order, first definition wins: `.env` < `.env.local`.
     assert_eq!(cfg.resolve("ORDERS_TOPIC"), Some(("orders", ".env")));
     assert_eq!(cfg.resolve("QUOTED"), Some(("q-topic", ".env")));
     assert_eq!(cfg.resolve("EXTRA"), Some(("x", ".env.local")));
     assert_eq!(cfg.resolve("MISSING"), None);
+}
+
+// AC-1018 (#933, ADR-0075): an env-file value is read only for an
+// allowlisted key. A key an env file sets but no allowlist lists stays
+// unresolved, and its Gap names the key, the file and how to allow it; a
+// secret under an unlisted key still refuses the ingest.
+#[test]
+fn env_values_are_read_only_for_allowlisted_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "ORDERS_QUEUE=https://sqs.example/orders\nOTHER=x\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("send.ts"),
+        r#"
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+const client = new SQSClient({});
+export function enqueue(body: string) {
+  return client.send(new SendMessageCommand({
+    QueueUrl: process.env.ORDERS_QUEUE,
+    MessageBody: body,
+  }));
+}
+"#,
+    )
+    .unwrap();
+
+    let cfg = ConfigIndex::from_dir(dir.path(), &reading(&[])).unwrap();
+    assert_eq!(cfg.resolve("ORDERS_QUEUE"), None);
+    assert_eq!(cfg.resolve("OTHER"), None);
+    let out = stitch_dir(dir.path());
+    assert!(out.nodes.iter().all(|n| n.label != "Channel"));
+    let gap = out.nodes.iter().find(|n| n.label == "Gap").expect("gap");
+    assert_eq!(
+        gap.props["reason"],
+        "env key ORDERS_QUEUE is set in .env but its value is not read: list it in env_read \
+         in cartograph.system.toml or in .cartograph/env.toml"
+    );
+
+    let out = stitch_dir_reading(dir.path(), &["ORDERS_QUEUE"]);
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.id == "chan:sqs-queue:https://sqs.example/orders")
+    );
+    assert_eq!(
+        ConfigIndex::from_dir(dir.path(), &reading(&["ORDERS_QUEUE"]))
+            .unwrap()
+            .resolve("OTHER"),
+        None
+    );
+
+    std::fs::write(dir.path().join(".env.local"), "DB_PASSWORD=hunter2-real\n").unwrap();
+    assert!(matches!(
+        ConfigIndex::from_dir(dir.path(), &reading(&["ORDERS_QUEUE"])),
+        Err(StitchError::SecretsInEnvFiles(_))
+    ));
 }
 
 // AC-0990 (#933): env files holding secret-shaped values refuse the
@@ -249,7 +318,7 @@ fn env_file_secrets_refuse_the_ingest_by_file_line_and_key() {
     )
     .unwrap();
 
-    let error = ConfigIndex::from_dir(dir.path()).unwrap_err();
+    let error = ConfigIndex::from_dir(dir.path(), &reading(&[])).unwrap_err();
     let StitchError::SecretsInEnvFiles(found) = &error else {
         panic!("not a refusal: {error}");
     };
@@ -314,14 +383,15 @@ fn env_files_without_secrets_still_resolve() {
     )
     .unwrap();
 
-    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let cfg = ConfigIndex::from_dir(dir.path(), &reading(&["API_URL", "AMQP"])).unwrap();
     assert_eq!(
         cfg.resolve("API_URL"),
         Some(("https://api.example.com/v1?x=a@b", ".env.example"))
     );
+    // ADR-0075 decision 4: a URL's `user@` is never kept.
     assert_eq!(
         cfg.resolve("AMQP"),
-        Some(("amqp://guest@mq:5672", ".env.example"))
+        Some(("amqp://mq:5672", ".env.example"))
     );
 }
 
@@ -691,7 +761,7 @@ fn env_resolved_fetch_url_confirms() {
         "ORDERS_API=https://api.example.com/api/orders\n",
     )
     .unwrap();
-    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let cfg = ConfigIndex::from_dir(dir.path(), &reading(&["ORDERS_API"])).unwrap();
     let id = SourceId {
         repo: "test",
         commit: "deadbeef",
@@ -717,7 +787,7 @@ fn env_resolved_fetch_url_confirms() {
 fn manifest_identities_override_env_files() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".env"), "ORDERS_TOPIC=from-dotenv\n").unwrap();
-    let mut cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let mut cfg = ConfigIndex::from_dir(dir.path(), &reading(&[])).unwrap();
     let mut manifest = std::collections::BTreeMap::new();
     manifest.insert("ORDERS_TOPIC".to_string(), "from-manifest".to_string());
     manifest.insert("EXTRA_QUEUE".to_string(), "q".to_string());
@@ -1291,7 +1361,7 @@ fn config_base_url_binding_cites_its_config_file() {
         "ORDERS_URL=https://orders.example.com/v1/orders\n",
     )
     .unwrap();
-    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let cfg = ConfigIndex::from_dir(dir.path(), &reading(&["ORDERS_URL"])).unwrap();
     let (gaps, edges) = web_gaps(
         &[fetch_site(
             "POST",
@@ -1902,7 +1972,7 @@ export function lost(url: string) { return new SendMessageCommand({ QueueUrl: ur
         .unwrap()
         .event_sites;
     let dir = tempfile::tempdir().unwrap();
-    let cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let cfg = ConfigIndex::from_dir(dir.path(), &reading(&[])).unwrap();
     let id = SourceId {
         repo: "test",
         commit: "deadbeef",
@@ -2006,7 +2076,7 @@ fn runtime_table_base_resolves_only_from_the_manifest() {
         "SETTINGS.apiUrl=https://env.example.io\n",
     )
     .unwrap();
-    let mut cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let mut cfg = ConfigIndex::from_dir(dir.path(), &reading(&[])).unwrap();
     let (gaps, _) = web_gaps(&[site()], &cfg);
     assert_eq!(
         gaps[0].props["reason"],
