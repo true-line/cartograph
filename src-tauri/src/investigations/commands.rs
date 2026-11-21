@@ -695,9 +695,11 @@ mod staged_tests {
     // AC-0286: the current schema-6 family must reach the same command boundary.
     #[test]
     fn completion_ipc_semantic_errors_reach_structured_invalid_input() {
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         for generation in [3, 4, 5, 6, 7] {
             let mut raw = serde_json::json!({
                 "schema_version": generation, "request_nonce": "invalid-semantic",
@@ -792,9 +794,11 @@ mod staged_tests {
         }
         // Even a recognized role cannot smuggle staged request generation 4
         // through the actual coordinator entrypoint. It rejects before AppState.
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let request: StartInvestigationRequest = serde_json::from_value(serde_json::json!({
             "schema_version":4,"request_nonce":"staged-boundary","specialist_id":"domain-analyst@6",
             "question":"Inspect selected evidence","scope":{"type":"all"},"provider_mode":"local",
