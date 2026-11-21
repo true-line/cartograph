@@ -1016,6 +1016,31 @@ fn templated_helmfiles_are_gaps_and_helm_output_is_deterministic() {
     assert_eq!(gap.props["kind"], "helmfile");
     assert!(gap.props["reason"].as_str().unwrap().contains("template"));
 
+    // A withheld environment name is not stored; `values.yml` is not the
+    // chart's default values file (Helm reads exactly `values.yaml`).
+    let dir = tempfile::tempdir().unwrap();
+    let helmfile = format!(
+        "environments:\n  {TOKEN}: {{}}\n  prod: {{}}\nreleases:\n  - name: app\n    chart: ./chart\n"
+    );
+    write(
+        dir.path(),
+        &[
+            ("helmfile.yaml", helmfile.as_str()),
+            ("chart/Chart.yaml", "name: app\n"),
+            ("chart/values.yml", "replicaCount: 1\n"),
+        ],
+    );
+    let out = extract_in(dir.path());
+    let release = node_of(&out, &format!("env:{REPO}@helmfile.yaml#app"));
+    assert_eq!(
+        release.props["helmfile_environments"],
+        serde_json::json!(["prod"])
+    );
+    let all = serde_json::to_string(&(&out.nodes, &out.edges)).unwrap();
+    assert!(!all.contains(TOKEN));
+    let chart = node_of(&out, &format!("workload:{REPO}@chart/Chart.yaml"));
+    assert!(chart.props.get("values_keys").is_none());
+
     let a = extract_helm();
     let b = extract_helm();
     assert_eq!(

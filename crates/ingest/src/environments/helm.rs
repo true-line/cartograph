@@ -29,8 +29,8 @@ use tree_sitter::{Node as TsNode, Parser, Tree};
 /// The names helmfile reads its state from.
 pub(super) const HELMFILE_NAMES: [&str; 2] = ["helmfile.yaml", "helmfile.yml"];
 
-/// The chart's default values file names, in Helm's order.
-const DEFAULT_VALUES: [&str; 2] = ["values.yaml", "values.yml"];
+/// The chart's default values file: Helm reads exactly this name.
+const DEFAULT_VALUES: &str = "values.yaml";
 
 /// How deep a values mapping is followed for key paths.
 const MAX_KEY_DEPTH: usize = 8;
@@ -271,7 +271,24 @@ pub(super) fn helmfile(text: &str) -> Result<Helmfile, (&'static str, Span)> {
     let mut findings = Findings::default();
     let environments = field(&top, "environments")
         .and_then(|f| fields(text, f.value?).ok())
-        .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    // Stored names pass `sanitize`; a withheld one is not kept.
+                    let (safe, redacted) = sanitize(&entry.name);
+                    if redacted == 0 {
+                        Some(safe)
+                    } else {
+                        findings.add(
+                            "an environment name is withheld, so it is not recorded",
+                            entry.key_span,
+                        );
+                        None
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_default();
     for key in ["bases", "helmfiles"] {
         if let Some(entry) = field(&top, key) {
@@ -455,10 +472,8 @@ impl<'a> Index<'a> {
 
     /// The chart's default values file, when the walk found one.
     pub(super) fn default_values(&self, chart_rel: &str) -> Option<String> {
-        DEFAULT_VALUES
-            .iter()
-            .map(|name| join(dir_of(chart_rel), name))
-            .find(|rel| self.files.contains_key(rel.as_str()))
+        Some(join(dir_of(chart_rel), DEFAULT_VALUES))
+            .filter(|rel| self.files.contains_key(rel.as_str()))
     }
 
     pub(super) fn chart_of(&self, helmfile_rel: &str, chart: &str) -> ChartTarget {
