@@ -85,11 +85,23 @@ pub(crate) fn topology(out: &mut impl fmt::Write, nodes: &[Node], edges: &[Edge]
         .collect();
     out.write_str("flowchart LR\n")?;
     for (id, node) in &resources {
-        let display = node
+        let logical = node
             .props
             .get("logical_id")
             .and_then(|v| v.as_str())
             .unwrap_or(id.strip_prefix("res:").unwrap_or(id));
+        // ADR-0077: the same address in two root modules is two boxes, so
+        // the label names the module directory beside the bare address. A
+        // legal directory name may hold a quote or line break.
+        let scope = ["root_module", "child_module"]
+            .iter()
+            .find_map(|key| node.props.get(*key).and_then(|v| v.as_str()));
+        let display = match scope {
+            Some(scope) if node.props.get("logical_id").is_some() => {
+                format!("{}: {logical}", Replace(scope, MERMAID_LABEL))
+            }
+            _ => logical.to_string(),
+        };
         let placeholder = node.props.get("placeholder").is_some();
         let (open, close) = if placeholder {
             ("([", "])")
