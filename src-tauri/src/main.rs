@@ -11953,15 +11953,15 @@ export function queueOrder() {
     fn unapplied_state_gap_is_owned_by_its_repository() {
         // AC-1501: the Gap carries no repository evidence, so re-ingest can
         // retract it only through explicit id ownership.
-        assert!(id_explicitly_owned_by_repo(
+        assert!(crate::id_explicitly_owned_by_repo(
             "gap:tf-state-root:acme/infra@",
             "acme/infra"
         ));
-        assert!(!id_explicitly_owned_by_repo(
+        assert!(!crate::id_explicitly_owned_by_repo(
             "gap:tf-state-root:acme/infra@",
             "acme/infra2"
         ));
-        assert!(!id_explicitly_owned_by_repo(
+        assert!(!crate::id_explicitly_owned_by_repo(
             "gap:tf-state-root:acme/infra2@",
             "acme/infra"
         ));
