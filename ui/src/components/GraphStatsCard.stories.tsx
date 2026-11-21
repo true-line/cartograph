@@ -109,3 +109,42 @@ export const SameNamedRepositoriesRemainDistinct: Story = {
     await expect(args.onClear).not.toHaveBeenCalled();
   },
 };
+
+export const NewProject: Story = {
+  // AC-1013 (#1994): New project names the repos it removes and what is
+  // kept, and starts only once confirmed.
+  args: {
+    stats: { nodes: 1284, edges: 4021 },
+    systemContents: [
+      { repo: 'acme/shop', commit: 'a1b2c3d4e5f6' },
+      { repo: 'local/infra', commit: 'workdir' },
+    ],
+    newProject: { can: true, starting: false, error: null, onStart: fn() },
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'New project…' }));
+    const alert = canvas.getByRole('alert');
+    await expect(alert).toHaveTextContent('Start a new project? This removes acme/shop, local/infra');
+    await expect(alert).toHaveTextContent(
+      'Settings, provider keys, run limits, the local model and installed adapters are kept.',
+    );
+    await userEvent.click(canvas.getByRole('button', { name: 'Keep project' }));
+    await expect(args.newProject?.onStart).not.toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('button', { name: 'New project…' }));
+    await userEvent.click(canvas.getByRole('button', { name: 'Start new project' }));
+    await expect(args.newProject?.onStart).toHaveBeenCalledOnce();
+  },
+};
+
+export const NewProjectWhileWorkRuns: Story = {
+  // AC-1013: refused while a job is queued or running.
+  args: {
+    stats: { nodes: 12, edges: 18 },
+    newProject: { can: false, starting: false, error: null, onStart: fn() },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('button', { name: 'New project…' })).toBeDisabled();
+  },
+};
