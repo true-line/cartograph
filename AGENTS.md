@@ -137,9 +137,9 @@ cannot be done the way it describes, skip it and report.
 - Every GitHub write (commits, branches, PRs, PR edits, comments, issues,
   labels, merges) goes through the Agent-Bot MCP identity.
 - Never use the `gh` CLI, session git credentials (`git push`) or a GitHub
-  connector for writes: they act as the owner's personal account. The only
-  exception is approving a PR, which the owner delegated; any other
-  connector write needs the owner's explicit permission for that write.
+  connector for writes or identity: they act as the owner's personal
+  account. A connector write happens only when the owner has expressly
+  permitted that specific write; when in doubt, do not write.
 - Never put the owner's name or any personal detail in anything public: PR
   titles and bodies, commits and trailers, issues, comments, docs or files.
   Add no "Requested by" line and no hidden attribution comment, and never
