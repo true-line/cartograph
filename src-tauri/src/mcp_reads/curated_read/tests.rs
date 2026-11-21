@@ -435,6 +435,9 @@ fn curated_basis_reservation_fixture_is_the_longest_wire_form() {
         CuratedFailure::ReviewsUnavailable,
         CuratedFailure::TooManyRecords { limit: usize::MAX },
         CuratedFailure::TooManyAccepted { limit: usize::MAX },
+        CuratedFailure::AcceptedTooLarge {
+            limit_bytes: usize::MAX,
+        },
         CuratedFailure::DuplicateRecord,
         CuratedFailure::DuplicateAssertionDecision,
         CuratedFailure::AssertionsNotCompiled,
