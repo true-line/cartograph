@@ -272,6 +272,12 @@ fn untracked_inputs(repo: &git2::Repository, root: &Path, depth: usize) -> Resul
                 .is_ok_and(|meta| meta.is_file())
                 .then(|| ingest::manifest::REPO_ENV_REL_PATH.to_owned()),
         )
+        // So does the dependency-types allowlist (ADR-0078).
+        .chain(
+            std::fs::symlink_metadata(root.join(adapters_lang_ts::DEPENDENCY_TYPES_REL_PATH))
+                .is_ok_and(|meta| meta.is_file())
+                .then(|| adapters_lang_ts::DEPENDENCY_TYPES_REL_PATH.to_owned()),
+        )
         .collect();
     Ok(flagged
         .saturating_add(stale_submodules)
@@ -479,6 +485,32 @@ pub(crate) mod tests {
         fs::write(
             dir.path().join(ingest::manifest::REPO_ENV_REL_PATH),
             b"read = [\"QUEUE_URL\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            local_commit(dir.path()),
+            LocalCommit::Workdir {
+                reason: "1 modified or untracked files".into()
+            }
+        );
+    }
+
+    // AC-1506: an ignored `.cartograph/types.toml` changes which dependency
+    // calls recovery proves, so it keeps `workdir`. (T-1506)
+    #[test]
+    fn ignored_dependency_types_allowlist_keeps_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_clean_repo(
+            dir.path(),
+            &[
+                (".gitignore", b".cartograph/\n"),
+                ("src/app.ts", b"export const ok = 1;\n"),
+            ],
+        );
+        fs::create_dir_all(dir.path().join(".cartograph")).unwrap();
+        fs::write(
+            dir.path().join(adapters_lang_ts::DEPENDENCY_TYPES_REL_PATH),
+            b"read = [\"stripe\"]\n",
         )
         .unwrap();
         assert_eq!(
