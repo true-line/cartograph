@@ -955,3 +955,47 @@ fn kotlin_mains_listeners_schedules_and_runners_are_starts() {
         .collect();
     assert_eq!(entries.len(), 9, "{entries:?}");
 }
+
+/// AC-1104: a Kotlin main is a server only when it calls the server start;
+/// a commented-out or longer-package import is no Spring web evidence; an
+/// extension `main` is no JVM main.
+#[test]
+fn kotlin_mains_need_a_start_call_and_a_parsed_web_import() {
+    let app = "src/main/kotlin/com/acme/App.kt";
+    let tool = "src/main/kotlin/com/acme/Tool.kt";
+    let out = extract_with(
+        &[
+            (
+                app,
+                "package com.acme\n\nimport org.springframework.boot.runApplication\n\nclass App\n\nfun main(args: Array<String>) {\n    runApplication<App>(*args)\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/web/Old.kt",
+                "package com.acme.web\n\n/*\nimport org.springframework.web.bind.annotation.RestController\n*/\nimport org.springframework.web.bind.annotationx.Thing\n",
+            ),
+            (
+                "src/main/java/com/acme/Legacy.java",
+                "package com.acme;\n// import org.springframework.web.bind.annotation.GetMapping;\nclass Legacy {}\n",
+            ),
+            (
+                tool,
+                "package com.acme\n\nimport io.ktor.server.engine.embeddedServer\nimport org.springframework.boot.SpringApplication\n\nfun main() {\n    println(SpringApplication::class)\n    val start = ::embeddedServer\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/Ext.kt",
+                "package com.acme\n\nclass Service\n\nfun Service.main() {}\n",
+            ),
+        ],
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    assert_eq!(entry(&out, app, "main").props["kind"], "process");
+    assert_eq!(entry(&out, tool, "main").props["kind"], "process");
+    let entries: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "EntryPoint")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(entries.len(), 2, "{entries:?}");
+}
