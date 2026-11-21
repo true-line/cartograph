@@ -6,16 +6,18 @@
 // any test runs: each shard is one `cargo test` process with libtest's own
 // threading, so in-process fixtures behave exactly as in an unsharded run.
 //
-// A shard takes every COUNT-th test of the binary's sorted test list, so the
-// shards partition the list by construction and neighbouring long tests of
-// one module spread across shards. After the run the shard checks libtest's
-// own totals against its selection: a test that was selected and did not run
-// (or one that ran unselected) fails the shard instead of passing silently.
+// Every shard assigns the binary's sorted test list the same way, longest
+// measured test first to the least loaded shard (rust-test-weights.json), so
+// the shards partition the list by construction and the slow tests spread.
+// After the run the shard checks libtest's own totals against its selection:
+// a test that was selected and did not run (or one that ran unselected) fails
+// the shard instead of passing silently.
 //
 // Usage: rust-test-shard.mjs <index>/<count> -- <cargo test target arguments>
 //   e.g. rust-test-shard.mjs 2/4 -- -p app --bin app
 import { spawn, spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export function parseShard(text) {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/u.exec(text ?? '');
@@ -38,8 +40,53 @@ export function parseTestList(output) {
   return sorted;
 }
 
-export function selectShard(names, { index, count }) {
-  return names.filter((_, position) => position % count === index - 1);
+// Measured seconds per test of the app binary (#1924), so the slow replay
+// tests spread across shards instead of landing together by name order.
+// Tests absent from the file weigh DEFAULT_WEIGHT. Regenerate with
+//   RUSTC_BOOTSTRAP=1 target/debug/deps/app-<hash> -Z unstable-options \
+//     --report-time --format json > report.json   (from src-tauri/)
+//   node scripts/rust-test-shard.mjs --weights-from report.json > scripts/rust-test-weights.json
+export const WEIGHTS_PATH = fileURLToPath(new URL('./rust-test-weights.json', import.meta.url));
+export const DEFAULT_WEIGHT = 0.2;
+// Faster tests stay at the default: listing them would only grow the file.
+const MIN_LISTED_SECONDS = 2;
+
+export function loadWeights(file = WEIGHTS_PATH) {
+  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).seconds : {};
+}
+
+// libtest's JSON report (one event per line) to a weights file.
+export function weightsFromReport(report) {
+  const seconds = {};
+  for (const line of report.split('\n')) {
+    if (!line.trim().startsWith('{')) continue;
+    const event = JSON.parse(line);
+    if (event.type === 'test' && event.event === 'ok' && event.exec_time >= MIN_LISTED_SECONDS) {
+      seconds[event.name] = Math.round(event.exec_time * 10) / 10;
+    }
+  }
+  const sorted = Object.fromEntries(Object.keys(seconds).sort().map((name) => [name, seconds[name]]));
+  return `${JSON.stringify({ seconds: sorted }, null, 2)}\n`;
+}
+
+// Every shard computes the same assignment from the same sorted list, so the
+// shards partition it by construction. Longest first, each test goes to the
+// least loaded shard (ties to the lowest index); with equal weights this is
+// plain round-robin over the sorted names.
+export function selectShard(names, { index, count }, weights = {}) {
+  const weight = (name) => weights[name] ?? DEFAULT_WEIGHT;
+  const order = names
+    .map((name, position) => ({ name, position, weight: weight(name) }))
+    .sort((a, b) => b.weight - a.weight || a.position - b.position);
+  const load = Array(count).fill(0);
+  const shardOf = new Map();
+  for (const { name, weight: seconds } of order) {
+    let target = 0;
+    for (let shard = 1; shard < count; shard += 1) if (load[shard] < load[target]) target = shard;
+    load[target] += seconds;
+    shardOf.set(name, target);
+  }
+  return names.filter((name) => shardOf.get(name) === index - 1);
 }
 
 // Sums every `test result:` line of a libtest run.
@@ -97,6 +144,10 @@ function run(cargoArguments, selected) {
 }
 
 async function main(argv) {
+  if (argv[0] === '--weights-from' && argv.length === 2) {
+    process.stdout.write(weightsFromReport(readFileSync(argv[1], 'utf8')));
+    return;
+  }
   const separator = argv.indexOf('--');
   if (separator !== 1 || argv.length < 3) {
     throw new Error('usage: rust-test-shard.mjs <index>/<count> -- <cargo test target arguments>');
@@ -104,7 +155,7 @@ async function main(argv) {
   const shard = parseShard(argv[0]);
   const cargoArguments = argv.slice(separator + 1);
   const names = list(cargoArguments);
-  const selected = selectShard(names, shard);
+  const selected = selectShard(names, shard, loadWeights());
   if (selected.length === 0) throw new Error(`shard ${shard.index}/${shard.count} selects no test of ${names.length}`);
   console.log(`shard ${shard.index}/${shard.count}: ${selected.length} of ${names.length} tests`);
   const { output, status } = await run(cargoArguments, selected);

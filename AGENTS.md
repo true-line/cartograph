@@ -173,7 +173,10 @@ groups (`adapters` and `ingest` name their packages, `core` runs the rest of
 the workspace, so a new crate lands there), "Rust agents & spec
 tests" runs `cargo test -p agents -p spec`, and four "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
-run does not account for exactly the tests it selected. Clippy runs in its
+run does not account for exactly the tests it selected. The shards split the
+tests by the measured seconds in `scripts/rust-test-weights.json` (the script's
+header says how to regenerate it); keep each slow replay scenario its own test,
+since one test can't be split across shards. Clippy runs in its
 own "Rust clippy" lane.
 
 The Rust lanes keep dependencies in rust-cache and workspace library crates
