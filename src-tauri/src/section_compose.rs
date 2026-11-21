@@ -48,6 +48,9 @@ pub(crate) struct Prepared {
     citable: BTreeSet<String>,
     nodes: Arc<Vec<Node>>,
     edges: Arc<Vec<Edge>>,
+    /// The overlay's derived Capabilities and Actors, citable beside the
+    /// base facts (#2040).
+    overlay: Arc<Vec<Node>>,
     /// The area an area-scoped composition is of (#2083), by name.
     area: Option<String>,
     /// The section's catalogue title, the compiled text and the citable
@@ -153,7 +156,10 @@ struct Compiled {
     text: String,
     nodes: Arc<Vec<Node>>,
     edges: Arc<Vec<Edge>>,
+    /// The overlay's Capabilities and Actors with the base facts each
+    /// rests on; citable as themselves (#2040).
     derived: Vec<core_graph::overlay::OverlayFact>,
+    overlay: Arc<Vec<Node>>,
     /// Each named Subsystem as (scope, name): its citation id and its name,
     /// in id order, each name once.
     areas: Vec<(String, String)>,
@@ -196,7 +202,22 @@ fn compile(
         .collect();
     let nodes = Arc::new(read.nodes.clone());
     let edges = Arc::new(read.edges.clone());
-    let derived = read.knowledge.capabilities.clone();
+    let derived: Vec<_> = read
+        .knowledge
+        .capabilities
+        .iter()
+        .chain(&read.knowledge.actors)
+        .cloned()
+        .collect();
+    let overlay = Arc::new(
+        derived
+            .iter()
+            .filter_map(|fact| match &fact.item {
+                core_graph::overlay::OverlayItem::Node(node) => Some(node.clone()),
+                core_graph::overlay::OverlayItem::Edge(_) => None,
+            })
+            .collect(),
+    );
     let artifact = crate::compile_spec_artifact(
         read.inputs(Some(&review)),
         spec::ExportMode::BestEffort,
@@ -213,6 +234,7 @@ fn compile(
         nodes,
         edges,
         derived,
+        overlay,
         areas,
     })
 }
@@ -284,6 +306,7 @@ fn prepared(
         citable: picked.citable(),
         nodes: Arc::clone(nodes),
         edges: Arc::clone(edges),
+        overlay: Arc::clone(&compiled.overlay),
         area,
         title: compiled.title,
         text: text.to_owned(),
@@ -467,7 +490,7 @@ fn stage_as(
     .map_err(|error| error.code().to_owned())?;
     // An area's draft rests on what the section prints for the area
     // (#2083): the facts its block lets a claim cite.
-    let citation_set = if prepared.area.is_some() {
+    let mut citation_set = if prepared.area.is_some() {
         let in_area: BTreeSet<String> = cited.intersection(&prepared.citable).cloned().collect();
         spec::cited_fact_hashes(nodes, edges, &in_area)
     } else {
@@ -476,6 +499,14 @@ fn stage_as(
             Err(refusal) => return Ok(ComposeOutcome::none(refusal.code())),
         }
     };
+    // A derived Capability or Actor the composer was handed is citable too
+    // (#2040): its hash is the one the curated projection compares.
+    let derived: BTreeSet<String> = cited.intersection(&prepared.citable).cloned().collect();
+    if prepared.area.is_some() || address.scope == spec::SYSTEM_SCOPE {
+        for (id, hash) in spec::cited_node_hashes(prepared.overlay.iter(), &derived) {
+            citation_set.entry(id).or_insert(hash);
+        }
+    }
     let draft = match admit(&address, &citation_set, finish) {
         Ok(draft) => draft,
         Err(refusal) => {
