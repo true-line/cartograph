@@ -446,8 +446,10 @@ fn evidence(cx: &FileCx<'_>, node: TsNode<'_>) -> EvidenceRef {
 
 /// The test cases a file defines, into `nodes`/`edges`, and the requests
 /// they perform, into `requests`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract(
     cx: &FileCx<'_>,
+    root: TsNode<'_>,
     imports: &Imports,
     package: Option<&str>,
     functions: &[(TsNode<'_>, String)],
@@ -456,13 +458,9 @@ pub(crate) fn extract(
     requests: &mut Vec<Request>,
 ) {
     // The file's test clients, read once from its root.
-    let Some(mut root) = functions.first().map(|(function, _)| *function) else {
-        return;
-    };
-    while let Some(parent) = root.parent() {
-        root = parent;
-    }
     let clients = &clients(cx, root, imports);
+    // Kotest specs (AC-1112).
+    kotest(cx, root, package, imports, clients, nodes, edges, requests);
     for (function, symbol) in functions {
         let proofs: Vec<(String, bool)> = declaration_annotations(cx, *function)
             .iter()
@@ -526,35 +524,47 @@ pub(crate) fn extract(
         else {
             continue;
         };
-        let expected = statuses(cx, body);
-        let mut found = Vec::new();
-        let mut stack = vec![body];
-        while let Some(node) = stack.pop() {
-            if node.kind() == "call_expression" && mockk_block(cx, node) {
-                continue;
-            }
-            stack.extend(named_children(node));
-            if node.kind() == "call_expression"
-                && let Some((method, url)) = request(cx, node, imports, clients)
-            {
-                found.push((node, method, url));
-            }
+        requests_in(cx, &test, body, imports, clients, requests);
+    }
+}
+
+/// The requests a test's body performs, in source order.
+fn requests_in(
+    cx: &FileCx<'_>,
+    test: &str,
+    body: TsNode<'_>,
+    imports: &Imports,
+    clients: &Clients,
+    requests: &mut Vec<Request>,
+) {
+    let expected = statuses(cx, body);
+    let mut found = Vec::new();
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "call_expression" && mockk_block(cx, node) {
+            continue;
         }
-        found.sort_by_key(|(node, _, _)| node.start_byte());
-        for (node, method, url) in found {
-            requests.push(Request {
-                test: test.clone(),
-                method,
-                path: url.and_then(|url| url_text(cx, url)),
-                request: cx
-                    .text(&node)
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                statuses: expected.clone(),
-                evidence: evidence(cx, node),
-            });
+        stack.extend(named_children(node));
+        if node.kind() == "call_expression"
+            && let Some((method, url)) = request(cx, node, imports, clients)
+        {
+            found.push((node, method, url));
         }
+    }
+    found.sort_by_key(|(node, _, _)| node.start_byte());
+    for (node, method, url) in found {
+        requests.push(Request {
+            test: test.to_owned(),
+            method,
+            path: url.and_then(|url| url_text(cx, url)),
+            request: cx
+                .text(&node)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            statuses: expected.clone(),
+            evidence: evidence(cx, node),
+        });
     }
 }
 
@@ -749,6 +759,400 @@ pub(crate) fn resolve(
             dst: gap,
             label: "REQUESTS".into(),
         });
+    }
+}
+
+/// Kotest's spec styles (`io.kotest.core.spec.style`).
+const KOTEST: &str = "io.kotest.core.spec.style";
+
+/// How a Kotest spec style writes its tests and the containers around
+/// them: the leaf and container functions (a `x`-prefixed one is
+/// disabled), and whether a string invoked with a lambda (`"name" { }`)
+/// is a leaf, `"name" - { }` a container (FreeSpec) or `"name" should { }`
+/// a container (WordSpec).
+struct Style {
+    name: &'static str,
+    leaves: &'static [&'static str],
+    containers: &'static [&'static str],
+    string_leaf: bool,
+    minus_container: bool,
+    infix_containers: &'static [&'static str],
+}
+
+const STYLES: &[Style] = &[
+    Style {
+        name: "FunSpec",
+        leaves: &["test"],
+        containers: &["context"],
+        string_leaf: false,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "ShouldSpec",
+        leaves: &["should"],
+        containers: &["context"],
+        string_leaf: false,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "DescribeSpec",
+        leaves: &["it"],
+        containers: &["describe", "context"],
+        string_leaf: false,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "BehaviorSpec",
+        leaves: &["then", "Then"],
+        containers: &["given", "Given", "`when`", "When", "and", "And"],
+        string_leaf: false,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "FeatureSpec",
+        leaves: &["scenario"],
+        containers: &["feature"],
+        string_leaf: false,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "ExpectSpec",
+        leaves: &["expect"],
+        containers: &["context"],
+        string_leaf: false,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "StringSpec",
+        leaves: &[],
+        containers: &[],
+        string_leaf: true,
+        minus_container: false,
+        infix_containers: &[],
+    },
+    Style {
+        name: "FreeSpec",
+        leaves: &[],
+        containers: &[],
+        string_leaf: true,
+        minus_container: true,
+        infix_containers: &[],
+    },
+    Style {
+        name: "WordSpec",
+        leaves: &[],
+        containers: &[],
+        string_leaf: true,
+        minus_container: false,
+        infix_containers: &["should", "When", "`when`"],
+    },
+];
+
+/// Whether `spelled` names Kotest's `style`: `Some(false)` when a qualified
+/// spelling or a named import (under its own name or an alias) proves it,
+/// `Some(true)` when only a star import does.
+fn kotest_style(spelled: &str, imports: &Imports, style: &str) -> Option<bool> {
+    let fqn = format!("{KOTEST}.{style}");
+    if spelled == fqn || imports.bindings.get(spelled) == Some(&fqn) {
+        return Some(false);
+    }
+    (spelled == style
+        && !imports.bindings.contains_key(spelled)
+        && imports.wildcard_packages.iter().any(|p| p == KOTEST))
+    .then_some(true)
+}
+
+/// A function a style declares, and whether it is the disabled form.
+fn styled(names: &[&str], called: &str) -> Option<bool> {
+    if names.contains(&called) {
+        return Some(false);
+    }
+    let rest = called.strip_prefix('x')?;
+    let rest = rest
+        .strip_prefix('`')
+        .map_or(rest.to_owned(), |r| format!("`{r}"));
+    let lowered = {
+        let mut chars = rest.chars();
+        chars
+            .next()
+            .map(|c| c.to_lowercase().chain(chars).collect::<String>())
+            .unwrap_or_default()
+    };
+    (names.contains(&rest.as_str()) || names.contains(&lowered.as_str())).then_some(true)
+}
+
+/// One step of a Kotest spec body: a test, or a container of more.
+enum Step<'t> {
+    Leaf {
+        name: Option<String>,
+        disabled: bool,
+        body: TsNode<'t>,
+    },
+    Container {
+        name: Option<String>,
+        disabled: bool,
+        body: TsNode<'t>,
+    },
+}
+
+/// What `node` is in a spec of `style`, if a test or a container.
+fn step<'t>(cx: &FileCx<'_>, style: &Style, node: TsNode<'t>) -> Option<Step<'t>> {
+    let literal = |n: TsNode<'_>| pure_string_literal(cx, n);
+    match node.kind() {
+        "call_expression" => {
+            let lambda = trailing_lambda(node)?;
+            let head = node.named_child(0)?;
+            if head.kind() == "string_literal" {
+                return style.string_leaf.then(|| Step::Leaf {
+                    name: literal(head),
+                    disabled: false,
+                    body: lambda,
+                });
+            }
+            let (receiver, called) = callee(cx, head)?;
+            if receiver.is_some() {
+                return None;
+            }
+            let args = value_arguments(head)?;
+            let name = match args.as_slice() {
+                [first, ..] => literal(*first),
+                [] => return None,
+            };
+            if let Some(disabled) = styled(style.leaves, &called) {
+                return Some(Step::Leaf {
+                    name,
+                    disabled,
+                    body: lambda,
+                });
+            }
+            styled(style.containers, &called).map(|disabled| Step::Container {
+                name,
+                disabled,
+                body: lambda,
+            })
+        }
+        "binary_expression" if style.minus_container => {
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            let minus = node
+                .child_by_field_name("operator")
+                .is_some_and(|op| cx.text(&op) == "-");
+            (minus && left.kind() == "string_literal" && right.kind() == "lambda_literal").then(
+                || Step::Container {
+                    name: literal(left),
+                    disabled: false,
+                    body: right,
+                },
+            )
+        }
+        "infix_expression" if !style.infix_containers.is_empty() => {
+            let parts = named_children(node);
+            let [left, operator, right] = parts.as_slice() else {
+                return None;
+            };
+            (left.kind() == "string_literal"
+                && operator.kind() == "identifier"
+                && style.infix_containers.contains(&cx.text(operator))
+                && right.kind() == "lambda_literal")
+                .then(|| Step::Container {
+                    name: literal(*left),
+                    disabled: false,
+                    body: *right,
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Kotest spec classes (AC-1112): a class extending a spec style proven
+/// by import from `io.kotest.core.spec.style`, whose constructor lambda or
+/// `init` blocks declare tests. Each test is a Confirmed `TestCase`
+/// (framework `kotest`) named by its class and container chain,
+/// `DEFINED_IN` its file; its requests are read as a JUnit test's are. A
+/// test or container whose name is not a plain literal is a Gap.
+#[allow(clippy::too_many_arguments)]
+fn kotest(
+    cx: &FileCx<'_>,
+    root: TsNode<'_>,
+    package: Option<&str>,
+    imports: &Imports,
+    clients: &Clients,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+    requests: &mut Vec<Request>,
+) {
+    let mut stack = vec![root];
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    while let Some(class) = stack.pop() {
+        stack.extend(named_children(class));
+        if class.kind() != "class_declaration" {
+            continue;
+        }
+        let Some(name) = class.child_by_field_name("name") else {
+            continue;
+        };
+        let class_name = cx.text(&name).to_string();
+        let mut style = None;
+        let mut shadowed_by: Option<String> = None;
+        let mut bodies = Vec::new();
+        for specifier in named_children(class)
+            .into_iter()
+            .filter(|c| c.kind() == "delegation_specifiers")
+            .flat_map(named_children)
+        {
+            let Some(invocation) = specifier
+                .named_child(0)
+                .filter(|c| c.kind() == "constructor_invocation")
+            else {
+                continue;
+            };
+            let Some(ty) = named_children(invocation)
+                .into_iter()
+                .find(|c| c.kind() == "user_type")
+            else {
+                continue;
+            };
+            let spelled: String = cx.text(&ty).split_whitespace().collect();
+            let Some((found, star)) = STYLES
+                .iter()
+                .find_map(|style| kotest_style(&spelled, imports, style.name).map(|s| (style, s)))
+            else {
+                continue;
+            };
+            style = Some(found);
+            // Proven only by a star import: a same-package product type of
+            // that name obscures it, settled at the join.
+            if star {
+                shadowed_by = Some(match package {
+                    Some(package) => format!("{package}.{}", found.name),
+                    None => found.name.to_owned(),
+                });
+            }
+            bodies.extend(
+                value_arguments(invocation)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|a| a.kind() == "lambda_literal"),
+            );
+            bodies.extend(trailing_lambda(invocation));
+        }
+        let Some(style) = style else {
+            continue;
+        };
+        if let Some(body) = named_children(class)
+            .into_iter()
+            .find(|c| c.kind() == "class_body")
+        {
+            bodies.extend(
+                named_children(body)
+                    .into_iter()
+                    .filter(|m| m.kind() == "anonymous_initializer"),
+            );
+        }
+        // (node, container chain, every name literal, a container disabled)
+        let mut pending: Vec<(TsNode<'_>, Vec<String>, bool, bool)> = bodies
+            .into_iter()
+            .map(|body| (body, vec![class_name.clone()], true, false))
+            .collect();
+        while let Some((node, chain, named, off)) = pending.pop() {
+            for child in named_children(node) {
+                // A local function, class or anonymous function body runs
+                // only when called: its calls register nothing provably.
+                if matches!(
+                    child.kind(),
+                    "function_declaration"
+                        | "class_declaration"
+                        | "object_declaration"
+                        | "anonymous_function"
+                ) {
+                    continue;
+                }
+                match step(cx, style, child) {
+                    Some(Step::Container {
+                        name,
+                        disabled,
+                        body,
+                    }) => {
+                        let mut inner = chain.clone();
+                        let ok = named && name.is_some();
+                        inner.push(name.unwrap_or_default());
+                        pending.push((body, inner, ok, off || disabled));
+                    }
+                    Some(Step::Leaf {
+                        name,
+                        disabled,
+                        body,
+                    }) => {
+                        let (true, Some(name)) = (named, name) else {
+                            let id = format!(
+                                "gap:test-name:{}@{}@{}",
+                                cx.id.repo,
+                                cx.path,
+                                child.start_byte()
+                            );
+                            nodes.push(Node {
+                                id: id.clone(),
+                                label: "Gap".into(),
+                                props: serde_json::json!({
+                                    "kind": "test-name-computed",
+                                    "reason": "test name is computed",
+                                    "attempted_tiers": ["T0"],
+                                    "prov": cx.prov(&child, &format!("Gap {id}")),
+                                }),
+                            });
+                            continue;
+                        };
+                        let mut full = chain.clone();
+                        full.push(name.clone());
+                        let mut qualified = full.join(" > ");
+                        let count = seen.entry(qualified.clone()).or_default();
+                        *count += 1;
+                        if *count > 1 {
+                            qualified = format!("{qualified} [{count}]");
+                        }
+                        let test = format!("test:{}@{}#{qualified}", cx.id.repo, cx.path);
+                        let mut props = serde_json::json!({
+                            "name": name,
+                            "qualified_name": qualified,
+                            "framework": "kotest",
+                            "style": style.name,
+                            "language": "kotlin",
+                            "path": cx.path,
+                            "prov": cx.prov(&child, &format!("TestCase {test}")),
+                        });
+                        if disabled || off {
+                            props["modifier"] = "disabled".into();
+                        }
+                        if let Some(shadow) = &shadowed_by {
+                            props["shadowed_by"] = serde_json::json!([shadow]);
+                        }
+                        nodes.push(Node {
+                            id: test.clone(),
+                            label: "TestCase".into(),
+                            props,
+                        });
+                        edges.push(Edge {
+                            src: test.clone(),
+                            dst: file_id(cx.id.repo, cx.path),
+                            label: "DEFINED_IN".into(),
+                            props: serde_json::json!({
+                                "prov": cx.prov(&child, &format!("DEFINED_IN {test}")),
+                            }),
+                        });
+                        requests_in(cx, &test, body, imports, clients, requests);
+                    }
+                    // A statement around the tests (a loop, a `val`): its
+                    // nested tests are read too.
+                    None => pending.push((child, chain.clone(), named, off)),
+                }
+            }
+        }
     }
 }
 
