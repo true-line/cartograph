@@ -855,3 +855,61 @@ fn found_adr_and_contract_readers_are_catalogued_and_unread_adrs_named() {
         &ProducerState::Ran
     );
 }
+
+// AC-1306 (#2164): a detected language whose adapter has no producer for an
+// extractor family names it as not covered and limits the inventory; a
+// Python-only run states nothing new.
+#[test]
+fn detected_languages_name_the_extractor_families_with_no_producer() {
+    let facts = CoverageFacts {
+        repo: "local/app",
+        commit: "workdir",
+        commit_note: None,
+        layer_hints: &[],
+        deterministic: vec![
+            ("t0.adapter-python", count(3)),
+            ("t0.adapter-kotlin", count(2)),
+        ],
+        plugins: Vec::new(),
+        observations: Vec::new(),
+    };
+    let detected =
+        |language: &str, files: u64, adapter: &str| crate::preflight::LanguageDetection {
+            language: language.into(),
+            files,
+            adapter: Some(adapter.into()),
+            coverage: Vec::new(),
+        };
+    let python_only = PreflightReport {
+        languages: vec![detected("Python", 3, "t0.adapter-python")],
+        ..PreflightReport::default()
+    };
+    let python = RepoCoverage::from_facts(&facts).with_unsupported(&python_only);
+    assert!(python.unsupported.is_empty(), "{:?}", python.unsupported);
+
+    let both = PreflightReport {
+        languages: vec![
+            detected("Kotlin", 2, "t0.adapter-kotlin"),
+            detected("Python", 3, "t0.adapter-python"),
+        ],
+        unsupported: vec![finding("inline-eval", "app.py", 4, None)],
+        ..PreflightReport::default()
+    };
+    let coverage = RepoCoverage::from_facts(&facts).with_unsupported(&both);
+    assert_eq!(
+        coverage
+            .unsupported
+            .iter()
+            .map(|u| (u.capability.as_str(), u.occurrences, u.first_site.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("inline-eval", 1, "app.py:4"),
+            (
+                "extractor-not-run:endpoint-auth:Kotlin",
+                2,
+                "t0.adapter-kotlin"
+            ),
+        ]
+    );
+    assert!(coverage.limited);
+}
