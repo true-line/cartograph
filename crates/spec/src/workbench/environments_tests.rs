@@ -745,3 +745,63 @@ fn helmfile_releases_list_their_chart_and_values_keys() {
         );
     }
 }
+
+// AC-1503 (T-1503, #2167): a Spring Boot profile environment is listed with
+// the profile it states, where it is declared and the key paths it sets.
+#[test]
+fn spring_profiles_list_their_settings_keys() {
+    const BASE: &str = "src/main/resources/application.yml";
+    const PROD: &str = "src/main/resources/application-prod.yml";
+    let mut f = Fixture::default();
+    let staging_path = format!("{BASE}#staging");
+    for (path, name, declared_in, keys) in [
+        (
+            staging_path.as_str(),
+            "staging",
+            None,
+            json!(["server.port"]),
+        ),
+        (
+            PROD,
+            "prod",
+            Some(BASE),
+            json!(["datasource.password", "datasource.url"]),
+        ),
+    ] {
+        let env = environment_id(SHOP, path);
+        let mut props = json!({
+            "declared_by": "spring-profile",
+            "path": path,
+            "name": name,
+            "settings_keys": keys,
+            "prov": confirmed(SHOP, BASE, &[(20, 40)], &env),
+        });
+        match declared_in {
+            Some(base) => props["profile_declared_in"] = base.into(),
+            None => props["file"] = BASE.into(),
+        }
+        f.nodes.push(Node {
+            id: env,
+            label: "Environment".into(),
+            props,
+        });
+    }
+    let content = f.artifact(ExportMode::BestEffort).content;
+    assert!(
+        content.contains(
+            "| acme/shop | src/main/resources/application-prod.yml | prod | \
+             src/main/resources/application.yml | datasource.password, datasource.url | \
+             Deterministic | Confirmed | acme/shop:src/main/resources/application.yml bytes \
+             20..40 @ 0123abc | — |"
+        ),
+        "{content}"
+    );
+    assert!(
+        content.contains(
+            "| acme/shop | src/main/resources/application.yml\\#staging | staging | \
+             src/main/resources/application.yml | server.port |"
+        ),
+        "{content}"
+    );
+    assert!(content.contains("Spring Boot `application` files are read"));
+}
