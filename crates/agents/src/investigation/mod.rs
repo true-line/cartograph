@@ -7,6 +7,7 @@
 #[doc(hidden)]
 pub mod acquisition_choices;
 mod admission;
+mod capabilities;
 pub mod claim_diagnostics;
 mod completion;
 mod coverage;
@@ -55,6 +56,7 @@ mod validation_workspace;
 mod withholding;
 mod withholding_witness;
 
+pub use capabilities::*;
 pub use completion::*;
 pub use coverage::*;
 pub use coverage_protocol::*;
