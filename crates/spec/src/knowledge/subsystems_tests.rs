@@ -312,7 +312,11 @@ fn a_widely_used_errors_module_is_shared() {
             fixture.imports(path, module);
         }
         let report = derive_subsystems(&fixture.snapshot());
-        assert_eq!((report.files, report.grouped, report.shared), (13, 12, 1), "{module}");
+        assert_eq!(
+            (report.files, report.grouped, report.shared),
+            (13, 12, 1),
+            "{module}"
+        );
         let shared = groups(&report)
             .into_iter()
             .find(|(_, kind, _)| kind == "shared")
