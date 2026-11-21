@@ -245,6 +245,55 @@ def local_import(src: Alias, n: int = Alias):
 }
 
 #[test]
+fn records_added_to_the_session_and_query_deletes_are_guarded_effects() {
+    // AC-0910 (T-0910, #1998): `Session.add` of an imported class's
+    // constructor, directly or through a local assigned before it, is an
+    // effect whose value is the constructor; `Model.filter(…).delete()` is
+    // one too. A local not built from an imported class, reassigned, or
+    // assigned in another block is not.
+    let code = r#"
+from app.models import DeletedAlias, DomainDeletedAlias, Alias
+from app.db import Session
+
+def perform(alias, reason):
+    if not DeletedAlias.get_by(email=alias.email):
+        deleted = DeletedAlias(email=alias.email, reason=reason)
+        Session.add(deleted)
+    if alias.custom_domain_id:
+        Session.add(DomainDeletedAlias(email=alias.email))
+    other = make(alias)
+    Session.add(other)
+    item = alias
+    if reason:
+        item = DeletedAlias(email=alias.email)
+    Session.add(item)
+    if reason:
+        late = DeletedAlias(email=alias.email)
+    Session.add(late)
+    Alias.filter(Alias.id == alias.id).delete()
+    Local.filter(x=1).delete()
+"#;
+    let out = recover(code);
+    let found: Vec<(String, usize)> = rules(&out)
+        .into_iter()
+        .filter(|(_, r)| r.kind == RuleKind::GuardedEffect)
+        .map(|(_, r)| (value(&r).1, r.conditions.len()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "DeletedAlias(email=alias.email, reason=reason)".to_owned(),
+                1
+            ),
+            ("DomainDeletedAlias(email=alias.email)".to_owned(), 1),
+            ("Alias.filter(Alias.id == alias.id).delete()".to_owned(), 0),
+        ],
+        "{found:?}"
+    );
+}
+
+#[test]
 fn guarded_returns_and_raises_are_owned_by_their_function() {
     // AC-0852: if / elif / else branches, outermost first; a nested function
     // and a lambda own their own exits; an unguarded or bare exit is none.

@@ -1181,6 +1181,16 @@ fn effect_statement<'t>(
         }
         _ => return None,
     };
+    // `Session.add(DeletedAlias(…))`, or of a local assigned one: the record
+    // created is the constructor call (#1998).
+    if let EffectKind::Call { call } = kind
+        && let Some(constructor) = session_added(cx, node, call, modules)
+    {
+        return Some(Effect {
+            statement: node,
+            kind: EffectKind::Call { call: constructor },
+        });
+    }
     if let EffectKind::Call { call } = kind {
         let callee = call.child_by_field_name("function")?;
         let admitted = match callee.kind() {
@@ -1215,10 +1225,26 @@ fn effect_statement<'t>(
                         && (modules.contains(receiver)
                             || function.is_some_and(|f| function_imports(cx, f).contains(receiver)))
                 };
-                object.kind() == "identifier"
+                // `Alias.filter(…).delete()`: the matching records deleted.
+                let query_delete = || {
+                    verb == "delete"
+                        && object.kind() == "call"
+                        && object
+                            .child_by_field_name("function")
+                            .filter(|f| f.kind() == "attribute")
+                            .is_some_and(|f| {
+                                f.child_by_field_name("attribute")
+                                    .is_some_and(|a| matches!(cx.text(&a), "filter" | "filter_by"))
+                                    && f.child_by_field_name("object").is_some_and(|model| {
+                                        imported_class(cx, node, model, modules)
+                                    })
+                            })
+                };
+                (object.kind() == "identifier"
                     && !LOGGING.contains(&receiver)
                     && !LOG_VERBS.contains(&verb)
-                    && (matches!(receiver, "self" | "cls") || module() || model_write())
+                    && (matches!(receiver, "self" | "cls") || module() || model_write()))
+                    || query_delete()
             }
             _ => false,
         };
@@ -1230,6 +1256,105 @@ fn effect_statement<'t>(
         statement: node,
         kind,
     })
+}
+
+/// Whether `name` is an upper-case class imported at the top of the file or
+/// in the statement's function, other than `Session`, and not rebound there.
+fn imported_class(
+    cx: &FileCx<'_>,
+    statement: TsNode<'_>,
+    name: TsNode<'_>,
+    modules: &BTreeSet<String>,
+) -> bool {
+    let text = cx.text(&name);
+    let function = owner_function(statement);
+    name.kind() == "identifier"
+        && text.starts_with(|c: char| c.is_ascii_uppercase())
+        && text != "Session"
+        && function.is_none_or(|f| !bound_locally(cx, f, text))
+        && (modules.contains(text)
+            || function.is_some_and(|f| function_imports(cx, f).contains(text)))
+}
+
+/// The constructor call of the record `Session.add(…)` adds (#1998): its
+/// argument `DeletedAlias(…)`, or the last `deleted = DeletedAlias(…)` of a
+/// local before the statement in the same function.
+fn session_added<'t>(
+    cx: &FileCx<'_>,
+    statement: TsNode<'t>,
+    call: TsNode<'t>,
+    modules: &BTreeSet<String>,
+) -> Option<TsNode<'t>> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "attribute"
+        || callee
+            .child_by_field_name("object")
+            .is_none_or(|o| o.kind() != "identifier" || cx.text(&o) != "Session")
+        || callee
+            .child_by_field_name("attribute")
+            .is_none_or(|a| cx.text(&a) != "add")
+    {
+        return None;
+    }
+    let arguments = call.child_by_field_name("arguments")?;
+    if arguments.named_child_count() != 1 {
+        return None;
+    }
+    let argument = arguments.named_child(0)?;
+    let constructs = |value: TsNode<'t>| {
+        value.kind() == "call"
+            && value
+                .child_by_field_name("function")
+                .is_some_and(|f| imported_class(cx, statement, f, modules))
+    };
+    match argument.kind() {
+        "call" => constructs(argument).then_some(argument),
+        "identifier" => {
+            // Only the local's one assignment in the function, earlier in the
+            // same block as the statement, so it is the value added on every
+            // path; a reassigned local is withheld.
+            let name = cx.text(&argument);
+            let function = owner_function(statement)?;
+            let mut found = Vec::new();
+            let mut stack = vec![function];
+            while let Some(node) = stack.pop() {
+                if node != function
+                    && matches!(
+                        node.kind(),
+                        "function_definition" | "class_definition" | "lambda"
+                    )
+                {
+                    continue;
+                }
+                if matches!(
+                    node.kind(),
+                    "assignment" | "augmented_assignment" | "for_statement"
+                ) && node.child_by_field_name("left").is_some_and(|left| {
+                    cx.text(&left)
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .any(|word| word == name)
+                }) {
+                    found.push(node);
+                }
+                let mut cursor = node.walk();
+                stack.extend(node.named_children(&mut cursor));
+            }
+            let [assignment] = found[..] else {
+                return None;
+            };
+            let same_block = assignment.parent().and_then(|p| p.parent()) == statement.parent();
+            let value = assignment.child_by_field_name("right")?;
+            (assignment.kind() == "assignment"
+                && assignment
+                    .child_by_field_name("left")
+                    .is_some_and(|left| left.kind() == "identifier")
+                && assignment.end_byte() <= statement.start_byte()
+                && same_block
+                && constructs(value))
+            .then_some(value)
+        }
+        _ => None,
+    }
 }
 
 fn omission_source(mut node: TsNode<'_>) -> TsNode<'_> {

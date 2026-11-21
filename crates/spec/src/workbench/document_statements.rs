@@ -1467,6 +1467,30 @@ fn called(value: &str) -> Option<String> {
     // `AliasUsedOn.create(…)` / `DeletedAlias.delete(…)` on a class: a
     // record created or deleted (#1998).
     let receiver: Vec<&str> = segments.clone().collect();
+    // `DeletedAlias(email=…)` a Python adapter admits only as the record
+    // `Session.add` adds (a SQLAlchemy constructor takes keywords, which a
+    // Go call never has); `Alias.filter(…).delete()` deletes the matches.
+    let keywords = || {
+        let bytes = value.as_bytes();
+        (callee.len()..bytes.len()).any(|i| {
+            bytes[i] == b'='
+                && bytes.get(i + 1) != Some(&b'=')
+                && !matches!(bytes[i - 1], b'=' | b'!' | b'<' | b'>')
+        })
+    };
+    if receiver.is_empty() && last.starts_with(|c: char| c.is_ascii_uppercase()) && keywords() {
+        return Some(format!("a new “{}” record is created", words(last)));
+    }
+    if let [model] = receiver[..]
+        && model.starts_with(|c: char| c.is_ascii_uppercase())
+        && matches!(last, "filter" | "filter_by")
+        && value.trim_end().ends_with(".delete()")
+    {
+        return Some(format!(
+            "the matching “{}” records are deleted",
+            words(model)
+        ));
+    }
     if let [model] = receiver[..]
         && model.starts_with(|c: char| c.is_ascii_uppercase())
         && model != "Session"
@@ -2380,6 +2404,18 @@ mod tests {
             "the “deleted alias” record is deleted"
         );
         assert_eq!(called("Session.delete(alias)").unwrap(), "it runs “delete”");
+        assert_eq!(
+            called("DeletedAlias(email=alias.email, alias_id=alias.id)").unwrap(),
+            "a new “deleted alias” record is created"
+        );
+        assert_eq!(
+            called("RespondError(w, code == 400)").unwrap(),
+            "it runs “respond error”"
+        );
+        assert_eq!(
+            called("Alias.filter(Alias.id == alias.id).delete()").unwrap(),
+            "the matching “alias” records are deleted"
+        );
         // TypeScript (#1998).
         assert_eq!(
             called("await this.connection.getRepository(ctx, OrderLine).save(line)").unwrap(),
