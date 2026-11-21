@@ -749,12 +749,14 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
                 out.files += 1;
                 out.nodes.push(emitter.name_only());
             }
+        } else if emitter.manifest(tree.documents(&file.rel), &mut out) {
+            // Read first: a Kubernetes manifest may be named like a Spring
+            // Boot configuration file (`application.yml`).
+            out.files += 1;
         } else if let Some(parsed) = spring.files.get(&file.rel) {
             if emitter.spring(&file.name, parsed, &spring, &mut out) {
                 out.files += 1;
             }
-        } else if emitter.manifest(tree.documents(&file.rel), &mut out) {
-            out.files += 1;
         } else if settings::names_an_environment(&file.rel)
             && std::fs::read_to_string(&file.path).is_ok()
         {

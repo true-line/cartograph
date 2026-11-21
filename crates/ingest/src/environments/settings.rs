@@ -221,9 +221,16 @@ fn walk_yaml(
             keys.insert(path);
             continue;
         };
-        if path == ON_PROFILE || path == LEGACY_PROFILES && scalar(text, value).is_some() {
+        // `spring.profiles` is an activation unless it is the mapping of
+        // `active`, `include` and `group` beneath it.
+        if path == ON_PROFILE || path == LEGACY_PROFILES && super::mapping_of(value).is_none() {
             match scalar(text, value) {
                 Some(profile) => activation(doc, &profile, entry.span),
+                None if items(value).is_some() => doc.findings.add(
+                    "the document is activated by a profile expression or list, which is not \
+                     evaluated",
+                    entry.span,
+                ),
                 None => doc
                     .findings
                     .add("a profile activation is not a plain scalar", entry.span),

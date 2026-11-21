@@ -1242,3 +1242,52 @@ fn settings_files_named_like_environments_are_name_only_gaps() {
     );
     assert!(!out.nodes.iter().any(|node| node.label == "Environment"));
 }
+
+// AC-1503: a Kubernetes manifest named like a Spring Boot file is still read
+// as a manifest, and a legacy `spring.profiles` list is a Gap, not a key.
+#[test]
+fn spring_named_manifests_stay_manifests_and_profile_lists_are_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "deploy/application.yml",
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+            ),
+            (
+                "deploy/application-prod.yml",
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web-prod\n",
+            ),
+            (
+                "app/application.yml",
+                "spring:\n  profiles: [prod, cloud]\nserver:\n  port: 1\n",
+            ),
+        ],
+    );
+    let out = extract_in(dir.path());
+    let workloads: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Workload")
+        .filter_map(|node| node.props["name"].as_str())
+        .collect();
+    assert_eq!(workloads, BTreeSet::from(["web", "web-prod"]));
+    // The manifests' own Gaps only: nothing reads them as Spring profiles.
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.id.contains("deploy/application")
+                && node.props["kind"] != "manifest-document"
+                && node.label == "Gap")
+    );
+    let gap = node_of(&out, &format!("gap:environment:{REPO}@app/application.yml"));
+    assert_eq!(gap.props["kind"], "spring-config");
+    assert!(
+        gap.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("profile expression or list")
+    );
+    assert!(!out.nodes.iter().any(|node| node.label == "Environment"));
+}
