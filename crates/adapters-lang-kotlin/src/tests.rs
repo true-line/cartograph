@@ -6253,3 +6253,303 @@ object Lookalike : Table("lookalike")
         ]
     );
 }
+
+// AC-1028: import-proven JPA `@Entity` classes are `jpa` DataEntities with
+// their stored properties as fields (`@Id`, `@Column` names, `@Transient`
+// skipped), named by `@Entity(name)` or the class and tabled by `@Table`;
+// relation properties are REFERENCES to the target entity across files
+// (to-many through the collection's element type). An unrecovered target,
+// a computed table name and a lookalike `@Entity` assert no relation,
+// table or entity.
+#[test]
+fn jpa_entities_and_relations_join_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/model/Customer.kt",
+        r#"package com.shop.model
+
+import jakarta.persistence.*
+
+@Entity
+@Table(name = "customers", schema = "shop")
+class Customer(
+    @Id @GeneratedValue val id: Long = 0,
+    @Column(name = "full_name") var name: String,
+    @OneToMany(mappedBy = "customer") val orders: MutableList<Order> = mutableListOf(),
+    @Transient val cached: String = "",
+    plain: Int = 0,
+) {
+    @ManyToMany
+    @JoinTable(name = "customer_tags")
+    var tags: Set<com.shop.tags.Tag> = emptySet()
+    val display: String
+        get() = name.uppercase()
+}
+
+@Entity(name = "Bad")
+@Table(name = TABLE)
+class Computed(@Id val id: Long)
+
+const val TABLE = "computed"
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/model/Order.kt",
+        r#"package com.shop.model
+
+import javax.persistence.Entity
+import javax.persistence.Id
+import javax.persistence.JoinColumn
+import javax.persistence.ManyToOne
+import javax.persistence.OneToOne
+
+@Entity(name = "PurchaseOrder")
+data class Order(
+    @Id val id: Long,
+    @ManyToOne @JoinColumn(name = "customer_id") val customer: Customer?,
+    @OneToOne(targetEntity = Invoice::class) val invoice: Any?,
+)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/fake/Fake.kt",
+        r#"package com.shop.fake
+
+annotation class Entity
+
+@Entity
+class NotPersistent(val id: Long)
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut entities: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    entities.sort();
+    assert_eq!(
+        entities,
+        [
+            "data:local/demo@jpa:Bad",
+            "data:local/demo@jpa:Customer",
+            "data:local/demo@jpa:PurchaseOrder"
+        ]
+    );
+    let customer = node(&out.nodes, "data:local/demo@jpa:Customer");
+    assert_eq!(customer.props["storage"], "jpa");
+    assert_eq!(customer.props["table"], "customers");
+    assert_eq!(customer.props["schema"], "shop");
+    assert_eq!(customer.props["table_source"], "explicit");
+    assert_eq!(customer.props["fqn"], "com.shop.model.Customer");
+    assert_eq!(
+        customer.props["fields"],
+        serde_json::json!([
+            {"name": "id", "id": true, "type": "Long"},
+            {"name": "name", "id": false, "type": "String", "column": "full_name"},
+            {"name": "orders", "id": false, "type": "MutableList<Order>", "relation": "OneToMany"},
+            {"name": "tags", "id": false, "type": "Set<com.shop.tags.Tag>", "relation": "ManyToMany"},
+        ])
+    );
+    let order = node(&out.nodes, "data:local/demo@jpa:PurchaseOrder");
+    assert_eq!(order.props["table"], "PurchaseOrder");
+    assert_eq!(order.props["table_source"], "default");
+    let bad = node(&out.nodes, "data:local/demo@jpa:Bad");
+    assert!(bad.props.get("table").is_none());
+    assert_eq!(bad.props["table_source"], "unresolved");
+
+    let orders = edge(
+        &out.edges,
+        "data:local/demo@jpa:Customer",
+        "data:local/demo@jpa:PurchaseOrder",
+        "REFERENCES",
+    );
+    assert_eq!(orders.props["cardinality"], "one-to-many");
+    assert_eq!(orders.props["mapped_by"], "customer");
+    assert_eq!(orders.props["owning"], false);
+    let customer_ref = edge(
+        &out.edges,
+        "data:local/demo@jpa:PurchaseOrder",
+        "data:local/demo@jpa:Customer",
+        "REFERENCES",
+    );
+    assert_eq!(customer_ref.props["cardinality"], "many-to-one");
+    assert_eq!(customer_ref.props["join_column"], "customer_id");
+    assert_eq!(customer_ref.props["owning"], true);
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jpa")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "JPA relation target `Invoice` is not a recovered entity",
+            "JPA relation target `com.shop.tags.Tag` is not a recovered entity",
+            "runtime-computed JPA table name",
+        ]
+    );
+}
+
+// AC-1028: one JPA entity name two classes declare is one duplicate Gap and
+// resolves nothing, to or from it; JPA relations resolve among JPA entities
+// only (a Room entity class is no target, and a Room query does not read a
+// JPA table); two relations to one target are one edge listing both fields;
+// a same-package `Transient` keeps the property a field.
+#[test]
+fn jpa_duplicates_frameworks_and_merged_relations() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/p/Model.kt",
+        r#"package p
+
+import jakarta.persistence.Entity
+import jakarta.persistence.Id
+import jakarta.persistence.ManyToOne
+import jakarta.persistence.OneToOne
+import jakarta.persistence.Table
+
+annotation class Transient
+
+@Entity
+@Table(name = "people")
+class Person(
+    @Id val id: Long,
+    @ManyToOne val referrer: Person?,
+    @OneToOne val mentor: Person?,
+    @ManyToOne val note: p.room.Note?,
+    @Transient val kept: String,
+)
+
+@Entity(name = "Twin")
+class TwinA(@Id val id: Long, @ManyToOne val person: Person)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/p/other/Twin.kt",
+        r#"package p.other
+
+import jakarta.persistence.Entity
+import jakarta.persistence.Id
+import jakarta.persistence.OneToOne
+import p.Person
+
+@Entity(name = "Twin")
+class TwinB(@Id val id: Long)
+
+@Entity
+class Holder(@Id val id: Long, @OneToOne val twin: TwinB)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/p/room/Note.kt",
+        r#"package p.room
+
+import androidx.room.Dao
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+import androidx.room.Query
+
+@Entity
+class Note(@PrimaryKey val id: Long)
+
+@Dao
+interface NoteDao {
+    @Query("SELECT * FROM people")
+    fun people(): List<Note>
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut entities: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    entities.sort();
+    assert_eq!(
+        entities,
+        [
+            "data:local/demo@jpa:Holder",
+            "data:local/demo@jpa:Person",
+            "data:local/demo@sql:note"
+        ]
+    );
+    let duplicate = node(&out.nodes, "gap:jpa:duplicate:data:local/demo@jpa:Twin");
+    assert_eq!(
+        duplicate.props["fqns"],
+        serde_json::json!(["p.TwinA", "p.other.TwinB"])
+    );
+    let person = node(&out.nodes, "data:local/demo@jpa:Person");
+    let fields: Vec<&str> = person.props["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(fields, ["id", "referrer", "mentor", "note", "kept"]);
+    assert!(person.props["fields"][4].get("unless_obscured").is_none());
+
+    let selfie = edge(
+        &out.edges,
+        "data:local/demo@jpa:Person",
+        "data:local/demo@jpa:Person",
+        "REFERENCES",
+    );
+    assert_eq!(
+        selfie.props["relations"],
+        serde_json::json!([
+            {"field": "mentor", "relation": "OneToOne", "cardinality": "one-to-one", "owning": true},
+            {"field": "referrer", "relation": "ManyToOne", "cardinality": "many-to-one", "owning": true},
+        ])
+    );
+    assert_eq!(
+        selfie.props["prov"]["evidence"].as_array().unwrap().len(),
+        2
+    );
+    // A relation to a colliding entity, and one from it, fail closed.
+    for src in ["data:local/demo@jpa:Holder", "data:local/demo@jpa:Twin"] {
+        assert!(out.edges.iter().any(|edge| edge.src == src
+            && edge.label == "REFERENCES"
+            && edge.dst.starts_with("gap:jpa:local/demo@")));
+    }
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.dst == "data:local/demo@sql:note" && edge.src.contains("jpa"))
+    );
+    assert!(
+        !out.edges
+            .iter()
+            .any(|edge| edge.dst == "data:local/demo@jpa:Person" && edge.label == "READS")
+    );
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] != "kotlin")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "JPA entity name is declared by more than one class",
+            "JPA relation target `Person` is not a recovered entity",
+            "JPA relation target `TwinB` is not a recovered entity",
+            "JPA relation target `p.room.Note` is not a recovered entity",
+            "Room query table `people` is not a recovered @Entity",
+        ]
+    );
+}

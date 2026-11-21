@@ -1,0 +1,29 @@
+{
+  "nodes": [
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@jpa:Owner",
+      "props": {
+        "storage": "jpa",
+        "framework": "jpa",
+        "table": "owners"
+      }
+    },
+    {
+      "label": "DataEntity",
+      "id": "data:local/p@jpa:Pet",
+      "props": {
+        "storage": "jpa",
+        "framework": "jpa",
+        "table": "Pet"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "REFERENCES",
+      "src": "data:local/p@jpa:Pet",
+      "dst": "data:local/p@jpa:Owner"
+    }
+  ]
+}
