@@ -234,3 +234,76 @@ fn unstorable_rejected_response_still_stops() {
     assert_eq!(count, 0);
     assert_eq!(fixture.store.investigation(&id).unwrap(), detail);
 }
+
+// AC-1405: a host failure after a decoded action keeps the action's canonical
+// body, which hashes to the saved action hash; a body with a secret keeps only
+// its size and hash, and the terminal outcome is a plain stop's.
+#[test]
+fn host_failure_stop_keeps_canonical_admitted_action() {
+    use agents::investigation::admitted_action::{ActionRetention, ActionWithheldReason};
+    let clean = "{ \"type\": \"query_context\", \"query\": {\"kind\": \"entity\", \"labels\": [\"Alias\"], \"max_facts\": 8} }";
+    let secret = "{\"type\":\"query_context\",\"labels\":[\"AKIA0000000000000000\"]}";
+    let cases = [
+        (
+            InvestigationStopReason::PreparationAt(PreparationPhase::Query),
+            clean,
+            None,
+        ),
+        (
+            InvestigationStopReason::HostLimitAt {
+                phase: PreparationPhase::Inventory,
+                limit: HostLimitKind::Unspecified,
+            },
+            secret,
+            Some(ActionWithheldReason::Sensitive),
+        ),
+    ];
+    for (index, (reason, response, withheld)) in cases.into_iter().enumerate() {
+        let mut fixture = Fixture::new();
+        let (id, execution) = fixture.start(
+            &format!("admitted-action-{index}"),
+            InvestigationProviderMode::Local,
+        );
+        fixture.prepare(&id, &execution, false);
+        let revision = fixture.store.investigation(&id).unwrap().summary.revision;
+        let detail = fixture
+            .store
+            .advance_investigation(
+                &execution,
+                revision,
+                InvestigationTransition::StopRejected {
+                    reason,
+                    active_milliseconds: 0,
+                    rejected: RejectedCompletion {
+                        step_id: "step-2".into(),
+                        text: response.into(),
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.error.as_deref(), Some(reason.test_message()));
+        let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+        assert_eq!(reopened.investigation_rejected_response(&id).unwrap(), None);
+        let kept = reopened
+            .investigation_admitted_action(&id)
+            .unwrap()
+            .unwrap();
+        let canonical = encode(
+            &serde_json::from_str::<serde_json::Value>(response).unwrap(),
+            MAX_ACTION_BYTES,
+        )
+        .unwrap();
+        assert_eq!(kept.step_id, "step-2");
+        assert_eq!(kept.action_hash, core_prov::content_hash(&canonical));
+        match withheld {
+            None => assert_eq!(
+                kept.retention,
+                ActionRetention::Body {
+                    json: String::from_utf8(canonical).unwrap()
+                }
+            ),
+            Some(reason) => assert_eq!(kept.retention, ActionRetention::Withheld { reason }),
+        }
+    }
+}
