@@ -743,3 +743,40 @@ fn android_components_are_one_client_application() {
     assert!(l2.contains("[Container: Android]"), "{l2}");
     assert!(!l2.contains("Runs `app/src/main"), "{l2}");
 }
+
+// AC-1110: a repository whose process already has its container keeps its
+// Android components in an app container of their own.
+#[test]
+fn android_components_beside_a_process_keep_their_own_container() {
+    let mut f = system();
+    const APP: &str = "acme/mixed";
+    f.node(&format!("repo:{APP}"), "Repo", json!({}), (APP, "."));
+    for (key, kind, file) in [
+        ("main", "process", "server/Main.kt"),
+        (
+            "activity:com.acme.MainActivity",
+            "android-activity",
+            "app/src/main/AndroidManifest.xml",
+        ),
+    ] {
+        let entry = f.node(
+            &format!("entry:{APP}@{file}#{key}"),
+            "EntryPoint",
+            json!({"kind": kind, "name": key, "how": "x", "file": file}),
+            (APP, file),
+        );
+        let module = f.code(APP, file, key);
+        f.edge(&entry, "ENTRY", &module, (APP, file), json!({}));
+    }
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert!(
+        l2.contains("Runs `server/Main.kt` as its own process"),
+        "{l2}"
+    );
+    assert!(l2.contains("mixed Android app"), "{l2}");
+    assert!(
+        l2.contains("Client application: 1 Android component"),
+        "{l2}"
+    );
+}

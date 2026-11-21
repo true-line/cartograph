@@ -854,18 +854,29 @@ impl<'a> Model<'a> {
                     &triggers,
                 );
             }
-            if owners.by_repo.contains_key(repo) {
-                continue;
-            }
-            // A client application: screens or an extension, no process.
-            let extension = by_label("Extension", repo).into_iter().next();
-            let screens = by_label("Screen", repo);
-            let contexts = by_label("ExtensionContext", repo);
-            let commands = by_label("Command", repo);
             let android: Vec<&Node> = by_label("EntryPoint", repo)
                 .into_iter()
                 .filter(|e| e.props["kind"].as_str().is_some_and(android_kind))
                 .collect();
+            // A repository another container already owns keeps its
+            // Android components and workers in an app container of their
+            // own (AC-1110).
+            let owned = owners.by_repo.contains_key(repo);
+            if owned && android.is_empty() {
+                continue;
+            }
+            let unowned = |label: &str| {
+                if owned {
+                    Vec::new()
+                } else {
+                    by_label(label, repo)
+                }
+            };
+            // A client application: screens or an extension, no process.
+            let extension = unowned("Extension").into_iter().next();
+            let screens = unowned("Screen");
+            let contexts = unowned("ExtensionContext");
+            let commands = unowned("Command");
             if extension.is_some()
                 || !screens.is_empty()
                 || !contexts.is_empty()
@@ -889,6 +900,7 @@ impl<'a> Model<'a> {
                             .filter(|n| !n.is_empty())
                             .map_or_else(|| repo_name(repo), str::to_string)
                     }
+                    None if owned => format!("{} Android app", repo_name(repo)),
                     None => repo_name(repo),
                 };
                 if !android.is_empty() && routers.iter().all(|r| !r.starts_with("Android")) {

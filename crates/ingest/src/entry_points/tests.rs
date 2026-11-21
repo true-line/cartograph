@@ -1032,6 +1032,14 @@ fn android_components_and_workers_are_starts() {
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".Split">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+            <intent-filter>
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
         <activity-alias android:name=".Alias" android:targetActivity=".MainActivity" />
         <service android:name=".sync.SyncService" android:exported="false" />
         <receiver android:name="BootReceiver">
@@ -1082,6 +1090,9 @@ fn android_components_and_workers_are_starts() {
     assert_eq!(activity.props["launcher"], true);
     assert_eq!(activity.props["exported"], true);
     assert_eq!(activity.props["how"], "<activity>");
+    // MAIN and LAUNCHER in separate intent filters launch nothing.
+    let split = entry(&out, manifest, "activity:com.acme.app.Split");
+    assert!(split.props.get("launcher").is_none(), "{:?}", split.props);
     assert_eq!(
         activity.props["name"],
         format!("App launch screen ({manifest}: com.acme.app.MainActivity)")
@@ -1140,7 +1151,7 @@ fn android_components_and_workers_are_starts() {
         .filter(|n| n.label == "EntryPoint")
         .map(|n| n.id.as_str())
         .collect();
-    assert_eq!(entries.len(), 6, "{entries:#?}");
+    assert_eq!(entries.len(), 7, "{entries:#?}");
 }
 
 /// AC-1110: a module's namespace is read from its own build file, stated

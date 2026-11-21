@@ -98,6 +98,8 @@ struct Element {
     within: Vec<String>,
     /// The index of the component element it sits in, if any.
     component: Option<usize>,
+    /// The index of the `<intent-filter>` it sits in, if any.
+    filter: Option<usize>,
 }
 
 /// Scan an XML document's start tags. Comments, processing instructions,
@@ -171,12 +173,18 @@ fn scan(text: &str) -> Vec<Element> {
             .rev()
             .map(|(_, index)| *index)
             .find(|index| COMPONENTS.iter().any(|(t, _)| *t == out[*index].tag));
+        let filter = stack
+            .iter()
+            .rev()
+            .map(|(_, index)| *index)
+            .find(|index| out[*index].tag == "intent-filter");
         out.push(Element {
             tag: tag.clone(),
             attributes,
             span: (start as u64, (end + 1) as u64),
             within,
             component,
+            filter,
         });
         if !self_closing {
             stack.push((tag, out.len() - 1));
@@ -339,11 +347,22 @@ pub(super) fn starts(
                 .collect()
         };
         let actions = inside("action");
-        let categories = inside("category");
-        let launcher = actions.iter().any(|a| a == "android.intent.action.MAIN")
-            && categories
-                .iter()
-                .any(|c| c == "android.intent.category.LAUNCHER");
+        // MAIN and LAUNCHER must be declared in the same intent filter.
+        let declares = |filter: usize, tag: &str, name: &str| {
+            elements.iter().any(|e| {
+                e.filter == Some(filter)
+                    && e.tag == tag
+                    && e.attributes.get("android:name").map(String::as_str) == Some(name)
+            })
+        };
+        let launcher = elements
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.component == Some(index) && e.tag == "intent-filter")
+            .any(|(filter, _)| {
+                declares(filter, "action", "android.intent.action.MAIN")
+                    && declares(filter, "category", "android.intent.category.LAUNCHER")
+            });
         let fqn = match (name.strip_prefix('.'), &package) {
             (Some(relative), Some(package)) => Some(format!("{package}.{relative}")),
             (Some(_), None) => None,
