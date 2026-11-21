@@ -1359,6 +1359,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** P1 (#260, #2036) · `spec` · ADR-0051 · T-0919
 - **AC-0970** Given the groups the subsystem rule found and named (AC-0914), when files are still in no group after the leftover files have joined the groups they are named for, then files that are not shared and carry a word in their own file names form groups: the word that the most such files carry (the first by spelling on a tie), when at least three carry it, gathers them as one group, and this repeats over the files that are left until no word is carried by three. The group is named as any other, so a configured strategy with its default and its alternatives (`default-tax-zone-strategy`, `address-based-tax-zone-strategy`) is one area (`Tax zone`) and its rules reach a topic expert. Files sharing no such word stay in no group. The groups found before this step are unchanged. The rule version is 4. On Vendure core this adds 11 groups and 49 files (Money, Slug, Logger, Asset, Tag, Health and Tax zone among them) and changes no earlier group. The SimpleLogin groups are unchanged (#260).
 - **Trace:** P1 (#260) · `spec` · ADR-0051 · T-0970
+- **AC-0978** Given the knowledge phase's producer rules, when the overlay recipe is named, then it is `knowledge@2;producers@blake3:` followed by the BLAKE3 content hash of each `rule@version` in phase order, so a change to any rule version or to the order changes the overlay identity, and the name has one length however many producers land, within the overlay's 256-byte name bound with the `knowledge-derived-rejected` marker (#2040).
+- **Trace:** P1 (#2040) · `app` · ADR-0051 · T-0978
 
 - **AC-0519** Given otherwise-valid deterministic Endpoint, HANDLES or Method support whose provenance names an explicit artifact or observation evidence basis, when the Capability rule checks support, then that support is refused and no candidate forms, because the derived candidate's own provenance resolves to a source basis; support with no basis or an explicit source basis is unchanged, and the rule version moves to 2 so the changed eligibility changes candidate identity, Rule provenance and the knowledge recipe (#1489).
 - **Security:** Derived facts can no longer relabel artifact or runtime evidence as source evidence; the existing source-backed contract is enforced, not widened.
@@ -1523,6 +1525,9 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Security:** Agents propose only; acceptance never upgrades a tier or writes a fact (R-INT-1, R-INT-3). Egress consent and redaction per step are unchanged. No write to the ingested target.
 - **Performance:** A drafting run is bounded by the existing call, byte and time limits; a draft is at most 64 claims and 256 KiB.
 - **Trace:** W13 (#1748) · `spec`, `agents`, `context-hub`, `app`, `ui` · ADR-0064, ADR-0061, ADR-0058 · T-0663..0670, T-0682..0684, T-0861, T-0862, T-0925
+- **AC-0979** Given a draft store that holds more than 256 accepted section drafts, when the curated projection reads it, then every reviewed draft is read and projected: an accepted draft costs no SPEC-09 assessment, so only the 4096-record scan bounds them, and `too_many_accepted` is stated only for more than 256 accepted proposals (#2040).
+- **AC-0980** Given a finding curation store that holds more than 256 accepted findings, when the curated projection reads it, then every reviewed finding is read: an accepted finding costs no SPEC-09 assessment, so only the 4096-record scan bounds them (#2040).
+- **Trace:** W13 (#2040) · `app` · ADR-0064, ADR-0074 · T-0979, T-0980
 
 ### US-0048 — Keep authored sections current as the code changes
 - **Actor:** Engineer or product owner

@@ -358,3 +358,26 @@ fn a_draft_store_that_cannot_be_read_leaves_the_projection_not_computed() {
             .contains("- Curated revision: not computed (`reviews_unavailable`)")
     );
 }
+
+// AC-0979 (#2040): an accepted draft costs no SPEC-09 assessment, so more
+// than `MAX_CURATED_ACCEPTED` of them are read and projected. Only the
+// record scan bounds them.
+#[test]
+fn more_accepted_drafts_than_the_proposal_bound_are_projected() {
+    let fixture = fixture();
+    let many = MAX_CURATED_ACCEPTED + 1;
+    for index in 0..many {
+        let draft = fixture.draft("1.1", &format!("Claim {index}."), &["cap:checkout"]);
+        fixture.review(&draft, DraftDecision::Accepted);
+    }
+    let review = fixture.reviews.gather();
+    assert_eq!(review.failure, None);
+    assert_eq!(review.drafts.len(), many);
+    let bundle = fixture.export(ExportMode::BestEffort);
+    assert!(bundle.curated_basis.is_some());
+    assert!(
+        !artifact(&bundle, "curated")
+            .content
+            .contains("too_many_accepted")
+    );
+}

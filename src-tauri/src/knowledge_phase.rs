@@ -345,18 +345,24 @@ pub(crate) const PRODUCER_RULES: [(&str, &str); 7] = [
     (spec::SUBSYSTEM_RULE, spec::SUBSYSTEM_RULE_VERSION),
 ];
 
-/// The phase recipe with each producer rule, so a rule version change
-/// changes the overlay identity. Every rule is in the `knowledge.`
-/// namespace, which the recipe names once (`knowledge@2`), so each rule is
-/// listed without it and the name stays within the overlay's name bound as
-/// producers are added (#1997).
+/// The phase recipe with a digest of every producer rule and version, so a
+/// rule version change changes the overlay identity. The name has one
+/// length however many producers land: `knowledge@2;producers@blake3:`
+/// and 64 hex digits, within the overlay's name bound (#2040).
 pub(crate) fn recipe_name() -> String {
-    let mut name = RECIPE.to_owned();
-    for (rule, version) in PRODUCER_RULES {
-        let short = rule.strip_prefix("knowledge.").unwrap_or(rule);
-        name.push_str(&format!(";{short}@{version}"));
-    }
-    name
+    recipe_over(&PRODUCER_RULES)
+}
+
+/// [`recipe_name`] over `rules`: the content hash (BLAKE3) of each
+/// `rule@version`, one per line in phase order, so the order and every
+/// version are in it.
+pub(crate) fn recipe_over(rules: &[(&str, &str)]) -> String {
+    let listed: String = rules
+        .iter()
+        .map(|(rule, version)| format!("{rule}@{version}\n"))
+        .collect();
+    let digest = core_prov::content_hash(listed.as_bytes());
+    format!("{RECIPE};producers@blake3:{digest}")
 }
 
 fn recipe(embedding_namespace: Option<String>, provider_ran: bool) -> OverlayRecipe {
