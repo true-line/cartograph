@@ -491,9 +491,9 @@ jobs:
       # As in the Linux Rust lanes: sccache serves the 15 workspace crates
       # this test builds, which rust-cache does not keep and which took most
       # of the lane's ~6 minutes of compile (#1924). install-action fails here
-      # after installing (bash startup failure with the per-step HOME it
-      # needs, actions/partner-runner-images#169), so the pinned release is
-      # fetched and checked against its published SHA-256 directly.
+      # (its cargo-binstall fallback hits a bash startup failure with the
+      # per-step HOME it needs), so the pinned release is fetched and checked
+      # against its published SHA-256 directly.
       - name: Install sccache
         shell: pwsh
         env:
@@ -519,10 +519,15 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
 
-      # Workspace crates only, as in the Linux lanes.
+      # Workspace crates only, as in the Linux lanes. The server is started
+      # here, outside the bounded test's process tree, which is torn down when
+      # the test ends and would take a server started by cargo with it.
       - name: Compile through sccache
         shell: pwsh
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
         run: |
+          & $env:SCCACHE_EXE --start-server
           "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
           "RUSTC_WORKSPACE_WRAPPER=$env:SCCACHE_EXE" >> $env:GITHUB_ENV
 
