@@ -5,10 +5,12 @@
 //! import-proven cross-file calls become the server graph, with unresolved
 //! project-local targets failing closed to explicit Gaps. Annotation-proven
 //! Spring Web mappings become Endpoint/HANDLES facts with class+method path
-//! composition (Ktor's routing DSL is a follow-on, not v1). Adapters are per
-//! language, not per compiler version: the grammar parses current syntax and
-//! anything it cannot prove is simply not asserted. This tier never calls an
-//! LLM and every emitted fact carries exact source-span provenance.
+//! composition, and import-proven Ktor routing DSL builders do too, with
+//! `route` prefixes and `Route` extension groups composed at the directory
+//! join (AC-1023). Adapters are per language, not per compiler version: the
+//! grammar parses current syntax and anything it cannot prove is simply not
+//! asserted. This tier never calls an LLM and every emitted fact carries
+//! exact source-span provenance.
 
 use adapters_lang_java::jvm::{classify_import, external_module_id, foreign_packages, in_system};
 use core_graph::{Edge, Node};
@@ -87,6 +89,8 @@ pub struct Extraction {
     pending_config: Vec<config_read::Pending>,
     /// Some file declares or imports something named `System`.
     system_rebound: bool,
+    /// Ktor routing DSL routes and mounts, composed at the join (AC-1023).
+    ktor_routes: ktor_routes::Pending,
 }
 
 /// A top-level class, interface, object, enum, annotation class or type
@@ -324,6 +328,7 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
         }
     }
     extraction.navigation3.retarget(commit);
+    extraction.ktor_routes.retarget(commit);
     hilt_binds::retarget(&mut extraction.hilt_binds, commit);
 }
 
@@ -1528,6 +1533,14 @@ pub fn extract_source(
         &mut out.nodes,
         &mut out.edges,
     );
+    // The file's own top-level functions already failed their proofs.
+    ktor_routes::resolve(
+        id.repo,
+        std::mem::take(&mut out.ktor_routes),
+        |_| false,
+        &mut out.nodes,
+        &mut out.edges,
+    );
     Ok(out)
 }
 
@@ -2052,6 +2065,21 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         &out.declared_importables,
     );
 
+    // Ktor server routes (AC-1023), product sources only. A handler
+    // lambda's calls are its own.
+    let mut handler_lambdas = HashMap::new();
+    if product {
+        (out.ktor_routes, handler_lambdas) = ktor_routes::extract(
+            &cx,
+            root,
+            package.as_deref(),
+            &imports,
+            &functions_by_start,
+            &mut out.nodes,
+            &mut out.edges,
+        );
+    }
+
     // Calls: same-scope unqualified/this calls resolve locally; calls
     // proven by an import (a type/object receiver, or an imported top-level
     // function) resolve repo-wide at the directory join, failing closed to
@@ -2071,9 +2099,12 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             let mut node = call;
             let mut found = None;
             while let Some(parent) = node.parent() {
-                if parent.kind() == "function_declaration"
-                    && let Some(symbol) = functions_by_start.get(&parent.start_byte())
-                {
+                let symbol = match parent.kind() {
+                    "function_declaration" => functions_by_start.get(&parent.start_byte()),
+                    "annotated_lambda" => handler_lambdas.get(&parent.start_byte()),
+                    _ => None,
+                };
+                if let Some(symbol) = symbol {
                     found = Some(symbol.clone());
                     break;
                 }
@@ -2505,6 +2536,7 @@ pub fn extract_dir_incremental_with_progress(
             out.navigation3.extend(extraction.navigation3);
             out.hilt_binds.extend(extraction.hilt_binds);
             out.pending_endpoints.extend(extraction.pending_endpoints);
+            out.ktor_routes.extend(extraction.ktor_routes);
             out.shadow_names.extend(extraction.shadow_names);
             out.pending_config.extend(extraction.pending_config);
             out.system_rebound |= extraction.system_rebound;
@@ -2557,6 +2589,13 @@ pub fn extract_dir_incremental_with_progress(
             .or_insert_with(|| Some(item.path.clone()));
     }
     let functions_by_fqn = unique_by_fqn(&out.declared_functions);
+    ktor_routes::resolve(
+        id.repo,
+        std::mem::take(&mut out.ktor_routes),
+        |fqn| functions_by_fqn.contains_key(fqn),
+        &mut out.nodes,
+        &mut out.edges,
+    );
     // Star-proven Spring endpoints (#1288): a same-package top-level type
     // or type alias of that name obscures the star import, so the route
     // fails closed to a Gap. In a mixed JVM tree a product Java type of the
@@ -2792,6 +2831,7 @@ mod apache_http;
 mod config_read;
 mod hilt_binds;
 mod ktor_client;
+mod ktor_routes;
 pub mod navigation3;
 mod okhttp;
 mod queries;
