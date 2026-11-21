@@ -231,7 +231,8 @@ export default function App() {
   const [dropActive, setDropActive] = useState(false);
   const [quickDispatchFallbackEnabled, setQuickDispatchFallbackEnabled] = useState(readQuickDispatchFallback);
   // Provider-reported usage per agent job (#252, AC-1703), read for the agent pool.
-  const [jobUsage, setJobUsage] = useState<JobUsage[]>([]);
+  // Null when the host could not read it, so stale counts are never shown.
+  const [jobUsage, setJobUsage] = useState<JobUsage[] | null>([]);
   // The closed-state dispatch hint (#251, AC-1702) shows until the first confirmed dispatch.
   const [quickDispatchHintShown, setQuickDispatchHintShown] = useState(readQuickDispatchHint);
   const showQuickDispatchHint = useCallback((shown: boolean) => {
@@ -353,7 +354,10 @@ export default function App() {
   useEffect(() => {
     if (view !== 'agent-chats') return;
     let current = true;
-    void loadJobUsage().then((rows) => { if (current) setJobUsage(rows); });
+    void loadJobUsage().then(
+      (rows) => { if (current) setJobUsage(rows); },
+      () => { if (current) setJobUsage(null); },
+    );
     return () => { current = false; };
   }, [jobs, view]);
 

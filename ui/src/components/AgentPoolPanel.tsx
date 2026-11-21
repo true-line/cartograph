@@ -12,8 +12,9 @@ export interface AgentPoolPanelProps {
   providers: InvestigationProvider[] | null;
   /** Undecided staged proposals in the loaded page; null when not loaded. */
   awaitingCuration: number | null;
-  /** Provider-reported usage per job (AC-1703); empty when none is recorded. */
-  usage?: JobUsage[];
+  /** Provider-reported usage per job (AC-1703); empty when none is recorded,
+   *  null when it could not be read. */
+  usage?: JobUsage[] | null;
   onOpenJobs: () => void;
   onOpenCuration: () => void;
   onViewInvestigation?: (id: string) => void;
@@ -63,8 +64,8 @@ export function AgentPoolPanel({
   jobs, providers, awaitingCuration, usage = [], onOpenJobs, onOpenCuration, onViewInvestigation,
 }: AgentPoolPanelProps) {
   const pool = agentPool(jobs);
-  const usageOf = new Map(usage.map((row) => [row.job_id, row]));
-  const total = usageTotal([...pool.active, ...pool.recent], usage);
+  const usageOf = new Map((usage ?? []).map((row) => [row.job_id, row]));
+  const total = usageTotal([...pool.active, ...pool.recent], usage ?? []);
   return (
     <section className="agent-pool" aria-labelledby="agent-pool-title">
       <header className="agent-pool-header">
@@ -115,7 +116,9 @@ export function AgentPoolPanel({
       <section aria-label="Reported model use">
         <h3>Reported model use</h3>
         <p data-testid="agent-pool-usage-total">
-          {total ? `Listed work: ${usageLine(total)}` : 'No model use is recorded for the listed work.'}
+          {usage === null
+            ? 'Reported model use could not be read.'
+            : total ? `Listed work: ${usageLine(total)}` : 'No model use is recorded for the listed work.'}
         </p>
         <p className="muted">
           Token counts are what each provider reported, not verified billing. Specialist

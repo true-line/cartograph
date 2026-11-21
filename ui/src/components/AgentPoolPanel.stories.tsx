@@ -68,3 +68,13 @@ export const Idle: Story = {
     await expect(canvas.getByTestId('agent-pool-usage-total')).toHaveTextContent('No model use is recorded for the listed work.');
   },
 };
+
+// AC-1703: a failed usage read is said, and no per-job counts are shown.
+export const UsageUnreadable: Story = {
+  args: { usage: null },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('agent-pool-usage-total')).toHaveTextContent('Reported model use could not be read.');
+    await expect(canvas.queryByTestId('agent-pool-usage-3')).toBeNull();
+  },
+};
