@@ -50,7 +50,7 @@ import { useAreaExpert } from './areaExpert';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { AgentPoolPanel } from './components/AgentPoolPanel';
-import { awaitingCuration } from './agentPool';
+import { awaitingCuration, loadJobUsage, type JobUsage } from './agentPool';
 import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
@@ -230,6 +230,8 @@ export default function App() {
   const [atlasLayer, setAtlasLayer] = useState('All layers');
   const [dropActive, setDropActive] = useState(false);
   const [quickDispatchFallbackEnabled, setQuickDispatchFallbackEnabled] = useState(readQuickDispatchFallback);
+  // Provider-reported usage per agent job (#252, AC-1703), read for the agent pool.
+  const [jobUsage, setJobUsage] = useState<JobUsage[]>([]);
   // The closed-state dispatch hint (#251, AC-1702) shows until the first confirmed dispatch.
   const [quickDispatchHintShown, setQuickDispatchHintShown] = useState(readQuickDispatchHint);
   const showQuickDispatchHint = useCallback((shown: boolean) => {
@@ -346,6 +348,14 @@ export default function App() {
     }
     return () => useSpecialistActivityStore.getState().setVisible(false);
   }, [cancelFollowUpCapture, view]);
+
+  // The agent pool's reported model use (AC-1703), re-read as job rows change.
+  useEffect(() => {
+    if (view !== 'agent-chats') return;
+    let current = true;
+    void loadJobUsage().then((rows) => { if (current) setJobUsage(rows); });
+    return () => { current = false; };
+  }, [jobs, view]);
 
   // Folder drop intake (#587): the webview reports dropped paths only while
   // Connect is open; elsewhere a drop does nothing.
@@ -801,6 +811,7 @@ export default function App() {
           <AgentPoolPanel
             jobs={jobs}
             providers={investigations.catalog?.providers ?? null}
+            usage={jobUsage}
             awaitingCuration={stagedError || (stagedLoading && stagedProposals.length === 0) ? null : awaitingCuration(stagedProposals)}
             onOpenJobs={() => navigate('jobs')}
             onOpenCuration={() => navigate('gaps')}

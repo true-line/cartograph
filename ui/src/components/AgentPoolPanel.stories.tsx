@@ -22,9 +22,13 @@ const meta = {
     jobs: JOBS,
     providers: [
       { mode: 'local', provider_id: 'ollama', model: 'qwen3:8b', endpoint: 'http://127.0.0.1:11434', deployment: null, available: true, unavailable_reason: null },
-      { mode: 'cloud', provider_id: 'anthropic', model: 'claude-opus-4-8', endpoint: 'https://api.anthropic.com', deployment: null, available: false, unavailable_reason: 'no API key saved' },
+      { mode: 'cloud', provider_id: 'anthropic', model: 'cloud-model', endpoint: 'https://api.anthropic.com', deployment: null, available: false, unavailable_reason: 'no API key saved' },
     ],
     awaitingCuration: 3,
+    usage: [
+      { job_id: 3, calls: 1, unreported_calls: 0, input_tokens: 24120, output_tokens: 512, request_bytes: 99000, model: 'cloud-model' },
+      { job_id: 5, calls: 4, unreported_calls: 4, input_tokens: 0, output_tokens: 0, request_bytes: 40000, model: 'qwen3:8b' },
+    ],
     onOpenJobs: fn(),
     onOpenCuration: fn(),
     onViewInvestigation: fn(),
@@ -41,8 +45,12 @@ export const Busy: Story = {
     await expect(within(active).getByText('spec § 3.2')).toBeVisible();
     // Ingest is not agent work.
     await expect(canvas.queryByText(/src_1/)).toBeNull();
-    await expect(canvas.getByText('cloud · anthropic · claude-opus-4-8: unavailable (no API key saved)')).toBeVisible();
+    await expect(canvas.getByText('cloud · anthropic · cloud-model: unavailable (no API key saved)')).toBeVisible();
     await expect(canvas.getByTestId('agent-pool-curation')).toHaveTextContent('3 staged proposals are waiting');
+    // AC-1703: reported use per job and in total; unreported counts are not estimated.
+    await expect(canvas.getByTestId('agent-pool-usage-3')).toHaveTextContent('1 call to cloud-model: 24,120 input and 512 output tokens, as the provider reported.');
+    await expect(canvas.getByTestId('agent-pool-usage-5')).toHaveTextContent('4 calls to qwen3:8b: no token count reported');
+    await expect(canvas.getByTestId('agent-pool-usage-total')).toHaveTextContent('Listed work: 5 calls to 2 models: 24,120 input and 512 output tokens; 4 calls reported no count');
     await userEvent.click(within(active).getByRole('button', { name: 'View investigation' }));
     await expect(args.onViewInvestigation).toHaveBeenCalledWith('inv-0001');
     await userEvent.click(canvas.getByRole('button', { name: 'Open curation' }));
@@ -57,5 +65,6 @@ export const Idle: Story = {
     await expect(canvas.getByTestId('agent-pool-idle')).toBeVisible();
     await expect(canvas.getByText('The provider catalog has not loaded.')).toBeVisible();
     await expect(canvas.getByTestId('agent-pool-curation')).toHaveTextContent('Staged proposals have not loaded.');
+    await expect(canvas.getByTestId('agent-pool-usage-total')).toHaveTextContent('No model use is recorded for the listed work.');
   },
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentPool, agentWorkOf, awaitingCuration, providerLine } from './agentPool';
+import { agentPool, agentWorkOf, awaitingCuration, providerLine, usageLine, usageTotal } from './agentPool';
 import type { Job, StagedProposal } from './store';
 
 // AC-1701 (T-1701): the agent pool reads only the job kinds the host writes.
@@ -65,5 +65,24 @@ describe('awaitingCuration and providerLine', () => {
     expect(providerLine({ ...base, available: true, unavailable_reason: null })).toBe('local · ollama · qwen3:8b: configured');
     expect(providerLine({ ...base, available: false, unavailable_reason: 'no key' }))
       .toBe('local · ollama · qwen3:8b: unavailable (no key)');
+  });
+});
+
+// AC-1703 (T-1703): reported usage is shown as reported and summed only over listed work.
+describe('usageLine and usageTotal', () => {
+  const row = (job_id: number, calls: number, unreported: number, input: number, output: number, model = 'm') =>
+    ({ job_id, calls, unreported_calls: unreported, input_tokens: input, output_tokens: output, request_bytes: 10, model });
+
+  it('names calls, model and reported tokens, and never estimates a missing count', () => {
+    expect(usageLine(row(1, 2, 0, 1200, 30))).toBe('2 calls to m: 1,200 input and 30 output tokens, as the provider reported.');
+    expect(usageLine(row(1, 1, 1, 0, 0))).toBe('1 call to m: no token count reported, as the provider reported.');
+    expect(usageLine(row(1, 3, 1, 10, 2))).toBe('3 calls to m: 10 input and 2 output tokens; 1 call reported no count, as the provider reported.');
+  });
+
+  it('sums the listed jobs only', () => {
+    const work = agentPool([job(1, 'area-ask:cloud', 'done'), job(2, 'area-ask:local', 'running')]);
+    const total = usageTotal([...work.active, ...work.recent], [row(1, 1, 0, 5, 1, 'a'), row(2, 2, 1, 7, 3, 'b'), row(9, 9, 0, 99, 99)]);
+    expect(total).toMatchObject({ calls: 3, unreported_calls: 1, input_tokens: 12, output_tokens: 4, model: '2 models' });
+    expect(usageTotal(work.active, [])).toBeNull();
   });
 });
