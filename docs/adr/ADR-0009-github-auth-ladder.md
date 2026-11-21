@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-06
-- **Deciders:** Chris Kane (proposed by Claude at US-0001 slice 1)
+- **Deciders:** Project owner (proposed by Claude at US-0001 slice 1)
 
 ## Context
 SPEC-00 §10 prefers GitHub App installation tokens with PAT fallback and an
