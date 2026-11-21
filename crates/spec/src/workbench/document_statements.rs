@@ -2813,6 +2813,10 @@ mod tests {
     fn rust_guarded_returns_are_said_in_words() {
         assert_eq!(rust_status("Err(StatusCode::NOT_FOUND)"), Some((404, None)));
         assert_eq!(
+            rust_status("Err(StatusCode::IM_A_TEAPOT)"),
+            Some((418, None))
+        );
+        assert_eq!(
             rust_status("(StatusCode::FORBIDDEN, \"not yours\")"),
             Some((403, Some("not yours".to_owned())))
         );

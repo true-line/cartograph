@@ -900,7 +900,8 @@ fn decode_number(raw: &str) -> Result<serde_json::Number, ()> {
 }
 
 /// Whether a string literal is the value of a sensitive name: compared with
-/// it (`==`, `!=`, `.eq(…)`) or passed beside it (`insert("password", …)`).
+/// it (`==`, `!=`, `.eq(…)` either way round) or passed beside it
+/// (`insert("password", …)`).
 fn sensitive_context(cx: &FileCx<'_>, mut child: TsNode<'_>) -> Result<bool, ()> {
     for _ in 0..MAX_CONTEXT_ANCESTORS {
         let Some(parent) = child.parent() else {
@@ -916,6 +917,21 @@ fn sensitive_context(cx: &FileCx<'_>, mut child: TsNode<'_>) -> Result<bool, ()>
                     let mut cursor = parent.walk();
                     for operand in parent.named_children(&mut cursor) {
                         if operand != child && sensitive_key(cx, operand)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            // `"…".eq(secret)`: the literal is the receiver.
+            "field_expression" if parent.child_by_field_name("value") == Some(child) => {
+                if let Some(call) = parent.parent()
+                    && call.kind() == "call_expression"
+                    && call.child_by_field_name("function") == Some(parent)
+                    && let Some(arguments) = call.child_by_field_name("arguments")
+                {
+                    let mut cursor = arguments.walk();
+                    for argument in arguments.named_children(&mut cursor) {
+                        if sensitive_key(cx, argument)? {
                             return Ok(true);
                         }
                     }

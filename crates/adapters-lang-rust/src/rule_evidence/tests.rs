@@ -193,6 +193,9 @@ fn rust_rule_displays_withhold_secrets_and_control_flow_is_a_gap() {
     if password == "hunter2-very-secret" {
         return Ok(true);
     }
+    if "short".eq(password) {
+        return Ok(true);
+    }
     self.count += 1;
     self.last = mode;
     Ok(false)
@@ -200,7 +203,12 @@ fn rust_rule_displays_withhold_secrets_and_control_flow_is_a_gap() {
 "#;
     let out = extract(source, "src/gate.rs");
     let rules = rules(&out);
-    assert_eq!(rules.len(), 2, "{rules:#?}");
+    assert_eq!(rules.len(), 3, "{rules:#?}");
+    // A literal compared as the receiver of `.eq` is withheld too.
+    assert_eq!(
+        rules[2].conditions[0].expression.display.as_str(),
+        "[REDACTED].eq(password)"
+    );
     let secret = &rules[1];
     assert_eq!(
         secret.conditions[0].expression.display.as_str(),
