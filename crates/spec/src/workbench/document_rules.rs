@@ -2470,7 +2470,7 @@ def update_alias(alias_id, user):
             "| ↳ User.lifetime\\_or\\_active\\_subscription | Otherwise, the user's lifetime or active subscription is true when the user's active subscription is set. |",
             "| ↳ User.max\\_alias\\_for\\_free\\_account | When the user's flags include the “free old alias limit” flag, the user's max alias for free account is the configured max nb email old free plan. |",
             "| ↳ User.max\\_alias\\_for\\_free\\_account | When the user's flags do not include the “free old alias limit” flag, the user's max alias for free account is the configured max nb email free plan. |",
-            "| ↳ verify\\_prefix\\_suffix | When the alias domain is not one of the user's available alias domains, the verify prefix suffix is false. |",
+            "| ↳ verify\\_prefix\\_suffix | When the alias domain is not one of the user's available alias domains for the alias options, the verify prefix suffix is false. |",
         ] {
             assert!(text.contains(line), "{line}\n{text}");
         }

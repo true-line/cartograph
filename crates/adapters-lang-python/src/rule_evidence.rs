@@ -99,6 +99,20 @@ fn owner_function(node: TsNode<'_>) -> Option<TsNode<'_>> {
     None
 }
 
+/// Whether a function is a method: defined directly in a class body,
+/// decorated or not, not nested in another function (AC-1030).
+fn in_class(function: TsNode<'_>) -> bool {
+    let mut parent = function.parent();
+    while let Some(current) = parent {
+        match current.kind() {
+            "class_definition" => return true,
+            "block" | "decorated_definition" => parent = current.parent(),
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn owner_id(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     let function = owner_function(node)?;
     let name = qualified_function_name(cx, function)?;
@@ -602,7 +616,7 @@ pub(super) fn extract(
         // whatever its name (`lifetime_or_active_subscription`, AC-1030).
         // Only a method: its rows state the earlier exits as "otherwise",
         // which a free function's rows do not.
-        let answers_bool = qualified_function_name(cx, function).is_some_and(|n| n.contains('.'))
+        let answers_bool = in_class(function)
             && owner_exits.iter().any(|exit| {
                 exit.kind() == "return_statement"
                     && exit_value(*exit).is_some_and(|v| matches!(v.kind(), "true" | "false"))

@@ -647,13 +647,26 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                     "the “{}” result",
                     words(function.trim_start_matches('_'))
                 )),
-                // A method's value read off its receiver (AC-1030):
-                // `user.available_alias_domains(alias_options=o)` is "the
-                // user's available alias domains".
+                // A method's value read off its receiver (AC-1030), with
+                // what it is given: `user.available_alias_domains(alias_options=o)`
+                // is "the user's available alias domains for the o", so
+                // calls given different inputs stay apart.
                 ([receiver, .., method], _)
                     if !is_class(receiver) && predicate_verb(method).is_none() =>
                 {
-                    subject(&accessor(path), cx)
+                    let what = subject(&accessor(path), cx)?;
+                    let inputs: Option<Vec<String>> = args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Pos(v) | Arg::Kw(_, v) => noun(v, cx),
+                        })
+                        .collect();
+                    let inputs = inputs?;
+                    Some(if inputs.is_empty() {
+                        what
+                    } else {
+                        format!("{what} for {}", inputs.join(" and "))
+                    })
                 }
                 _ => None,
             }
