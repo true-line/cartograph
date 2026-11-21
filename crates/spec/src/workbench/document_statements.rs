@@ -140,7 +140,16 @@ fn tokenize(text: &str) -> Option<Vec<Tok>> {
             let start = i + 1;
             i += 1;
             while i < chars.len() && chars[i] != quote {
+                // A string that is only a line break (`"\n"`) is kept as
+                // `\n`; any other escape is outside the rules.
                 if chars[i] == '\\' {
+                    if i == start
+                        && chars.get(i + 1) == Some(&'n')
+                        && chars.get(i + 2) == Some(&quote)
+                    {
+                        i += 2;
+                        break;
+                    }
                     return None;
                 }
                 i += 1;
@@ -797,6 +806,7 @@ fn request_input(path: &[String]) -> bool {
 
 fn literal(lit: &Lit) -> String {
     match lit {
+        Lit::Str(s) if s == "\\n" => "a line break".to_owned(),
         Lit::Str(s) => format!("“{s}”"),
         Lit::Num(n) => n.clone(),
         Lit::Bool(true) => "true".into(),
@@ -971,6 +981,14 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
                 (left.as_ref(), op.as_str(), right.as_ref())
             {
                 let present = (op == "in") != negated;
+                if text == "\\n" {
+                    let whole = noun(right, cx)?;
+                    return Some(if present {
+                        format!("{whole} contains a line break")
+                    } else {
+                        format!("{whole} does not contain a line break")
+                    });
+                }
                 if request_input(r) {
                     let key = words(text);
                     return Some(if present {
@@ -1421,6 +1439,31 @@ pub(super) fn go_error(display: &str) -> Option<String> {
     (all_ident && rest.starts_with(|c: char| c.is_ascii_uppercase())).then(|| words(rest))
 }
 
+/// Python `alias.name = alias.name.replace("\n", "")` as "line breaks are
+/// removed from the alias's name" (#1998). Python's `str.replace` replaces
+/// every occurrence; JavaScript's replaces only the first, so callers apply
+/// this to Python evidence only. `None` for any other assignment.
+fn line_breaks_removed(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
+    let args = value
+        .strip_prefix(target.trim())?
+        .strip_prefix(".replace(")?
+        .strip_suffix(')')?;
+    let (from, to) = args.split_once(',')?;
+    if !matches!(
+        (from.trim(), to.trim()),
+        ("\"\\n\"" | "'\\n'", "\"\"" | "''")
+    ) {
+        return None;
+    }
+    let Expr::Ref(path) = parse(target.trim())? else {
+        return None;
+    };
+    Some(format!(
+        "line breaks are removed from {}",
+        subject(&path, cx)?
+    ))
+}
+
 /// `x.field = value` as a clause (#1998): `g.user = api_key.user` is "the
 /// request acts as the API key's user"; `alias.enabled = False` is "the
 /// alias is no longer enabled"; `alias.delete_on = arrow.now().shift(days=+N)`
@@ -1822,6 +1865,13 @@ fn rendered(
     }
     // A state change or a call (#1998, AC-0910).
     let changed = match &evidence.effect {
+        LocalExit::Assign { target, value }
+            if evidence.exit_source.path.ends_with(".py")
+                && let Some(removed) =
+                    line_breaks_removed(target.display.as_str(), value.display.as_str(), &cx) =>
+        {
+            Some(removed)
+        }
         LocalExit::Assign { target, value } => Some(assigned(
             target.display.as_str(),
             value.display.as_str(),
@@ -2465,6 +2515,32 @@ mod tests {
             "the alias's note is set to the “compute” result"
         );
         assert_eq!(set("alias.note", "compute(alias) + 1"), None);
+        let removed = |t: &str, v: &str| line_breaks_removed(t, v, &cx);
+        assert_eq!(
+            removed("alias.name", r#"alias.name.replace("\n", "")"#).unwrap(),
+            "line breaks are removed from the alias's name"
+        );
+        assert_eq!(
+            removed("alias.name", r#"alias.name.replace('\n', '')"#).unwrap(),
+            "line breaks are removed from the alias's name"
+        );
+        assert_eq!(
+            removed("alias.name", r#"other.name.replace("\n", "")"#),
+            None
+        );
+        assert_eq!(
+            condition(r#""\n" in data"#, BranchPolarity::TruthyBranch, &cx).unwrap(),
+            "the data contains a line break"
+        );
+        assert_eq!(
+            condition(
+                r#"alias.name and "\n" in alias.name"#,
+                BranchPolarity::TruthyBranch,
+                &cx
+            )
+            .unwrap(),
+            "the alias's name is set and the alias's name contains a line break"
+        );
         assert_eq!(set("items[0]", "1"), None);
         assert_eq!(
             called("perform_alias_deletion(alias, user)").unwrap(),
