@@ -1,0 +1,244 @@
+import type { Meta, StoryObj } from '@storybook/react-vite';
+import { expect, within } from 'storybook/test';
+import { IngestSummaryDetails } from './IngestSummaryDetails';
+
+// The last ingest's outcome as Workspace shows it (#2170).
+const meta = {
+  title: 'Shell/IngestSummary',
+  component: IngestSummaryDetails,
+} satisfies Meta<typeof IngestSummaryDetails>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+const EMPTY_LAYERS = {
+  ts: { files: 0, nodes: 0, edges: 0 },
+  python: { files: 0, nodes: 0, edges: 0 },
+  go: { files: 0, nodes: 0, edges: 0 },
+  tf: { files: 0, nodes: 0, edges: 0 },
+  java: { files: 0, nodes: 0, edges: 0 },
+  kotlin: { files: 0, nodes: 0, edges: 0 },
+  webext: { files: 0, nodes: 0, edges: 0 },
+  tools: { files: 0, nodes: 0, edges: 0 },
+};
+
+export const WithSummary: Story = {
+  args: {
+    summary: {
+      job_id: 3,
+      files: 12,
+      nodes: 84,
+      edges: 141,
+      merged: { nodes: 0, edges: 0, node_collisions: 0 },
+      layers: {
+        ts: { files: 8, nodes: 50, edges: 90 },
+        python: { files: 0, nodes: 0, edges: 0 },
+        go: { files: 0, nodes: 0, edges: 0 },
+        tf: { files: 4, nodes: 34, edges: 51 },
+        java: { files: 0, nodes: 0, edges: 0 },
+        kotlin: { files: 0, nodes: 0, edges: 0 },
+        webext: { files: 0, nodes: 0, edges: 0 },
+        // #215 (AC-0096): config files land as Tool facts with DEFINED_IN proofs.
+        tools: { files: 3, nodes: 6, edges: 5 },
+        events: { files: 2, nodes: 1, edges: 4 },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('tools-layer-summary').textContent).toBe(
+      '3 configs · 6 nodes · 5 edges',
+    );
+    // #874: stitched facts are their own row, not TypeScript's.
+    await expect(canvas.getByTestId('events-layer-summary').textContent).toBe(
+      '2 files · 1 nodes · 4 edges',
+    );
+    // AC-0196: nothing merged, so no merge line.
+    await expect(canvas.queryByTestId('merged-summary')).toBeNull();
+  },
+};
+
+// AC-0196 (#242): totals are the distinct facts stored; what was collapsed to
+// reach them is stated next to the totals.
+export const MergedOccurrencesAreStated: Story = {
+  args: {
+    summary: {
+      job_id: 9,
+      files: 49,
+      nodes: 524,
+      edges: 764,
+      merged: { nodes: 4, edges: 8, node_collisions: 3 },
+      layers: { ...EMPTY_LAYERS, java: { files: 49, nodes: 523, edges: 764 } },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('merged-summary').textContent).toBe(
+      'Merged: 8 repeated relation sites · 4 repeated node ids · 3 identity collisions (distinct declarations sharing one id)',
+    );
+  },
+};
+
+// AC-0039/AC-0040: unchanged parses are visibly reused on re-ingest.
+export const DeltaReingest: Story = {
+  args: {
+    summary: {
+      job_id: 7,
+      files: 12,
+      nodes: 84,
+      edges: 141,
+      layers: {
+        ts: { files: 8, nodes: 50, edges: 90 },
+        python: { files: 0, nodes: 0, edges: 0 },
+        go: { files: 0, nodes: 0, edges: 0 },
+        tf: { files: 4, nodes: 34, edges: 51 },
+        java: { files: 0, nodes: 0, edges: 0 },
+        kotlin: { files: 0, nodes: 0, edges: 0 },
+        webext: { files: 0, nodes: 0, edges: 0 },
+        tools: { files: 0, nodes: 0, edges: 0 },
+      },
+      delta: { recomputed_files: 1, reused_files: 11, deleted_files: 0 },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('delta-summary').textContent).toBe(
+      'Delta: 1 recomputed · 11 reused · 0 removed',
+    );
+  },
+};
+
+// AC-0049: a Pulumi/TS ingest makes its lack of Terraform facts explicit.
+export const PulumiWithoutTerraform: Story = {
+  args: {
+    summary: {
+      job_id: 6,
+      files: 7,
+      nodes: 31,
+      edges: 22,
+      layers: {
+        ts: { files: 7, nodes: 31, edges: 22 },
+        python: { files: 0, nodes: 0, edges: 0 },
+        go: { files: 0, nodes: 0, edges: 0 },
+        tf: { files: 0, nodes: 0, edges: 0 },
+        java: { files: 0, nodes: 0, edges: 0 },
+        kotlin: { files: 0, nodes: 0, edges: 0 },
+        webext: { files: 0, nodes: 0, edges: 0 },
+        tools: { files: 0, nodes: 0, edges: 0 },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('ts-layer-summary').textContent).toBe(
+      '7 files · 31 nodes · 22 edges',
+    );
+    await expect(canvas.getByTestId('tf-layer-summary').textContent).toBe(
+      '0 files · 0 nodes · 0 edges',
+    );
+  },
+};
+
+// AC-0053: Python and TypeScript are reported separately, so successful
+// Python recovery cannot be mistaken for TypeScript coverage.
+export const PythonAndTypeScript: Story = {
+  args: {
+    summary: {
+      job_id: 8,
+      files: 5,
+      nodes: 44,
+      edges: 39,
+      layers: {
+        ts: { files: 3, nodes: 24, edges: 20 },
+        python: { files: 2, nodes: 20, edges: 19 },
+        go: { files: 0, nodes: 0, edges: 0 },
+        tf: { files: 0, nodes: 0, edges: 0 },
+        java: { files: 0, nodes: 0, edges: 0 },
+        kotlin: { files: 0, nodes: 0, edges: 0 },
+        webext: { files: 0, nodes: 0, edges: 0 },
+        tools: { files: 0, nodes: 0, edges: 0 },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('python-layer-summary').textContent).toBe(
+      '2 files · 20 nodes · 19 edges',
+    );
+    await expect(canvas.getByTestId('ts-layer-summary').textContent).toBe(
+      '3 files · 24 nodes · 20 edges',
+    );
+  },
+};
+
+// AC-0054: Go is visible as its own deterministic language layer alongside
+// Python rather than being folded into a generic server count.
+export const GoAndPython: Story = {
+  args: {
+    summary: {
+      job_id: 9,
+      files: 5,
+      nodes: 42,
+      edges: 37,
+      layers: {
+        ts: { files: 0, nodes: 0, edges: 0 },
+        python: { files: 2, nodes: 20, edges: 19 },
+        go: { files: 3, nodes: 22, edges: 18 },
+        tf: { files: 0, nodes: 0, edges: 0 },
+        java: { files: 0, nodes: 0, edges: 0 },
+        kotlin: { files: 0, nodes: 0, edges: 0 },
+        webext: { files: 0, nodes: 0, edges: 0 },
+        tools: { files: 0, nodes: 0, edges: 0 },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('go-layer-summary').textContent).toBe(
+      '3 files · 22 nodes · 18 edges',
+    );
+    await expect(canvas.getByTestId('python-layer-summary').textContent).toBe(
+      '2 files · 20 nodes · 19 edges',
+    );
+  },
+};
+
+// AC-0002: a system add lists every declared repo with its identity.
+export const WithSystemManifest: Story = {
+  args: {
+    summary: {
+      job_id: 5,
+      files: 5,
+      nodes: 40,
+      edges: 60,
+      layers: EMPTY_LAYERS,
+      repos: ['acme/shop@a1b2c3d4e5f6', 'local/infra@workdir'],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('system-repos').textContent).toBe(
+      'acme/shop@a1b2c3d4e5f6, local/infra@workdir',
+    );
+  },
+};
+
+// AC-0001: a cloned GitHub repo is listed with its commit SHA.
+export const WithClonedRepo: Story = {
+  args: {
+    summary: {
+      job_id: 4,
+      files: 3,
+      nodes: 20,
+      edges: 30,
+      layers: EMPTY_LAYERS,
+      repo: 'acme/shop',
+      commit_sha: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const listed = canvas.getByTestId('cloned-repo');
+    await expect(listed.textContent).toBe('acme/shop @ a1b2c3d4e5f6');
+  },
+};
