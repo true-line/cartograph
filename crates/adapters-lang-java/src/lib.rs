@@ -20,6 +20,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
 mod apache_http;
+mod bean_validation;
 mod jaxrs;
 mod jpa;
 pub mod jvm;
@@ -93,6 +94,15 @@ pub struct Extraction {
     string_constants: Vec<method_security::Constant>,
     /// `HttpSecurity` URL rule chains (#2020), applied repo-wide.
     http_chains: Vec<http_security::Chain>,
+    /// Classes and records with annotated members, for Bean Validation
+    /// constraints on the handlers that validate them (#2162).
+    beans: Vec<bean_validation::Bean>,
+    /// Annotation types declared with `@Constraint` (#2162).
+    constraint_types: Vec<String>,
+    /// Spring handlers with validated parameters (#2162).
+    validated_handlers: Vec<bean_validation::Handler>,
+    /// `static final` integer constants, for constraint attributes (#2162).
+    numeric_constants: Vec<method_security::Constant>,
     /// MockMvc requests JUnit tests perform (#2020), joined repo-wide.
     test_requests: Vec<target_tests::Request>,
     /// Fully qualified names of every top-level type a file declares,
@@ -352,6 +362,11 @@ fn retarget_commit(extraction: &mut Extraction, commit: &str) {
     http_security::retarget(&mut extraction.http_chains, |props| {
         retarget_props_commit(props, commit)
     });
+    bean_validation::retarget_all(
+        &mut extraction.beans,
+        &mut extraction.validated_handlers,
+        commit,
+    );
     for edge in &mut extraction.edges {
         retarget_props_commit(&mut edge.props, commit);
     }
@@ -850,11 +865,25 @@ pub fn extract_source(
     let feign_sites = feign::resolve(std::mem::take(&mut out.pending_feign), |fqn| {
         package_types.contains(fqn)
     });
-    let settled = method_security::Settled::new(&std::mem::take(&mut out.string_constants));
+    let mut constants = std::mem::take(&mut out.string_constants);
+    let settled = method_security::Settled::new(&constants);
     method_security::resolve(
         &mut out.nodes,
         &settled,
         &std::mem::take(&mut out.http_chains),
+        &|fqn| package_types.contains(fqn),
+    );
+    bean_validation::resolve(
+        id.repo,
+        &mut out.nodes,
+        &mut out.edges,
+        &std::mem::take(&mut out.beans),
+        &std::mem::take(&mut out.validated_handlers),
+        &std::mem::take(&mut out.constraint_types),
+        &{
+            constants.append(&mut out.numeric_constants);
+            method_security::Settled::new(&constants)
+        },
         &|fqn| package_types.contains(fqn),
     );
     target_tests::resolve(
@@ -964,6 +993,18 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
         &imports,
         package.as_deref(),
     ));
+    if !adapters_fw::in_jvm_test_source_set(path) {
+        let (beans, constraint_types) =
+            bean_validation::beans(&cx, root, &imports, package.as_deref());
+        out.beans.extend(beans);
+        out.constraint_types.extend(constraint_types);
+        out.numeric_constants
+            .extend(bean_validation::numeric_constants(
+                &cx,
+                root,
+                package.as_deref(),
+            ));
+    }
 
     // Types: classes, interfaces, enums, records — nested chains included.
     // Built from TYPE_KINDS, so compiled once here rather than through the
@@ -1244,6 +1285,16 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             Some(node) => annotation_path(&cx, node).segments(),
         };
         let method_annotations = declaration_annotations(&cx, *method);
+        // Bean Validation on the handler's parameters (#2162).
+        out.validated_handlers.extend(bean_validation::handler(
+            &cx,
+            &imports,
+            package.as_deref(),
+            chain,
+            *method,
+            handler,
+            &class_annotations,
+        ));
         // Spring method security on the handler or its class (#2020).
         let auth = method_security::auth(
             &cx,
@@ -1835,6 +1886,10 @@ fn extract_dir_with(
             out.pending_feign.extend(extraction.pending_feign);
             out.string_constants.extend(extraction.string_constants);
             out.http_chains.extend(extraction.http_chains);
+            out.beans.extend(extraction.beans);
+            out.constraint_types.extend(extraction.constraint_types);
+            out.validated_handlers.extend(extraction.validated_handlers);
+            out.numeric_constants.extend(extraction.numeric_constants);
             out.test_requests.extend(extraction.test_requests);
             out.package_types.extend(extraction.package_types);
             out.test_types.extend(extraction.test_types);
@@ -1900,11 +1955,25 @@ fn extract_dir_with(
     let feign_sites = feign::resolve(std::mem::take(&mut out.pending_feign), |fqn| {
         package_types.contains(fqn)
     });
-    let settled = method_security::Settled::new(&std::mem::take(&mut out.string_constants));
+    let mut constants = std::mem::take(&mut out.string_constants);
+    let settled = method_security::Settled::new(&constants);
     method_security::resolve(
         &mut out.nodes,
         &settled,
         &std::mem::take(&mut out.http_chains),
+        &|fqn| package_types.contains(fqn),
+    );
+    bean_validation::resolve(
+        id.repo,
+        &mut out.nodes,
+        &mut out.edges,
+        &std::mem::take(&mut out.beans),
+        &std::mem::take(&mut out.validated_handlers),
+        &std::mem::take(&mut out.constraint_types),
+        &{
+            constants.append(&mut out.numeric_constants);
+            method_security::Settled::new(&constants)
+        },
         &|fqn| package_types.contains(fqn),
     );
     target_tests::resolve(

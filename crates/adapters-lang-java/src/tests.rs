@@ -5874,3 +5874,255 @@ public class Resource {
             .any(|e| e.src.starts_with("test:") && e.src.contains("ShadowedTest"))
     );
 }
+
+// AC-1303 (#2162): Bean Validation constraints on the types a Spring handler validates
+// are input constraints of its endpoints, citing each annotation; what is not read is a
+// Gap on the endpoint.
+#[test]
+fn bean_validation_constraints_are_input_constraints_of_validating_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/main/java/com/acme/dto/BaseDTO.java",
+        r#"package com.acme.dto;
+import jakarta.validation.constraints.*;
+public class BaseDTO {
+    public static final String CODE = "^[A-Z]+$";
+    @NotBlank @Pattern(regexp = CODE) private String code;
+}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/dto/OrderDTO.java",
+        r#"package com.acme.dto;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
+import com.acme.check.Sku;
+public class OrderDTO extends BaseDTO {
+    public static final int MAX_LINES = 20;
+    @Size(min = 1, max = MAX_LINES, message = "lines") private java.util.List<String> lines;
+    @Min(1) private int quantity;
+    @Sku private String sku;
+    @Valid private Address address;
+    @jakarta.validation.constraints.NotNull(groups = Admin.class) private String owner;
+    @Size(max = LIMIT) private String note;
+    private static final int unused = 3;
+}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/dto/Item.java",
+        r#"package com.acme.dto;
+public record Item(@javax.validation.constraints.Positive long price, String name) {}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/dto/Unchecked.java",
+        r#"package com.acme.dto;
+import jakarta.validation.constraints.NotNull;
+public class Unchecked { @NotNull private String id; }
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/check/Sku.java",
+        r#"package com.acme.check;
+import jakarta.validation.Constraint;
+@Constraint(validatedBy = SkuValidator.class)
+public @interface Sku {}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/web/OrderController.java",
+        r#"package com.acme.web;
+import com.acme.dto.*;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@Validated
+@RequestMapping("/orders")
+public class OrderController {
+    @PostMapping
+    public void create(@Valid @RequestBody OrderDTO order) {}
+    @PutMapping("/items")
+    public void item(@RequestBody @Valid Item item, @RequestParam @Email String contact) {}
+    @PatchMapping
+    public void patch(@RequestBody OrderDTO order) {}
+    @PostMapping("/unchecked")
+    public void unchecked(@RequestBody Unchecked body) {}
+    @PostMapping("/admin")
+    public void admin(@Validated(Admin.class) @RequestBody OrderDTO order) {}
+    @GetMapping("/sku")
+    public void sku(@RequestParam @com.acme.check.Sku String sku, @RequestParam String plain) {}
+    @GetMapping("/message")
+    public void message(@RequestParam @Email(message = Messages.MISSING) String to) {}
+}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/web/GroupController.java",
+        r#"package com.acme.web;
+import jakarta.validation.constraints.NotNull;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@Validated(Admin.class)
+public class GroupController {
+    @GetMapping("/grouped")
+    public void grouped(@RequestParam @NotNull String id) {}
+    @GetMapping("/bare")
+    public void bare(@RequestParam String id) {}
+}
+"#,
+    );
+    write(
+        root,
+        "src/main/java/com/acme/web/PlainController.java",
+        r#"package com.acme.web;
+import jakarta.validation.constraints.Email;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class PlainController {
+    @GetMapping("/plain")
+    public void plain(@RequestParam @Email String contact) {}
+}
+"#,
+    );
+    let x = extract_dir(root, &id()).unwrap();
+    let endpoint = |id: &str| {
+        x.nodes
+            .iter()
+            .find(|n| n.id == format!("ep:local/demo@{id}"))
+            .unwrap_or_else(|| panic!("{id}"))
+    };
+    let rows = |id: &str| {
+        endpoint(id).props["input_constraints"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        format!(
+                            "{}.{}:{}{}",
+                            r["parameter"].as_str().unwrap(),
+                            r["field"].as_str().unwrap_or("-"),
+                            r["constraint"].as_str().unwrap(),
+                            r["attributes"],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+    };
+    // The bean's own constraints, then the superclass's, constants settled.
+    assert_eq!(
+        rows("POST:/orders").unwrap(),
+        [
+            "order.code:NotBlank{}",
+            r#"order.code:Pattern{"regexp":"^[A-Z]+$"}"#,
+            r#"order.lines:Size{"max":"20","min":"1"}"#,
+            r#"order.quantity:Min{"value":"1"}"#,
+        ]
+    );
+    let create = &endpoint("POST:/orders").props["input_constraints"];
+    let lines = create
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["field"] == "lines")
+        .unwrap();
+    assert_eq!(lines["message"], "lines");
+    assert_eq!(lines["type"], "com.acme.dto.OrderDTO");
+    let evidence = &lines["prov"]["evidence"][0];
+    assert_eq!(evidence["path"], "src/main/java/com/acme/dto/OrderDTO.java");
+    let source =
+        std::fs::read_to_string(root.join("src/main/java/com/acme/dto/OrderDTO.java")).unwrap();
+    let start = evidence["byte_start"].as_u64().unwrap() as usize;
+    assert!(source[start..].starts_with("@Size(min = 1, max = MAX_LINES"));
+    // A record component, and a parameter constraint under a @Validated class.
+    assert_eq!(
+        rows("PUT:/orders/items").unwrap(),
+        ["contact.-:Email{}", "item.price:Positive{}"]
+    );
+    // Not validated: no constraints recorded, and no Gap.
+    assert!(rows("PATCH:/orders").is_none());
+    assert!(rows("POST:/orders/unchecked").is_none());
+    assert!(rows("GET:/plain").is_none());
+    // What is not read is a Gap on the endpoint.
+    let gaps = |id: &str| {
+        let src = format!("ep:local/demo@{id}");
+        let mut found: Vec<(String, String)> = x
+            .edges
+            .iter()
+            .filter(|e| {
+                e.src == src && e.label == "DEPENDS_ON" && e.dst.starts_with("gap:bean-validation:")
+            })
+            .map(|e| {
+                let gap = x.nodes.iter().find(|n| n.id == e.dst).unwrap();
+                (
+                    gap.props["reason"].as_str().unwrap().to_string(),
+                    gap.props["annotation"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(
+        gaps("POST:/orders"),
+        [
+            ("cascaded_field".to_string(), "@Valid".to_string()),
+            (
+                "constraint_value".to_string(),
+                "@Size(max = LIMIT)".to_string()
+            ),
+            ("custom_constraint".to_string(), "@Sku".to_string()),
+            (
+                "validation_group".to_string(),
+                "@jakarta.validation.constraints.NotNull(groups = Admin.class)".to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        gaps("POST:/orders/admin"),
+        [(
+            "validation_group".to_string(),
+            "@Validated(Admin.class)".to_string()
+        )]
+    );
+    assert_eq!(rows("POST:/orders/admin").unwrap(), Vec::<String>::new());
+    assert!(gaps("PATCH:/orders").is_empty());
+    // A custom constraint on a parameter, an unsettled `message`, and a
+    // class-level `@Validated(...)` naming groups are Gaps, never rows.
+    assert_eq!(
+        gaps("GET:/orders/sku"),
+        [(
+            "custom_constraint".to_string(),
+            "@com.acme.check.Sku".to_string()
+        )]
+    );
+    assert_eq!(rows("GET:/orders/sku").unwrap(), Vec::<String>::new());
+    assert_eq!(
+        gaps("GET:/orders/message"),
+        [(
+            "constraint_value".to_string(),
+            "@Email(message = Messages.MISSING)".to_string()
+        )]
+    );
+    assert_eq!(
+        gaps("GET:/grouped"),
+        [(
+            "validation_group".to_string(),
+            "@Validated(Admin.class)".to_string()
+        )]
+    );
+    assert_eq!(rows("GET:/grouped").unwrap(), Vec::<String>::new());
+    assert!(rows("GET:/bare").is_none());
+}
