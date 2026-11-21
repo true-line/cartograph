@@ -166,6 +166,8 @@ const KT_OKHTTP: &str = "inline `Request.Builder()…build()` chains on a named-
 const KT_APACHE: &str = "`HttpGet(<url>)` and the other HttpClient 4 and 5 request classes, named-imported (or aliased) or fully qualified, with one positional argument and no trailing lambda; a file-declared name, a binding of the first segment, a captured `org` (declared, imported or possibly wildcard-imported) and no-argument constructors are not read, and a URL is a literal only as a pure string literal";
 /// What the Kotlin Exposed cell reads (AC-1027).
 const KT_EXPOSED: &str = "`object`s extending an import-proven `Table` or id table (a literal name or the object name less `Table`; columns from builder calls with a literal name, plus `id`), and DSL statements (`select`, `selectAll`, `insert`, `update`, `upsert`, `deleteWhere` and their variants) called directly on a table object in a file that imports Exposed; joins, `slice`, DAO entities (`IntEntity`), raw `exec` SQL and table classes (not objects) are not read";
+/// What the Kotlin JPA cell reads (AC-1028).
+const KT_JPA: &str = "import-proven `jakarta`/`javax.persistence` `@Entity` classes (a literal entity and table name, else the defaults; stored constructor and body properties as fields with `@Id`, `@Column(name)` and `@Transient`) and their relation properties as references to the target entity; Spring Data repositories and their call sites, fields inherited from `@MappedSuperclass`, `@Embeddable` types and duplicate entity names are not read";
 /// What the Kotlin Room cell reads (AC-1025).
 const KT_ROOM: &str = "import-proven `@Entity` classes (a literal `tableName` or the class name; constructor and body properties as columns, `@ColumnInfo(name)` literals honoured, `@Embedded` and `@Relation` not flattened) and `@Dao` functions: a `@Query` read only as one string literal (raw strings included) through the shared SQL reader, and `@Insert`/`@Update`/`@Delete`/`@Upsert` by their first parameter's entity type; `entity =` arguments, `@RawQuery`, `@DatabaseView` and FTS tables are not read";
 /// What the Kotlin Ktor server routes cell reads (AC-1023).
@@ -376,6 +378,7 @@ pub const COVERAGE_MATRIX: &[CoverageCell] = &[
     cell("Kotlin", "ktor", HttpEndpoints, Partial, KT_KTOR_ROUTES),
     cell("Kotlin", "room", DataModel, Partial, KT_ROOM),
     cell("Kotlin", "exposed", DataModel, Partial, KT_EXPOSED),
+    cell("Kotlin", "jpa", DataModel, Partial, KT_JPA),
     cell(
         "Kotlin",
         "navigation3",

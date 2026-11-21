@@ -6253,3 +6253,147 @@ object Lookalike : Table("lookalike")
         ]
     );
 }
+
+// AC-1028: import-proven JPA `@Entity` classes are `jpa` DataEntities with
+// their stored properties as fields (`@Id`, `@Column` names, `@Transient`
+// skipped), named by `@Entity(name)` or the class and tabled by `@Table`;
+// relation properties are REFERENCES to the target entity across files
+// (to-many through the collection's element type). An unrecovered target,
+// a computed table name and a lookalike `@Entity` assert no relation,
+// table or entity.
+#[test]
+fn jpa_entities_and_relations_join_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/model/Customer.kt",
+        r#"package com.shop.model
+
+import jakarta.persistence.*
+
+@Entity
+@Table(name = "customers", schema = "shop")
+class Customer(
+    @Id @GeneratedValue val id: Long = 0,
+    @Column(name = "full_name") var name: String,
+    @OneToMany(mappedBy = "customer") val orders: MutableList<Order> = mutableListOf(),
+    @Transient val cached: String = "",
+    plain: Int = 0,
+) {
+    @ManyToMany
+    @JoinTable(name = "customer_tags")
+    var tags: Set<com.shop.tags.Tag> = emptySet()
+    val display: String
+        get() = name.uppercase()
+}
+
+@Entity(name = "Bad")
+@Table(name = TABLE)
+class Computed(@Id val id: Long)
+
+const val TABLE = "computed"
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/model/Order.kt",
+        r#"package com.shop.model
+
+import javax.persistence.Entity
+import javax.persistence.Id
+import javax.persistence.JoinColumn
+import javax.persistence.ManyToOne
+import javax.persistence.OneToOne
+
+@Entity(name = "PurchaseOrder")
+data class Order(
+    @Id val id: Long,
+    @ManyToOne @JoinColumn(name = "customer_id") val customer: Customer?,
+    @OneToOne(targetEntity = Invoice::class) val invoice: Any?,
+)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/fake/Fake.kt",
+        r#"package com.shop.fake
+
+annotation class Entity
+
+@Entity
+class NotPersistent(val id: Long)
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let mut entities: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "DataEntity")
+        .map(|node| node.id.as_str())
+        .collect();
+    entities.sort();
+    assert_eq!(
+        entities,
+        [
+            "data:local/demo@jpa:Bad",
+            "data:local/demo@jpa:Customer",
+            "data:local/demo@jpa:PurchaseOrder"
+        ]
+    );
+    let customer = node(&out.nodes, "data:local/demo@jpa:Customer");
+    assert_eq!(customer.props["storage"], "jpa");
+    assert_eq!(customer.props["table"], "customers");
+    assert_eq!(customer.props["schema"], "shop");
+    assert_eq!(customer.props["table_source"], "explicit");
+    assert_eq!(customer.props["fqn"], "com.shop.model.Customer");
+    assert_eq!(
+        customer.props["fields"],
+        serde_json::json!([
+            {"name": "id", "id": true, "type": "Long"},
+            {"name": "name", "id": false, "type": "String", "column": "full_name"},
+            {"name": "orders", "id": false, "type": "MutableList<Order>", "relation": "OneToMany"},
+            {"name": "tags", "id": false, "type": "Set<com.shop.tags.Tag>", "relation": "ManyToMany"},
+        ])
+    );
+    let order = node(&out.nodes, "data:local/demo@jpa:PurchaseOrder");
+    assert_eq!(order.props["table"], "PurchaseOrder");
+    assert_eq!(order.props["table_source"], "default");
+    let bad = node(&out.nodes, "data:local/demo@jpa:Bad");
+    assert!(bad.props.get("table").is_none());
+    assert_eq!(bad.props["table_source"], "unresolved");
+
+    let orders = edge(
+        &out.edges,
+        "data:local/demo@jpa:Customer",
+        "data:local/demo@jpa:PurchaseOrder",
+        "REFERENCES",
+    );
+    assert_eq!(orders.props["cardinality"], "one-to-many");
+    assert_eq!(orders.props["mapped_by"], "customer");
+    assert_eq!(orders.props["owning"], false);
+    let customer_ref = edge(
+        &out.edges,
+        "data:local/demo@jpa:PurchaseOrder",
+        "data:local/demo@jpa:Customer",
+        "REFERENCES",
+    );
+    assert_eq!(customer_ref.props["cardinality"], "many-to-one");
+    assert_eq!(customer_ref.props["join_column"], "customer_id");
+    assert_eq!(customer_ref.props["owning"], true);
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "jpa")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    assert_eq!(
+        gaps,
+        [
+            "JPA relation target `Invoice` is not a recovered entity",
+            "JPA relation target `com.shop.tags.Tag` is not a recovered entity",
+            "runtime-computed JPA table name",
+        ]
+    );
+}
