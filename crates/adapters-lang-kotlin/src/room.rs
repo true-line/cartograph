@@ -810,6 +810,7 @@ pub(crate) fn resolve(
         }
     }
     let mut seen = BTreeSet::new();
+    let mut emitted_edges: HashMap<(String, String, &'static str), usize> = HashMap::new();
     for access in pending.accesses {
         let dst = if obscured(&access.shadows, &access.path) {
             None
@@ -830,13 +831,18 @@ pub(crate) fn resolve(
         };
         match dst {
             Some(dst) => {
-                if seen.insert((access.src.clone(), dst.clone(), access.label)) {
-                    edges.push(Edge {
-                        src: access.src,
-                        dst,
-                        label: access.label.into(),
-                        props: access.props,
-                    });
+                let key = (access.src.clone(), dst.clone(), access.label);
+                match emitted_edges.get(&key) {
+                    Some(&at) => merge_access_props(&mut edges[at].props, &access.props),
+                    None => {
+                        emitted_edges.insert(key, edges.len());
+                        edges.push(Edge {
+                            src: access.src,
+                            dst,
+                            label: access.label.into(),
+                            props: access.props,
+                        });
+                    }
                 }
             }
             None => {
@@ -847,5 +853,42 @@ pub(crate) fn resolve(
                 }
             }
         }
+    }
+}
+
+/// Folds a second access of the same table by the same function into the
+/// edge already emitted, keeping the union of their operations and
+/// statements, so an `insert` then an `update` keep both.
+fn merge_access_props(kept: &mut serde_json::Value, other: &serde_json::Value) {
+    union(kept, other, "operations", "operation");
+    union(kept, other, "statements", "statement");
+}
+
+/// `kept[plural]` becomes the distinct values of both sides' `plural`
+/// lists, or their `singular` value where a side has no list, sorted;
+/// written only when it holds more than `kept` already says.
+fn union(kept: &mut serde_json::Value, other: &serde_json::Value, plural: &str, singular: &str) {
+    let values = |side: &serde_json::Value| match side[plural].as_array() {
+        Some(list) => list.clone(),
+        None => side
+            .get(singular)
+            .filter(|v| v.is_string())
+            .cloned()
+            .into_iter()
+            .collect(),
+    };
+    let mut merged = values(kept);
+    let before = merged.len();
+    for value in values(other) {
+        if !merged.contains(&value) {
+            merged.push(value);
+        }
+    }
+    if merged.len() > before || (kept[plural].is_null() && merged.len() > 1) {
+        merged.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        if kept.get(singular).is_none_or(serde_json::Value::is_null) {
+            kept[singular] = merged[0].clone();
+        }
+        kept[plural] = merged.into();
     }
 }

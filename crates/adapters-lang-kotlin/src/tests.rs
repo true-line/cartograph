@@ -6109,16 +6109,20 @@ fn exposed_tables_and_dsl_statements_join_across_files() {
 
 import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.Table as ExposedTable
 
 object Users : Table("users") {
     val id = integer("id").autoIncrement()
     val name = varchar("name", 50).nullable()
+    val roles = listOf("admin")
     override val primaryKey = PrimaryKey(id)
 }
 
 object CityTable : IntIdTable() {
     val title = text("title")
 }
+
+object Tags : ExposedTable("tags")
 
 object Computed : Table(TABLE_NAME)
 
@@ -6141,6 +6145,10 @@ class UserRepo {
         CityTable.deleteWhere { title eq value }
     }
     fun rename() = Users.update({ Users.id eq 1 }) { it[name] = "x" }
+    fun save(value: String) {
+        Users.insert { it[name] = value }
+        Users.update { it[name] = value }
+    }
     fun orphan() = Orders.selectAll()
     fun local(list: List<String>) = list.select()
 }
@@ -6166,7 +6174,11 @@ object Lookalike : Table("lookalike")
     entities.sort();
     assert_eq!(
         entities,
-        ["data:local/demo@sql:city", "data:local/demo@sql:users"]
+        [
+            "data:local/demo@sql:city",
+            "data:local/demo@sql:tags",
+            "data:local/demo@sql:users"
+        ]
     );
     let users = node(&out.nodes, "data:local/demo@sql:users");
     assert_eq!(users.props["framework"], "exposed");
@@ -6210,6 +6222,20 @@ object Lookalike : Table("lookalike")
         )
         .props["operation"],
         "update"
+    );
+    let save = edge(
+        &out.edges,
+        &format!("{repo}.save"),
+        "data:local/demo@sql:users",
+        "WRITES",
+    );
+    assert_eq!(
+        save.props["operations"],
+        serde_json::json!(["insert", "update"])
+    );
+    assert_eq!(
+        save.props["statements"],
+        serde_json::json!(["insert", "update"])
     );
 
     let mut gaps: Vec<&str> = out

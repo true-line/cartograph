@@ -49,6 +49,48 @@ const ID_TABLES: &[&str] = &[
     "CompositeIdTable",
 ];
 
+/// Exposed `Table` member functions that declare a column, named by
+/// their first argument.
+const COLUMN_BUILDERS: &[&str] = &[
+    "array",
+    "binary",
+    "blob",
+    "bool",
+    "byte",
+    "char",
+    "customEnumeration",
+    "date",
+    "datetime",
+    "decimal",
+    "double",
+    "duration",
+    "entityId",
+    "enumeration",
+    "enumerationByName",
+    "float",
+    "integer",
+    "javaUUID",
+    "json",
+    "jsonb",
+    "largeText",
+    "long",
+    "mediumText",
+    "optReference",
+    "reference",
+    "registerColumn",
+    "short",
+    "text",
+    "time",
+    "timestamp",
+    "timestampWithTimeZone",
+    "ubyte",
+    "uinteger",
+    "ulong",
+    "ushort",
+    "uuid",
+    "varchar",
+];
+
 /// The operations a DSL statement of this name performs, with its label.
 fn statement(name: &str) -> Option<(&'static str, &'static [&'static str])> {
     Some(match name {
@@ -114,7 +156,11 @@ fn base_proof(
 
 /// The table base an object declares: its spelling and constructor
 /// arguments.
-fn supertype<'t>(cx: &FileCx<'_>, object: TsNode<'t>) -> Option<(String, Option<TsNode<'t>>)> {
+fn supertype<'t>(
+    cx: &FileCx<'_>,
+    object: TsNode<'t>,
+    imports: &Imports,
+) -> Option<(String, Option<TsNode<'t>>)> {
     let specifiers = named_children(object)
         .into_iter()
         .find(|child| child.kind() == "delegation_specifiers")?;
@@ -139,7 +185,13 @@ fn supertype<'t>(cx: &FileCx<'_>, object: TsNode<'t>) -> Option<(String, Option<
             }
             _ => continue,
         };
-        let spelled = spelling(cx.text(&ty));
+        let mut spelled = spelling(cx.text(&ty));
+        // An aliased import (`Table as ExposedTable`) names its target.
+        if !spelled.contains('.')
+            && let Some(bound) = imports.bindings.get(spelled.as_str())
+        {
+            spelled = bound.clone();
+        }
         let simple = spelled.rsplit('.').next().unwrap_or(&spelled);
         if simple == "Table" || ID_TABLES.contains(&simple) {
             return Some((spelled, arguments));
@@ -186,7 +238,7 @@ fn column_name(cx: &FileCx<'_>, property: TsNode<'_>) -> Option<String> {
                     .next()
                     .filter(|inner| inner.kind() == "call_expression")?;
             }
-            "identifier" => {
+            "identifier" if COLUMN_BUILDERS.contains(&cx.text(&callee)) => {
                 let arguments = parts.iter().find(|part| part.kind() == "value_arguments")?;
                 let first = named_children(*arguments).into_iter().next()?;
                 let value = match named_children(first)[..] {
@@ -260,7 +312,7 @@ fn table(
     let Some(name) = object.child_by_field_name("name") else {
         return;
     };
-    let Some((spelled, arguments)) = supertype(cx, object) else {
+    let Some((spelled, arguments)) = supertype(cx, object, imports) else {
         return;
     };
     let Some((id_table, shadows)) = base_proof(&spelled, imports, package) else {
