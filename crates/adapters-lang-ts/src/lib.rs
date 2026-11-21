@@ -99,6 +99,9 @@ pub struct Extraction {
     /// Calls on injected strategies and the classes implementing them
     /// (#2069), linked at directory completion.
     strategies: strategies::Pending,
+    /// Barrel re-exports (AC-1504), followed at directory completion so a
+    /// call through `index.ts` reaches the declaring file.
+    reexports: Vec<reexports::ReExport>,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -348,6 +351,7 @@ impl Extraction {
         self.service_worker_registrations.clear();
         self.next_routes.clear();
         self.strategies = strategies::Pending::default();
+        self.reexports.clear();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -461,6 +465,87 @@ impl FileCx<'_> {
 
     fn text(&self, node: &TsNode) -> &str {
         node.utf8_text(self.source).unwrap_or("")
+    }
+}
+
+/// The re-export one top-level `export` statement makes, if any.
+fn reexport_of(
+    cx: &FileCx<'_>,
+    stmt: TsNode<'_>,
+    imported: &HashMap<String, String>,
+    imported_names: &HashMap<String, String>,
+) -> Option<reexports::ReExport> {
+    let span = (stmt.start_byte() as u64, stmt.end_byte() as u64);
+    let unquote = |node: TsNode<'_>| {
+        let text = cx.text(&node);
+        text.get(1..text.len().checked_sub(1)?).map(str::to_string)
+    };
+    let source = stmt.child_by_field_name("source").and_then(unquote);
+    let mut cursor = stmt.walk();
+    let children: Vec<_> = stmt.children(&mut cursor).collect();
+    if children
+        .iter()
+        .any(|child| child.kind() == "namespace_export")
+    {
+        return None; // `export * as ns from`: a namespace, not a re-export
+    }
+    let clause = children
+        .iter()
+        .find(|child| child.kind() == "export_clause");
+    let names = clause.map(|clause| {
+        let mut cursor = clause.walk();
+        clause
+            .named_children(&mut cursor)
+            .filter(|spec| spec.kind() == "export_specifier")
+            .filter_map(|spec| {
+                let name = spec.child_by_field_name("name")?;
+                let alias = spec.child_by_field_name("alias").unwrap_or(name);
+                Some((cx.text(&alias).to_string(), cx.text(&name).to_string()))
+            })
+            .collect::<Vec<_>>()
+    });
+    match (source, names) {
+        (Some(source), names) => {
+            if names.is_none() && !children.iter().any(|child| child.kind() == "*") {
+                return None;
+            }
+            Some(reexports::ReExport {
+                file: cx.path.to_string(),
+                target: resolve_relative(cx.path, &source)
+                    .filter(|_| !escapes_root(cx.path, &source))?,
+                names,
+                span,
+            })
+        }
+        // `import { a } from './x'; export { a as b }`: one re-export per
+        // imported binding, whose target is the importing declaration's file.
+        (None, Some(names)) => {
+            let prefix = format!("sym:{}@", cx.id.repo);
+            let mut targets: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+            for (exported, local) in names {
+                let Some(foreign) = imported.get(&local) else {
+                    continue;
+                };
+                let Some((file, _)) = foreign.strip_prefix(&prefix)?.split_once('#') else {
+                    continue;
+                };
+                let original = imported_names.get(&local).cloned().unwrap_or(local);
+                targets
+                    .entry(file.to_string())
+                    .or_default()
+                    .push((exported, original));
+            }
+            // Several imported files in one clause: keep the first only; the
+            // rest stay unfollowed, never merged into one wrong target.
+            let (target, names) = targets.into_iter().next()?;
+            Some(reexports::ReExport {
+                file: cx.path.to_string(),
+                target,
+                names: Some(names),
+                span,
+            })
+        }
+        (None, None) => None,
     }
 }
 
@@ -2579,6 +2664,18 @@ fn extract_source_recording(
         }
     }
 
+    // Barrel re-exports (AC-1504): `export * from`, `export { a as b }
+    // from`, and `export { a }` of an imported `a`.
+    let mut w = root.walk();
+    for stmt in root
+        .children(&mut w)
+        .filter(|c| c.kind() == "export_statement")
+    {
+        if let Some(reexport) = reexport_of(&cx, stmt, &imported, &imported_names) {
+            out.reexports.push(reexport);
+        }
+    }
+
     // --- Client side (US-0005, .tsx only, and every Vue component): screens,
     // renders, fetch sites. A Vue component is client code whatever its script
     // `lang`, so its fetch sites are scanned even under the plain TypeScript
@@ -3346,6 +3443,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
         .extend(ex.service_worker_registrations);
     out.next_routes.extend(ex.next_routes);
     out.strategies.extend(ex.strategies);
+    out.reexports.extend(ex.reexports);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3353,11 +3451,32 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
 fn complete_pending_calls(
     mut pending: Vec<PendingCall>,
     known_symbols: &std::collections::HashSet<String>,
+    barrels: &reexports::Index<'_>,
+    id: &SourceId,
     facts: &mut impl FactAccess,
 ) -> Result<(), core_graph::GraphError> {
     for call in &mut pending {
         if let Some(real) = reconcile_guessed_extension(&call.resolved_edge.dst, known_symbols) {
             call.resolved_edge.dst = real;
+        }
+        if barrels.is_empty() || known_symbols.contains(&call.resolved_edge.dst) {
+            continue;
+        }
+        if let Some(resolved) = barrels.resolve(id.repo, &call.resolved_edge.dst, known_symbols) {
+            let mut edge = call.resolved_edge.unpack()?;
+            edge.dst = resolved.dst.clone();
+            edge.props["resolution"] = "re-export".into();
+            edge.props["via"] = resolved
+                .via
+                .iter()
+                .map(|(path, _)| serde_json::Value::from(path.as_str()))
+                .collect();
+            if let Ok(mut prov) = serde_json::from_value::<Provenance>(edge.props["prov"].clone()) {
+                prov.evidence
+                    .extend(reexports::evidence(id.repo, id.commit, &resolved));
+                edge.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
+            }
+            call.resolved_edge = PackedEdge::pack(edge)?;
         }
     }
     let targets: BTreeSet<&str> = pending
@@ -3445,9 +3564,12 @@ fn complete_directory(
     // cache-reused.
     let index = resolution::ResolutionIndex::load(root)?;
     resolution::resolve_bare_imports(&mut *facts, &index, id, &known_files)?;
+    let reexports = std::mem::take(&mut out.reexports);
     complete_pending_calls(
         std::mem::take(&mut out.pending_calls),
         &known_symbols,
+        &reexports::Index::new(&reexports),
+        id,
         &mut *facts,
     )?;
     strategies::complete(
@@ -3706,6 +3828,7 @@ mod local_definitions;
 pub mod next_api;
 pub mod node_http;
 pub mod observed_infra;
+mod reexports;
 pub(crate) mod resolution;
 mod rule_evidence;
 mod service_worker;
