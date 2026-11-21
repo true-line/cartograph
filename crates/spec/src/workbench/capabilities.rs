@@ -426,9 +426,12 @@ fn compile_capability_stories(
 }
 
 /// Where a story or an Actor is listed: by the name it is shown under, then
-/// its id (#2224).
-fn listed_order(node: &Node) -> (String, &str) {
-    (render::NodeName(node).to_string(), node.id.as_str())
+/// its id (#2224). Both are borrowed, so the ordering keys own no name bytes.
+/// Capabilities and Actors take the plain name `render::NodeName` shows.
+pub(crate) type ListedOrder<'a> = (&'a str, &'a str);
+
+fn listed_order(node: &Node) -> ListedOrder<'_> {
+    (render::plain_name(node), node.id.as_str())
 }
 
 // Returning only borrowed stories drops every lookup/projection/ordering index
@@ -639,12 +642,14 @@ fn actor_renderer_parts(
 }
 
 fn actor_retained_parts(actor_count: usize) -> Option<(usize, usize)> {
-    use super::accounting::{map_slots, slots, sum};
+    use super::accounting::{map_slots, set_slots, slots, sum};
     use core_graph::overlay::OverlayFact;
     Some((
         sum(&[
-            map_slots::<&str, (&Node, &Node, &OverlayFact)>(actor_count)?,
+            map_slots::<ListedOrder<'_>, (&Node, &Node, &OverlayFact)>(actor_count)?,
+            set_slots::<&str>(actor_count)?, // Actor ids, for duplicates
             std::mem::size_of::<BTreeMap<(), ()>>(),
+            std::mem::size_of::<BTreeSet<()>>(),
         ])?,
         sum(&[
             slots::<Story<'_>>(actor_count)?,

@@ -189,7 +189,8 @@ fn capability_bound_covers_real_shared_support_indexes_and_official_output() {
     );
     let actual_lookup = map_slots::<&str, Option<&Node>>(lookup.len()).unwrap()
         + set_slots::<&str>(visible.len()).unwrap()
-        + map_slots::<&str, &CapabilityStory<'_>>(ordered.len()).unwrap();
+        + map_slots::<ListedOrder<'_>, &CapabilityStory<'_>>(ordered.len()).unwrap()
+        + set_slots::<&str>(ordered.len()).unwrap();
     assert!(bound.lookup_bytes >= actual_lookup);
     let decoded = Provenance::deserialize(&candidates[0].capability.props["prov"]).unwrap();
     assert!(

@@ -158,6 +158,24 @@ impl<T: fmt::Display> fmt::Display for Replace<T> {
         fmt::write(&mut Adapter(f, self.1), format_args!("{}", self.0))
     }
 }
+/// The name a node other than an Endpoint, DocumentedRoute or Environment is
+/// shown under, borrowed from the node.
+pub(crate) fn plain_name(n: &Node) -> &str {
+    text_prop(
+        n,
+        &[
+            "title",
+            "name",
+            "identity",
+            "logical_id",
+            "route",
+            "path",
+            "reason",
+        ],
+    )
+    .unwrap_or(&n.id)
+}
+
 pub(crate) struct NodeName<'a>(pub &'a Node);
 impl fmt::Display for NodeName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -173,21 +191,7 @@ impl fmt::Display for NodeName<'_> {
         if n.label == "Environment" {
             return f.write_str(text_prop(n, &["name"]).unwrap_or(&n.id));
         }
-        f.write_str(
-            text_prop(
-                n,
-                &[
-                    "title",
-                    "name",
-                    "identity",
-                    "logical_id",
-                    "route",
-                    "path",
-                    "reason",
-                ],
-            )
-            .unwrap_or(&n.id),
-        )
+        f.write_str(plain_name(n))
     }
 }
 pub(crate) struct EvidenceText<'a>(pub &'a Provenance);

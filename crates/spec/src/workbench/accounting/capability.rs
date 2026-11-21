@@ -1,6 +1,6 @@
 //! Capability-only additions to the existing selected compiler workspace.
 use super::*;
-use crate::workbench::capabilities::{Stories, Story, Support};
+use crate::workbench::capabilities::{ListedOrder, Stories, Story, Support};
 use core_graph::overlay::BaseRef;
 
 /// Named logical owners, excluding retained base/selection and the caller's
@@ -55,9 +55,10 @@ pub fn logical_capability_compile_bound(
         slots::<&Edge>(graph.rows)?,
         set_slots::<&str>(graph.rows)?,
         set_slots::<(&String, &String, &String)>(graph.rows)?,
-        map_slots::<&str, &CapabilityStory<'_>>(selected_facts)?,
+        map_slots::<ListedOrder<'_>, &CapabilityStory<'_>>(selected_facts)?,
+        set_slots::<&str>(selected_facts)?, // candidate ids, for duplicates
         slots::<BTreeMap<(), ()>>(3)?,
-        slots::<BTreeSet<()>>(2)?,
+        slots::<BTreeSet<()>>(3)?,
         slots::<Vec<()>>(2)?,
     ])?;
     let story_support_bytes = sum(&[
