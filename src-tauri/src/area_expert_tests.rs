@@ -106,3 +106,36 @@ fn a_blank_question_or_an_unknown_area_is_refused_before_any_call() {
         Some("area_not_found")
     );
 }
+
+// A question names its area as the asker knows it; a run may name that area
+// more narrowly, so the words asked find it.
+#[test]
+fn a_question_finds_its_area_by_the_words_of_its_name() {
+    let choice = |name: &str, files| AreaChoice {
+        area: format!("subsystem:{name}"),
+        name: name.into(),
+        files,
+        sections: Vec::new(),
+        briefing_bytes: 0,
+        briefing_digest: String::new(),
+    };
+    let choices = [
+        choice("Product variant", 40),
+        choice("Product option", 12),
+        choice("Tax", 9),
+        choice("Custom domain", 5),
+    ];
+    let name = |wanted| named(&choices, wanted).map(|choice| choice.name.as_str());
+    assert_eq!(name("Tax"), Some("Tax"));
+    assert_eq!(name("taxes"), Some("Tax"));
+    assert_eq!(name("custom-domain"), Some("Custom domain"));
+    assert_eq!(
+        name("Product"),
+        Some("Product variant"),
+        "the larger of the two"
+    );
+    assert_eq!(name("Products"), Some("Product variant"));
+    assert_eq!(name("Product options"), Some("Product option"));
+    assert_eq!(name("Order"), None);
+    assert_eq!(name("  "), None);
+}

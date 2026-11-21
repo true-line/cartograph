@@ -109,6 +109,51 @@ pub(crate) enum AskOutcome {
     },
 }
 
+/// The area a question names. Area names follow the code, so a run can name
+/// an area more narrowly than the asker did ("Product variant" for
+/// "Product"): the name itself, any case, else the largest area whose name
+/// holds every word of the one asked, a plural matching its singular.
+#[cfg(test)]
+pub(crate) fn named<'a>(choices: &'a [AreaChoice], wanted: &str) -> Option<&'a AreaChoice> {
+    fn words(name: &str) -> Vec<String> {
+        name.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                let word = word.to_lowercase();
+                if let Some(stem) = word.strip_suffix("ies").filter(|s| s.len() > 1) {
+                    return format!("{stem}y");
+                }
+                if let Some(stem) = word.strip_suffix("es").filter(|s| {
+                    ["x", "s", "z", "ch", "sh"].iter().any(|end| s.ends_with(end))
+                }) {
+                    return stem.to_owned();
+                }
+                match word.strip_suffix('s') {
+                    Some(stem) if stem.len() > 2 && !stem.ends_with('s') => stem.to_owned(),
+                    _ => word,
+                }
+            })
+            .collect()
+    }
+    if let Some(exact) = choices.iter().find(|choice| choice.name == wanted) {
+        return Some(exact);
+    }
+    let asked = words(wanted);
+    if asked.is_empty() {
+        return None;
+    }
+    if let Some(same) = choices.iter().find(|choice| words(&choice.name) == asked) {
+        return Some(same);
+    }
+    choices
+        .iter()
+        .filter(|choice| {
+            let have = words(&choice.name);
+            asked.iter().all(|word| have.contains(word))
+        })
+        .max_by(|a, b| a.files.cmp(&b.files).then_with(|| b.name.cmp(&a.name)))
+}
+
 /// The areas of the current overlay, by name. Empty when no overlay is
 /// current for the graph.
 pub(crate) fn areas(state: &AppState) -> Result<Vec<AreaChoice>, String> {
