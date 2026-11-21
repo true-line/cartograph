@@ -127,6 +127,8 @@ pub(in super::super) fn reopen_preparation<T>(
 ) -> Result<T, String> {
     let basis = reopen_basis(config, preparation, proposal, output, input_policy)?;
     let app = basis.profile.app()?;
+    // A generic callback may keep a handle beyond this call.
+    app.retain_with_escaped_handles();
     use_reopen_app(&basis, &app, use_preparation)
 }
 

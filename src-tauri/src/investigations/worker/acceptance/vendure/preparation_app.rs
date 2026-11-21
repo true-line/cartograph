@@ -1,5 +1,5 @@
 //! Captured-preparation fixture over a test app. Its AppState stores are freed
-//! when the owner drops (#1621); a handle a callback cloned out keeps them alive.
+//! when the owner drops (#1621); generic-callback reopen retains its app.
 use super::super::expanded::vendure_prepare::{self, BoundDefinition};
 use super::*;
 use agents::investigation::InvestigationDetail;
@@ -142,9 +142,9 @@ mod tests {
         }
     }
 
-    // AC-0450: a panicked owner releases too; a handle a generic callback cloned keeps state.
+    // AC-0450: a panicked owner releases too; a generic-callback reopen retains its app.
     #[test]
-    fn captured_fixture_preparation_releases_on_panic_and_retains_escaped_handles() {
+    fn captured_fixture_preparation_releases_on_panic_and_retains_generic_callbacks() {
         let case = super::super::tests::Case::new();
         let prepared = case.prepare_fixture().unwrap();
         let owner = PreparationApp::new(&prepared.profile).unwrap();
@@ -173,9 +173,9 @@ mod tests {
         )
         .unwrap();
         let sources = Arc::downgrade(&escaped.state::<AppState>().sources);
-        // The generic callback's handle keeps the app alive until it drops.
+        // The generic callback's handle may still be in use, so the app is retained.
         assert!(escaped.try_state::<AppState>().is_some());
         drop(escaped);
-        assert!(sources.upgrade().is_none());
+        assert!(sources.upgrade().is_some());
     }
 }
