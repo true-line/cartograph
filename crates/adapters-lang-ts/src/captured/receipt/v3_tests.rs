@@ -269,21 +269,22 @@ fn expansion_preflight_is_exact_for_the_ranges_validate_measures() {
                 index: range.index,
                 byte_start: range.evidence.byte_start,
                 byte_end: range.evidence.byte_end,
+                file: None,
             })
         })
         .collect();
     let commit = v3.content.commit_sha.as_deref().unwrap();
     assert_eq!(
-        expanded_range_bytes(&wire, v3.repo_key(), v3.file(), commit),
+        expanded_range_bytes(&wire, v3.repo_key(), v3.file(), &[], commit),
         Some(serde_json::to_vec(v3.ranges()).unwrap().len())
     );
     assert_eq!(
-        expanded_range_bytes(&[], v3.repo_key(), v3.file(), commit),
+        expanded_range_bytes(&[], v3.repo_key(), v3.file(), &[], commit),
         Some(2)
     );
     let mixed = vec![WireRange::Full(v3.ranges()[0].clone())];
     assert_eq!(
-        expanded_range_bytes(&mixed, v3.repo_key(), v3.file(), commit),
+        expanded_range_bytes(&mixed, v3.repo_key(), v3.file(), &[], commit),
         None
     );
 }

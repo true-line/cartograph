@@ -39,8 +39,9 @@ impl MintedHeader {
     }
 }
 
-/// One range of a minted receipt: role, index and the shared offsets.
-type Span = (RangeRole, u32, u64, u64);
+/// One range of a minted receipt: role, index, the shared offsets and the
+/// cited file, `0` for the header's file and `n` for `other_files[n - 1]`.
+type Span = (RangeRole, u32, u64, u64, u32);
 
 /// A freshly minted v3 receipt in compact form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,8 @@ pub struct MintedReceipt {
     fact_key: FactKey,
     fact_digest: String,
     spans: Box<[Span]>,
+    /// Further captured files the spans cite (AC-1039), in path order.
+    other_files: Box<[CaptureFileRef]>,
     source_sizes: Option<super::ReceiptSourceSizes>,
 }
 
@@ -75,16 +78,40 @@ impl MintedReceipt {
         {
             return Err(CapturedError::Invalid("minted receipt contract"));
         }
+        let slot = |file: &CaptureFileRef| {
+            if *file == content.file {
+                Some(0)
+            } else {
+                content
+                    .other_files
+                    .iter()
+                    .position(|other| other == file)
+                    .and_then(|index| u32::try_from(index + 1).ok())
+            }
+        };
         if content.ranges.iter().any(|range| {
             range.evidence.repo != content.repo_key
-                || range.evidence.path != content.file.path
+                || range.evidence.path != range.captured.file.path
                 || range.evidence.commit_sha != commit_sha
-                || range.captured.file != content.file
+                || slot(&range.captured.file).is_none()
                 || range.evidence.byte_start != range.captured.byte_start
                 || range.evidence.byte_end != range.captured.byte_end
         }) {
             return Err(CapturedError::Invalid("minted receipt range"));
         }
+        let spans = content
+            .ranges
+            .iter()
+            .map(|range| {
+                (
+                    range.role,
+                    range.index,
+                    range.evidence.byte_start,
+                    range.evidence.byte_end,
+                    slot(&range.captured.file).unwrap_or(0),
+                )
+            })
+            .collect();
         let shared = match header {
             Some(shared)
                 if shared.repo_key == content.repo_key
@@ -109,19 +136,17 @@ impl MintedReceipt {
             header: shared,
             fact_key: content.fact_key,
             fact_digest: content.fact_digest,
-            spans: content
-                .ranges
-                .iter()
-                .map(|range| {
-                    (
-                        range.role,
-                        range.index,
-                        range.evidence.byte_start,
-                        range.evidence.byte_end,
-                    )
-                })
-                .collect(),
+            spans,
+            other_files: content.other_files.into_boxed_slice(),
         })
+    }
+
+    /// The captured file a span's slot names.
+    fn slot_file(&self, slot: u32) -> &CaptureFileRef {
+        match slot {
+            0 => &self.header.file,
+            n => &self.other_files[n as usize - 1],
+        }
     }
 
     /// The complete receipt this carrier stands for.
@@ -145,23 +170,27 @@ impl MintedReceipt {
                 ranges: self
                     .spans
                     .iter()
-                    .map(|&(role, index, byte_start, byte_end)| ReceiptRange {
-                        role,
-                        index,
-                        evidence: EvidenceRef {
-                            repo: header.repo_key.clone(),
-                            path: header.file.path.clone(),
-                            byte_start,
-                            byte_end,
-                            commit_sha: header.commit_sha.clone(),
-                        },
-                        captured: CaptureSpanRef {
-                            file: header.file.clone(),
-                            byte_start,
-                            byte_end,
-                        },
+                    .map(|&(role, index, byte_start, byte_end, slot)| {
+                        let file = self.slot_file(slot);
+                        ReceiptRange {
+                            role,
+                            index,
+                            evidence: EvidenceRef {
+                                repo: header.repo_key.clone(),
+                                path: file.path.clone(),
+                                byte_start,
+                                byte_end,
+                                commit_sha: header.commit_sha.clone(),
+                            },
+                            captured: CaptureSpanRef {
+                                file: file.clone(),
+                                byte_start,
+                                byte_end,
+                            },
+                        }
                     })
                     .collect(),
+                other_files: self.other_files.to_vec(),
                 source_sizes: self.source_sizes.clone(),
                 source_scope: SourceScope::PrimarySourceOnly,
                 input_closure: InputClosure::InputClosureNotEstablished,
@@ -202,12 +231,12 @@ impl MintedReceipt {
     pub fn header(&self) -> &Arc<MintedHeader> {
         &self.header
     }
-    /// Each cited span of the captured file, built one at a time.
+    /// Each cited span of the captured files, built one at a time.
     pub fn captured_spans(&self) -> impl Iterator<Item = CaptureSpanRef> + '_ {
         self.spans
             .iter()
-            .map(|&(_, _, byte_start, byte_end)| CaptureSpanRef {
-                file: self.header.file.clone(),
+            .map(|&(_, _, byte_start, byte_end, slot)| CaptureSpanRef {
+                file: self.slot_file(slot).clone(),
                 byte_start,
                 byte_end,
             })
@@ -230,6 +259,17 @@ impl MintedReceipt {
             + self.fact_digest.capacity()
             + self.spans.len() * size_of::<Span>()
             + self
+                .other_files
+                .iter()
+                .map(|file| {
+                    size_of::<CaptureFileRef>()
+                        + file.source_id.as_str().len()
+                        + file.capture_id.capacity()
+                        + file.path.capacity()
+                        + file.digest.capacity()
+                })
+                .sum::<usize>()
+            + self
                 .source_sizes
                 .as_ref()
                 .map_or(0, |sizes| sizes.heap_bytes())
@@ -245,11 +285,11 @@ impl MintedReceipt {
         .is_ok_and(|ranges| {
             ranges.len() == self.spans.len()
                 && ranges.iter().zip(self.spans.iter()).all(
-                    |((role, index, evidence), &(span_role, span_index, start, end))| {
+                    |((role, index, evidence), &(span_role, span_index, start, end, slot))| {
                         *role == span_role
                             && *index == span_index
                             && evidence.repo == header.repo_key
-                            && evidence.path == header.file.path
+                            && evidence.path == self.slot_file(slot).path
                             && evidence.commit_sha == header.commit_sha
                             && evidence.byte_start == start
                             && evidence.byte_end == end
