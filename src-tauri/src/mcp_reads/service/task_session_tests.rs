@@ -57,9 +57,11 @@ fn service_task_sessions_follow_host_grant_and_rotation() {
     // AC-0320/0321: the grant comes from host activation, never RPC arguments.
     let stores = tempfile::tempdir().unwrap();
     let endpoint = tempfile::tempdir().unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(crate::registered_source_tests::app_state(stores.path()));
     let state = app.state::<crate::AppState>();
     let client = state.jobs.lock().unwrap().create_mcp_client(nz(1)).unwrap();

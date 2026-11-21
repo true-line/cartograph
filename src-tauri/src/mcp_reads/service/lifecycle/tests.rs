@@ -10,16 +10,18 @@ use std::{
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
 }
-fn app() -> tauri::App<tauri::test::MockRuntime> {
-    tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap()
+fn app() -> crate::test_app::TestApp {
+    crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    )
 }
 fn policy() -> Policy {
     super::super::tests::policy()
 }
 
-fn task_fixture() -> (tauri::App<tauri::test::MockRuntime>, Policy) {
+fn task_fixture() -> (crate::test_app::TestApp, Policy) {
     use tauri::Manager;
     let root = tempfile::tempdir().unwrap();
     let app = app();

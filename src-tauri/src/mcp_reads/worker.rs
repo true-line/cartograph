@@ -1108,7 +1108,8 @@ pub(crate) mod tests {
             "test.cartograph.{}",
             dir.path().file_name().unwrap().to_string_lossy()
         );
-        let app = tauri::test::mock_builder().build(context).unwrap();
+        let app =
+            crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
         app.manage(crate::registered_source_tests::app_state(dir.path()));
         let budget = WorkBudget::new(WorkLimits {
             max_workers: nz(1),
@@ -1166,7 +1167,8 @@ mod native_tests {
             "test.cartograph.{}",
             dir.path().file_name().unwrap().to_string_lossy()
         );
-        let app = tauri::test::mock_builder().build(context).unwrap();
+        let app =
+            crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
         app.manage(crate::registered_source_tests::app_state(dir.path()));
         let handle = app.handle().clone();
         let budget = WorkBudget::new(WorkLimits {

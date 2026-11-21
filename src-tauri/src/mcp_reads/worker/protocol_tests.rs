@@ -11,7 +11,8 @@ fn mcp_worker_protocol_survives_failed_acquisition_and_keeps_one_id_ledger() {
             "test.cartograph.{}",
             dir.path().file_name().unwrap().to_string_lossy()
         );
-        let app = tauri::test::mock_builder().build(context).unwrap();
+        let app =
+            crate::test_app::TestApp::new(tauri::test::mock_builder().build(context).unwrap());
         app.manage(crate::registered_source_tests::app_state(dir.path()));
         // Make only this disposable graph unavailable. Protocol calls must not
         // attempt a graph lock; a subsequent read must report the failure.
@@ -90,9 +91,11 @@ fn mcp_worker_protocol_survives_failed_acquisition_and_keeps_one_id_ledger() {
 #[test]
 fn scoped_worker_refuses_invalid_graph_limits_before_reserving_or_advertising() {
     let dir = tempfile::tempdir().unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(crate::registered_source_tests::app_state(dir.path()));
     let base = tests::limits();
     let budget = WorkBudget::new(WorkLimits {
@@ -130,9 +133,11 @@ fn authenticated_task_tools_share_lifecycle_and_revocation_precedes_store_access
     // AC-0320/0321/0325: internal factory only; public task activation stays off.
     use agents::investigation::{McpClientId, McpTaskActivation};
     let dir = tempfile::tempdir().unwrap();
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
     app.manage(crate::registered_source_tests::app_state(dir.path()));
     let grant = McpTaskActivation::granted(
         McpClientId::from_host_bytes([9; 16]),

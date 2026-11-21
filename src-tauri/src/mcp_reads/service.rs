@@ -548,9 +548,11 @@ mod tests {
             |p| p.aggregate.max_workers = nz(p.transport.max_connections.get() + 1),
         ];
         let parent = tempfile::tempdir().unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         assert!(policy().validate().is_ok());
         for (index, mutate) in invalid.iter().enumerate() {
@@ -626,9 +628,11 @@ mod tests {
     #[test]
     fn mcp_service_starts_disabled_and_cleans_record_before_reenable() {
         let parent = tempfile::tempdir().unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         assert_eq!(service.status().unwrap(), Status::Disabled);
         tauri::async_runtime::block_on(async {
@@ -671,9 +675,11 @@ mod tests {
     #[test]
     fn mcp_service_refuses_new_activation_until_old_worker_releases_budget() {
         let parent = tempfile::tempdir().unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         let budget = WorkBudget::new(policy().aggregate);
         let still_running = budget.try_acquire(nz(100), 0).unwrap();
@@ -704,9 +710,11 @@ mod tests {
             task::{Context, Poll, Waker},
         };
         let parent = tempfile::tempdir().unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         let (completed, completion) = tokio::sync::watch::channel(None);
         {
@@ -746,9 +754,11 @@ mod tests {
             task::{Context, Poll, Waker},
         };
         let parent = tempfile::tempdir().unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         tauri::async_runtime::block_on(async {
             let record = service
@@ -774,9 +784,11 @@ mod tests {
     fn mcp_cleanup_failure_persists_and_denies_reactivation() {
         // AC-0288: a record replacement never becomes verified disabled state.
         let parent = tempfile::tempdir().unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         tauri::async_runtime::block_on(async {
             let record = service
@@ -810,9 +822,11 @@ mod configuration_tests {
         let relay = parent.path().join("relay with spaces 🧭");
         std::fs::write(&relay, b"fixture only, never executed").unwrap();
         std::fs::set_permissions(&relay, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let app = tauri::test::mock_builder()
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .unwrap();
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap(),
+        );
         let service = Service::default();
         assert!(service.client_configuration(&relay).is_err());
         tauri::async_runtime::block_on(async {
