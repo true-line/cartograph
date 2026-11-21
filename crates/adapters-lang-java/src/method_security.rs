@@ -104,6 +104,9 @@ pub(super) struct Admits {
     pub(super) anonymous: bool,
     /// Whether the expression holds a condition beyond those above.
     pub(super) other: bool,
+    /// Whether checks are joined by `and` or negated, so the roles and
+    /// authorities above are not alternatives.
+    pub(super) compound: bool,
 }
 
 fn role_name(role: &str) -> String {
@@ -176,6 +179,22 @@ pub(super) fn expression(expression: &str) -> Admits {
     admits.permit_all = word(expression, "permitAll");
     admits.deny_all = word(expression, "denyAll");
     admits.anonymous = !calls(expression, "isAnonymous").is_empty();
+    let checks: usize = [
+        "hasRole",
+        "hasAnyRole",
+        "hasAuthority",
+        "hasAnyAuthority",
+        "isAuthenticated",
+        "isFullyAuthenticated",
+        "isRememberMe",
+        "isAnonymous",
+    ]
+    .iter()
+    .map(|name| calls(expression, name).len())
+    .sum();
+    let negated = word(expression, "not") || expression.contains('!');
+    let joined = word(expression, "and") || expression.contains("&&");
+    admits.compound = negated || (joined && checks > 1);
     // Whatever is left after the recognised calls and `and`/`or`/`not`.
     let mut residue = expression.to_string();
     for name in [
@@ -230,7 +249,7 @@ fn caller(admits: &Admits, expression: &str) -> String {
     if parts.is_empty() && admits.anonymous {
         parts.push("anonymous caller".into());
     }
-    if parts.is_empty() || admits.other {
+    if parts.is_empty() || admits.other || admits.compound {
         return format!("caller that `{expression}` admits");
     }
     parts.join(" or ")
@@ -740,8 +759,29 @@ fn combine(
                 "reasons": [format!("{NO_ANNOTATION}"), reason],
             });
         }
-        // The method's own reading still holds when the URL rule is not read.
-        Some(Err(_)) => return method,
+        // An unread URL rule may be stricter than the method's own reading,
+        // so the endpoint is partial: the annotation is kept as a site, the
+        // caller it names is not stated as the endpoint's.
+        Some(Err(reason)) => {
+            if method["state"] == "unknown" {
+                return method;
+            }
+            let read = match method["state"].as_str() {
+                Some("none") => "the handler's method security admits every caller".to_string(),
+                _ => format!(
+                    "the handler's method security admits {}",
+                    method["caller"].as_str().unwrap_or("some callers")
+                ),
+            };
+            let mut partial = method;
+            if let Some(props) = partial.as_object_mut() {
+                props.remove("caller");
+                props.remove("basis");
+            }
+            partial["state"] = "unknown".into();
+            partial["reasons"] = serde_json::json!([read, reason]);
+            return partial;
+        }
         Some(Ok(url)) => url,
     };
     if !annotated {
@@ -881,6 +921,7 @@ fn evaluate(
                             admits.deny_all |= read.deny_all;
                             admits.anonymous |= read.anonymous;
                             admits.other |= read.other;
+                            admits.compound |= read.compound;
                         }
                         "PreAuthorize" | "PostAuthorize" => {
                             let read = expression(value);
@@ -891,6 +932,7 @@ fn evaluate(
                             admits.deny_all |= read.deny_all;
                             admits.anonymous |= read.anonymous;
                             admits.other |= read.other;
+                            admits.compound |= read.compound;
                             expressions.push(value.clone());
                         }
                         // `@Secured` takes config attributes; `ROLE_` ones
@@ -972,5 +1014,17 @@ mod tests {
         );
         assert!(expression("permitAll()").permit_all);
         assert!(!expression("permitAll()").other);
+        // Both roles are required, and a negated role is no role to hold.
+        for both in [
+            "hasRole('ADMIN') and hasRole('AUDITOR')",
+            "hasRole('ADMIN') && hasAuthority('audit')",
+            "not hasRole('GUEST')",
+            "!hasRole('GUEST')",
+        ] {
+            let read = expression(both);
+            assert!(read.compound, "{both}");
+            assert_eq!(caller(&read, both), format!("caller that `{both}` admits"));
+        }
+        assert!(!expression("hasRole('A') or hasAuthority('b')").compound);
     }
 }

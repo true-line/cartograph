@@ -456,12 +456,16 @@ pub(super) fn reading(
             "the HttpSecurity chain has a securityMatcher, which is not read".into(),
         );
     }
-    let ordered = chains
-        .iter()
-        .filter(|c| !c.conditional)
-        .chain(chains.iter().filter(|c| c.conditional));
-    for chain in ordered {
+    // Rules apply in source order; a conditional rule met first leaves the
+    // endpoint to the condition.
+    for chain in chains {
         for rule in &chain.rules {
+            // A rule for another verb never covers the endpoint, whatever
+            // its matcher.
+            let verb = verb_cover(rule.verb.as_deref(), method);
+            if verb == Cover::None {
+                continue;
+            }
             let path_cover = match &rule.matcher {
                 Matcher::Any => Cover::All,
                 Matcher::Unread => {
@@ -484,7 +488,7 @@ pub(super) fn reading(
                     best
                 }
             };
-            match path_cover.min(verb_cover(rule.verb.as_deref(), method)) {
+            match path_cover.min(verb) {
                 Cover::None => continue,
                 Cover::Some => {
                     return Url::Unknown(format!(

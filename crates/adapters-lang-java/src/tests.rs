@@ -5560,3 +5560,81 @@ class LabelResourceIT {
     assert_eq!(link.props["link"], "handler_assumed");
     assert_eq!(link.props["prov"]["confidence_tier"], "InferredStrong");
 }
+
+// AC-0964: an annotated endpoint under a URL rule that is not read is
+// partial, not its annotation's caller; rules apply in source order, so a
+// conditional rule met first decides nothing; a rule for another verb is
+// skipped whatever its matcher.
+#[test]
+fn spring_url_rules_that_are_not_read_keep_annotated_endpoints_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("src/main/java/com/acme");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("SecurityConfiguration.java"),
+        r#"package com.acme;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+public class SecurityConfiguration {
+    public SecurityFilterChain filterChain(HttpSecurity http, boolean dev) throws Exception {
+        if (dev) {
+            http.authorizeHttpRequests(authz -> authz.requestMatchers("/api/dev/**").permitAll());
+        }
+        http.authorizeHttpRequests(authz ->
+            authz
+                .requestMatchers(HttpMethod.POST, custom()).permitAll()
+                .requestMatchers("/api/reports/**").hasRole("AUDITOR")
+                .requestMatchers(custom()).authenticated()
+                .anyRequest().authenticated()
+        );
+        return http.build();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("Resource.java"),
+        r#"package com.acme;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Resource {
+    @GetMapping("/api/dev/tools") public void tools() {}
+    @GetMapping("/api/reports/daily") public void daily() {}
+    @PreAuthorize("hasRole('ADMIN')")
+    @GetMapping("/api/admin/purge") public void purge() {}
+}
+"#,
+    )
+    .unwrap();
+    let out = super::extract_dir(dir.path(), &id()).unwrap();
+    let auth = |path: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}"))
+            .props["auth"]
+            .clone()
+    };
+    let tools = auth("/api/dev/tools");
+    assert_eq!(tools["state"], "unknown", "{tools}");
+    assert!(tools.to_string().contains("under a condition"), "{tools}");
+    // The POST-only custom matcher is skipped for a GET endpoint.
+    let daily = auth("/api/reports/daily");
+    assert_eq!(daily["caller"], "caller with role AUDITOR", "{daily}");
+    // The unread matcher may cover it, so the annotation is only partial.
+    let purge = auth("/api/admin/purge");
+    assert_eq!(purge["state"], "unknown", "{purge}");
+    assert!(purge.get("caller").is_none(), "{purge}");
+    assert_eq!(
+        purge["reasons"][0],
+        "the handler's method security admits caller with role ADMIN"
+    );
+    assert!(
+        purge["reasons"][1].as_str().unwrap().contains("not read"),
+        "{purge}"
+    );
+    assert_eq!(purge["roles"], serde_json::json!(["ADMIN"]));
+}
