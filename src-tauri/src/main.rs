@@ -1748,6 +1748,53 @@ fn admit_surviving_lane_receipts(
     adapters_lang_ts::captured::admit_after(receipts, minted);
 }
 
+/// Mint a lane's receipts from the facts graph publication materializes
+/// (last-value node winners, merged edges, AC-1037), so a repeated node or
+/// relation is cited in its published form, then admit the survivors.
+fn stage_lane_publication_receipts(
+    grammar: adapters_lang_ts::captured::Grammar,
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &adapters_lang_ts::SourceId<'_>,
+    nodes: &[core_graph::Node],
+    edges: &[core_graph::Edge],
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
+) {
+    let (published_nodes, published_edges) = publication_view(nodes, edges);
+    let stage = adapters_lang_ts::captured::stage_lane_receipts(
+        grammar,
+        capture,
+        files,
+        id,
+        &published_nodes,
+        &published_edges,
+    );
+    admit_surviving_lane_receipts(nodes, edges, stage, receipts);
+}
+
+/// The facts graph publication keeps: each node id's last occurrence, in
+/// extraction order, and each relation merged across its occurrences.
+fn publication_view(
+    nodes: &[core_graph::Node],
+    edges: &[core_graph::Edge],
+) -> (Vec<core_graph::Node>, Vec<core_graph::Edge>) {
+    let mut last = std::collections::HashMap::<&str, usize>::new();
+    for (index, node) in nodes.iter().enumerate() {
+        last.insert(node.id.as_str(), index);
+    }
+    let nodes = nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| last[node.id.as_str()] == *index)
+        .map(|(_, node)| node.clone())
+        .collect();
+    let edges = merged_edge_view(edges)
+        .into_values()
+        .map(std::borrow::Cow::into_owned)
+        .collect();
+    (nodes, edges)
+}
+
 /// [`extract_tree_with_registries`] without the final decode.
 #[allow(clippy::too_many_arguments)]
 fn extract_tree_packed(
@@ -1949,15 +1996,15 @@ fn extract_tree_packed(
             .map_err(|error| error.to_string())?;
             // Facts are bound in their final form, after directory resolution,
             // so those the join builds are covered too (AC-1037).
-            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+            stage_lane_publication_receipts(
                 adapters_lang_ts::captured::Grammar::Python,
                 capture,
                 &captured_python,
                 &ts_id,
                 &python.nodes,
                 &python.edges,
+                receipts,
             );
-            admit_surviving_lane_receipts(&python.nodes, &python.edges, stage, receipts);
             let stats = adapters_lang_python::IncrementalStats {
                 recomputed_files: captured_python.len() as u64,
                 ..Default::default()
@@ -2029,15 +2076,15 @@ fn extract_tree_packed(
             .map_err(|error| error.to_string())?;
             // Facts are bound in their final form, after directory resolution,
             // so those the join builds are covered too (AC-1037).
-            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+            stage_lane_publication_receipts(
                 adapters_lang_ts::captured::Grammar::Go,
                 capture,
                 &captured_go,
                 &ts_id,
                 &go.nodes,
                 &go.edges,
+                receipts,
             );
-            admit_surviving_lane_receipts(&go.nodes, &go.edges, stage, receipts);
             let stats = adapters_lang_go::IncrementalStats {
                 recomputed_files: captured_go.len() as u64,
                 ..Default::default()
@@ -2096,15 +2143,15 @@ fn extract_tree_packed(
             .map_err(|error| error.to_string())?;
             // Facts are bound in their final form, after directory resolution,
             // so those the join builds are covered too (AC-1037).
-            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+            stage_lane_publication_receipts(
                 adapters_lang_ts::captured::Grammar::Rust,
                 capture,
                 &captured_rust,
                 &ts_id,
                 &rust.nodes,
                 &rust.edges,
+                receipts,
             );
-            admit_surviving_lane_receipts(&rust.nodes, &rust.edges, stage, receipts);
             let stats = adapters_lang_rust::IncrementalStats {
                 recomputed_files: captured_rust.len() as u64,
                 ..Default::default()
@@ -2163,15 +2210,15 @@ fn extract_tree_packed(
             .map_err(|error| error.to_string())?;
             // Facts are bound in their final form, after directory resolution,
             // so those the join builds are covered too (AC-1037).
-            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+            stage_lane_publication_receipts(
                 adapters_lang_ts::captured::Grammar::Java,
                 capture,
                 &captured_java,
                 &ts_id,
                 &java.nodes,
                 &java.edges,
+                receipts,
             );
-            admit_surviving_lane_receipts(&java.nodes, &java.edges, stage, receipts);
             let stats = adapters_lang_java::IncrementalStats {
                 recomputed_files: captured_java.len() as u64,
                 ..Default::default()
@@ -2230,15 +2277,15 @@ fn extract_tree_packed(
             .map_err(|error| error.to_string())?;
             // Facts are bound in their final form, after directory resolution,
             // so those the join builds are covered too (AC-1037).
-            let stage = adapters_lang_ts::captured::stage_lane_receipts(
+            stage_lane_publication_receipts(
                 adapters_lang_ts::captured::Grammar::Kotlin,
                 capture,
                 &captured_kotlin,
                 &ts_id,
                 &kotlin.nodes,
                 &kotlin.edges,
+                receipts,
             );
-            admit_surviving_lane_receipts(&kotlin.nodes, &kotlin.edges, stage, receipts);
             let stats = adapters_lang_kotlin::IncrementalStats {
                 recomputed_files: captured_kotlin.len() as u64,
                 ..Default::default()
