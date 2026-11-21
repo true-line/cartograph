@@ -4845,9 +4845,10 @@ fn record_ingest_metrics(
     layers: &LayerBreakdown,
     coverage_repos: &std::collections::BTreeSet<String>,
 ) -> Result<(), String> {
-    let (nodes, edges) = {
+    // Packed: the metrics decode one fact at a time (AC-1201).
+    let snapshot = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        graph.read_snapshot().map_err(|e| e.to_string())?
+        graph.read_packed_snapshot().map_err(|e| e.to_string())?
     };
     // Only layers this ingest actually contained are in scope — a
     // zero-file layer's extractor did not run, so it reports null
@@ -4866,7 +4867,9 @@ fn record_ingest_metrics(
     .filter(|(_, files)| *files > 0)
     .map(|(extractor, files)| (extractor.to_string(), files))
     .collect();
-    let computed = metrics::compute(&nodes, &edges, &scope, coverage_repos);
+    let computed =
+        metrics::compute_packed(&snapshot, &scope, coverage_repos).map_err(|e| e.to_string())?;
+    drop(snapshot);
     let (unsupported, no_evidence) = {
         let findings = state.findings.lock().map_err(|e| e.to_string())?;
         findings.counts().map_err(|e| e.to_string())?
