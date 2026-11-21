@@ -172,13 +172,19 @@ fn auditor12_rejected_finish_preserves_reason_usage_and_reopens() {
 // (#1924), and libtest can run separate tests side by side.
 #[test]
 fn auditor13_replay_correction_succeeds_or_exhausts_and_reopens() {
-    for rejection in [Rejection::Once, Rejection::Repeated] {
-        exercise_auditor_configured(
-            Scenario::CloudComplete,
-            SpecialistId::EvidenceAuditorV13,
-            Some(rejection),
-        );
-    }
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV13,
+        Some(Rejection::Once),
+    );
+}
+#[test]
+fn auditor13_repeated_rejection_replay_correction_exhausts_and_reopens() {
+    exercise_auditor_configured(
+        Scenario::CloudComplete,
+        SpecialistId::EvidenceAuditorV13,
+        Some(Rejection::Repeated),
+    );
 }
 #[test]
 fn auditor13_short_title_replay_correction_reopens() {
