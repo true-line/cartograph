@@ -91,6 +91,17 @@ pub(crate) fn selected_source_peak_bytes() -> Option<usize> {
 }
 
 impl RegisteredSource {
+    /// This source as the owner of receipts under another identity, such as
+    /// its observation inputs' (ADR-0079): `id` is both its source id and
+    /// its repo key.
+    pub(crate) fn owning_as(&self, id: String) -> Self {
+        Self {
+            source_id: id.clone(),
+            repo_key: id,
+            ..self.clone()
+        }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

@@ -1805,6 +1805,27 @@ fn publication_view(
     (nodes, edges)
 }
 
+/// Observed receipts for the facts in `facts` whose observation cites the
+/// input `capture` (ADR-0079, AC-1045). Only those facts are decoded.
+fn observed_receipts_packed(
+    capture: &source_capture::Capture,
+    facts: &FactStore,
+) -> Result<Vec<adapters_lang_ts::captured::MintedReceipt>, String> {
+    let cited = format!(
+        "\"repo\":{}",
+        serde_json::to_string(capture.manifest().source_id.as_str()).map_err(|e| e.to_string())?
+    );
+    let nodes = facts
+        .nodes_where(|node| node.props_json().contains(&cited))
+        .map_err(|e| e.to_string())?;
+    let edges = facts
+        .edges_where(|edge| edge.props_json().contains(&cited))
+        .map_err(|e| e.to_string())?;
+    Ok(adapters_lang_ts::captured::mint_observed_receipts(
+        capture, &nodes, &edges,
+    ))
+}
+
 /// [`extract_tree_with_registries`] without the final decode.
 #[allow(clippy::too_many_arguments)]
 fn extract_tree_packed(
@@ -6471,17 +6492,20 @@ fn add_system_blocking<R: tauri::Runtime>(
             .map_err(&fail)?
         };
         ensure_running_job(&state, &execution)?;
-        let (omitted_stored_receipts, omitted_stored_facts) = state
+        let retained = state
             .primary_sources
             .persist(&primary, source, &receipts)
-            .map_err(&fail)?
-            .keep_retained(&mut receipts);
+            .map_err(&fail)?;
+        let charged = retained.charged();
+        let (omitted_stored_receipts, omitted_stored_facts) = retained.keep_retained(&mut receipts);
         // The captured observation inputs are retained with the source, so
-        // the bytes their evidence cites outlive this recovery (ADR-0080).
+        // the bytes their evidence cites outlive this recovery (ADR-0080),
+        // with a receipt for each observation's exact span (ADR-0079).
         if let Some(capture) = observed.capture() {
+            let observed_receipts = observed_receipts_packed(capture, &facts).map_err(&fail)?;
             state
                 .primary_sources
-                .persist_input(source, capture)
+                .persist_input(source, capture, &observed_receipts, charged)
                 .map_err(&fail)?;
         }
         reads.omitted_stored_receipts = omitted_stored_receipts;
@@ -14220,6 +14244,46 @@ export function App() {
         let after = super::primary_source::preview(&state, &source.source_id).unwrap();
         assert!(after.input_capture_ids.is_empty());
         assert_eq!(after.captures, after.capture_ids.len());
+    }
+
+    #[test]
+    fn observed_facts_get_receipts_owned_by_their_input_and_forgotten_with_their_source() {
+        // AC-1045 (ADR-0079, #385): a fact the captured Terraform state
+        // enriched gets an observed receipt for its exact span, owned by the
+        // input identity, counted in its source's retention preview and
+        // reclaimed when the source is forgotten.
+        use tauri::Manager;
+        const STATE: &str = r#"{"format_version":"1.0","values":{"root_module":{"resources":[
+            {"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{"url":"https://sqs.example/jobs"},"sensitive_values":{}}]}}}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        let root = system.join("infra");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.tf"),
+            "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(system.join("state.json"), STATE).unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+            .unwrap();
+        let source = state.sources.lock().unwrap().list().unwrap().remove(0);
+        let retained = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert_eq!(retained.input_receipts, 1);
+        assert!(retained.receipts >= retained.input_receipts);
+        super::primary_source::forget(&state, &source.source_id, &retained.fingerprint).unwrap();
+        let after = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert_eq!(after.input_receipts, 0);
     }
 
     #[test]

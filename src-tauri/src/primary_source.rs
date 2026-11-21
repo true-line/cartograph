@@ -585,6 +585,15 @@ fn source_id(value: &str) -> Result<SourceId, String> {
     SourceId::new(value).map_err(storage_error)
 }
 
+/// A receipt owner: a registered source, or the observation input identity
+/// of one, whose observed receipts it owns (ADR-0079).
+fn receipt_owner(value: &str) -> Result<SourceId, String> {
+    match value.strip_prefix(crate::observation_inputs::INPUT_REPO_PREFIX) {
+        Some(registered) => input_id(registered),
+        None => source_id(value),
+    }
+}
+
 /// The capture identity of a registered source's manifest observation
 /// inputs (ADR-0080).
 fn input_id(registered: &str) -> Result<SourceId, String> {
@@ -1056,6 +1065,8 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
 
 // Metadata-only preallocation checks apply even after open; indexed ownership
 // fields are not trusted just because a SQL predicate selected their row.
+// An owner is a registered source or its observation input identity
+// (`input/<source id>`, ADR-0079).
 fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     receipt_schema(conn)?;
     let count: i64 = conn
@@ -1074,8 +1085,10 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM receipt_headers WHERE typeof(id) != 'text'
          OR length(CAST(id AS BLOB)) NOT BETWEEN 1 AND 256
-         OR typeof(source_id) != 'text' OR length(CAST(source_id AS BLOB)) != 36
-         OR source_id NOT GLOB 'src_*' OR trim(substr(source_id, 5), '0123456789abcdef') != ''
+         OR typeof(source_id) != 'text' OR NOT ((length(CAST(source_id AS BLOB)) = 36 AND source_id GLOB 'src_*'
+                  AND trim(substr(source_id, 5), '0123456789abcdef') = '')
+              OR (length(CAST(source_id AS BLOB)) = 42 AND source_id GLOB 'input/src_*'
+                  AND trim(substr(source_id, 11), '0123456789abcdef') = ''))
          OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
          OR typeof(header) != 'text' OR length(CAST(header AS BLOB)) NOT BETWEEN 1 AND ?1
          OR NOT EXISTS(SELECT 1 FROM receipts WHERE receipts.header_id = receipt_headers.id))",
@@ -1090,7 +1103,10 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM receipts WHERE typeof(id) != 'text'
          OR length(CAST(id AS BLOB)) NOT BETWEEN 1 AND 256
-         OR typeof(source_id) != 'text' OR length(CAST(source_id AS BLOB)) != 36
+         OR typeof(source_id) != 'text' OR NOT ((length(CAST(source_id AS BLOB)) = 36 AND source_id GLOB 'src_*'
+                  AND trim(substr(source_id, 5), '0123456789abcdef') = '')
+              OR (length(CAST(source_id AS BLOB)) = 42 AND source_id GLOB 'input/src_*'
+                  AND trim(substr(source_id, 11), '0123456789abcdef') = ''))
          OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
          OR typeof(payload) != 'text' OR length(CAST(payload AS BLOB)) NOT BETWEEN 1 AND ?1
          OR (capture_forgotten_tombstone IS NOT NULL
@@ -1147,8 +1163,10 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     let invalid_tombstones: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM receipt_tombstones WHERE typeof(id) != 'integer' OR id <= 0
-         OR typeof(source_id) != 'text' OR length(CAST(source_id AS BLOB)) != 36
-         OR source_id NOT GLOB 'src_*' OR trim(substr(source_id, 5), '0123456789abcdef') != ''
+         OR typeof(source_id) != 'text' OR NOT ((length(CAST(source_id AS BLOB)) = 36 AND source_id GLOB 'src_*'
+                  AND trim(substr(source_id, 5), '0123456789abcdef') = '')
+              OR (length(CAST(source_id AS BLOB)) = 42 AND source_id GLOB 'input/src_*'
+                  AND trim(substr(source_id, 11), '0123456789abcdef') = ''))
          OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
          OR typeof(capture_ids) != 'text' OR length(CAST(capture_ids AS BLOB)) NOT BETWEEN 2 AND ?1
          OR typeof(capture_ids_truncated) != 'integer' OR capture_ids_truncated NOT IN (0, 1)
@@ -1523,6 +1541,7 @@ impl ReceiptStore {
         delete_orphan_tombstones(&tx)?;
         delete_orphan_headers(&tx)?;
         tx.commit().map_err(storage_error)?;
+        retained.charged = (source_count, source_bytes);
         Ok(retained)
     }
 
@@ -1538,7 +1557,7 @@ impl ReceiptStore {
     }
 
     fn ids(&self, source: &str) -> Result<Vec<String>, String> {
-        source_id(source)?;
+        receipt_owner(source)?;
         let tx = self.conn.unchecked_transaction().map_err(storage_error)?;
         receipt_storage(&tx)?;
         // ADR-0046 decision 5 (#1233): only this source's rows are rebuilt
@@ -1599,7 +1618,7 @@ impl ReceiptStore {
         if std::mem::take(&mut self.fail_next_reclaim) {
             return Err(storage_error("injected reclaim failure"));
         }
-        source_id(&source.source_id)?;
+        receipt_owner(&source.source_id)?;
         if source.repo_key.is_empty() || source.repo_key.len() > 256 {
             return Err(storage_error("receipt ownership"));
         }
@@ -2051,24 +2070,40 @@ impl PrimarySourceStore {
     }
 
     /// Retain `source`'s manifest observation input capture beside its own
-    /// captures (ADR-0080). It holds no receipt yet; it is listed and
-    /// forgotten with the source.
+    /// captures (ADR-0080), with as many of its observed `receipts` as fit
+    /// (ADR-0079, AC-1045). They are owned by the input identity and stored
+    /// within the source's share, less `charged`, what the source's own
+    /// receipts of this recovery took; the input is listed and forgotten
+    /// with the source.
     pub(crate) fn persist_input(
         &self,
         source: &RegisteredSource,
         capture: &source_capture::Capture,
-    ) -> Result<(), String> {
-        if capture.manifest().source_id.as_str()
-            != crate::observation_inputs::input_source_id(&source.source_id)
-        {
+        receipts: &[impl Citable],
+        charged: (u64, u64),
+    ) -> Result<RetainedReceipts, String> {
+        let input = crate::observation_inputs::input_source_id(&source.source_id);
+        if capture.manifest().source_id.as_str() != input {
             return Err(storage_error("observation input of another source"));
         }
         let _guard = self.guard(&source.source_id, false)?;
-        self.captures
-            .lock()
-            .map_err(storage_error)?
+        self.storage.verify()?;
+        let mut captures = self.captures.lock().map_err(storage_error)?;
+        captures
             .persist(capture)
-            .map_err(|_| "Observation input retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())
+            .map_err(|_| "Observation input retention failed or reached capacity. Use retained-source controls to free space; recovery was not published.".to_string())?;
+        let weights = captures.source_byte_weights().map_err(storage_error)?;
+        let weight = weights
+            .get(&source_id(&source.source_id)?)
+            .copied()
+            .unwrap_or(0);
+        let total = receipt_weight_total(&weights);
+        let mut store = self.receipts.lock().map_err(storage_error)?;
+        let share = (
+            source_share(store.capacity.0, weight, total).saturating_sub(charged.0),
+            source_share(store.capacity.1, weight, total).saturating_sub(charged.1),
+        );
+        store.persist_within(capture, &source.owning_as(input), receipts, share)
     }
 
     /// Retain the capture and as many `receipts` as the store has room for
@@ -2145,9 +2180,16 @@ pub(crate) struct RetainedReceipts {
     ids: std::collections::BTreeSet<String>,
     omitted: std::collections::BTreeMap<String, u64>,
     pub(crate) omitted_facts: Vec<(FactKey, String)>,
+    /// The (count, bytes) of the source's share the retained rows took.
+    charged: (u64, u64),
 }
 
 impl RetainedReceipts {
+    /// What the retained rows took of the source's share.
+    pub(crate) fn charged(&self) -> (u64, u64) {
+        self.charged
+    }
+
     /// Drop every receipt the store did not retain and return the omissions.
     pub(crate) fn keep_retained(
         self,
@@ -2460,6 +2502,9 @@ pub(crate) struct RetentionPreview {
     pub files: u64,
     pub bytes: u64,
     pub receipts: usize,
+    /// Of `receipts`, the observed receipts its observation inputs own
+    /// (ADR-0079), forgotten with it.
+    pub input_receipts: usize,
     pub current_references: usize,
     pub historical_references: usize,
     /// Actual v2 evidence references in immutable staged proposals.
@@ -2494,12 +2539,17 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         .map_err(storage_error)?
         .source_inventory(&input_id(&source.source_id)?)
         .map_err(storage_error)?;
-    let receipt_ids = state
-        .primary_sources
-        .receipts
-        .lock()
-        .map_err(storage_error)?
-        .ids(&source.source_id)?;
+    let (receipt_ids, input_receipt_ids) = {
+        let store = state
+            .primary_sources
+            .receipts
+            .lock()
+            .map_err(storage_error)?;
+        (
+            store.ids(&source.source_id)?,
+            store.ids(input_id(&source.source_id)?.as_str())?,
+        )
+    };
     let current = state
         .graph
         .lock()
@@ -2555,18 +2605,25 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         .store
         .lock()
         .map_err(storage_error)?
-        .referenced_receipts(&receipt_ids)
+        .referenced_receipts(
+            &receipt_ids
+                .iter()
+                .chain(&input_receipt_ids)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
         .map_err(storage_error)?
         .into_iter()
         .collect();
     let fingerprint = core_prov::content_hash(
         &serde_json::to_vec(&(
-            "retained-source-preview-v5",
+            "retained-source-preview-v6",
             &source.source_id,
             &source.repo_key,
             &capture_ids,
             &input_capture_ids,
             &receipt_ids,
+            &input_receipt_ids,
             &current_bindings,
             &staged_references,
             &investigation_references,
@@ -2605,7 +2662,8 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
                 .chain(&inputs)
                 .map(|capture| capture.byte_len)
                 .sum(),
-            receipts: receipt_ids.len(),
+            receipts: receipt_ids.len() + input_receipt_ids.len(),
+            input_receipts: input_receipt_ids.len(),
             current_references: current_count,
             historical_references: receipt_ids.len().saturating_sub(current_count),
             staged_references: staged_references.len(),
@@ -2671,6 +2729,15 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
         .lock()
         .map_err(storage_error)?
         .reclaim_forgotten(&source, &locked.preview.capture_ids, &locked.pins)?;
+    if locked.preview.input_receipts > 0 {
+        let owner = source.owning_as(input_id(id)?.as_str().to_owned());
+        state
+            .primary_sources
+            .receipts
+            .lock()
+            .map_err(storage_error)?
+            .reclaim_forgotten(&owner, &locked.preview.input_capture_ids, &locked.pins)?;
+    }
     Ok(forgotten)
 }
 
