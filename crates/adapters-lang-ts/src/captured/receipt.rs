@@ -14,6 +14,9 @@ use std::collections::BTreeMap;
 pub const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 /// Maximum complete range inventory. Receipts never contain partial inventories.
 pub const MAX_RECEIPT_RANGES: usize = 1024;
+/// Most further captured files one lane receipt may cite besides its primary
+/// file (AC-1039).
+pub const MAX_RECEIPT_OTHER_FILES: usize = 8;
 const MAX_ID_BYTES: usize = 4096;
 const MAX_REPO_BYTES: usize = 256;
 const RECEIPT_SCHEMA_VERSION: u32 = 3;
@@ -295,6 +298,14 @@ struct CompactRange {
     index: u32,
     byte_start: u64,
     byte_end: u64,
+    /// Position in `other_files` of the file a range cites when it is not the
+    /// primary file (AC-1039); absent for the primary file, never `null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_index"
+    )]
+    file: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +322,8 @@ struct Content {
     fact_key: FactKey,
     fact_digest: String,
     ranges: Vec<ReceiptRange>,
+    /// Further captured files a lane receipt cites, sorted by path (AC-1039).
+    other_files: Vec<CaptureFileRef>,
     source_sizes: Option<ReceiptSourceSizes>,
     source_scope: SourceScope,
     input_closure: InputClosure,
@@ -331,6 +344,8 @@ struct WireContentFull<'a> {
     fact_key: &'a FactKey,
     fact_digest: &'a str,
     ranges: &'a [ReceiptRange],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    other_files: &'a [CaptureFileRef],
     #[serde(skip_serializing_if = "Option::is_none")]
     source_sizes: Option<&'a ReceiptSourceSizes>,
     source_scope: SourceScope,
@@ -352,6 +367,8 @@ struct WireContentCompact<'a> {
     fact_key: &'a FactKey,
     fact_digest: &'a str,
     ranges: Vec<CompactRange>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    other_files: &'a [CaptureFileRef],
     #[serde(skip_serializing_if = "Option::is_none")]
     source_sizes: Option<&'a ReceiptSourceSizes>,
     source_scope: SourceScope,
@@ -386,6 +403,8 @@ struct WireContent {
     fact_key: FactKey,
     fact_digest: String,
     ranges: Vec<WireRange>,
+    #[serde(default, deserialize_with = "present_files")]
+    other_files: Vec<CaptureFileRef>,
     #[serde(default, deserialize_with = "sizes::present")]
     source_sizes: Option<ReceiptSourceSizes>,
     source_scope: SourceScope,
@@ -396,6 +415,42 @@ struct WireContent {
 /// would otherwise be a second encoding of an absent `commit_sha`.
 fn present_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
+}
+
+/// A present `other_files` list must be non-empty and bounded: an empty one
+/// would be a second encoding of an absent list.
+fn present_files<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<CaptureFileRef>, D::Error> {
+    struct Bounded;
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Vec<CaptureFileRef>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a bounded non-empty list of captured files")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut files = Vec::new();
+            while let Some(file) = seq.next_element()? {
+                if files.len() == MAX_RECEIPT_OTHER_FILES {
+                    return Err(serde::de::Error::custom("receipt files exceed limit"));
+                }
+                files.push(file);
+            }
+            if files.is_empty() {
+                return Err(serde::de::Error::custom("empty receipt file list"));
+            }
+            Ok(files)
+        }
+    }
+    deserializer.deserialize_seq(Bounded)
+}
+
+/// A present range file index must be a number, never `null`.
+fn present_index<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize)]
@@ -419,6 +474,7 @@ impl Content {
             fact_key: &self.fact_key,
             fact_digest: &self.fact_digest,
             ranges: &self.ranges,
+            other_files: &self.other_files,
             source_sizes: self.source_sizes.as_ref(),
             source_scope: self.source_scope,
             input_closure: self.input_closure,
@@ -437,6 +493,16 @@ impl Serialize for Content {
                     index: range.index,
                     byte_start: range.evidence.byte_start,
                     byte_end: range.evidence.byte_end,
+                    // A range citing a file outside the list is caught by
+                    // `validate()`; it serializes as the primary file.
+                    file: (range.captured.file != self.file)
+                        .then(|| {
+                            self.other_files
+                                .iter()
+                                .position(|file| *file == range.captured.file)
+                        })
+                        .flatten()
+                        .and_then(|index| u32::try_from(index).ok()),
                 })
                 .collect();
             WireContentCompact {
@@ -452,6 +518,7 @@ impl Serialize for Content {
                 fact_key: &self.fact_key,
                 fact_digest: &self.fact_digest,
                 ranges,
+                other_files: &self.other_files,
                 source_sizes: self.source_sizes.as_ref(),
                 source_scope: self.source_scope,
                 input_closure: self.input_closure,
@@ -474,38 +541,49 @@ fn expanded_range_bytes(
     ranges: &[WireRange],
     repo_key: &str,
     file: &CaptureFileRef,
+    other_files: &[CaptureFileRef],
     commit_sha: &str,
 ) -> Option<usize> {
     let digits = |value: u64| value.checked_ilog10().map_or(1, |log| log as usize + 1);
-    // One template range with every variable part zero-length or "0".
-    let template = serde_json::to_vec(&ReceiptRange {
-        role: RangeRole::Provenance,
-        index: 0,
-        evidence: EvidenceRef {
-            repo: repo_key.to_owned(),
-            path: file.path.clone(),
-            byte_start: 0,
-            byte_end: 0,
-            commit_sha: commit_sha.to_owned(),
-        },
-        captured: CaptureSpanRef {
-            file: file.clone(),
-            byte_start: 0,
-            byte_end: 0,
-        },
-    })
-    .ok()?
-    .len();
     let provenance = serde_json::to_vec(&RangeRole::Provenance).ok()?.len();
-    let fixed = template.checked_sub(provenance + 5)?;
+    // One template range per cited file, with every variable part
+    // zero-length or "0"; the primary file first.
+    let fixed = std::iter::once(file)
+        .chain(other_files)
+        .map(|file| {
+            let template = serde_json::to_vec(&ReceiptRange {
+                role: RangeRole::Provenance,
+                index: 0,
+                evidence: EvidenceRef {
+                    repo: repo_key.to_owned(),
+                    path: file.path.clone(),
+                    byte_start: 0,
+                    byte_end: 0,
+                    commit_sha: commit_sha.to_owned(),
+                },
+                captured: CaptureSpanRef {
+                    file: file.clone(),
+                    byte_start: 0,
+                    byte_end: 0,
+                },
+            })
+            .ok()?
+            .len();
+            template.checked_sub(provenance + 5)
+        })
+        .collect::<Option<Vec<_>>>()?;
     let mut total = ranges.len().saturating_sub(1) + 2;
     for range in ranges {
         let WireRange::Compact(range) = range else {
             return None;
         };
         let role = serde_json::to_vec(&range.role).ok()?.len();
+        let slot = match range.file {
+            None => 0,
+            Some(index) => usize::try_from(index).ok()?.checked_add(1)?,
+        };
         total = total
-            .checked_add(fixed)?
+            .checked_add(*fixed.get(slot)?)?
             .checked_add(role)?
             .checked_add(digits(u64::from(range.index)))?
             .checked_add(2 * digits(range.byte_start))?
@@ -530,8 +608,14 @@ impl<'de> Deserialize<'de> for Content {
                 })
                 .collect::<Result<Vec<_>, ()>>(),
             (3, Some(commit_sha))
-                if expanded_range_bytes(&wire.ranges, &wire.repo_key, &wire.file, commit_sha)
-                    .is_none_or(|bytes| bytes > MAX_RECEIPT_BYTES) =>
+                if expanded_range_bytes(
+                    &wire.ranges,
+                    &wire.repo_key,
+                    &wire.file,
+                    &wire.other_files,
+                    commit_sha,
+                )
+                .is_none_or(|bytes| bytes > MAX_RECEIPT_BYTES) =>
             {
                 return Err(serde::de::Error::custom("receipt expansion exceeds limit"));
             }
@@ -539,29 +623,41 @@ impl<'de> Deserialize<'de> for Content {
                 .ranges
                 .into_iter()
                 .map(|range| match range {
-                    // `expanded_range_bytes` admitted these clones above.
-                    WireRange::Compact(range) => Ok(ReceiptRange {
-                        role: range.role,
-                        index: range.index,
-                        evidence: EvidenceRef {
-                            repo: wire.repo_key.clone(),
-                            path: wire.file.path.clone(),
-                            byte_start: range.byte_start,
-                            byte_end: range.byte_end,
-                            commit_sha: commit_sha.clone(),
-                        },
-                        captured: CaptureSpanRef {
-                            file: wire.file.clone(),
-                            byte_start: range.byte_start,
-                            byte_end: range.byte_end,
-                        },
-                    }),
+                    // `expanded_range_bytes` admitted these clones above,
+                    // and every range's file index is in bounds.
+                    WireRange::Compact(range) => {
+                        let file = match range.file {
+                            None => &wire.file,
+                            Some(index) => &wire.other_files[index as usize],
+                        };
+                        Ok(ReceiptRange {
+                            role: range.role,
+                            index: range.index,
+                            evidence: EvidenceRef {
+                                repo: wire.repo_key.clone(),
+                                path: file.path.clone(),
+                                byte_start: range.byte_start,
+                                byte_end: range.byte_end,
+                                commit_sha: commit_sha.clone(),
+                            },
+                            captured: CaptureSpanRef {
+                                file: file.clone(),
+                                byte_start: range.byte_start,
+                                byte_end: range.byte_end,
+                            },
+                        })
+                    }
                     WireRange::Full(_) => Err(()),
                 })
                 .collect::<Result<Vec<_>, ()>>(),
             _ => Err(()),
         }
         .map_err(|()| serde::de::Error::custom("receipt range form does not match its version"))?;
+        if wire.schema_version != 3 && !wire.other_files.is_empty() {
+            return Err(serde::de::Error::custom(
+                "receipt files do not match its version",
+            ));
+        }
         Ok(Self {
             schema_version: wire.schema_version,
             source_id: wire.source_id,
@@ -575,6 +671,7 @@ impl<'de> Deserialize<'de> for Content {
             fact_key: wire.fact_key,
             fact_digest: wire.fact_digest,
             ranges,
+            other_files: wire.other_files,
             source_sizes: wire.source_sizes,
             source_scope: wire.source_scope,
             input_closure: wire.input_closure,
@@ -659,6 +756,45 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
             || file.path.ends_with(".kts"))
     {
         return Err(CapturedError::Invalid("capture file binding"));
+    }
+    Ok(())
+}
+
+/// A lane receipt may cite further captured files besides its primary file
+/// (AC-1039): each of the same capture and grammar, listed once in path order,
+/// cited by at least one range, with the primary file cited first. TypeScript
+/// receipts and measured receipts stay single-file.
+fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
+    if content.other_files.is_empty() {
+        return Ok(());
+    }
+    if content.schema_version != 3
+        || !content.grammar.provenance_only()
+        || content.source_sizes.is_some()
+        || content.other_files.len() > MAX_RECEIPT_OTHER_FILES
+        || content
+            .ranges
+            .first()
+            .is_none_or(|range| range.captured.file != content.file)
+    {
+        return Err(CapturedError::Invalid("receipt files"));
+    }
+    let mut previous: Option<&str> = None;
+    for file in &content.other_files {
+        validate_identity(file, &content.repo_key)?;
+        if file.source_id != content.file.source_id
+            || file.capture_id != content.file.capture_id
+            || file.path == content.file.path
+            || Grammar::for_path(&file.path) != content.grammar
+            || previous.is_some_and(|previous| previous >= file.path.as_str())
+            || !content
+                .ranges
+                .iter()
+                .any(|range| range.captured.file == *file)
+        {
+            return Err(CapturedError::Invalid("receipt files"));
+        }
+        previous = Some(&file.path);
     }
     Ok(())
 }
@@ -897,8 +1033,12 @@ fn valid_inventory_shape(ranges: &[ReceiptRange], version: u32) -> bool {
 }
 
 impl Receipt {
+    /// Mint against `file`. With `capture`, a lane fact whose evidence also
+    /// cites other files of that capture binds each range to its own file
+    /// (AC-1039); without one, every range must lie in `file`.
     fn mint(
         file: &CapturedFile,
+        capture: Option<&source_capture::Capture>,
         id: &SourceId,
         fact_key: FactKey,
         fact_digest: String,
@@ -906,10 +1046,21 @@ impl Receipt {
     ) -> Result<Self, CapturedError> {
         let grammar = Grammar::for_path(&file.reference().path);
         let current = contract(RECEIPT_SCHEMA_VERSION, grammar)?;
+        let mut other_files = BTreeMap::new();
         let ranges = inventory(props, RECEIPT_SCHEMA_VERSION, grammar)?
             .into_iter()
             .map(|(role, index, evidence)| {
-                let captured = file.span(evidence.byte_start, evidence.byte_end)?;
+                let cited = match capture {
+                    Some(capture) if evidence.path != file.reference().path => {
+                        let other = capture
+                            .file(&evidence.path)
+                            .map_err(|_| CapturedError::Invalid("receipt files"))?;
+                        other_files.insert(evidence.path.clone(), other.reference().clone());
+                        other
+                    }
+                    _ => file,
+                };
+                let captured = cited.span(evidence.byte_start, evidence.byte_end)?;
                 Ok(ReceiptRange {
                     role,
                     index,
@@ -931,6 +1082,7 @@ impl Receipt {
             fact_key,
             fact_digest,
             ranges,
+            other_files: other_files.into_values().collect(),
             source_sizes: None,
             source_scope: SourceScope::PrimarySourceOnly,
             input_closure: InputClosure::InputClosureNotEstablished,
@@ -948,8 +1100,18 @@ impl Receipt {
         id: &SourceId,
         node: &Node,
     ) -> Result<Self, CapturedError> {
+        Self::for_node_in(file, None, id, node)
+    }
+
+    pub(super) fn for_node_in(
+        file: &CapturedFile,
+        capture: Option<&source_capture::Capture>,
+        id: &SourceId,
+        node: &Node,
+    ) -> Result<Self, CapturedError> {
         Self::mint(
             file,
+            capture,
             id,
             FactKey::Node {
                 id: node.id.clone(),
@@ -964,8 +1126,18 @@ impl Receipt {
         id: &SourceId,
         edge: &Edge,
     ) -> Result<Self, CapturedError> {
+        Self::for_edge_in(file, None, id, edge)
+    }
+
+    pub(super) fn for_edge_in(
+        file: &CapturedFile,
+        capture: Option<&source_capture::Capture>,
+        id: &SourceId,
+        edge: &Edge,
+    ) -> Result<Self, CapturedError> {
         Self::mint(
             file,
+            capture,
             id,
             FactKey::Edge {
                 source: edge.src.clone(),
@@ -992,6 +1164,11 @@ impl Receipt {
     /// Full primary-file capture binding.
     pub fn file(&self) -> &CaptureFileRef {
         &self.content.file
+    }
+    /// Further captured files a lane receipt's ranges cite, in path order
+    /// (AC-1039); empty for a single-file receipt.
+    pub fn other_files(&self) -> &[CaptureFileRef] {
+        &self.content.other_files
     }
     /// Typed node or directed-edge identity.
     pub fn fact_key(&self) -> &FactKey {
@@ -1079,12 +1256,14 @@ impl Receipt {
         if let Some(sizes) = &content.source_sizes {
             sizes.validate(content)?;
         }
+        validate_other_files(content)?;
         let mut seen = std::collections::BTreeSet::new();
         for range in &content.ranges {
             let evidence = &range.evidence;
-            if range.captured.file != content.file
+            let file = &range.captured.file;
+            if (*file != content.file && !content.other_files.contains(file))
                 || evidence.repo != content.repo_key
-                || evidence.path != content.file.path
+                || evidence.path != file.path
                 || !bounded_identity(&evidence.commit_sha, MAX_ID_BYTES)
                 || evidence.commit_sha != content.ranges[0].evidence.commit_sha
                 || content
@@ -1094,7 +1273,7 @@ impl Receipt {
                 || evidence.byte_start != range.captured.byte_start
                 || evidence.byte_end != range.captured.byte_end
                 || evidence.byte_start >= evidence.byte_end
-                || evidence.byte_end > content.file.byte_len
+                || evidence.byte_end > file.byte_len
                 || evidence.byte_end - evidence.byte_start > source_capture::MAX_SPAN_BYTES
                 || !seen.insert((range.role, range.index))
             {

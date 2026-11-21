@@ -151,6 +151,9 @@ struct ReceiptHeader {
 ///   does not start with `<kind-prefix>:<repo_key>@<path>`
 /// - `d`: `fact_digest`
 /// - `r`: `ranges` as `[role, index, byte_start, byte_end]` arrays
+/// - `o`: a multi-file receipt's `other_files` (AC-1039), absent when empty
+/// - `f`: `[range position, file index]` for each range citing one of `o`,
+///   absent when none does
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReceiptBody {
@@ -164,6 +167,10 @@ struct ReceiptBody {
     verbatim_e: Option<(String, String, String)>,
     d: String,
     r: Vec<(captured::RangeRole, u32, u64, u64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    o: Vec<source_capture::CaptureFileRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    f: Vec<(u32, u32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_sizes: Option<captured::ReceiptSourceSizes>,
 }
@@ -190,6 +197,8 @@ struct StrictV3WireContent {
     fact_key: FactKey,
     fact_digest: String,
     ranges: Vec<StrictV3WireRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    other_files: Vec<source_capture::CaptureFileRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_sizes: Option<captured::ReceiptSourceSizes>,
     source_scope: String,
@@ -203,6 +212,8 @@ struct StrictV3WireRange {
     index: u32,
     byte_start: u64,
     byte_end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<u32>,
 }
 
 struct NormalizedReceipt {
@@ -308,6 +319,14 @@ fn normalize_v3_receipt(receipt: &impl Citable, canonical_json: &str) -> Option<
         verbatim_e,
         d: wire.content.fact_digest,
         source_sizes: wire.content.source_sizes,
+        o: wire.content.other_files,
+        f: wire
+            .content
+            .ranges
+            .iter()
+            .enumerate()
+            .filter_map(|(position, range)| Some((u32::try_from(position).ok()?, range.file?)))
+            .collect(),
         r: wire
             .content
             .ranges
@@ -381,6 +400,16 @@ fn rebuild_normalized_receipt(
     if serde_json::to_string(&body).map_err(storage_error)? != body_json {
         return Err(storage_error("receipt body not canonical"));
     }
+    // File indices name ranges in strictly ascending position, each in bounds.
+    if body
+        .f
+        .iter()
+        .zip(body.f.iter().skip(1))
+        .any(|(a, b)| a.0 >= b.0)
+        || body.f.iter().any(|(at, _)| *at as usize >= body.r.len())
+    {
+        return Err(storage_error("receipt body file index"));
+    }
     let path = &header.file.path;
     let fact_key = match (body.k, body.verbatim_k, body.e, body.verbatim_e) {
         (Some(compact), None, None, None) => {
@@ -442,15 +471,24 @@ fn rebuild_normalized_receipt(
             fact_key,
             fact_digest: body.d,
             source_sizes: body.source_sizes,
+            other_files: body.o,
             ranges: body
                 .r
                 .into_iter()
-                .map(|(role, index, byte_start, byte_end)| StrictV3WireRange {
-                    role,
-                    index,
-                    byte_start,
-                    byte_end,
-                })
+                .enumerate()
+                .map(
+                    |(position, (role, index, byte_start, byte_end))| StrictV3WireRange {
+                        role,
+                        index,
+                        byte_start,
+                        byte_end,
+                        file: body
+                            .f
+                            .iter()
+                            .find(|(at, _)| *at as usize == position)
+                            .map(|(_, file)| *file),
+                    },
+                )
                 .collect(),
             source_scope: header.source_scope,
             input_closure: header.input_closure,

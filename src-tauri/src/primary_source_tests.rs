@@ -4064,3 +4064,126 @@ fn lane_receipts_cite_published_merged_relations() {
     assert!(node_a.matches_node(&nodes[2]));
     assert_eq!(receipts.len(), 3);
 }
+
+// AC-1039: a Flask route whose Blueprint mount lies in another captured file
+// gets one Python receipt citing both files; it is stored, bound at
+// publication, and each range reads back its own file's captured text.
+#[test]
+fn facts_citing_several_captured_files_are_cited_and_read_back() {
+    const BLUEPRINT: &str =
+        "from flask import Blueprint\n\nbp = Blueprint(\"api\", __name__, url_prefix=\"/api\")\n";
+    const VIEWS: &str =
+        "from bp import bp\n\n\n@bp.route(\"/users\")\ndef users():\n    return \"u\"\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("bp.py"), BLUEPRINT).unwrap();
+    std::fs::write(root.join("views.py"), VIEWS).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string(), "server".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let mut minted = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut minted,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let endpoint = extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Endpoint" && node.props["path"] == "/api/users")
+        .expect("the Blueprint route is recovered")
+        .clone();
+    let receipt = minted
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), FactKey::Node { id } if *id == endpoint.id))
+        .expect("the route citing two files carries a receipt")
+        .to_receipt()
+        .unwrap();
+    assert!(receipt.id().starts_with("py-primary-v1:"));
+    assert!(receipt.matches_node(&endpoint));
+    let others: Vec<_> = receipt
+        .other_files()
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(others.len(), 1);
+    assert_ne!(others[0], receipt.file().path);
+    assert_eq!(
+        Receipt::from_json(&receipt.to_json().unwrap()).unwrap(),
+        receipt
+    );
+    let parsed = Parsed {
+        input,
+        extraction,
+        receipts: minted
+            .iter()
+            .map(|receipt| receipt.to_receipt().unwrap())
+            .collect(),
+        delta: Default::default(),
+    };
+    let bindings = publish(&state, &source, &parsed);
+    assert!(
+        bindings
+            .iter()
+            .any(|binding| binding.receipt_id == receipt.id())
+    );
+    // It is stored in the shared-header form, not verbatim.
+    let header: Option<String> =
+        rusqlite::Connection::open(app_data.join("retained-source/receipts.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT header_id FROM receipts WHERE id = ?1",
+                [receipt.id()],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert!(header.is_some());
+    let fact = FactKey::Node {
+        id: endpoint.id.clone(),
+    };
+    let description = primary_source::describe(&state, &fact).unwrap();
+    assert_eq!(description.receipt_id, receipt.id());
+    let mut paths = BTreeSet::new();
+    for range in &description.ranges {
+        let read =
+            primary_source::read(&state, &fact, &description.receipt_id, range.index).unwrap();
+        let original = if read.path == "bp.py" {
+            BLUEPRINT
+        } else {
+            VIEWS
+        };
+        assert_eq!(
+            read.text.as_bytes(),
+            &original.as_bytes()[range.byte_start as usize..range.byte_end as usize]
+        );
+        paths.insert(read.path);
+    }
+    assert_eq!(
+        paths,
+        BTreeSet::from(["bp.py".to_string(), "views.py".to_string()])
+    );
+}
