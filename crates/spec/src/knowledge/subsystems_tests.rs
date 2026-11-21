@@ -301,6 +301,26 @@ fn a_file_used_from_everywhere_is_shared() {
     );
 }
 
+// AC-1005 (#2083): an errors or exceptions module used from everywhere names
+// a mechanism, not a subject, so it is shared code, not one concept's core.
+#[test]
+fn a_widely_used_errors_module_is_shared() {
+    for module in ["app/errors.py", "app/exceptions.py"] {
+        let mut fixture = layered();
+        fixture.file(module, &["AliasInTrashError"]);
+        for path in ALIAS.iter().chain(&MAILBOX).chain(&DOMAIN) {
+            fixture.imports(path, module);
+        }
+        let report = derive_subsystems(&fixture.snapshot());
+        assert_eq!((report.files, report.grouped, report.shared), (13, 12, 1), "{module}");
+        let shared = groups(&report)
+            .into_iter()
+            .find(|(_, kind, _)| kind == "shared")
+            .unwrap();
+        assert_eq!(shared.2, vec![module.to_owned()]);
+    }
+}
+
 // AC-0914: a file used from everywhere that is named for a subject is that
 // subject's core, not shared code: it stays in the group it names.
 #[test]
