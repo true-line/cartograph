@@ -36,7 +36,32 @@ The harness is in `src-tauri/src/showcase_tests.rs`. It uses the production path
 
 The scorer, `scripts/score-api-contract.mjs`, reduces `:x`, `<x>` and `{x}` to one parameter shape, then compares each `METHOD /path` pair.
 
-On an M4 laptop, ingesting and exporting all three repos through the system manifest (gap 1) took 18.9 s wall time, with an already built release test binary. The first build takes about 20 minutes. Peak resident memory was 1.03 GiB (`/usr/bin/time -l` on the test binary). It was 1.09 GiB at `d326a47e`, and 1.39 GiB before the publish snapshot check stopped re-reading the whole graph (#768). Measured at Cartograph `2508c5a4`.
+On an M4 laptop, ingesting and exporting all three repos through the system manifest (gap 1) took 18.9 s wall time, with an already built release test binary. The first build takes about 20 minutes. Peak resident memory was 1.03 GiB (`/usr/bin/time -l` on the test binary). It was 1.09 GiB at `d326a47e`, and 1.39 GiB before the publish snapshot check stopped re-reading the whole graph (#768). Measured at Cartograph `2508c5a4` (0.23.1).
+
+## Scheduled watch (#1768)
+
+The **Scheduled checks** workflow runs this showcase every Sunday on the self-hosted Mac, with a release build and the system manifest above (`node scripts/showcase-watch.mjs simplelogin`). It compares the run with the thresholds in [`bench/thresholds/simplelogin.json`](../../bench/thresholds/simplelogin.json): endpoints recovered, the `/api` contract scores below, client calls linked, traced flows, business rules, data entities, tests, gap nodes and gap findings by extractor, wall time and peak memory. A missed threshold fails the lane and opens or updates the issue "Scheduled: SimpleLogin showcase below its thresholds" (AC-1700). Each run's report states the Cartograph commit and version it measured, and its `metrics.json` artifact is the source for updating the numbers on this page.
+
+The thresholds were recorded at Cartograph `ee9df763` (v0.72.0), release build, linux-x64:
+
+| Metric | Value |
+|---|---:|
+| Endpoints recovered | 426 |
+| Documented `/api` endpoints matched | 44 / 45 |
+| Documented input names matched | 55 |
+| Documented statuses matched | 30 |
+| Documented top-level keys matched | 14 |
+| Client calls linked to an endpoint | 59 (24 Gaps) |
+| Traced flows | 483 (38 Verified, 23 Partial) |
+| Business rules | 5,935 |
+| Data entities | 80 |
+| Tests | 1,047 |
+| Gap nodes | 20,138 |
+| Gap findings | 20,181 in 51 classes (Python 12,256, TypeScript/JS 7,861) |
+| Whole harness wall time (ingest, knowledge phase, both exports, briefings) | 119.6 s on 4 vCPU |
+| Peak resident memory | 2.47 GiB |
+
+The sections below were measured earlier and say at which commit.
 
 ## Score
 

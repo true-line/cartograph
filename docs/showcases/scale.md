@@ -27,9 +27,13 @@ node scripts/bench-ingest.mjs --work $WORK --only kafka
 
 The harness builds the release showcase test binary once. It then runs each lane through the production ingest path against an isolated profile and writes a JSON result. Each result records the measurements (`wall_seconds`, `max_rss_bytes`, `peak_footprint_bytes`) and the deterministic counts.
 
+## Scheduled watch (#1768)
+
+The **Scheduled checks** workflow runs every lane above on the first of each month, or on demand (**Run workflow**, lane `scale-showcase`), on the self-hosted Mac: `node scripts/showcase-watch.mjs scale` runs `scripts/bench-ingest.mjs` and compares each lane's endpoints, wall time and peak memory with [`bench/thresholds/scale.json`](../../bench/thresholds/scale.json). A missed threshold fails the lane and opens or updates the issue "Scheduled: scale showcase below its thresholds" (AC-1700). The thresholds start from the numbers on this page, with wide ceilings for time and memory; the first scheduled run's `metrics.json` artifact, which states the Cartograph commit and version it measured, is the source for recording the full baseline and for updating this page.
+
 ## Results
 
-Measured at Cartograph `151a403b` on an M4 laptop (darwin-arm64), with the release test binary already built.
+Measured at Cartograph `151a403b` (a commit that is not on `main`; its version was not recorded) on an M4 laptop (darwin-arm64), with the release test binary already built.
 
 | Lane | Files | Wall | Peak RSS | Peak footprint | Nodes | Edges | `Gap` nodes | Endpoints | Rules | Receipts |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
