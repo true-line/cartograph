@@ -1885,13 +1885,76 @@ fn extract_tree_packed(
     if wants_application {
         let python_id = adapters_lang_python::SourceId { repo, commit };
         let mut python_progress = |path: &str| on_file(&format!("Reading Python sources — {path}"));
-        let (python, stats) = adapters_lang_python::extract_dir_incremental_with_progress(
-            root,
-            &python_id,
-            &mut cache.python,
-            &mut python_progress,
-        )
-        .map_err(|error| error.to_string())?;
+        // A capture holding the Python selection is parsed from its retained
+        // bytes, and each file's own facts are bound to provenance-only
+        // receipts (AC-1024); otherwise Python reads the checkout as before.
+        let captured_python: Vec<String> = primary
+            .map(|capture| {
+                capture
+                    .manifest()
+                    .files
+                    .iter()
+                    .filter(|entry| entry.path.ends_with(".py"))
+                    .map(|entry| entry.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (python, stats) = if let (Some(capture), false) = (primary, captured_python.is_empty())
+        {
+            // Candidates are bounded by the receipt budget as they are minted.
+            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
+            let python = adapters_lang_python::extract_dir_from_sources(
+                root,
+                &python_id,
+                &captured_python,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| std::io::Error::other("captured Python file is unavailable"))
+                },
+                &mut python_progress,
+                &mut |path, parsed| {
+                    if let Ok(file) = capture.file(path)
+                        && let Ok(receipts) = adapters_lang_ts::captured::mint_python_file_receipts(
+                            file,
+                            &ts_id,
+                            &parsed.nodes,
+                            &parsed.edges,
+                        )
+                    {
+                        stage.extend(receipts);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            let mut minted = stage.into_receipts();
+            // Only facts directory resolution left unchanged keep a receipt.
+            let survivors =
+                primary_source::matching_bindings_in(&python.nodes, &python.edges, &minted)
+                    .into_iter()
+                    .map(|binding| (binding.fact, binding.emitted_fact_digest))
+                    .collect::<std::collections::BTreeSet<_>>();
+            minted.retain(|receipt| {
+                survivors.contains(&(receipt.fact_key().clone(), receipt.fact_digest().to_owned()))
+            });
+            // A receipt past the budget is left out; its fact stays uncaptured,
+            // as for a TS completion receipt (AC-1019).
+            adapters_lang_ts::captured::admit_after(receipts, minted);
+            let stats = adapters_lang_python::IncrementalStats {
+                recomputed_files: captured_python.len() as u64,
+                ..Default::default()
+            };
+            (python, stats)
+        } else {
+            adapters_lang_python::extract_dir_incremental_with_progress(
+                root,
+                &python_id,
+                &mut cache.python,
+                &mut python_progress,
+            )
+            .map_err(|error| error.to_string())?
+        };
         delta.add(
             stats.recomputed_files,
             stats.reused_files,

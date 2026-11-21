@@ -1951,9 +1951,36 @@ impl PrimarySourceStore {
         // CapturedError's diagnostics are fixed strings that never carry
         // source contents, so the reason is safe to name (#1229).
         let selection = captured::enumerate_selection(root).map_err(|error| format!("Selected TS/JS source could not be captured safely ({error}); recovery was not published."))?;
-        let capture = match commit {
-            Some(commit) => source_capture::capture_git(root, &source_id(&source.source_id)?, commit, &selection.files, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be read from the cloned commit's Git objects within the capture limits; recovery was not published.".to_string())?,
-            None => source_capture::capture_working_tree(root, &source_id(&source.source_id)?, &selection.files, CaptureLimits::default()).map_err(|_| "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string())?,
+        let id = source_id(&source.source_id)?;
+        let capture_paths = |paths: &[String]| match commit {
+            Some(commit) => {
+                source_capture::capture_git(root, &id, commit, paths, CaptureLimits::default())
+            }
+            None => {
+                source_capture::capture_working_tree(root, &id, paths, CaptureLimits::default())
+            }
+        };
+        // The Python lane's `.py` files join the same capture (AC-1024). When
+        // they cannot be listed or retained with the TS/JS selection, Python
+        // keeps its ordinary uncaptured lane and the TS/JS capture stands alone.
+        let wants_python = ingest::coverage::wants(layers, ingest::coverage::APPLICATION_LAYERS);
+        let combined = wants_python
+            .then(|| adapters_lang_python::python_paths(root).ok())
+            .flatten()
+            .filter(|python| !python.is_empty())
+            .and_then(|python| {
+                let mut paths = selection.files.clone();
+                paths.extend(python);
+                paths.sort();
+                paths.dedup();
+                capture_paths(&paths).ok()
+            });
+        let capture = match combined {
+            Some(capture) => capture,
+            None => capture_paths(&selection.files).map_err(|_| match commit {
+                Some(_) => "Selected TS/JS source could not be read from the cloned commit's Git objects within the capture limits; recovery was not published.".to_string(),
+                None => "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string(),
+            })?,
         };
         Ok(PrimaryInput {
             capture: Some(capture),
@@ -2088,16 +2115,22 @@ pub(crate) fn matching_bindings(
     extraction: &adapters_lang_ts::Extraction,
     receipts: &[impl Citable],
 ) -> Vec<SourceBinding> {
+    matching_bindings_in(&extraction.nodes, &extraction.edges, receipts)
+}
+
+/// [`matching_bindings`] over any producer's nodes and edges.
+pub(crate) fn matching_bindings_in(
+    nodes: &[core_graph::Node],
+    edges: &[core_graph::Edge],
+    receipts: &[impl Citable],
+) -> Vec<SourceBinding> {
     // Match the same facts that graph publication materializes: last-value
     // node winners, and edges after evidence union (AC-0203). A relation
     // collapsed from several sites is not the fact any one receipt attested,
     // so it publishes unbound rather than failing the digest check.
-    let nodes: std::collections::BTreeMap<_, _> = extraction
-        .nodes
-        .iter()
-        .map(|node| (&node.id, node))
-        .collect();
-    let edges = crate::merged_edge_view(&extraction.edges);
+    let nodes: std::collections::BTreeMap<_, _> =
+        nodes.iter().map(|node| (&node.id, node)).collect();
+    let edges = crate::merged_edge_view(edges);
     receipts
         .iter()
         .filter(|receipt| match receipt.fact_key() {

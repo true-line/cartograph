@@ -61,8 +61,8 @@ impl MintedReceipt {
         receipt: Receipt,
         header: &mut Option<Arc<MintedHeader>>,
     ) -> Result<Self, CapturedError> {
-        let current = contract(RECEIPT_SCHEMA_VERSION)?;
         let content = receipt.content;
+        let current = contract(RECEIPT_SCHEMA_VERSION, content.grammar)?;
         let commit_sha = match (content.schema_version, content.commit_sha) {
             (RECEIPT_SCHEMA_VERSION, Some(commit_sha)) => commit_sha,
             _ => return Err(CapturedError::Invalid("minted receipt contract")),
@@ -126,8 +126,8 @@ impl MintedReceipt {
 
     /// The complete receipt this carrier stands for.
     pub fn to_receipt(&self) -> Result<Receipt, CapturedError> {
-        let current = contract(RECEIPT_SCHEMA_VERSION)?;
         let header = &*self.header;
+        let current = contract(RECEIPT_SCHEMA_VERSION, Grammar::for_path(&header.file.path))?;
         Ok(Receipt {
             receipt_id: self.receipt_id.clone(),
             content: Content {
@@ -237,7 +237,12 @@ impl MintedReceipt {
 
     fn matches_inventory(&self, props: &serde_json::Value) -> bool {
         let header = &*self.header;
-        inventory(props, RECEIPT_SCHEMA_VERSION).is_ok_and(|ranges| {
+        inventory(
+            props,
+            RECEIPT_SCHEMA_VERSION,
+            Grammar::for_path(&self.header.file.path),
+        )
+        .is_ok_and(|ranges| {
             ranges.len() == self.spans.len()
                 && ranges.iter().zip(self.spans.iter()).all(
                     |((role, index, evidence), &(span_role, span_index, start, end))| {

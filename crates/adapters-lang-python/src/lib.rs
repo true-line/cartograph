@@ -2398,9 +2398,61 @@ pub fn extract_dir_incremental_with_progress(
     cache: &mut IncrementalCache,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    let files = python_paths(root)?;
+    extract_dir_with(
+        root,
+        id,
+        &files,
+        &|path| std::fs::read(root.join(path)),
+        cache,
+        on_file,
+        &mut |_, _| {},
+    )
+}
+
+/// The `.py` files the ordinary walk selects, sorted, without reading them.
+pub fn python_paths(root: &Path) -> Result<Vec<String>, ExtractError> {
     let mut files = Vec::new();
     collect_python_files(root, &mut files)?;
     files.sort();
+    Ok(files)
+}
+
+/// Recover a Python directory whose `.py` sources are the retained bytes
+/// `read` returns for each of `files` (AC-1024), instead of the checkout.
+/// Each file's own extraction is handed to `on_parsed` before directory
+/// resolution, so a caller can bind receipts to it; directory resolution
+/// still reads the auxiliary inputs under `root` (templates, requirement
+/// pins, Alembic migrations, module names), which stay outside any receipt.
+pub fn extract_dir_from_sources(
+    root: &Path,
+    id: &SourceId<'_>,
+    files: &[String],
+    read: &(dyn Fn(&str) -> std::io::Result<Vec<u8>> + Sync),
+    on_file: &mut dyn FnMut(&str),
+    on_parsed: &mut dyn FnMut(&str, &Extraction),
+) -> Result<Extraction, ExtractError> {
+    extract_dir_with(
+        root,
+        id,
+        files,
+        read,
+        &mut IncrementalCache::default(),
+        on_file,
+        on_parsed,
+    )
+    .map(|(extraction, _)| extraction)
+}
+
+fn extract_dir_with(
+    root: &Path,
+    id: &SourceId<'_>,
+    files: &[String],
+    read: &(dyn Fn(&str) -> std::io::Result<Vec<u8>> + Sync),
+    cache: &mut IncrementalCache,
+    on_file: &mut dyn FnMut(&str),
+    on_parsed: &mut dyn FnMut(&str, &Extraction),
+) -> Result<(Extraction, IncrementalStats), ExtractError> {
     let active = files.iter().cloned().collect::<BTreeSet<_>>();
     let mut stats = IncrementalStats {
         deleted_files: cache
@@ -2423,9 +2475,9 @@ pub fn extract_dir_incremental_with_progress(
         .map(|(path, cached)| (path.clone(), cached.source_hash.clone()))
         .collect();
     let merged = source_walk::parallel::map_ordered(
-        &files,
+        files,
         |path| {
-            let source = std::fs::read(root.join(path))?;
+            let source = read(path)?;
             let source_hash = core_prov::content_hash(&source);
             let reusable = previous.get(path).is_some_and(|hash| *hash == source_hash);
             let fresh = if reusable {
@@ -2449,6 +2501,7 @@ pub fn extract_dir_incremental_with_progress(
                     extraction
                 }
             };
+            on_parsed(path, &extraction);
             cache.files.insert(
                 path.to_string(),
                 CachedFile {
