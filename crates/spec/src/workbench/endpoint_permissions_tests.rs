@@ -152,7 +152,7 @@ fn three_routes() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.flask("/me", (120, 160), required((100, 115), Value::Null));
     fixture.flask("/health", (200, 240), no_guard());
-    fixture.route("/orders", "spring", "java", (300, 340), Value::Null);
+    fixture.route("/orders", "jax-rs", "java", (300, 340), Value::Null);
     fixture
 }
 
@@ -222,7 +222,7 @@ fn guarded_route_lists_its_site_and_unguarded_route_is_none_recovered() {
 fn route_outside_recovery_is_under_the_coverage_note_only() {
     let content = three_routes().artifact(ExportMode::BestEffort).content;
     let outside = section(&content, OUTSIDE);
-    assert!(outside.contains("| java | spring | 1 |"));
+    assert!(outside.contains("| java | jax-rs | 1 |"));
     let listed = row(outside, "/orders").expect("listed under the coverage note");
     assert!(
         listed
@@ -241,7 +241,7 @@ fn route_outside_recovery_is_under_the_coverage_note_only() {
             recovery.framework, recovery.language
         )));
     }
-    assert!(!covered.contains("spring"));
+    assert!(!covered.contains("jax-rs"));
     assert!(content.contains(
         "Endpoints read: 3. With a recovered permission site: 1. None recovered: 1. Handler path partial: 0. Outside permission-site recovery: 1."
     ));
@@ -293,6 +293,89 @@ fn nestjs_graphql_site_from_the_real_adapter_is_listed() {
             || section(&artifact.content, PARTIAL).contains("| QUERY shop.nextOrderStates |")
     );
     assert!(!section(&artifact.content, OUTSIDE).contains("shop."));
+}
+
+// AC-0964: Spring method-security annotations from the real Java adapter are
+// permission sites, and D1 §1.2 names the caller each one admits; an
+// endpoint with no annotation is partial (URL rules are not read), never
+// "none recovered".
+#[test]
+fn spring_method_security_from_the_real_adapter_names_callers() {
+    let facts = adapters_lang_java::extract_source(
+        br#"package com.acme.web;
+import org.springframework.security.access.prepost.PreAuthorize;
+import jakarta.annotation.security.PermitAll;
+import org.springframework.web.bind.annotation.*;
+final class Roles { static final String ADMIN = "ROLE_ADMIN"; }
+@RestController
+@RequestMapping("/api")
+class UserResource {
+    @GetMapping("/admin/users")
+    @PreAuthorize("hasAuthority(\"" + Roles.ADMIN + "\")")
+    public String all() { return ""; }
+    @GetMapping("/status")
+    @PermitAll
+    public String status() { return ""; }
+    @GetMapping("/me")
+    public String me() { return ""; }
+}
+"#,
+        "src/main/java/com/acme/web/UserResource.java",
+        &adapters_lang_java::SourceId {
+            repo: "acme/shop",
+            commit: "0123abc",
+        },
+    )
+    .unwrap();
+    let endpoint = |path: &str| {
+        facts
+            .nodes
+            .iter()
+            .find(|n| n.label == "Endpoint" && n.props["path"] == path)
+            .unwrap_or_else(|| panic!("{path}: {:?}", facts.nodes))
+    };
+    assert_eq!(
+        recovery(endpoint("/api/admin/users")).map(|r| r.framework),
+        Some("spring")
+    );
+    assert_eq!(
+        endpoint("/api/admin/users").props["auth"]["caller"],
+        "caller with authority ROLE_ADMIN"
+    );
+    let fixture = Fixture {
+        nodes: facts.nodes.clone(),
+        edges: facts.edges.clone(),
+    };
+    let artifact = fixture.artifact(ExportMode::BestEffort);
+    let sited = row(section(&artifact.content, SITED), "/api/admin/users")
+        .expect("the annotated endpoint is in table one");
+    assert!(sited.contains("@PreAuthorize"), "{sited}");
+    assert!(row(section(&artifact.content, NONE), "/api/status").is_some());
+    assert!(row(section(&artifact.content, PARTIAL), "/api/me").is_some());
+    assert!(!section(&artifact.content, OUTSIDE).contains("/api/"));
+
+    let bundle = compile_spec(
+        &facts.nodes,
+        &facts.edges,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    );
+    let d1 = &bundle
+        .artifacts
+        .iter()
+        .find(|a| a.id == "d1-product-specification")
+        .unwrap()
+        .content;
+    let actors = &d1[d1.find("## 1.2 ").unwrap()..d1.find("## 1.3 ").unwrap()];
+    assert!(
+        actors.contains("| Caller with authority ROLE\\_ADMIN | @PreAuthorize"),
+        "{actors}"
+    );
+    assert!(
+        actors.contains("Spring method-security annotations"),
+        "{actors}"
+    );
 }
 
 // AC-0599 (R-INT-4): a route with no recovered site whose handler path hits a
