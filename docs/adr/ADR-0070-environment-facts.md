@@ -71,6 +71,20 @@ source does not state.
    file name names an environment (`values-prod.yaml`) is a name-only Gap
    (decision 3).
 
+10. **Spring Boot profiles and settings files (increment 3).** A document of
+    a base `application.{yml,yaml,properties}` that states
+    `spring.config.activate.on-profile` (or document-level `spring.profiles`)
+    is an `Environment` `env:{repo}@{file}#{profile}` named by that profile.
+    A profile-specific file `application-{profile}.*` is an `Environment`
+    only where a base file of its directory declares the profile
+    (`spring.profiles.active`, `.include`, a `spring.profiles.group` entry,
+    or an activated document); it is cited at that declaration, never in
+    itself. Each lists the key paths it sets, never a value. A profile
+    expression is a Gap. An undeclared profile file, and a settings module or
+    configuration file named like an environment (`settings/production.py`,
+    `config/staging.yml`, `config/environments/production.rb`), is a
+    name-only Gap (decision 3).
+
 ## Consequences
 
 - A repository with a Compose file gains `Environment`, `Workload` and

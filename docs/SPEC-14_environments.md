@@ -211,6 +211,32 @@ kustomization reaches is still a `Workload`; it has no `DECLARES` edge.
   version, app version, default values keys and each release's values files
   and their keys.
 
+## Facts (increment 3: Spring Boot profiles and settings files)
+
+- **Activated document:** a document of `application.yml`, `.yaml` or
+  `.properties` (documents split by `---`, or `#---` / `!---` in
+  properties) that states `spring.config.activate.on-profile: P`, or the
+  older document-level `spring.profiles: P`, is an `Environment`
+  `env:{repo}@{file}#P`, `path` `{file}#P`, `declared_by` `spring-profile`,
+  named `P`, cited at the activation. Documents of one file activated for
+  one profile are one environment.
+- **Profile-specific file:** `application-P.*` is an `Environment`
+  `env:{repo}@{file}`, named `P`, with `profile_declared_in`, only where a
+  base file of the same directory declares `P` in `spring.profiles.active`,
+  `spring.profiles.include`, a `spring.profiles.group` entry or an activated
+  document. It is cited at that declaration, never in itself.
+- **Settings keys:** each carries `settings_keys`, the sorted key paths its
+  documents set (activation keys excluded; at most 8 levels and 512 paths,
+  with `settings_keys_omitted`). No value is read.
+- **Gaps:** kind `spring-config` for a file that does not parse, a profile
+  expression or list in an activation (`prod & cloud`, `!dev`), a
+  placeholder in a declaration and an activation in a profile-specific
+  file. An `application-P.*` whose profile no base file declares, unless
+  `P` is a template word, is a name-only Gap; so is a `settings/*.py`,
+  `config/*.{yml,yaml,json,toml}` or `config/environments/*` file whose stem
+  is an environment word (`production`, `staging`, `dev`, `qa`, …).
+- **Document:** a **Spring Boot profiles** table after the Helm table.
+
 ## The document
 
 `environments.md`, artifact id `environments`, in both export modes:
@@ -245,9 +271,9 @@ decision says otherwise.
 
 1. **Compose** (this specification).
 2. Kubernetes manifests and kustomize (specified above; AC-0662).
-3. Helm charts and helmfiles (specified above; AC-1502); per-environment
-   settings files, if a file states the environment, otherwise they stay
-   Gaps.
+3. Helm charts and helmfiles (AC-1502); Spring Boot profiles and
+   per-environment settings files (AC-1503), an environment only where a
+   file states it, otherwise a Gap.
 4. Terraform root modules, after #1844.
 
 AC-0661 covers increment 1 and AC-0662 increment 2. The issue's evidence (a
