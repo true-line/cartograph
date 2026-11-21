@@ -23,3 +23,8 @@ host returns a durable investigation ID.
 After a confirmed start or retry, Quick Dispatch opens that exact saved task in
 Agent Chats. A refused or uncertain start stays in the dialog; use **Open
 Investigations** there to recover a different pending request.
+
+Until your first confirmed quick dispatch, a **Dispatch to an agent** pill at
+the bottom of the workspace names the shortcut and opens the same dialog. Hide
+it with its close button; **Show the "Dispatch to an agent" hint** in Settings
+turns it back on. It is not shown in Settings, Help or the ingest flow.

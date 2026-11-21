@@ -1,5 +1,15 @@
 # Agent Chats
 
+The **Agent pool** at the top lists the agent work recorded as jobs: what is
+queued or running, counted by kind (specialist investigations, topic-expert
+questions, section drafting and gap escalation), and the last eight finished
+agent jobs. It also shows each configured provider and model with its catalog
+availability, and how many staged proposals in the loaded page wait for a
+decision. It reads those records only: a job record does not prove a worker is
+live, a configured provider is not proof a model answers, and agent output is
+never promoted over T0/T1 facts. Use **Open Jobs** to cancel or retry work and
+**Open curation** to decide proposals.
+
 Review saved specialist conversations and open their findings. The list uses
 the same saved investigation history as Investigations, including its search,
 active filter, and **Load older saved tasks** continuation. Each docked task
