@@ -1143,3 +1143,43 @@ fn a_repository_guard_names_a_role() {
         assert_eq!(super::guard_role(guard), role, "{guard}");
     }
 }
+
+// AC-1304 (#2163): a Go route's middleware guard is its permission site, and
+// a Go route with no recovered guard is never listed as "none recovered".
+#[test]
+fn go_middleware_guards_are_permission_sites_and_go_is_never_none() {
+    let mut fixture = Fixture::new();
+    fixture.route(
+        "/me",
+        "chi",
+        "go",
+        (10, 40),
+        json!({
+            "state": "required", "authenticated": true,
+            "guards": ["jwtauth.Authenticator"],
+            "basis": ["library guard github.com/go-chi/jwtauth/v5.Authenticator"],
+            "prov": confirmed("main.go", (50, 71), "auth"),
+        }),
+    );
+    fixture.route(
+        "/feed",
+        "gin",
+        "go",
+        (80, 120),
+        json!({"state": "unknown", "reasons": ["no_guard_recovered"]}),
+    );
+    let content = fixture.artifact(ExportMode::VerifiedOnly).content;
+    let guarded = row(section(&content, SITED), "/me").expect("Go guard is a site");
+    assert!(
+        guarded.contains("guard: jwtauth.Authenticator"),
+        "{guarded}"
+    );
+    assert!(
+        guarded
+            .contains("| Deterministic | Confirmed | acme/shop:main.go bytes 50..71 @ 0123abc |")
+    );
+    for other in [NONE, OUTSIDE] {
+        assert!(row(section(&content, other), "/feed").is_none(), "{other}");
+    }
+    assert!(content.contains("/feed"), "{content}");
+}

@@ -269,6 +269,9 @@ pub(super) fn keep_test_facts(out: &mut Extraction) {
     out.handler_functions.clear();
     out.pending_bases.clear();
     out.base_bindings.clear();
+    out.pending_auth.clear();
+    out.denials.clear();
+    out.deny_values.clear();
 }
 
 /// The number of literal segments a route matches `path` with, or `None`

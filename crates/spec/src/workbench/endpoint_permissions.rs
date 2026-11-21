@@ -9,7 +9,7 @@
 //! `Endpoint` fact with their own provenance ([`RECOVERY`] lists the
 //! producers): `permission_site` (NestJS GraphQL `Allow(...)` decorator
 //! syntax) and `auth` (Flask and Flask-Admin guards, Spring method-security
-//! annotations). No adapter records a
+//! annotations, Go route middleware). No adapter records a
 //! site on a fact below the endpoint, so a check made inside a handler body
 //! or in a function it calls is not recovered; the document says so.
 //!
@@ -110,6 +110,30 @@ const RECOVERY: &[Recovery] = &[
         producer: "adapters-lang-java (method_security)",
     },
     Recovery {
+        framework: "net/http",
+        language: "Go",
+        property: "auth",
+        recovers: GO_RECOVERS,
+        absent_read: GO_ABSENT_READ,
+        producer: GO_PRODUCER,
+    },
+    Recovery {
+        framework: "chi",
+        language: "Go",
+        property: "auth",
+        recovers: GO_RECOVERS,
+        absent_read: GO_ABSENT_READ,
+        producer: GO_PRODUCER,
+    },
+    Recovery {
+        framework: "gin",
+        language: "Go",
+        property: "auth",
+        recovers: GO_RECOVERS,
+        absent_read: GO_ABSENT_READ,
+        producer: GO_PRODUCER,
+    },
+    Recovery {
         framework: "nestjs-graphql",
         language: "TypeScript",
         property: "permission_site",
@@ -120,6 +144,16 @@ const RECOVERY: &[Recovery] = &[
         producer: "adapters-lang-ts (graphql_resolvers)",
     },
 ];
+
+/// What the Go adapter reads for `net/http`, chi and gin (#2163). It never
+/// records `none`: a Go route has no declarative public marker.
+const GO_RECOVERS: &str = "middleware on the route: a handler wrapper, chi With, and Use on the \
+                           same chi router or gin engine (gin: before the route). Guards are gin \
+                           BasicAuth, chi BasicAuth and jwtauth Authenticator by import, and \
+                           repository middleware whose body answers 401 or 403. Middleware on \
+                           an enclosing router, a server-wide wrapper and gin groups are not read";
+const GO_ABSENT_READ: &str = "route middleware";
+const GO_PRODUCER: &str = "adapters-lang-go (middleware)";
 
 fn recovery(endpoint: &Node) -> Option<&'static Recovery> {
     let framework = endpoint.props["framework"].as_str()?;
@@ -528,7 +562,12 @@ fn role(endpoint: &Node, guards: &[&str]) -> String {
     let named = |guard: &str| match guard {
         "flask_login.login_required" => Some("signed-in user"),
         "flask_login.fresh_login_required" => Some("freshly signed-in user"),
-        "flask_jwt_extended.jwt_required" => Some("caller with a valid JWT"),
+        "flask_jwt_extended.jwt_required" | "jwtauth.Authenticator" => {
+            Some("caller with a valid JWT")
+        }
+        "gin.BasicAuth" | "gin.BasicAuthForRealm" | "chi.middleware.BasicAuth" => {
+            Some("caller with HTTP Basic credentials")
+        }
         _ => None,
     };
     if endpoint.props["framework"] == "flask_admin" || endpoint.props["mount"] == "flask_admin" {
