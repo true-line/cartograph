@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseShard, parseTestList, parseTotals, selectShard, verifyRun } from './rust-test-shard.mjs';
+import { DEFAULT_WEIGHT, loadWeights, parseShard, parseTestList, parseTotals, selectShard, verifyRun, weightsFromReport } from './rust-test-shard.mjs';
 
 const listing = [
   'jobs::tests::b: test',
@@ -59,4 +59,41 @@ test('a shard passes only when libtest accounts for exactly its selection', () =
   assert.match(verifyRun(selected, result(3, 0, 0), 1), /exited 1/u);
   assert.match(verifyRun(selected, '', 0), /one test binary result, saw 0/u);
   assert.match(verifyRun(selected, result(3, 0, 0) + result(0, 0, 0), 0), /saw 2/u);
+});
+
+test('measured weights spread the slow tests and still partition the list (#1924)', () => {
+  const names = Array.from({ length: 40 }, (_, n) => `m::t${String(n).padStart(2, '0')}`);
+  // The four slowest tests sit on one shard under round-robin by name.
+  const weights = { 'm::t00': 90, 'm::t04': 60, 'm::t08': 40, 'm::t12': 38 };
+  assert.deepEqual(selectShard(names, { index: 1, count: 4 }).filter((name) => name in weights), Object.keys(weights));
+  const shards = [1, 2, 3, 4].map((index) => selectShard(names, { index, count: 4 }, weights));
+  assert.deepEqual(shards.flat().sort(), names);
+  assert.equal(new Set(shards.flat()).size, names.length);
+  for (const shard of shards) assert.equal(shard.filter((name) => name in weights).length, 1);
+  const loads = shards.map((shard) => shard.reduce((sum, name) => sum + (weights[name] ?? DEFAULT_WEIGHT), 0));
+  assert.ok(Math.max(...loads) - Math.min(...loads) <= 90 - 38 + DEFAULT_WEIGHT * names.length);
+  // Each shard keeps the sorted order libtest is given.
+  for (const shard of shards) assert.deepEqual(shard, [...shard].sort());
+});
+
+test('weights come from libtest\'s JSON report and only list tests of two seconds or more', () => {
+  const report = [
+    '{ "type": "suite", "event": "started", "test_count": 3 }',
+    '{ "type": "test", "event": "started", "name": "b::slow" }',
+    '{ "type": "test", "name": "b::slow", "event": "ok", "exec_time": 12.345 }',
+    '{ "type": "test", "name": "a::quick", "event": "ok", "exec_time": 0.2 }',
+    '{ "type": "test", "name": "a::fail", "event": "failed", "exec_time": 30 }',
+    '{ "type": "test", "name": "a::slow", "event": "ok", "exec_time": 2 }',
+    '{ "type": "test", "name": "a::second", "event": "ok", "exec_time": 1.9 }',
+    'not json',
+  ].join('\n');
+  assert.equal(weightsFromReport(report), `${JSON.stringify({ seconds: { 'a::slow': 2, 'b::slow': 12.3 } }, null, 2)}\n`);
+});
+
+test('the committed weights name tests in sorted order with positive seconds', () => {
+  const weights = loadWeights();
+  const names = Object.keys(weights);
+  assert.ok(names.length > 0);
+  assert.deepEqual(names, [...names].sort());
+  for (const name of names) assert.ok(weights[name] >= 2, name);
 });
