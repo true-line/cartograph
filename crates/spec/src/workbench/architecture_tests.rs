@@ -699,3 +699,47 @@ fn a_main_file_is_named_for_its_directory() {
     assert!(l2.contains("<b>Worker</b>"), "{l2}");
     assert!(!l2.contains("<b>Main</b>"), "{l2}");
 }
+
+/// AC-1110: Android components and workers run inside the app: they make
+/// the repository a client application, not processes of their own.
+#[test]
+fn android_components_are_one_client_application() {
+    let mut f = system();
+    const APP: &str = "acme/android";
+    f.node(&format!("repo:{APP}"), "Repo", json!({}), (APP, "."));
+    let manifest = "app/src/main/AndroidManifest.xml";
+    for (key, kind, file) in [
+        (
+            "activity:com.acme.MainActivity",
+            "android-activity",
+            manifest,
+        ),
+        (
+            "receiver:com.acme.BootReceiver",
+            "android-receiver",
+            manifest,
+        ),
+        (
+            "SyncWorker.doWork",
+            "background-job",
+            "app/src/main/java/com/acme/SyncWorker.kt",
+        ),
+    ] {
+        let entry = f.node(
+            &format!("entry:{APP}@{file}#{key}"),
+            "EntryPoint",
+            json!({"kind": kind, "name": key, "how": "x", "file": file}),
+            (APP, file),
+        );
+        let module = f.code(APP, "app/src/main/java/com/acme/Main.kt", key);
+        f.edge(&entry, "ENTRY", &module, (APP, file), json!({}));
+    }
+    let (md, _) = render(&f, ExportMode::BestEffort, None);
+    let l2 = level(&md, "## Level 2");
+    assert!(
+        l2.contains("Client application: 2 Android components, 1 background job"),
+        "{l2}"
+    );
+    assert!(l2.contains("[Container: Android]"), "{l2}");
+    assert!(!l2.contains("Runs `app/src/main"), "{l2}");
+}

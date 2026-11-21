@@ -313,3 +313,51 @@ fn java_scheduled_methods_are_one_capability_and_runners_run_at_startup() {
         "{caps:#?}"
     );
 }
+
+// AC-1110: an Android component or a WorkManager worker is titled by the
+// class it names, in words, not by the manifest declaring it.
+#[test]
+fn android_components_are_titled_by_their_class() {
+    let mut base = snapshot();
+    let manifest = "app/src/main/AndroidManifest.xml";
+    let main = "app/src/main/java/com/acme/MainActivity.kt";
+    let boot = "app/src/main/java/com/acme/BootReceiver.kt";
+    let worker = "app/src/main/java/com/acme/SyncWorker.kt";
+    for (path, key, kind, component, dst) in [
+        (
+            manifest,
+            "activity:com.acme.MainActivity",
+            "android-activity",
+            "com.acme.MainActivity",
+            main,
+        ),
+        (
+            manifest,
+            "receiver:com.acme.BootReceiver",
+            "android-receiver",
+            "com.acme.BootReceiver",
+            boot,
+        ),
+        (
+            worker,
+            "SyncWorker.doWork",
+            "background-job",
+            "SyncWorker",
+            worker,
+        ),
+    ] {
+        let (mut node, edge) = entry(path, key, kind, "x", &format!("file:{REPO}@{dst}"));
+        node.props["component"] = component.into();
+        base.graph.0.push(node);
+        base.graph.1.push(edge);
+    }
+    base.graph.0.extend([file(main), file(boot), file(worker)]);
+    let caps = capabilities(&derive_entry_point_capabilities(&base));
+    for title in [
+        "Open the main activity screen",
+        "Receive broadcasts in boot receiver",
+        "Run sync worker in the background",
+    ] {
+        assert!(caps.contains_key(title), "{title}: {caps:#?}");
+    }
+}

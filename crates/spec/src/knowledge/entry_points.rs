@@ -54,7 +54,24 @@ fn stem_words(path: &str) -> String {
     stem.replace(['_', '-'], " ").trim().to_string()
 }
 
-fn title(kind: &str, file: &str) -> String {
+/// A class name in words: `com.acme.BootReceiver` reads `boot receiver`.
+fn class_words(fqn: &str) -> String {
+    let simple = fqn.rsplit('.').next().unwrap_or(fqn);
+    stem_words(&format!("{simple}.java"))
+}
+
+fn title(kind: &str, file: &str, component: Option<&str>) -> String {
+    if let Some(component) = component {
+        let words = class_words(component);
+        match kind {
+            "android-activity" => return format!("Open the {words} screen"),
+            "android-service" => return format!("Run the {words} service"),
+            "android-receiver" => return format!("Receive broadcasts in {words}"),
+            "android-provider" => return format!("Serve content from {words}"),
+            "background-job" => return format!("Run {words} in the background"),
+            _ => {}
+        }
+    }
     match kind {
         "smtp-listener" => "Receive mail over SMTP".into(),
         "database-listener" => "Handle database notifications".into(),
@@ -98,6 +115,8 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
     }
     // Group identity → (kind, display file, group).
     let mut groups: BTreeMap<(String, String), (String, String, Group)> = BTreeMap::new();
+    // The class an Android component or worker entry names (AC-1110).
+    let mut components: BTreeMap<(String, String), String> = BTreeMap::new();
     for node in nodes.values().filter_map(|n| *n) {
         match node.label.as_str() {
             "EntryPoint" => {
@@ -132,6 +151,9 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
                     ("entry".to_owned(), node.id.clone())
                 };
                 let place = key.1.clone();
+                if let Some(component) = node.props["component"].as_str() {
+                    components.insert(key.clone(), component.to_owned());
+                }
                 let (_, _, group) = groups.entry(key).or_insert_with(|| {
                     let shown = if kind == "command" {
                         place
@@ -173,7 +195,7 @@ pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityR
             let title = match kind.as_str() {
                 "schedule" => "Run scheduled jobs".to_owned(),
                 "command" => "Run operator commands".to_owned(),
-                _ => title(&kind, &file),
+                _ => title(&kind, &file, components.get(&key).map(String::as_str)),
             };
             (title, file, key, group)
         })
