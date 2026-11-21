@@ -58,11 +58,17 @@ no cited record of stated intent, although a claim of kind
    per-repository file count and a per-file section count. Every file it
    finds is counted as read or as skipped with a closed reason, in the
    coverage inventory.
-6. **The two existing readers are unchanged in this decision.** A declared
-   API reference file and a found decision record are also documents and
-   get `Document` and `DocSection` nodes. Their `ADR`, contract and drift
-   facts stay as they are. Folding those readers into the document reader
-   is later work and changes no fact identity when it happens.
+6. **The two existing readers are cases of the document reader.** One walk
+   finds every documentation file of a repository and reads its bytes once,
+   under one size bound; the found-decision reader and the declared API
+   references are cases of that read (AC-1600, AC-1601). A found decision
+   record is a `Document` with the `decision_record` role and a `RECORDS`
+   edge to its `ADR`; a declared API reference is a `Document` with the
+   `api_reference` role, read from the contents its loader validated when
+   the walk does not reach it (a dot directory, or an OpenAPI `.json` file,
+   format `openapi`, no sections). Their `ADR`, contract and drift facts,
+   and every fact id, stay as they were; the declared-file validation
+   (anchored reads, bounds, gaps) stays in its loader.
 7. **Same commit, same facts.** Node ids are derived from the repository,
    the path and the section's ordinal. Files, sections and references are
    processed in sorted order. A second ingest of the same commit yields the
