@@ -7,6 +7,7 @@ pub mod client;
 pub mod config_read;
 pub mod events;
 pub mod observed;
+pub mod sql;
 pub mod tsconfig;
 pub mod vercel;
 pub mod vue;

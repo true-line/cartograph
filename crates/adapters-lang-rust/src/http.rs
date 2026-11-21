@@ -141,7 +141,7 @@ fn strip_generics(text: &str) -> String {
 
 /// Resolve a written path against `use` bindings and external globs in `scopes`,
 /// returning all candidate external paths (`axum::...`, `actix_web::...`,
-/// `reqwest::...`, `http::...`) it proves.
+/// `reqwest::...`, `http::...`, the SQL crates) it proves.
 pub(super) fn resolve_external_paths(
     cx: &FileCx<'_>,
     bindings: &Bindings,
@@ -187,7 +187,18 @@ pub(super) fn resolve_external_paths(
     }
     if matches!(
         name.as_str(),
-        "axum" | "actix_web" | "reqwest" | "rdkafka" | "http" | "std" | "alloc"
+        "axum"
+            | "actix_web"
+            | "reqwest"
+            | "rdkafka"
+            | "http"
+            | "std"
+            | "alloc"
+            | "rusqlite"
+            | "sqlx"
+            | "postgres"
+            | "tokio_postgres"
+            | "diesel"
     ) && !cx.workspace_crates.contains(name)
         && !cx.declared_mods.contains(name)
     {

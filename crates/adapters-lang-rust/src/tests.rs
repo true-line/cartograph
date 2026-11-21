@@ -1933,3 +1933,132 @@ fn path_attributes_resolve_from_the_declaring_directory() {
     ]);
     assert!(module_paths::modules(&declared, &[]).is_empty());
 }
+
+fn sql_facts(x: &Extraction) -> Vec<String> {
+    let mut facts: Vec<String> = x
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(edge.label.as_str(), "READS" | "WRITES")
+                && (edge.dst.contains("@sql:") || edge.dst.starts_with("gap:sql:"))
+        })
+        .map(|edge| {
+            let dst = if edge.dst.starts_with("gap:sql:") {
+                "gap"
+            } else {
+                edge.dst.as_str()
+            };
+            format!(
+                "{} {} {} {}",
+                edge.src,
+                edge.label,
+                dst,
+                edge.props["operation"].as_str().unwrap_or("-")
+            )
+        })
+        .collect();
+    facts.sort();
+    facts
+}
+
+// AC-1015 (#2041): rusqlite and sqlx statements written as literals, a
+// `const`, a `let` binding and a sqlx checked macro name the tables they
+// read and write; a `format!` table is a Gap; a parameter list, an unbound
+// argument and a look-alike `execute` in a file with no SQL crate name
+// nothing.
+#[test]
+fn rust_sql_statements_are_table_reads_and_writes() {
+    let text = r#"use rusqlite::{params, Connection};
+
+const LIST: &str = "SELECT id, email FROM users WHERE active = 1";
+
+pub fn save(conn: &Connection, email: &str) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO users (email, active) VALUES (?1, 1)", params![email])?;
+    let mut stmt = conn.prepare(LIST)?;
+    let sql = "UPDATE accounts SET balance = balance - ?1 WHERE id = ?2";
+    conn.execute(sql, params![1, 2])?;
+    stmt.execute(params![email])?;
+    Ok(())
+}
+
+pub fn dynamic(conn: &Connection, table: &str) -> rusqlite::Result<usize> {
+    conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), params![1])
+}
+
+pub async fn orders(pool: &sqlx::PgPool) {
+    let _ = sqlx::query("SELECT total FROM orders WHERE id = $1").bind(1).fetch_one(pool).await;
+    let _ = sqlx::query!("UPDATE orders SET total = $1", 2).execute(pool).await;
+}
+"#;
+    let x = extract_source(text.as_bytes(), "src/lib.rs", &id()).unwrap();
+    let facts = sql_facts(&x);
+    assert_eq!(
+        facts,
+        [
+            "sym:local/rust-ws@src/lib.rs#dynamic READS gap -",
+            "sym:local/rust-ws@src/lib.rs#orders READS data:local/rust-ws@sql:orders -",
+            "sym:local/rust-ws@src/lib.rs#orders WRITES data:local/rust-ws@sql:orders update",
+            "sym:local/rust-ws@src/lib.rs#save READS data:local/rust-ws@sql:users -",
+            "sym:local/rust-ws@src/lib.rs#save WRITES data:local/rust-ws@sql:accounts update",
+            "sym:local/rust-ws@src/lib.rs#save WRITES data:local/rust-ws@sql:users insert",
+        ],
+        "{facts:#?}"
+    );
+    let users = x
+        .nodes
+        .iter()
+        .find(|node| node.id == "data:local/rust-ws@sql:users")
+        .unwrap();
+    assert_eq!(users.label, "DataEntity");
+    assert_eq!(users.props["framework"], "rusqlite");
+    assert_eq!(users.props["language"], "rust");
+    let columns: Vec<&str> = users.props["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| column["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(columns, ["active", "email"]);
+    let gap = x
+        .nodes
+        .iter()
+        .find(|node| node.label == "Gap" && node.id.starts_with("gap:sql:"))
+        .unwrap();
+    assert_eq!(gap.props["reason"], "SQL statement names a computed table");
+
+    let lookalike = r#"pub struct Runner;
+impl Runner {
+    pub fn execute(&self, _: &str, _: u8) {}
+}
+pub fn run(r: &Runner) {
+    r.execute("DELETE FROM users", 1);
+}
+"#;
+    let x = extract_source(lookalike.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert!(sql_facts(&x).is_empty());
+    assert!(!x.nodes.iter().any(|node| node.id.contains("@sql:")));
+
+    // A crate named only in a comment or a string proves nothing.
+    let mentioned =
+        format!("// see sqlx::query\nconst DOC: &str = \"rusqlite::Connection\";\n{lookalike}");
+    let x = extract_source(mentioned.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert!(sql_facts(&x).is_empty());
+
+    // A turbofish method call is a statement; a `let` in a block that
+    // closed before the call is not the binding it reads.
+    let scoped = r#"use rusqlite::Connection;
+pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
+    let sql = "SELECT count(*) FROM outer_table";
+    {
+        let sql = "SELECT count(*) FROM inner_table";
+        let _ = sql;
+    }
+    conn.query_row::<i64, _, _>(sql, [], |row| row.get(0))
+}
+"#;
+    let x = extract_source(scoped.as_bytes(), "src/lib.rs", &id()).unwrap();
+    assert_eq!(
+        sql_facts(&x),
+        ["sym:local/rust-ws@src/lib.rs#count READS data:local/rust-ws@sql:outer_table -"]
+    );
+}
