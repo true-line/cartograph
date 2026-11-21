@@ -100,3 +100,91 @@ fn unclassified_stop_keeps_failure_record_omitted() {
         tx.rollback().unwrap();
     }
 }
+
+// AC-1403: a stop caused by a rejected response keeps a bounded redacted
+// excerpt in its own immutable row; a sensitive or replayed response keeps
+// only its size and hash, and any other cause keeps nothing.
+#[test]
+fn rejected_response_stop_keeps_bounded_redacted_record() {
+    use agents::investigation::rejected_response::{ExcerptRetention, WithheldReason};
+    let response = "{\"type\":\"query_context\",\"token\":\"AKIA0000000000000000\"}";
+    let cases = [
+        (
+            InvestigationStopReason::ActionDecode(ActionDecodeFailure {
+                stage: ActionDecodeStage::SemanticRule(ActionSemanticRule::QueryShape),
+                error: InvestigationError::InvalidAction,
+            }),
+            Some(None),
+        ),
+        (InvestigationStopReason::InvalidResponse, Some(None)),
+        (
+            InvestigationStopReason::ActionDecode(ActionDecodeFailure {
+                stage: ActionDecodeStage::TypedEnvelope,
+                error: InvestigationError::SensitiveOutput,
+            }),
+            Some(Some(WithheldReason::SensitiveOutput)),
+        ),
+        (
+            InvestigationStopReason::PreparationAt(PreparationPhase::Query),
+            None,
+        ),
+    ];
+    for (index, (reason, expected)) in cases.into_iter().enumerate() {
+        let mut fixture = Fixture::new();
+        let (id, execution) = fixture.start(
+            &format!("rejected-response-{index}"),
+            InvestigationProviderMode::Local,
+        );
+        fixture.prepare(&id, &execution, false);
+        let revision = fixture.store.investigation(&id).unwrap().summary.revision;
+        let detail = fixture
+            .store
+            .advance_investigation(
+                &execution,
+                revision,
+                InvestigationTransition::StopRejected {
+                    reason,
+                    active_milliseconds: 0,
+                    rejected: RejectedCompletion {
+                        step_id: "step-1".into(),
+                        text: response.into(),
+                    },
+                },
+            )
+            .unwrap();
+        // The terminal outcome is the one a plain stop records.
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.error.as_deref(), Some(reason.test_message()));
+        let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+        let kept = reopened.investigation_rejected_response(&id).unwrap();
+        let Some(withheld) = expected else {
+            assert_eq!(kept, None);
+            continue;
+        };
+        let kept = kept.unwrap();
+        assert_eq!(kept.step_id, "step-1");
+        assert_eq!(
+            kept.response_hash,
+            core_prov::content_hash(response.as_bytes())
+        );
+        match (withheld, kept.retention) {
+            (Some(reason), retention) => {
+                assert_eq!(retention, ExcerptRetention::Withheld { reason })
+            }
+            (
+                None,
+                ExcerptRetention::Excerpt {
+                    text,
+                    truncated,
+                    redactions,
+                },
+            ) => {
+                assert!(text.starts_with("{\"type\":\"query_context\""));
+                assert!(!text.contains("AKIA0000000000000000"));
+                assert!(!truncated);
+                assert_eq!(redactions, 1);
+            }
+            (None, retention) => panic!("expected an excerpt, got {retention:?}"),
+        }
+    }
+}
