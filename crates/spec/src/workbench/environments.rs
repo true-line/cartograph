@@ -97,6 +97,14 @@ const NOT_COVERED: &[&str] = &[
      a templated helmfile, `bases`, `helmfiles`, inline values, `set` and `secrets` are not read. \
      No value of a values file is read or stored. Argo CD applications and kustomize \
      `helmCharts` are not read.",
+    "Spring Boot `application` files are read for the profiles they state and the key paths \
+     they set. A profile-specific file (`application-prod.yml`) is an environment only where a \
+     base file of its directory declares the profile; otherwise it is named only by its file \
+     name. Profile expressions, `spring.config.import` and profiles set outside these files \
+     (`SPRING_PROFILES_ACTIVE`, `@Profile`) are not read. Other settings modules and \
+     configuration files (`settings/production.py`, `config/staging.yml`, \
+     `config/environments/production.rb`) are not read; one named like an environment is \
+     listed under Not established.",
     "Terraform resources are not attached to an environment.",
     "Nothing is merged. Which Compose files a deployment combines is not written in them, and no \
      kustomize patch or transformer is applied, so the effective configuration of a deployment \
@@ -1116,6 +1124,7 @@ fn gap_kind(node: &Node) -> &'static str {
         Some("helm-chart") => "Helm chart",
         Some("helmfile") => "helmfile",
         Some("helmfile-release") => "helmfile release",
+        Some("spring-config") => "Spring configuration file",
         _ => "not recorded",
     }
 }
@@ -1125,11 +1134,12 @@ A deterministic projection of the environments the ingested sources declare and 
 each declares. No model is involved.\n\n\
 ## How to read this document\n\n\
 - **An environment** here is a declared deployable set: one file that declares a set of things \
-to run together. That is a Compose file with a `services` mapping, or a kustomization file \
-(`kustomization.yaml`, `kustomization.yml` or `Kustomization`). Each such file is one \
-environment.\n\
+to run together. That is a Compose file with a `services` mapping, a kustomization file \
+(`kustomization.yaml`, `kustomization.yml` or `Kustomization`), a release of a helmfile, or a \
+Spring Boot profile that a configuration file states.\n\
 - **An environment is shown by the path of its file.** It has a name only where the file \
-states one (a top-level `name` in a Compose file, a `namespace` in a kustomization). Where the \
+states one (a top-level `name` in a Compose file, a `namespace` in a kustomization or a \
+helmfile release, the profile a Spring Boot file states). Where the \
 file states none, the name cell reads \"none stated\". A file or directory name is never used \
 as an environment name.\n\
 - **A workload** is one thing an environment declares to run. For Compose that is one service, \
@@ -1420,6 +1430,41 @@ pub(super) fn output(
     if !chart_rows {
         content
             .push_str("| — | None in this export | — | — | — | — | — | — | — | — | — | — |\n")?;
+    }
+
+    content.push_str(
+        "\nSpring Boot profiles, one row per profile environment, with the key paths its \
+         settings set. No value is read; the span is where the profile is stated.\n\n\
+         | Repository | Environment path | Profile | Profile declared in | Settings keys | Tier \
+         | Confidence | Span | Note |\n\
+         |---|---|---|---|---|---|---|---|---|\n",
+    )?;
+    let mut profile_rows = false;
+    for ((repo, path), environment) in &model.environments {
+        if environment.node.props["declared_by"] != "spring-profile" {
+            continue;
+        }
+        profile_rows = true;
+        let declared_in = environment.node.props["profile_declared_in"]
+            .as_str()
+            .or_else(|| environment.node.props["file"].as_str())
+            .unwrap_or("—");
+        let omitted = environment.node.props["settings_keys_omitted"].as_u64();
+        writeln!(
+            content,
+            "| {} | {} | {} | {} | {}{} | {} | {} |",
+            Literal(repo),
+            Literal(path),
+            cell(environment.node, "name"),
+            Literal(declared_in),
+            cell(environment.node, "settings_keys"),
+            omitted.map_or(String::new(), |n| format!(" and {n} more")),
+            Evidence(environment.node),
+            note(weak(&environment.node.props))
+        )?;
+    }
+    if !profile_rows {
+        content.push_str("| — | None in this export | — | — | — | — | — | — | — |\n")?;
     }
 
     content.push_str(

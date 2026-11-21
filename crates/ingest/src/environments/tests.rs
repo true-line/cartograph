@@ -1048,3 +1048,246 @@ fn templated_helmfiles_are_gaps_and_helm_output_is_deterministic() {
         serde_json::to_string(&(&b.nodes, &b.edges)).unwrap()
     );
 }
+
+const RES: &str = "src/main/resources";
+
+fn spring_tree() -> Vec<(String, String)> {
+    vec![
+        (
+            format!("{RES}/application.yml"),
+            format!(
+                "spring:\n  application:\n    name: shop\n  profiles:\n    active: prod\n    group:\n      cloud: [prod, metrics]\ndatasource:\n  password: {SECRET}\n---\nspring:\n  config:\n    activate:\n      on-profile: staging\nserver:\n  port: 8081\n---\nspring.config.activate.on-profile: prod & cloud\nfeature: on\n"
+            ),
+        ),
+        (
+            format!("{RES}/application-prod.yml"),
+            format!("datasource:\n  url: jdbc:postgresql://db/shop\n  password: {SECRET}\n"),
+        ),
+        (
+            format!("{RES}/application-metrics.properties"),
+            "management.endpoints.web.exposure.include=*\n".into(),
+        ),
+        // No base file declares `qa`: named only by the file name.
+        (
+            format!("{RES}/application-qa.properties"),
+            "server.port=9000\n".into(),
+        ),
+        // A template word names no environment.
+        (
+            format!("{RES}/application-example.yml"),
+            "server:\n  port: 1\n".into(),
+        ),
+        (
+            "worker/application.properties".into(),
+            format!(
+                "spring.profiles.active=dev\ndb.password={SECRET}\n#---\nspring.config.activate.on-profile=test\nserver.port=1\\\n  2\n"
+            ),
+        ),
+        (
+            "worker/application-dev.yaml".into(),
+            "cache:\n  ttl: 5\n".into(),
+        ),
+    ]
+}
+
+fn extract_spring() -> EnvironmentExtraction {
+    let dir = tempfile::tempdir().unwrap();
+    let files = spring_tree();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    write(dir.path(), &files);
+    extract_in(dir.path())
+}
+
+// AC-1503 (T-1503, #2167): a Spring Boot document activated for a profile
+// is an environment named by it; a profile-specific file is one only where
+// a base file of its directory declares the profile. Each lists the key
+// paths it sets, never a value, and cites only where the profile is stated.
+#[test]
+fn spring_profiles_are_environments_only_where_a_file_states_them() {
+    let out = extract_spring();
+    let staging = node_of(&out, &format!("env:{REPO}@{RES}/application.yml#staging"));
+    assert_eq!(staging.label, "Environment");
+    assert_eq!(staging.props["declared_by"], "spring-profile");
+    assert_eq!(staging.props["name"], "staging");
+    assert_eq!(
+        staging.props["path"],
+        format!("{RES}/application.yml#staging")
+    );
+    assert_eq!(
+        staging.props["settings_keys"],
+        serde_json::json!(["server.port"])
+    );
+
+    let prod = node_of(&out, &format!("env:{REPO}@{RES}/application-prod.yml"));
+    assert_eq!(prod.props["name"], "prod");
+    assert_eq!(
+        prod.props["profile_declared_in"],
+        format!("{RES}/application.yml")
+    );
+    assert_eq!(
+        prod.props["settings_keys"],
+        serde_json::json!(["datasource.password", "datasource.url"])
+    );
+    // A profile named by a group is declared too.
+    let metrics = node_of(
+        &out,
+        &format!("env:{REPO}@{RES}/application-metrics.properties"),
+    );
+    assert_eq!(
+        metrics.props["settings_keys"],
+        serde_json::json!(["management.endpoints.web.exposure.include"])
+    );
+    // `.properties` documents, a continued line and an `active` list.
+    let test = node_of(
+        &out,
+        &format!("env:{REPO}@worker/application.properties#test"),
+    );
+    assert_eq!(
+        test.props["settings_keys"],
+        serde_json::json!(["server.port"])
+    );
+    let dev = node_of(&out, &format!("env:{REPO}@worker/application-dev.yaml"));
+    assert_eq!(dev.props["settings_keys"], serde_json::json!(["cache.ttl"]));
+
+    // Only base files are cited, at the statement of the profile.
+    for node in out.nodes.iter().filter(|node| node.label == "Environment") {
+        for evidence in node.props["prov"]["evidence"].as_array().unwrap() {
+            let path = evidence["path"].as_str().unwrap();
+            assert!(
+                path.ends_with("/application.yml") || path.ends_with("/application.properties"),
+                "{path} is cited"
+            );
+        }
+    }
+    let all = serde_json::to_string(&(&out.nodes, &out.edges)).unwrap();
+    assert!(!all.contains(SECRET));
+    assert!(!all.contains("jdbc:"));
+}
+
+// AC-1503: an undeclared profile file is a name-only Gap, a template word
+// names nothing, and a profile expression is a Gap.
+#[test]
+fn undeclared_profiles_and_profile_expressions_are_gaps() {
+    let out = extract_spring();
+    let qa = node_of(
+        &out,
+        &format!("gap:environment:{REPO}@{RES}/application-qa.properties"),
+    );
+    assert_eq!(qa.props["kind"], "name-only-environment");
+    assert!(qa.props["prov"]["evidence"].as_array().unwrap().is_empty());
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.id.contains("application-example"))
+    );
+    let gap = node_of(
+        &out,
+        &format!("gap:environment:{REPO}@{RES}/application.yml"),
+    );
+    assert_eq!(gap.props["kind"], "spring-config");
+    assert!(
+        gap.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("profile expression")
+    );
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.id.contains("prod & cloud"))
+    );
+    let a = extract_spring();
+    assert_eq!(
+        serde_json::to_string(&(&a.nodes, &a.edges)).unwrap(),
+        serde_json::to_string(&(&out.nodes, &out.edges)).unwrap()
+    );
+}
+
+// AC-1503: a settings module or configuration file named like an
+// environment is a name-only Gap; other names and places are nothing.
+#[test]
+fn settings_files_named_like_environments_are_name_only_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            ("app/settings/production.py", "DEBUG = False\n"),
+            ("app/settings/base.py", "DEBUG = True\n"),
+            ("config/staging.yml", "host: example\n"),
+            ("config/database.yml", "adapter: postgresql\n"),
+            (
+                "config/environments/production.rb",
+                "Rails.application.configure do\nend\n",
+            ),
+            ("scripts/production.py", "print(1)\n"),
+        ],
+    );
+    let out = extract_in(dir.path());
+    let gaps: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.props["kind"] == "name-only-environment")
+        .map(|node| node.props["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gaps,
+        BTreeSet::from([
+            "app/settings/production.py",
+            "config/environments/production.rb",
+            "config/staging.yml",
+        ])
+    );
+    assert!(!out.nodes.iter().any(|node| node.label == "Environment"));
+}
+
+// AC-1503: a Kubernetes manifest named like a Spring Boot file is still read
+// as a manifest, and a legacy `spring.profiles` list is a Gap, not a key.
+#[test]
+fn spring_named_manifests_stay_manifests_and_profile_lists_are_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "deploy/application.yml",
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+            ),
+            (
+                "deploy/application-prod.yml",
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web-prod\n",
+            ),
+            (
+                "app/application.yml",
+                "spring:\n  profiles: [prod, cloud]\nserver:\n  port: 1\n",
+            ),
+        ],
+    );
+    let out = extract_in(dir.path());
+    let workloads: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Workload")
+        .filter_map(|node| node.props["name"].as_str())
+        .collect();
+    assert_eq!(workloads, BTreeSet::from(["web", "web-prod"]));
+    // The manifests' own Gaps only: nothing reads them as Spring profiles.
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|node| node.id.contains("deploy/application")
+                && node.props["kind"] != "manifest-document"
+                && node.label == "Gap")
+    );
+    let gap = node_of(&out, &format!("gap:environment:{REPO}@app/application.yml"));
+    assert_eq!(gap.props["kind"], "spring-config");
+    assert!(
+        gap.props["reason"]
+            .as_str()
+            .unwrap()
+            .contains("profile expression or list")
+    );
+    assert!(!out.nodes.iter().any(|node| node.label == "Environment"));
+}
