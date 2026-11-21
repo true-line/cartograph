@@ -74,6 +74,9 @@ pub(super) struct DirectFacts {
     /// budget the file's own declarations leave, and the rest are counted.
     pub(super) locals: BTreeMap<String, Node>,
     pub(super) rules: Vec<(Node, Edge)>,
+    /// The file's own File node and its TestCase facts (AC-1019): supporting
+    /// facts a gap task reads, kept only if completion leaves them unchanged.
+    pub(super) supporting: BTreeMap<String, Node>,
 }
 
 fn supported(path: &str) -> bool {
@@ -309,6 +312,10 @@ struct FileReceipts {
     rules: Vec<MintedReceipt>,
     /// Declarations in fact-key order.
     declarations: Vec<MintedReceipt>,
+    /// Supporting File/TestCase receipts in fact-key order, then
+    /// unresolved-call Gap receipts in call order (AC-1019). For the
+    /// directory lane only: a single file has no completion to decide them.
+    completed: Vec<MintedReceipt>,
     /// Declarations never minted because this file reached its own bound.
     omitted_declarations: u64,
 }
@@ -410,11 +417,36 @@ fn extract_file_with_measurements(
     let matching = matcher(&extraction);
     declarations.retain(|receipt| matching(receipt));
     drop(matching);
+    // A gap task also reads the file's File node, its TestCase facts and the
+    // unresolved-call Gap itself (AC-1019). Each cites a span this parse read;
+    // the Gap exists only once directory completion finds no target, and
+    // completion may enrich the others, so these receipts go to the directory
+    // lane, which keeps one only when its complete fact survives completion.
+    // They use what is left of this file's declaration bound and, being
+    // undecided, are never counted as omissions.
+    let gaps = extraction
+        .pending_calls
+        .iter()
+        .filter_map(|pending| pending.gap_node.unpack().ok());
+    let mut completed = Vec::new();
+    for node in direct.supporting.values().cloned().chain(gaps) {
+        let held = declarations.len() + completed.len();
+        if held == file_declarations.receipts {
+            break;
+        }
+        let Ok(receipt) = mint(Receipt::for_node(file, id, &node)) else {
+            continue;
+        };
+        if charge.admit(&receipt, held, file_declarations) {
+            completed.push(receipt);
+        }
+    }
     Ok((
         extraction,
         FileReceipts {
             rules,
             declarations,
+            completed,
             omitted_declarations,
         },
     ))
@@ -610,6 +642,11 @@ fn extract_captured_dir_packed_with_policy(
     // stops once they alone could not fit, bounding the extra memory.
     let mut declarations = Vec::new();
     let mut staged = Charge::default();
+    // Completion-decided File/TestCase/Gap receipts (AC-1019) are admitted
+    // last, after every declaration. They are no declaration contract: one
+    // that does not fit is left out unnamed and its fact stays uncaptured.
+    let mut completed = Vec::new();
+    let mut staged_completed = Charge::default();
     let mut omitted_rules = Vec::new();
     let mut stats = IncrementalStats::default();
     source_walk::parallel::map_ordered(
@@ -662,6 +699,11 @@ fn extract_captured_dir_packed_with_policy(
                             emitted_fact_digest: receipt.fact_digest().to_owned(),
                             kind: core_graph::source::ReceiptOmissionKind::Declarations,
                         });
+                }
+            }
+            for receipt in file_receipts.completed {
+                if staged_completed.admit(&receipt, completed.len(), budget) {
+                    completed.push(receipt);
                 }
             }
             store.extend_packed(
@@ -717,6 +759,12 @@ fn extract_captured_dir_packed_with_policy(
                     emitted_fact_digest: receipt.fact_digest().to_owned(),
                     kind: core_graph::source::ReceiptOmissionKind::Declarations,
                 });
+        }
+    }
+    drop(staged_completed);
+    for receipt in completed {
+        if matching(&receipt) && charge.admit(&receipt, receipts.len(), budget) {
+            receipts.push(receipt);
         }
     }
     drop(matching);
