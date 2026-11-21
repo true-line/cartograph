@@ -280,6 +280,36 @@ mod tests {
     }
 
     #[test]
+    fn topology_labels_name_the_root_module_of_a_scoped_resource() {
+        // AC-1500 (ADR-0077): one address in two root modules draws two
+        // boxes whose labels say which module directory each belongs to.
+        let mut prod = resource(
+            "res:r@envs/prod/aws_sqs_queue.orders",
+            "aws_sqs_queue.orders",
+        );
+        prod.props["root_module"] = "envs/prod".into();
+        let mut staging = resource(
+            "res:r@envs/staging/aws_sqs_queue.orders",
+            "aws_sqs_queue.orders",
+        );
+        staging.props["root_module"] = "envs/staging".into();
+        let root = resource("res:r@aws_sqs_queue.orders", "aws_sqs_queue.orders");
+        let mmd = topology_mermaid(&[prod, staging, root], &[]);
+        assert!(mmd.contains(&format!(
+            r#"{}["envs/prod: aws_sqs_queue.orders · T0 Gap"]"#,
+            mermaid_id("res:r@envs/prod/aws_sqs_queue.orders")
+        )));
+        assert!(mmd.contains(&format!(
+            r#"{}["envs/staging: aws_sqs_queue.orders · T0 Gap"]"#,
+            mermaid_id("res:r@envs/staging/aws_sqs_queue.orders")
+        )));
+        assert!(mmd.contains(&format!(
+            r#"{}["aws_sqs_queue.orders · T0 Gap"]"#,
+            mermaid_id("res:r@aws_sqs_queue.orders")
+        )));
+    }
+
+    #[test]
     fn placeholders_render_distinctly() {
         // R-INT-2 at the artifact level: unresolved is visibly unresolved.
         let mut unresolved = resource("res:module.vpc", "module.vpc");

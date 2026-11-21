@@ -2273,15 +2273,18 @@ fn extract_tree_packed(
             let raw = std::fs::read_to_string(state_path)
                 .map_err(|e| format!("state_json {}: {e}", state_path.display()))?;
             let observed = dynamic::parse_state(&raw).map_err(|e| e.to_string())?;
+            // ADR-0077: a state that cannot be tied to one root module is
+            // not applied; its Gap joins the graph instead.
             facts
-                .update_nodes(&["Resource"], |nodes, _| {
-                    dynamic::enrich_resources(
+                .update_nodes(&["Resource"], |nodes, added| {
+                    let enrichment = dynamic::enrich_resources(
                         nodes,
                         repo,
                         &observed,
                         &state_path.to_string_lossy(),
                         &raw,
-                    )
+                    );
+                    added.extend(enrichment.unapplied);
                 })
                 .map_err(pack_err)?;
         }
