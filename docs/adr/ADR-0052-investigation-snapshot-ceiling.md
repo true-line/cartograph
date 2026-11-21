@@ -128,8 +128,11 @@ Consequences:
   MCP read sessions are unchanged.
 - The graph identity itself is unchanged: the pass hashes to the id
   `ContextSnapshot::new` assigns (AC-0735).
-- Not yet wired: investigation preparation (`investigations/context.rs`,
-  `evidence.rs`, `inspection.rs`) still reads the frozen graph under
-  `task_graph_limits`, and reports a snapshot refusal as the plain
-  `host_limit` message until that slice lands.
+- Wired (2026-11-21, AC-1301, AC-1302): `investigations/context.rs` prepares a
+  neighborhood or area scope inside a scoped reader at one pinned revision,
+  streaming the identity and retaining only the scope, and re-reads selected
+  facts at that revision. Not yet wired: an `All` scope, `inspection.rs` and
+  `completion_choices.rs` still read the frozen graph under
+  `task_graph_limits`, and a snapshot refusal is still the plain `host_limit`
+  message until the phase-naming error lands.
 
