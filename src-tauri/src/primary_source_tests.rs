@@ -4160,7 +4160,11 @@ fn facts_citing_several_captured_files_are_cited_and_read_back() {
     for range in &description.ranges {
         let read =
             primary_source::read(&state, &fact, &description.receipt_id, range.index).unwrap();
-        let original = if read.path == "bp.py" { BLUEPRINT } else { VIEWS };
+        let original = if read.path == "bp.py" {
+            BLUEPRINT
+        } else {
+            VIEWS
+        };
         assert_eq!(
             read.text.as_bytes(),
             &original.as_bytes()[range.byte_start as usize..range.byte_end as usize]
