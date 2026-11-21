@@ -1960,16 +1960,23 @@ impl PrimarySourceStore {
                 source_capture::capture_working_tree(root, &id, paths, CaptureLimits::default())
             }
         };
-        // The Python (AC-1024), Go (AC-1026) and Java (AC-1031) lanes' files
-        // join the same capture. A lane whose files cannot be listed is left
-        // out; when the combined set cannot be retained, those lanes keep
-        // their ordinary uncaptured reads and the TS/JS capture stands alone.
+        // The Python (AC-1024), Go (AC-1026), Java (AC-1031) and Rust
+        // (AC-1033) lanes' files join the same capture. A lane whose files
+        // cannot be listed is left out; when the combined set cannot be
+        // retained, those lanes keep their ordinary uncaptured reads and the
+        // TS/JS capture stands alone.
         let wants_lanes = ingest::coverage::wants(layers, ingest::coverage::APPLICATION_LAYERS);
         let lanes: Vec<String> = if wants_lanes {
             let python = adapters_lang_python::python_paths(root).unwrap_or_default();
             let go = adapters_lang_go::go_paths(root).unwrap_or_default();
             let java = adapters_lang_java::java_paths(root).unwrap_or_default();
-            python.into_iter().chain(go).chain(java).collect()
+            let rust = adapters_lang_rust::rust_paths(root).unwrap_or_default();
+            python
+                .into_iter()
+                .chain(go)
+                .chain(java)
+                .chain(rust)
+                .collect()
         } else {
             Vec::new()
         };

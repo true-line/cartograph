@@ -2075,13 +2075,52 @@ fn extract_tree_packed(
     if wants_application {
         let rust_id = adapters_lang_rust::SourceId { repo, commit };
         let mut rust_progress = |path: &str| on_file(&format!("Reading Rust sources — {path}"));
-        let (rust, stats) = adapters_lang_rust::extract_dir_incremental_with_progress(
-            root,
-            &rust_id,
-            &mut cache.rust,
-            &mut rust_progress,
-        )
-        .map_err(|error| error.to_string())?;
+        // As for the other lanes, a capture holding the Rust selection is
+        // parsed from its retained bytes with provenance-only Rust receipts
+        // (AC-1033); crate discovery still reads `Cargo.toml` from `root`.
+        let captured_rust = captured_lane_paths(primary, ".rs");
+        let (rust, stats) = if let (Some(capture), false) = (primary, captured_rust.is_empty()) {
+            let mut stage = adapters_lang_ts::captured::ReceiptStage::default();
+            let rust = adapters_lang_rust::extract_dir_from_sources(
+                root,
+                &rust_id,
+                &captured_rust,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| std::io::Error::other("captured Rust file is unavailable"))
+                },
+                &mut rust_progress,
+                &mut |path, parsed| {
+                    if let Ok(file) = capture.file(path)
+                        && let Ok(receipts) = adapters_lang_ts::captured::mint_rust_file_receipts(
+                            file,
+                            &ts_id,
+                            &parsed.nodes,
+                            &parsed.edges,
+                        )
+                    {
+                        stage.extend(receipts);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            admit_surviving_lane_receipts(&rust.nodes, &rust.edges, stage, receipts);
+            let stats = adapters_lang_rust::IncrementalStats {
+                recomputed_files: captured_rust.len() as u64,
+                ..Default::default()
+            };
+            (rust, stats)
+        } else {
+            adapters_lang_rust::extract_dir_incremental_with_progress(
+                root,
+                &rust_id,
+                &mut cache.rust,
+                &mut rust_progress,
+            )
+            .map_err(|error| error.to_string())?
+        };
         delta.add(
             stats.recomputed_files,
             stats.reused_files,

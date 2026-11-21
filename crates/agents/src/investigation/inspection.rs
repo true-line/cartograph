@@ -73,6 +73,7 @@ impl InvestigationInspectionTarget {
                 .or_else(|| self.receipt_id.strip_prefix("py-primary-v1:"))
                 .or_else(|| self.receipt_id.strip_prefix("go-primary-v1:"))
                 .or_else(|| self.receipt_id.strip_prefix("java-primary-v1:"))
+                .or_else(|| self.receipt_id.strip_prefix("rs-primary-v1:"))
                 .is_some_and(crate::source_basis::hash)
             || !text(&self.source.repo, 256)
             || !text(&self.source.commit_sha, 256)
