@@ -2271,6 +2271,27 @@ fn extract_file(source: &[u8], path: &str, id: &SourceId<'_>) -> Result<Extracti
             }
             _ => continue,
         };
+        // A Spring Data vocabulary call on a receiver declared with a
+        // repository type reads or writes its entity (AC-1100).
+        if product
+            && let Some(receivers::Binding::Typed(ty)) = &binding
+            && let Some(writes) = jpa::classify(&name)
+            && !receivers::is_type_parameter(&cx, call, ty.split('.').next().unwrap_or(ty))
+        {
+            let label = if writes { "WRITES" } else { "READS" };
+            out.room.push_repository_call(
+                path,
+                src.clone(),
+                type_candidates(&cx, &imports, package.as_deref(), &local_types, call, ty),
+                writes,
+                serde_json::json!({
+                    "resolution": "declared-type",
+                    "framework": "spring-data",
+                    "method": name,
+                    "prov": cx.prov(&call, &format!("{label} {ty}.{name}")),
+                }),
+            );
+        }
         match binding {
             Some(receivers::Binding::Untyped) => continue,
             Some(binding) => {

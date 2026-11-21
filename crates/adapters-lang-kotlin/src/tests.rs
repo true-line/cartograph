@@ -6553,3 +6553,241 @@ interface NoteDao {
         ]
     );
 }
+
+// AC-1100: a Kotlin interface extending an import-proven Spring Data
+// repository base binds the JPA entity its first type argument names; a
+// vocabulary call through a receiver declared with that repository type
+// reads or writes the entity. Lookalike bases, generic bases, non-entity
+// targets, untyped receivers, non-vocabulary methods and test sources
+// assert nothing beyond a Gap for the unresolved binding.
+#[test]
+fn spring_data_repositories_bind_entities_and_calls_read_and_write() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/model/Customer.kt",
+        r#"package com.shop.model
+
+import jakarta.persistence.Entity
+import jakarta.persistence.Id
+
+@Entity
+class Customer(@Id val id: Long, var name: String)
+
+class Plain(val id: Long)
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/repo/Repos.kt",
+        r#"package com.shop.repo
+
+import com.shop.model.Customer
+import com.shop.model.Plain
+import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.repository.CrudRepository as Crud
+import org.springframework.data.repository.NoRepositoryBean
+
+interface CustomerRepository : JpaRepository<Customer, Long> {
+    fun findByName(name: String): List<Customer>
+    fun purge(name: String)
+}
+
+interface PlainRepository : Crud<Plain, Long>
+
+@NoRepositoryBean
+interface BaseRepository<T> : Crud<T, Long>
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/fake/Fake.kt",
+        r#"package com.shop.fake
+
+import com.shop.model.Customer
+
+interface JpaRepository<T, ID>
+
+interface NotSpring : JpaRepository<Customer, Long>
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/service/CustomerService.kt",
+        r#"package com.shop.service
+
+import com.shop.fake.NotSpring
+import com.shop.model.Customer
+import com.shop.repo.CustomerRepository
+import com.shop.repo.PlainRepository
+
+class CustomerService(
+    private val customers: CustomerRepository,
+    private val plains: PlainRepository,
+    private val fake: NotSpring,
+) {
+    fun rename(id: Long, name: String) {
+        val found = customers.findById(id)
+        this.customers.save(Customer(id, name))
+        customers.purge(name)
+        plains.findAll()
+        fake.findAll()
+    }
+
+    fun search(name: String): Int {
+        val repo: CustomerRepository = customers
+        val inferred = customers
+        inferred.deleteAll()
+        return repo.countByName(name)
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/test/kotlin/com/shop/service/CustomerServiceTest.kt",
+        r#"package com.shop.service
+
+import com.shop.repo.CustomerRepository
+
+class CustomerServiceTest(private val customers: CustomerRepository) {
+    fun cleanup() {
+        customers.deleteAll()
+    }
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/star/Star.kt",
+        r#"package com.shop.star
+
+import com.shop.model.Customer
+import org.springframework.data.repository.*
+
+interface StarRepository : CrudRepository<Customer, Long>
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/shadow/Shadow.kt",
+        r#"package com.shop.shadow
+
+import com.shop.model.Customer
+import org.springframework.data.repository.*
+
+interface CrudRepository<T, ID>
+
+interface ShadowRepository : CrudRepository<Customer, Long>
+"#,
+    );
+    // Kotlin precedence: a same-package declaration hides a star-imported
+    // entity or repository of the same name (Codex review on #2171).
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/hidden/Hidden.kt",
+        r#"package com.shop.hidden
+
+import com.shop.model.*
+import com.shop.repo.*
+import org.springframework.data.repository.CrudRepository
+
+interface HiddenRepository : CrudRepository<Customer, Long>
+
+class Caller(private val repo: CustomerRepository) {
+    fun list() = repo.findAll()
+}
+"#,
+    );
+    write(
+        dir.path(),
+        "src/main/kotlin/com/shop/hidden/Types.kt",
+        r#"package com.shop.hidden
+
+class Customer(val id: Long)
+
+class CustomerRepository {
+    fun findAll(): List<Customer> = emptyList()
+}
+"#,
+    );
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let customer = "data:local/demo@jpa:Customer";
+    let mut repository: Vec<(&str, &str)> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.props["framework"] == "spring-data")
+        .map(|edge| (edge.label.as_str(), edge.src.as_str()))
+        .collect();
+    repository.sort();
+    let referencing: Vec<&Edge> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "REFERENCES" && edge.props["relation"] == "repository")
+        .collect();
+    let mut bound: Vec<(&str, &str)> = referencing
+        .iter()
+        .map(|edge| {
+            assert_eq!(edge.dst, customer);
+            (
+                edge.src.rsplit('#').next().unwrap(),
+                edge.props["repository"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    bound.sort();
+    // The shadowed star import proves nothing and leaves no edge.
+    assert_eq!(
+        bound,
+        [
+            ("CustomerRepository", "JpaRepository"),
+            ("StarRepository", "CrudRepository"),
+        ],
+        "{repository:?}"
+    );
+
+    let mut accesses: Vec<(&str, &str, &str)> = out
+        .edges
+        .iter()
+        .filter(|edge| edge.props["framework"] == "spring-data" && edge.label != "REFERENCES")
+        .map(|edge| {
+            assert_eq!(edge.dst, customer);
+            (
+                edge.label.as_str(),
+                edge.src.rsplit('#').next().unwrap(),
+                edge.props["method"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    accesses.sort();
+    assert_eq!(
+        accesses,
+        [
+            ("READS", "CustomerService.rename", "findById"),
+            ("READS", "CustomerService.search", "countByName"),
+            ("WRITES", "CustomerService.rename", "save"),
+        ],
+        "{:?}",
+        out.edges
+            .iter()
+            .filter(|edge| edge.props["framework"] == "spring-data")
+            .collect::<Vec<_>>()
+    );
+
+    let mut gaps: Vec<&str> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap" && node.props["framework"] == "spring-data")
+        .map(|node| node.props["reason"].as_str().unwrap())
+        .collect();
+    gaps.sort();
+    // The obscured star proof fails closed to a Gap, as Room's do.
+    assert_eq!(
+        gaps,
+        [
+            "Spring Data repository entity `Customer` is not a recovered JPA entity",
+            "Spring Data repository entity `Customer` is not a recovered JPA entity",
+            "Spring Data repository entity `Plain` is not a recovered JPA entity",
+        ]
+    );
+}
