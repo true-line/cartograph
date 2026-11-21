@@ -1,0 +1,85 @@
+{
+  "_comment": "Thresholds for the monthly scale lanes (AC-1700, #1768), seeded from docs/showcases/scale.md, which was measured on an M4 laptop at a commit not on main. Endpoint floors are kept only where later work cannot have lowered them on purpose: SimpleLogin's 426 Flask routes (re-measured at v0.72.0), Kafka's 43 JAX-RS endpoints (#1264) and Kubernetes' 53; rea, Vendure and openmrs-core endpoint counts are not re-measured since that page and are left to the first run. Wall time (4x) and peak memory (3x) get wide ceilings, as the harness now also runs the knowledge phase, both exports and the briefings. The first scheduled run's metrics.json records the full baseline in a reviewed PR; until then the other metrics are reported, not tracked.",
+  "measured_at": {
+    "commit": "151a403b",
+    "version": "not recorded",
+    "platform": "darwin-arm64"
+  },
+  "metrics": {
+    "simplelogin.endpoints": {
+      "baseline": 426,
+      "direction": "min",
+      "tolerance": 0
+    },
+    "simplelogin.wall_seconds": {
+      "baseline": 58.0,
+      "direction": "max",
+      "tolerance": 3.0
+    },
+    "simplelogin.max_rss_bytes": {
+      "baseline": 1073741824,
+      "direction": "max",
+      "tolerance": 2.0
+    },
+    "rea.wall_seconds": {
+      "baseline": 298.5,
+      "direction": "max",
+      "tolerance": 3.0
+    },
+    "rea.max_rss_bytes": {
+      "baseline": 4198330532,
+      "direction": "max",
+      "tolerance": 2.0
+    },
+    "vendure.wall_seconds": {
+      "baseline": 18.0,
+      "direction": "max",
+      "tolerance": 3.0
+    },
+    "vendure.max_rss_bytes": {
+      "baseline": 1320702444,
+      "direction": "max",
+      "tolerance": 2.0
+    },
+    "openmrs-core.wall_seconds": {
+      "baseline": 8.95,
+      "direction": "max",
+      "tolerance": 3.0
+    },
+    "openmrs-core.max_rss_bytes": {
+      "baseline": 1374389535,
+      "direction": "max",
+      "tolerance": 2.0
+    },
+    "kafka.endpoints": {
+      "baseline": 43,
+      "direction": "min",
+      "tolerance": 0
+    },
+    "kafka.wall_seconds": {
+      "baseline": 70.35,
+      "direction": "max",
+      "tolerance": 3.0
+    },
+    "kafka.max_rss_bytes": {
+      "baseline": 3414499000,
+      "direction": "max",
+      "tolerance": 2.0
+    },
+    "kubernetes.endpoints": {
+      "baseline": 53,
+      "direction": "min",
+      "tolerance": 0
+    },
+    "kubernetes.wall_seconds": {
+      "baseline": 27.9,
+      "direction": "max",
+      "tolerance": 3.0
+    },
+    "kubernetes.max_rss_bytes": {
+      "baseline": 1954210120,
+      "direction": "max",
+      "tolerance": 2.0
+    }
+  }
+}

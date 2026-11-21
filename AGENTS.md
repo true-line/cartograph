@@ -185,9 +185,28 @@ The complete CI suite also requires native job ownership tests on Windows:
 the GitHub-hosted `windows-latest` runner, a native Windows host, never WSL.
 The repository is public, so every CI job runs on GitHub-hosted runners
 (`ubuntu-latest`, `windows-latest`); no job a pull request can start runs on a
-self-hosted runner, because fork PRs would execute on it. The one exception is
-macOS release packaging (`package.yml`), which runs on the owner's self-hosted
-Mac (`self-hosted, macOS, ARM64`) and has no pull-request trigger.
+self-hosted runner, because fork PRs would execute on it. The exceptions are
+macOS release packaging (`package.yml`) and the scheduled checks
+(`scheduled.yml`), which run on the organisation's self-hosted Macs
+(`self-hosted, macOS, ARM64`) and have no pull-request trigger.
+
+Which gates run where:
+
+| Gate | Linux (`ubuntu-latest`) | Windows (`windows-latest`) | macOS (self-hosted, `scheduled.yml`) |
+|---|---|---|---|
+| Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | — | — |
+| `cargo test` (every package; `app` in four shards) | every PR and merge | — | daily; not a PR gate |
+| Job ownership tests (`job-execution-tests --test ownership`) | every PR and merge (in the workspace run) | every PR and merge | daily (in the workspace run) |
+| Real-repository determinism (AC-0593, MT-1812-01) | — | — | daily, Cartograph at its pinned commit |
+| SimpleLogin showcase thresholds (AC-1700) | — | — | weekly, release build |
+| Scale showcase thresholds (AC-1700) | — | — | monthly or on demand |
+| Changelog versions are tagged (#1762) | daily (`scheduled.yml`) | — | — |
+
+A scheduled lane does not block a PR. It opens or updates one tracking issue
+named `Scheduled: …` when it fails and closes it when it passes again; its
+result also shows on the main commit it ran on. The Mac lanes share one
+concurrency group, so at most one of them builds at a time beside release
+packaging.
 The harness imports the production job modules and their existing tests without
 building Tauri. Local workspace tests run the same harness on the local platform;
 only a successful exact-SHA Windows lane establishes its Windows runtime result.

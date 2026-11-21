@@ -366,8 +366,10 @@ work the procedure verifies; `Later` means no open issue in R1–R4 schedules it
 
 ## MT-M10-04 — Local scale benchmark (AC-0423, T-0423)
 
-**Procedure: local only, never CI.** It reads pinned public repositories and
-never runs their code. Timing and memory are measurements, not gates.
+**Procedure: local, never a PR gate.** It reads pinned public repositories and
+never runs their code. Timing and memory are measurements here; the monthly
+scale lane of **Scheduled checks** runs the same script and compares its
+result with `bench/thresholds/scale.json` (AC-1700, MT-1768-01).
 
 1. On macOS or Linux with `git`, `sqlite3` and the Rust toolchain, run
    `node scripts/bench-ingest.mjs --work <new dir>` from a clean checkout.
@@ -1611,10 +1613,13 @@ the page describes, and before #1796 closes.
 
 ## MT-1812-01 — Re-ingest determinism on a real repository (AC-0593, T-0593)
 
-**Status: Not run under this procedure.** AC-0593; #1812. Run at each milestone
-boundary until the check runs in CI. One earlier run of the same test on the
-Cartograph tree at `b0a139c2` passed (32,502 nodes, 58,430 edges, 323 s in a
-debug build).
+**Status: Not run under this procedure.** AC-0593; #1812. Since #1812 the
+check runs daily in the scheduled macOS lane (`scheduled.yml`, "macOS Rust
+tests and determinism") against Cartograph at `b0a139c2`, and a failure opens
+the issue "Scheduled: macOS Rust tests or determinism failing". Run this
+procedure by hand for another repository, another commit or another machine.
+One earlier run of the same test on the Cartograph tree at `b0a139c2` passed
+(32,502 nodes, 58,430 edges, 323 s in a debug build).
 
 1. Check out the repository to compare at a fixed commit, with a clean work
    tree. Record the repository and the full commit id on the milestone's task
@@ -1703,3 +1708,26 @@ specified fact and role; it is not the acquisition menu position. Exclusion
 removes entries without renumbering selectors. Admission compares the complete
 fact/role/index tuple with an offered action. A changed index may name another
 explicitly offered range, but cannot redirect a removed entry by menu position.
+
+## MT-1768-01 — Read the scheduled showcase watch (AC-1700, T-1700)
+
+**Status: Not run under this procedure.** AC-1700; #1768. The weekly
+SimpleLogin lane and the monthly scale lane of **Scheduled checks** run
+themselves; this procedure is how a person reads and acts on them.
+
+1. Open the latest **Scheduled checks** run of the lane (Actions, or the
+   checks on the main commit it ran on). Its summary is the report: each
+   tracked metric with its value, baseline, limit and result, and the
+   Cartograph commit and version it measured. The `metrics.json` artifact
+   holds the same numbers.
+2. **Pass:** every threshold held. Where a value is better than its baseline,
+   a reviewed PR may raise the threshold in `bench/thresholds/<lane>.json`
+   and update the showcase page's numbers from the artifact, stating the
+   commit and version they were measured at.
+3. **Fail:** the lane opened or commented on the issue "Scheduled: SimpleLogin
+   showcase below its thresholds" (or the scale one). Find the change that
+   moved the metric. A regression is fixed; a deliberate change records new
+   thresholds, with the reason, in the PR that makes it. The issue closes
+   itself on the next passing run.
+4. A wall-time or memory miss on one run alone may be a busy Mac: re-run the
+   lane from **Run workflow** before treating it as a regression.

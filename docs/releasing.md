@@ -39,6 +39,39 @@ run **Version cut** manually. It requires the existing tag and redispatches the
 missing release. You may instead dispatch **Release** with that exact tag. Do
 not create, delete, or move a tag by hand.
 
+### Versions that were cut but never tagged (#1762)
+
+Every `## X.Y.Z` heading in `CHANGELOG.md` is a cut. The daily **Scheduled
+checks** lane "Changelog versions are tagged" (`node scripts/release-tags.mjs`)
+compares them with the `v*` tags. A version cut in the last three hours is
+still waiting for its tag; any other version without a tag fails the lane and
+opens or updates the issue "Scheduled: changelog versions without a release
+tag". The tag job also fails, instead of exiting quietly, when a cut commit
+still holds pending changesets.
+
+Seventeen versions (v0.15.4 to v0.69.0) were cut and never tagged. They are
+recorded as never released, with each one's cut commit and cause, in
+[`docs/release/untagged-versions.json`](release/untagged-versions.json):
+
+- **Changesets still pending at the cut (5):** v0.23.1, v0.27.0, v0.37.0,
+  v0.40.0, v0.44.0. A feature PR's changeset landed on main after the Version
+  packages branch was cut, the squash merge carried it, and the tag step
+  logged "nothing to tag" and passed.
+- **Before the tag job moved to the CI completion trigger (#1436) (9):**
+  v0.15.4, v0.16.0, v0.22.0, v0.33.0, v0.42.0, v0.43.0, v0.45.0, v0.49.0,
+  v0.50.0. The job polled CI for at most 70 minutes and was never retried
+  (#1378).
+- **After #1436, cause not recoverable (3):** v0.52.0, v0.53.1, v0.69.0. No
+  changesets were pending, and the run history for that period is no longer
+  kept; a non-success CI conclusion on the cut commit is the remaining refusal.
+
+They are not tagged retroactively: a tag would name a build that never passed
+release packaging, and tags are never moved. The next tagged version contains
+each one's changes. To record a new gap, find why its tag run refused, then
+either recover it with **Version cut** or add it to the record with its cause.
+The lane fails on a recorded version that has since been tagged, so the record
+only shrinks.
+
 After publication, verify the workflow and release:
 
 ```sh

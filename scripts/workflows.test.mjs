@@ -27,6 +27,10 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.doesNotMatch(workflow, /sleep 30/u);
   assert.doesNotMatch(workflow, /workflow_runs\[\].*\.name == "CI"/u);
   assert.match(workflow, /Manual recovery requires an existing \$tag tag/u);
+  // A cut with changesets still pending fails the tag job instead of exiting
+  // successfully untagged, as five versions did (#1762).
+  assert.match(workflow, /changesets still pending \(\$pending\); refusing to tag\. See docs\/releasing\.md\."\n\s+exit 1/u);
+  assert.doesNotMatch(workflow, /Changesets remain pending \(\$pending\); nothing to tag/u);
   assert.match(workflow, /commits\/\$cut_commit\/pulls/u);
   assert.match(workflow, /\.head\.ref == "changeset-release\/main"/u);
   assert.match(workflow, /git tag -a "\$TAG" "\$CUT_COMMIT"/u);
@@ -691,7 +695,7 @@ test('every job runs on GitHub-hosted runners except release packaging', () => {
     const hosted = /runs-on: (ubuntu|windows|macos)-latest$/u;
     const packaging = /runs-on: \[self-hosted, macOS, ARM64\]$/u;
     for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
-      if (name === 'package.yml' && packaging.test(line)) {
+      if ((name === 'package.yml' || name === 'scheduled.yml') && packaging.test(line)) {
         assert.doesNotMatch(triggers(workflow), /pull_request|issue_comment/u, `${name}: self-hosted with a PR trigger`);
         continue;
       }
@@ -760,4 +764,49 @@ test('the privacy guard keeps its terms in a secret and never runs PR code with 
   // A push to main also starts CI; one shared group would let the skipped
   // workflow_run cancel the push scan.
   assert.match(workflow, /group: privacy-guard-\$\{\{ github\.event_name \}\}-/u);
+});
+
+test('scheduled real-repository lanes stay off pull requests and share one Mac slot (#1768, #1770, #1812, #1762)', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/scheduled.yml'), 'utf8');
+  const on = triggers(workflow);
+  assert.doesNotMatch(on, /pull_request|issue_comment|push:|workflow_run/u);
+  assert.match(on, /^ {2}schedule:\n(?: {4}#.*\n| {4}- cron: '[^']+'\n)+/mu);
+  assert.match(on, /^ {2}workflow_dispatch:/mu);
+  // No repository secret: the self-hosted Macs never see one, and the issue
+  // writes use the workflow's own token.
+  assert.doesNotMatch(workflow, /secrets\./u);
+  const jobs = Object.fromEntries(
+    workflow.split(/^jobs:\n/mu)[1].split(/\n(?= {2}[a-z][\w-]*:\n)/u).map((block) => [block.match(/^ {2}([\w-]+):/u)[1], block]),
+  );
+  assert.deepEqual(Object.keys(jobs), ['policy', 'release-tags', 'macos-tests', 'simplelogin-showcase', 'scale-showcase']);
+  for (const name of ['macos-tests', 'simplelogin-showcase', 'scale-showcase']) {
+    const job = jobs[name];
+    assert.match(job, /^ {4}runs-on: \[self-hosted, macOS, ARM64\]$/mu, name);
+    assert.match(job, /^ {4}concurrency:\n {6}group: scheduled-macos\n {6}cancel-in-progress: false$/mu, name);
+    assert.match(job, /^ {4}needs: policy$/mu, name);
+    // The build stays incremental between runs and bounded on disk.
+    assert.ok(job.includes('dir="$HOME/.cartograph-scheduled/target"'), name);
+    assert.ok(job.includes('-gt 62914560 ]; then rm -rf "$dir"; fi'), name);
+  }
+  assert.match(jobs['release-tags'], /^ {4}runs-on: ubuntu-latest$/mu);
+  // Every lane reports through one tracking issue per lane.
+  for (const [name, title] of [
+    ['release-tags', 'Scheduled: changelog versions without a release tag'],
+    ['macos-tests', 'Scheduled: macOS Rust tests or determinism failing'],
+    ['simplelogin-showcase', 'Scheduled: SimpleLogin showcase below its thresholds'],
+    ['scale-showcase', 'Scheduled: scale showcase below its thresholds'],
+  ]) {
+    assert.ok(jobs[name].includes(`node scripts/scheduled-issue.mjs "$mode" --title '${title}'`), name);
+    assert.match(jobs[name], /^ {6}issues: write$/mu, name);
+  }
+  // #1770: the whole workspace on macOS, app in four processes (#1621).
+  const mac = jobs['macos-tests'];
+  assert.ok(mac.includes('cargo test --locked --workspace --exclude app'));
+  assert.ok(mac.includes('node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --bin app'));
+  // #1812: the ignored determinism test, exactly, at the pinned commit.
+  assert.match(mac, /DETERMINISM_COMMIT: [0-9a-f]{40}\n/u);
+  assert.ok(mac.includes('-- --ignored --exact \\\n            registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash'));
+  assert.ok(jobs['simplelogin-showcase'].includes('node scripts/showcase-watch.mjs simplelogin'));
+  assert.ok(jobs['scale-showcase'].includes('node scripts/showcase-watch.mjs scale'));
+  assert.ok(jobs['release-tags'].includes('node scripts/release-tags.mjs --window-hours 3'));
 });

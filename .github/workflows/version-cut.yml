@@ -290,11 +290,16 @@ jobs:
             exit 0
           fi
 
+          # A cut whose tree still holds changesets is refused, and loudly: five
+          # versions went untagged when a feature PR's changeset landed on
+          # main after the Version packages branch was cut and this step
+          # exited successfully (#1762). Recovery: record the version as
+          # never released in docs/release/untagged-versions.json; the next
+          # cut releases its changes.
           pending=$(node scripts/release-version.mjs pending)
           if [ -n "$pending" ]; then
-            echo "Changesets remain pending ($pending); nothing to tag."
-            echo 'kind=none' >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::$tag was cut at $cut_commit with changesets still pending ($pending); refusing to tag. See docs/releasing.md."
+            exit 1
           fi
 
           # Tag only on the exact cut commit's own successful CI run; never
