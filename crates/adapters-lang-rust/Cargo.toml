@@ -13,6 +13,7 @@ workspace = true
 adapters-fw = { workspace = true }
 core-graph = { workspace = true }
 core-prov = { workspace = true }
+core-redact = { workspace = true }
 source-walk = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
