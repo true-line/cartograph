@@ -385,10 +385,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The app unit-test binary runs in the Rust app tests shards and the
-      # agents package in Rust agents tests (#1924); `app` is a binary-only
-      # package, so excluding it drops nothing else.
+      # agents and spec packages in Rust agents & spec tests (#1924); `app` is
+      # a binary-only package, so excluding it drops nothing else.
       - name: Test
-        run: cargo test --workspace --exclude app --exclude agents
+        run: cargo test --workspace --exclude app --exclude agents --exclude spec
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
@@ -636,13 +636,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: '"$RUSTC_WORKSPACE_WRAPPER" --show-stats'
 
-  # The agents package's test binary is the longest compile left in the Rust
-  # job (about 3.5 minutes, after its library) and a test binary is never
-  # served by sccache, so it builds in parallel here (#1924). The Rust job
-  # excludes exactly this package; `cargo test -p agents` runs every target
-  # of it: unit, integration and doc tests.
-  rust-agents-tests:
-    name: Rust agents tests
+  # The agents and spec test binaries were the two longest compiles in the
+  # Rust job (about 3.5 minutes each) and a test binary is never served by
+  # sccache, so they build in parallel here (#1924). The Rust job excludes
+  # exactly these packages; `cargo test -p agents -p spec` runs every target
+  # of both: unit, integration and doc tests.
+  rust-heavy-tests:
+    name: Rust agents & spec tests
     needs: [policy, merge-evidence, preflight-evidence, ci-image]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
@@ -731,7 +731,7 @@ jobs:
         run: mkdir -p ui/dist
 
       - name: Test
-        run: cargo test -p agents
+        run: cargo test -p agents -p spec
 
       - name: sccache statistics
         if: ${{ !cancelled() }}
@@ -978,7 +978,7 @@ jobs:
 
   complete:
     name: Complete suite
-    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, rust-agents-tests, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
+    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, rust-heavy-tests, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
@@ -992,7 +992,7 @@ jobs:
           CI_IMAGE: ${{ needs.ci-image.result }}
           RUST: ${{ needs.rust.result }}
           RUST_APP_TESTS: ${{ needs.rust-app-tests.result }}
-          RUST_AGENTS_TESTS: ${{ needs.rust-agents-tests.result }}
+          RUST_HEAVY_TESTS: ${{ needs.rust-heavy-tests.result }}
           WINDOWS_JOB_OWNERSHIP: ${{ needs.windows-job-ownership.result }}
           COMPLIANCE: ${{ needs.compliance.result }}
           ZIZMOR: ${{ needs.zizmor.result }}
@@ -1004,7 +1004,7 @@ jobs:
           test "$CI_IMAGE" = success
           test "$RUST" = success
           test "$RUST_APP_TESTS" = success
-          test "$RUST_AGENTS_TESTS" = success
+          test "$RUST_HEAVY_TESTS" = success
           test "$WINDOWS_JOB_OWNERSHIP" = success
           test "$COMPLIANCE" = success
           test "$ZIZMOR" = success
