@@ -381,7 +381,7 @@ impl ReadSession {
         let source_revisions = crate::source_revisions_of(&base.graph.0);
         let curated = {
             let content_hash = &graph_content_hash;
-            let overlay = curated::overlay_nodes(capabilities.iter().chain(&actors));
+            let overlay = curated::overlay_nodes(&base, &capabilities, &actors, &rejected_hashes);
             CuratedRead::of(curated::project(
                 &review,
                 &curated::Snapshot {

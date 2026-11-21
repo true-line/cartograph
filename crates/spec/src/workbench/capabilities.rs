@@ -84,6 +84,11 @@ impl<'a> KnowledgeStories<'a> {
     pub fn filtered(&self) -> usize {
         self.0.filtered
     }
+    /// The derived Capabilities and Actors the stories kept, which the
+    /// export prints and a draft may cite (#2040).
+    pub fn included_nodes(&self) -> impl Iterator<Item = &'a Node> + '_ {
+        self.0.included.iter().map(|story| story.node)
+    }
 }
 
 /// Validate overlay Capability candidates and Actors against `base` under one

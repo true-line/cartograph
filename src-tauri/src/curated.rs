@@ -834,17 +834,42 @@ pub(crate) fn project(
     })
 }
 
-/// The nodes of the overlay `facts`, for [`Snapshot::overlay`].
+/// The overlay Capabilities and Actors a `best-effort` export of `base`
+/// prints, for [`Snapshot::overlay`] (#2040): the knowledge stories
+/// validated as the export validates them, so a story the export withholds
+/// (it, or a fact it rests on, was rejected) resolves no draft. A refused
+/// overlay resolves none.
 pub(crate) fn overlay_nodes<'a>(
-    facts: impl IntoIterator<Item = &'a core_graph::overlay::OverlayFact>,
+    base: &'a core_graph::RevisionedSnapshot,
+    capabilities: &'a [core_graph::overlay::OverlayFact],
+    actors: &'a [core_graph::overlay::OverlayFact],
+    rejected: &BTreeSet<String>,
 ) -> Vec<&'a Node> {
-    facts
-        .into_iter()
-        .filter_map(|fact| match &fact.item {
-            core_graph::overlay::OverlayItem::Node(node) => Some(node),
+    let Some(candidates) = capabilities
+        .iter()
+        .map(|fact| match &fact.item {
+            core_graph::overlay::OverlayItem::Node(capability) => Some(spec::CapabilityStory {
+                capability,
+                cites: &fact.cites,
+            }),
             core_graph::overlay::OverlayItem::Edge(_) => None,
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    if candidates.is_empty() && actors.is_empty() {
+        return Vec::new();
+    }
+    spec::validate_knowledge_stories(
+        base,
+        &candidates,
+        actors,
+        spec::ExportMode::BestEffort,
+        rejected,
+    )
+    .map(|stories| stories.included_nodes().collect())
+    .unwrap_or_default()
 }
 
 /// The snapshot with its inventories and the store revision of the same
