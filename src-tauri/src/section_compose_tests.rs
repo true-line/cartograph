@@ -204,3 +204,50 @@ fn a_reply_that_is_not_the_schema_stages_nothing() {
     .unwrap();
     assert_eq!(decoded.err(), Some("reply_not_the_schema"));
 }
+
+/// AC-0970 (T-0970): the gated workflow drafts §1.5 only, and only on a
+/// local provider.
+#[test]
+fn a_gated_composition_runs_on_section_1_5_and_a_local_provider_only() {
+    let (_dir, state) = state();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let provider = Scripted {
+        reply: reply(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let continue_ = || CallDirective::Continue;
+    assert_eq!(
+        compose_gated(&state, &provider, &prepared, &continue_, 1),
+        Err("gated_composition_section_unsupported".into())
+    );
+    assert!(provider.prompts.lock().unwrap().is_empty());
+
+    struct Cloud;
+    impl LlmProvider for Cloud {
+        fn id(&self) -> &str {
+            "cloud"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Cloud
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let mut model = HostModel {
+        state: &state,
+        provider: &Cloud,
+        check: &continue_,
+    };
+    assert_eq!(
+        model.complete(&prepared.action),
+        Err("gated_composition_local_only".into())
+    );
+}
