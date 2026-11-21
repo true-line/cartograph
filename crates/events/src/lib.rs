@@ -235,8 +235,7 @@ fn secret_reason(key: &str, value: &str) -> Option<&'static str> {
     if url_password(value) {
         return Some("URL with a password");
     }
-    let credential_key = core_redact::is_sensitive_name(key)
-        || !core_redact::recognized_secrets(&format!("{key}=\"{value}\"")).is_empty();
+    let credential_key = core_redact::is_sensitive_name(key) || credential_suffix(key);
     if credential_key && !placeholder(value) {
         return Some("value under a credential key");
     }
@@ -256,26 +255,54 @@ fn url_password(value: &str) -> bool {
     })
 }
 
-/// Whether a credential value is an obvious template placeholder rather
+/// Whether `key` ends in a credential word (`DB_PASSWORD`, `APP_SECRET`,
+/// `GITHUB_TOKEN`, `STRIPE_API_KEY`), whatever the value's length.
+fn credential_suffix(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "api-key",
+        "private_key",
+        "secret_key",
+        "access_key",
+        "credentials",
+    ]
+    .iter()
+    .any(|word| lower.ends_with(word))
+}
+
+/// Whether a credential value is an explicit template placeholder rather
 /// than a secret: a reference (`${VAR}`, `<your-key>`), one repeated
-/// character (`xxxx`), or a word templates use for "fill this in".
+/// character (`xxxx`), a whole placeholder word (`changeme`), or a
+/// `your-...` / `your_...` fill-in. A value merely containing such a word
+/// (`mydummyPass!42`) is not one.
 fn placeholder(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     (value.starts_with("${") && value.ends_with('}'))
         || (value.starts_with('<') && value.ends_with('>'))
         || value.chars().all(|c| value.starts_with(c))
+        || lower.starts_with("your-")
+        || lower.starts_with("your_")
         || [
-            "change",
+            "changeme",
+            "change-me",
+            "change_me",
             "example",
             "placeholder",
-            "your",
-            "replace",
+            "replaceme",
+            "replace-me",
+            "replace_me",
             "todo",
             "dummy",
             "fixme",
         ]
-        .iter()
-        .any(|word| lower.contains(word))
+        .contains(&lower.as_str())
 }
 
 fn prov(

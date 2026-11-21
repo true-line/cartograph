@@ -243,7 +243,11 @@ fn env_file_secrets_refuse_the_ingest_by_file_line_and_key() {
         ),
     )
     .unwrap();
-    std::fs::write(dir.path().join(".env.local"), "# c\nAPI_KEY=k-12345678\n").unwrap();
+    std::fs::write(
+        dir.path().join(".env.local"),
+        "# c\nAPI_KEY=k-12345678\nDB_PASSWORD=abc\nAPP_SECRET=mydummyPass!42\n",
+    )
+    .unwrap();
 
     let error = ConfigIndex::from_dir(dir.path()).unwrap_err();
     let StitchError::SecretsInEnvFiles(found) = &error else {
@@ -261,10 +265,22 @@ fn env_file_secrets_refuse_the_ingest_by_file_line_and_key() {
             (".env", 4, "SIGNING", "recognized secret pattern"),
             (".env", 5, "SESSION_BLOB", "token-shaped value"),
             (".env.local", 2, "API_KEY", "value under a credential key"),
+            (
+                ".env.local",
+                3,
+                "DB_PASSWORD",
+                "value under a credential key"
+            ),
+            (
+                ".env.local",
+                4,
+                "APP_SECRET",
+                "value under a credential key"
+            ),
         ]
     );
     let message = error.to_string();
-    assert!(message.starts_with("ingest refused: 5 env-file values look like secrets."));
+    assert!(message.starts_with("ingest refused: 7 env-file values look like secrets."));
     assert!(message.contains("- .env:3 DB_PASSWORD (value under a credential key)"));
     assert!(message.contains("To proceed: remove these values"));
     for value in [
