@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Job } from '../store';
+import { agentWorkOf } from '../agentPool';
 import { stageLabel } from '../stageLabels';
 import { hasRecordedExecution, isRecoveryJob } from '../jobPresentation';
 
@@ -125,6 +126,9 @@ export function JobsSurface({
             const unknown = !hasRecordedExecution(job);
             const investigation = job.investigation_id;
             const legacyRetry = (unknown || job.kind.startsWith('ingest:')) && action?.kind === 'retry';
+            // AC-1709: the host retries no agent job (topic expert question,
+            // section draft, gap escalation); it is started again where it was asked.
+            const agentRetry = !investigation && agentWorkOf(job) !== null && action?.kind === 'retry';
             return (
               <li key={job.id} className={`job-row job-${job.status}`}>
                 <span
@@ -172,7 +176,7 @@ export function JobsSurface({
                       <div className="job-progress-bar" style={{ width: `${job.progress}%` }} />
                     </div>
                   )}
-                  {job.status === 'failed' && job.error && (
+                  {(job.status === 'failed' || job.status === 'cancelled') && job.error && (
                     <p className="job-error">{job.error}</p>
                   )}
                   {job.status === 'done' && (job.artifacts?.length ?? 0) > 0 && (
@@ -201,7 +205,7 @@ export function JobsSurface({
                       View live
                     </button>
                   )}
-                {action && (!investigation || action.kind === 'cancel') && (
+                {action && !agentRetry && (!investigation || action.kind === 'cancel') && (
                   <button
                     type="button"
                     className="job-action"

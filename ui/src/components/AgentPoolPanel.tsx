@@ -71,7 +71,7 @@ function WorkRow({ item, usage, onViewInvestigation }: {
           {' · updated '}{job.updated_at}
         </p>
         {usage && <p className="muted" data-testid={`agent-pool-usage-${job.id}`}>{usageLine(usage)}</p>}
-        {job.status === 'failed' && job.error && <p className="job-error">{job.error}</p>}
+        {(job.status === 'failed' || job.status === 'cancelled') && job.error && <p className="job-error">{job.error}</p>}
       </div>
       {investigation && onViewInvestigation && (
         <button type="button" className="secondary-button" onClick={() => onViewInvestigation(investigation)}>
