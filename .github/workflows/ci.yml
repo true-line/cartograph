@@ -586,10 +586,12 @@ jobs:
 
       # The tests must remove every temporary directory they create (#1307).
       # A fixture that drops its directory before the store holding state.db
-      # leaks it on Windows. This reports the count and what each left behind;
-      # it fails the job again once the remaining holders are fixed (#1307).
-      # runner.temp is emptied after the job either way.
-      - name: Report leaked test temporary directories
+      # leaks it on Windows (#1307), so the job fails on any leak and names
+      # what each left behind. CI tests a PR's head commit, so a branch that
+      # predates the fixture fix (#2289) still leaks; it is only reported
+      # until the branch merges main. runner.temp is emptied after the job
+      # either way.
+      - name: Check that the tests removed their temporary directories
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
@@ -597,6 +599,12 @@ jobs:
           "Leaked test temporary directories: $($leaked.Count)"
           $leaked | Select-Object -First 20 | ForEach-Object {
             "$($_.Name): $((Get-ChildItem -Force -Name -Path $_.FullName) -join ', ')"
+          }
+          $fixed = Select-String -Quiet -SimpleMatch -Pattern 'Dropped last: Windows cannot remove it' -Path src-tauri/src/jobs/investigations/completion_tests.rs
+          if ($leaked.Count -gt 0 -and -not $fixed) {
+            "This branch predates the #1307 fixture fix; merge main to enforce the check."
+          } elseif ($leaked.Count -gt 0) {
+            throw "The tests left $($leaked.Count) temporary directories behind (#1307)"
           }
 
   # License compliance + supply-chain gate (#222). This remains a complete-
