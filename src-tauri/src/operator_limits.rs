@@ -54,6 +54,11 @@ pub const PYTHON_ALEMBIC_MAX_REVISIONS: &str = "python_alembic_max_revisions";
 pub const PYTHON_ALEMBIC_MAX_FILE_MIB: &str = "python_alembic_max_file_mib";
 pub const PYTHON_LOCKFILE_MAX_MIB: &str = "python_lockfile_max_mib";
 
+/// Rows and vector MiB one semantic preview's embedding operation may hold
+/// (AC-1807).
+pub const SEMANTIC_OPERATION_MAX_ROWS: &str = "semantic_operation_max_rows";
+pub const SEMANTIC_OPERATION_MAX_VECTOR_MIB: &str = "semantic_operation_max_vector_mib";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -192,6 +197,22 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: adapters_lang_python::PythonLimits::HARD_MAX_LOCKFILE_BYTES / MIB,
         advanced: true,
         description: "MiB one root lockfile may hold. A larger lockfile is not read, so the pins it may hold are recorded as unchecked.",
+    },
+    LimitSpec {
+        key: SEMANTIC_OPERATION_MAX_ROWS,
+        default: semantic::embedding_cache::MAX_ROWS as u64,
+        min: semantic::embedding_cache::OperationLimits::MIN_ROWS as u64,
+        max: semantic::embedding_cache::MAX_ROWS as u64,
+        advanced: true,
+        description: "Texts one semantic preview may embed. A larger plan fails before any vector is kept, instead of using more memory.",
+    },
+    LimitSpec {
+        key: SEMANTIC_OPERATION_MAX_VECTOR_MIB,
+        default: (semantic::embedding_cache::MAX_VECTOR_BYTES as u64) / MIB,
+        min: (semantic::embedding_cache::OperationLimits::MIN_VECTOR_BYTES as u64) / MIB,
+        max: (semantic::embedding_cache::MAX_VECTOR_BYTES as u64) / MIB,
+        advanced: true,
+        description: "MiB of vectors one semantic preview may hold. The pass peaks near twice this in memory; a plan past it fails instead.",
     },
 ];
 
@@ -492,6 +513,23 @@ mod tests {
         assert!(at(|key| key.max).is_some());
         assert!(at(|key| key.max + 1).is_none());
         assert!(revisions.advanced && file.advanced && lock.advanced);
+    }
+
+    // AC-1807 / #1653: the semantic keys default to the cache's shipped
+    // bounds and can only lower them.
+    #[test]
+    fn semantic_keys_default_to_the_cache_bounds_and_only_lower_them() {
+        use semantic::embedding_cache::OperationLimits;
+        let rows = spec(SEMANTIC_OPERATION_MAX_ROWS).unwrap();
+        let mib = spec(SEMANTIC_OPERATION_MAX_VECTOR_MIB).unwrap();
+        let at = |pick: fn(&LimitSpec) -> u64| {
+            OperationLimits::within(pick(rows) as usize, (pick(mib) * MIB) as usize)
+        };
+        assert_eq!(at(|key| key.default), Some(OperationLimits::default()));
+        assert_eq!((rows.default, mib.default), (rows.max, mib.max));
+        assert!(at(|key| key.min).is_some());
+        assert!(at(|key| key.max + 1).is_none());
+        assert!(rows.advanced && mib.advanced);
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value
