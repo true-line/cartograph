@@ -184,6 +184,30 @@ impl JobStore {
         self.investigation_history_filtered(conversation_id, None, false, cursor)
     }
 
+    /// The saved specialist, provider mode and status of every in-flight
+    /// investigation, read through the active selection for the agent roster
+    /// (AC-1408). `None` when more than `max_pages` pages are in flight.
+    pub(crate) fn active_investigation_work(
+        &self,
+        max_pages: usize,
+    ) -> Result<Option<Vec<agents::roster::AgentWork>>, InvestigationStoreError> {
+        let mut work = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..max_pages {
+            let page = self.investigation_history_selection(None, true, cursor.as_deref())?;
+            work.extend(
+                page.items
+                    .iter()
+                    .map(|item| (item.specialist_id, item.provider_mode, item.status)),
+            );
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(Some(work)),
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn search_investigation_history(
         &self,
         query: &str,

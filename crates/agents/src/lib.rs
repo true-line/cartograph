@@ -30,6 +30,7 @@ pub mod finding_curation;
 pub mod gated_compose;
 pub mod investigation;
 pub mod prepared;
+pub mod roster;
 pub mod section_change;
 pub mod section_compose;
 pub mod section_draft;

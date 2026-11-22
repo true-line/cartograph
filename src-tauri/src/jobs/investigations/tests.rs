@@ -3185,3 +3185,56 @@ fn finish_feedback_witness_absence_preserves_response_wire() {
     assert!(decoded.finish_feedback_witness.is_none());
     assert_eq!(decoded, value);
 }
+
+#[test]
+fn agent_roster_counts_only_in_flight_investigations_per_agent() {
+    // AC-1408: the roster reads the active selection; a cancelled run leaves
+    // its agent idle, a queued one shows its agent running on its mode.
+    let mut fixture = Fixture::new();
+    let queued = fixture
+        .store
+        .start_investigation(
+            &request("roster-queued", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+    let cancelled = fixture
+        .store
+        .start_investigation(
+            &request("roster-cancelled", InvestigationProviderMode::Local),
+            Some(&provider(InvestigationProviderMode::Local)),
+        )
+        .unwrap()
+        .detail
+        .summary;
+    fixture
+        .store
+        .cancel_investigation(&cancelled.investigation_id)
+        .unwrap();
+
+    let work = fixture.store.active_investigation_work(4).unwrap().unwrap();
+    assert_eq!(
+        work,
+        [(
+            queued.specialist_id,
+            InvestigationProviderMode::Local,
+            InvestigationStatus::Queued
+        )]
+    );
+    assert_eq!(fixture.store.active_investigation_work(0).unwrap(), None);
+    let roster = agents::roster::roster_status(agents::roster::roster().unwrap(), &work);
+    let analyst = roster
+        .iter()
+        .find(|row| row.agent.agent == "agt-analyst")
+        .unwrap();
+    assert_eq!(analyst.state, agents::roster::AgentState::Running);
+    assert_eq!((analyst.local_active, analyst.cloud_active), (1, 0));
+    assert!(
+        roster
+            .iter()
+            .filter(|row| row.agent.agent != "agt-analyst")
+            .all(|row| row.state == agents::roster::AgentState::Idle)
+    );
+}

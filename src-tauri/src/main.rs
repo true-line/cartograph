@@ -8564,6 +8564,7 @@ fn main() {
             manifest_draft::preview_system_manifest,
             manifest_draft::save_system_manifest,
             investigations::commands::investigation_specialists,
+            investigations::commands::list_agents,
             investigations::commands::start_investigation,
             investigations::section_drafts::section_redraft_question,
             investigations::section_drafts::section_draft_question,
