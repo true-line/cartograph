@@ -1,6 +1,6 @@
 import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFamilies';
 import { SPECIALIST_TABLE } from '../generated/specialistTable';
-import { ROLE_LABELS, currentVersion, offeredRoles, offeredVersions, profileFor, roleOf } from '../specialistRoles';
+import { ROLE_LABELS, currentVersion, isRetired, offeredRoles, offeredVersions, profileFor, roleOf } from '../specialistRoles';
 import { useRef, useState } from 'react';
 import { RunLimitFooter } from './RunLimitFooter';
 import type { InvestigationState } from '../investigationStore';
@@ -142,7 +142,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
         })}</div>
         {(state.catalog || state.pendingStart) && <div className="investigation-version">
           <label>Specialist version<select value={specialistId} onChange={(event) => chooseSpecialist(event.target.value as SpecialistId)}>
-            {!selectedSpecialistAvailable && <option value={specialistId}>{specialistId} · saved selection, unavailable for new starts</option>}
+            {!selectedSpecialistAvailable && <option value={specialistId}>{specialistId} · {isRetired(specialistId) ? 'retired' : 'saved selection'}, unavailable for new starts</option>}
             {roles.map((role) => <optgroup key={role} label={ROLE_LABELS[role]}>
               {offeredVersions(state.catalog, role).map((item) => <option key={item.id} value={item.id}>
                 {item.id}{SPECIALIST_TABLE[item.id].availability === 'current' ? ' · current' : ''}{isExpandedSpecialist(item.id) ? ' · Expanded budget' : ''}</option>)}
@@ -297,7 +297,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
         <ul>{state.history.map((item) => <li key={item.investigation_id}>
           <button type="button" className={`investigation-history-item${item.investigation_id === state.selectedId ? ' selected' : ''}`}
             aria-pressed={item.investigation_id === state.selectedId} onClick={() => void state.open(item.investigation_id)}>
-            <strong>{item.question}</strong>{state.historyAnswerMatchIds.includes(item.investigation_id) && <span>Answer match</span>}{state.historyNameMatchIds.includes(item.investigation_id) && <span>Name match</span>}<span>{item.specialist_id}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
+            <strong>{item.question}</strong>{state.historyAnswerMatchIds.includes(item.investigation_id) && <span>Answer match</span>}{state.historyNameMatchIds.includes(item.investigation_id) && <span>Name match</span>}<span>{item.specialist_id}{isRetired(item.specialist_id) && ' · retired'}</span><span>{INVESTIGATION_STATUS[item.status]}</span>
             {state.historyActiveOnly && <><span>Provider: {item.provider_mode}</span><time>Updated {item.updated_at}</time></>}
             {item.schema_version === 3 && <span>Coverage-qualified · saved basis shown on open</span>}
             <span>Source inspections: {item.inspection_status === 'pending' ? 'Awaiting assessment' : item.inspection_status === 'supplied'
@@ -317,6 +317,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
               cancellation does not immediately terminate remote inference. A valid completed answer can still be retained.</p>}
             {summary.status === 'outcome_unknown' && <p className="investigation-notice">The previous model outcome is unknown. This task will not be replayed automatically.</p>}
             {summary.status === 'interrupted' && <p className="investigation-notice">The original worker input is no longer available. A follow-up uses a new task and basis.</p>}
+            <p className="muted">Specialist: <code>{summary.specialist_id}</code>{isRetired(summary.specialist_id) &&
+              ' · retired: this run reopens read-only, and a follow-up needs a version offered today'}</p>
             <p className="muted">Scope: {summary.scope.type === 'all' ? 'Recovered system' : `${summary.scope.anchor} · ${summary.scope.hops} hop(s)`}</p>
             <p className="muted">Prepared graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
             <div className="investigation-actions">
