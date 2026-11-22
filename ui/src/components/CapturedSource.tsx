@@ -1,4 +1,4 @@
-import type { CapturedDescription, CapturedText } from '../primarySourceStore';
+import type { CapturedDescription, CapturedText, ObservedDescription } from '../primarySourceStore';
 
 export interface CapturedSourceProps {
   description: CapturedDescription | null;
@@ -9,10 +9,15 @@ export interface CapturedSourceProps {
   onRequire?: (index: number) => void;
   requirementBusy?: boolean;
   requirementError?: string | null;
+  observed?: ObservedDescription | null;
+  observedText?: CapturedText | null;
+  observedError?: string | null;
+  onReadObserved?: (index: number) => void;
 }
 
 /** Captured source has its own identity and never replaces a live source window. */
-export function CapturedSource({ description, text, loading, error, onRead, onRequire, requirementBusy, requirementError }: CapturedSourceProps) {
+export function CapturedSource({ description, text, loading, error, onRead, onRequire, requirementBusy, requirementError,
+  observed, observedText, observedError, onReadObserved }: CapturedSourceProps) {
   const [chosen, setChosen] = useState<{ receipt: string; index: number } | null>(null);
   const rangeIndex = chosen?.receipt === description?.receipt_id ? chosen?.index : undefined;
   return (
@@ -55,7 +60,38 @@ export function CapturedSource({ description, text, loading, error, onRead, onRe
         <p>{text.path} · bytes {text.byte_start}–{text.byte_end}</p>
         <pre data-testid="captured-source-text">{text.text}</pre>
       </>}
+      {observed && <ObservedIn observed={observed} text={observedText ?? null} error={observedError ?? null}
+        onRead={onReadObserved} />}
+      {!observed && observedError && <p role="status">{observedError}</p>}
     </section>
   );
 }
 import { useState } from 'react';
+
+/**
+ * The captured observation input (state, export or trace) that observed the
+ * fact. It is cited beside the declaration, never in its place (ADR-0079).
+ */
+function ObservedIn({ observed, text, error, onRead }: {
+  observed: ObservedDescription; text: CapturedText | null; error: string | null; onRead?: (index: number) => void;
+}) {
+  return (
+    <div className="captured-source-observed" aria-label="Observed in">
+      <h4>Observed in</h4>
+      <p className="muted">A captured observation input, not a declaration. It does not replace the declaring source.</p>
+      <ul>
+        {observed.ranges.map((range) => <li key={range.index}>
+          <button type="button" className="secondary-button" disabled={!onRead} onClick={() => onRead?.(range.index)}>
+            {range.path} · bytes {range.byte_start}–{range.byte_end}
+          </button>
+        </li>)}
+      </ul>
+      {error && <p role="status">{error}</p>}
+      {text && text.receipt_id === observed.receipt_id && <>
+        <p>{text.path} · bytes {text.byte_start}–{text.byte_end}</p>
+        <pre data-testid="observed-source-text">{text.text}</pre>
+      </>}
+      <details><summary>Observation reference</summary><code>{observed.receipt_id}</code></details>
+    </div>
+  );
+}

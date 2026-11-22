@@ -24,6 +24,19 @@ export interface CapturedDescription {
   input_closure: 'input_closure_not_established';
 }
 
+/** A fact's observed binding: spans of a captured observation input (ADR-0079). */
+export interface ObservedDescription {
+  fact: FactKey;
+  receipt_id: string;
+  emitted_fact_digest: string;
+  source_id: string;
+  registered_source_id: string;
+  repo_key: string;
+  ranges: { index: number; path: string; byte_start: number; byte_end: number }[];
+  scope: 'observed_input_only';
+  input_closure: 'input_closure_not_established';
+}
+
 export interface CapturedText {
   receipt_id: string;
   range_index: number;
@@ -59,12 +72,17 @@ interface PrimarySourceState {
   description: CapturedDescription | null;
   text: CapturedText | null;
   rangeIndex: number | null;
+  observed: ObservedDescription | null;
+  observedText: CapturedText | null;
+  observedRangeIndex: number | null;
+  observedError: string | null;
   loading: boolean;
   error: string | null;
   requirementBusy: boolean;
   requirementError: string | null;
   inspect: (node: GraphNode, fact?: FactKey) => Promise<void>;
   readRange: (index: number) => Promise<void>;
+  readObservedRange: (index: number) => Promise<void>;
   resolveInspectionTarget: (index: number) => Promise<InvestigationInspectionTarget | null>;
   clear: () => void;
   sources: RetainedSource[];
@@ -80,25 +98,39 @@ interface PrimarySourceState {
 }
 
 const INVENTORY_ERROR = 'Retained-source inventory is unavailable.';
+const NO_OBSERVED = { observed: null, observedText: null, observedRangeIndex: null, observedError: null } as const;
 let inventoryRequest = 0;
 
 export const usePrimarySourceStore = create<PrimarySourceState>((set, get) => ({
-  selection: 0, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, loading: false, error: null,
+  selection: 0, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, ...NO_OBSERVED,
+  loading: false, error: null,
   requirementBusy: false, requirementError: null,
   sources: [], preview: null, retentionSelection: 0, retentionBusy: false,
   retentionError: null, retentionMessage: null,
   inspect: async (node, fact = { kind: 'node', id: node.id }) => {
     const selection = get().selection + 1;
-    set({ selection, subject: node, subjectFact: fact, description: null, text: null, rangeIndex: null, loading: true, error: null,
-      requirementBusy: false, requirementError: null });
+    set({ selection, subject: node, subjectFact: fact, description: null, text: null, rangeIndex: null, ...NO_OBSERVED,
+      loading: true, error: null, requirementBusy: false, requirementError: null });
+    const expected = {
+      fact,
+      expectedNode: fact.kind === 'node' ? node : null,
+      expectedEdge: fact.kind === 'edge' ? {
+        src: fact.source, dst: fact.destination, label: fact.label, props: node.props,
+      } : null,
+    };
+    // The observed binding is independent of the primary one: a fact can
+    // have either, both or neither (ADR-0079).
+    void invokeOr<ObservedDescription | null>('describe_observed_source', null, expected).then((observed) => {
+      if (observed && (!sameFactKey(observed.fact, fact) || !observed.receipt_id ||
+          observed.scope !== 'observed_input_only' || observed.input_closure !== 'input_closure_not_established')) {
+        throw new Error('Observed description does not match the selected fact.');
+      }
+      if (get().selection === selection) set({ observed: observed ?? null });
+    }).catch(() => {
+      if (get().selection === selection) set({ observed: null, observedError: 'Observed source is unavailable for this selected fact.' });
+    });
     try {
-      const description = await invokeOr<CapturedDescription | null>('describe_captured_source', null, {
-        fact,
-        expectedNode: fact.kind === 'node' ? node : null,
-        expectedEdge: fact.kind === 'edge' ? {
-          src: fact.source, dst: fact.destination, label: fact.label, props: node.props,
-        } : null,
-      });
+      const description = await invokeOr<CapturedDescription | null>('describe_captured_source', null, expected);
       if (description && (!sameFactKey(description.fact, fact) || !description.receipt_id ||
           description.scope !== 'primary_source_only' || description.input_closure !== 'input_closure_not_established')) {
         throw new Error('Captured description does not match the selected fact.');
@@ -129,6 +161,24 @@ export const usePrimarySourceStore = create<PrimarySourceState>((set, get) => ({
       }
     }
   },
+  readObservedRange: async (index) => {
+    const { selection, observed } = get();
+    if (!observed || !observed.ranges.some((range) => range.index === index)) return;
+    set({ observedRangeIndex: index, observedText: null, observedError: null });
+    const current = () => get().selection === selection && get().observedRangeIndex === index &&
+      get().observed?.receipt_id === observed.receipt_id;
+    try {
+      const text = await invokeOr<CapturedText | null>('read_observed_source', null, {
+        fact: observed.fact, receiptId: observed.receipt_id, rangeIndex: index,
+      });
+      if (!current()) return;
+      if (!text || text.receipt_id !== observed.receipt_id || text.range_index !== index) {
+        set({ observedText: null, observedError: 'Observed source is unavailable. Select the fact again if recovery changed.' });
+      } else set({ observedText: text });
+    } catch {
+      if (current()) set({ observedText: null, observedError: 'Observed source is unavailable or stale. Nothing was substituted.' });
+    }
+  },
   resolveInspectionTarget: async (index) => {
     const { selection, description, requirementBusy } = get();
     const range = description?.ranges.find((item) => item.index === index);
@@ -155,7 +205,8 @@ export const usePrimarySourceStore = create<PrimarySourceState>((set, get) => ({
       return null;
     }
   },
-  clear: () => set((state) => ({ selection: state.selection + 1, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, loading: false, error: null,
+  clear: () => set((state) => ({ selection: state.selection + 1, subject: null, subjectFact: null, description: null, text: null, rangeIndex: null, ...NO_OBSERVED,
+    loading: false, error: null,
     requirementBusy: false, requirementError: null })),
   loadSources: async () => {
     const request = ++inventoryRequest;
@@ -191,7 +242,8 @@ export const usePrimarySourceStore = create<PrimarySourceState>((set, get) => ({
       });
       if (removed === null) throw new Error('unavailable');
       // Never keep copied source visible after the user has forgotten its source.
-      if (get().description?.source_id === preview.source_id) get().clear();
+      if (get().description?.source_id === preview.source_id ||
+          get().observed?.registered_source_id === preview.source_id) get().clear();
       if (get().retentionSelection === retentionSelection) {
         set({ preview: null, retentionBusy: false, retentionMessage: `Forgot ${removed} retained captures for ${preview.display_name}. Receipt and review history is preserved.` });
       }
