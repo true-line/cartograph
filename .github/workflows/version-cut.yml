@@ -156,14 +156,6 @@ jobs:
               exit 0
             fi
           fi
-          # A ready Version packages PR runs the complete suite on every head
-          # change. Return it to draft before the new head lands so the refresh
-          # starts no Actions jobs; marking it ready again runs the suite once
-          # on the release patch that will actually be merged.
-          open_ready=$(gh pr list --head "$BRANCH" --base main --state open --json number,isDraft --jq '.[] | select(.isDraft | not) | .number')
-          if [ -n "$open_ready" ]; then
-            gh pr ready "$open_ready" --undo
-          fi
           # The runner-authored commit is only a local staging point: the ruleset
           # requires signed commits, so the branch is written through the git
           # data API as chores-dumb, which GitHub signs and reports as verified.
@@ -184,10 +176,15 @@ jobs:
           open=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
           if [ -n "$open" ]; then
             gh pr edit "$open" --body-file "$RUNNER_TEMP/pr-body.md"
+            # The cut stays ready for review: no manual step before its suite
+            # runs. A PR left in draft by an earlier workflow is made ready.
+            if [ "$(gh pr view "$open" --json isDraft --jq .isDraft)" = "true" ]; then
+              gh pr ready "$open"
+            fi
           else
-            # Opened as draft: draft PR events start no Actions jobs, so the
-            # suite runs once, when the owner marks the cut ready.
-            gh pr create --draft --base main --head "$BRANCH" --title 'Version packages' --body-file "$RUNNER_TEMP/pr-body.md"
+            # Opened ready for review, so the complete suite runs on the cut
+            # and on each refresh without anyone marking it ready.
+            gh pr create --base main --head "$BRANCH" --title 'Version packages' --body-file "$RUNNER_TEMP/pr-body.md"
           fi
 
   tag:
