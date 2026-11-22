@@ -2601,6 +2601,17 @@ def check_suffix_signature(signed_suffix):
     except itsdangerous.BadSignature:
         return None
 
+def read_payload(payload):
+    try:
+        return json.loads(payload)
+    except ValueError:
+        return None
+
+def parse_body(payload):
+    body = read_payload(payload)
+    if not body:
+        return jsonify(error="Bad body"), 400
+
 def authorize_request():
     api_code = request.headers.get("Authentication")
     api_key = ApiKey.get_by(code=api_code)
@@ -2629,6 +2640,10 @@ def new_custom_alias(signed_suffix):
     except Exception:
         return jsonify(error="Tampered suffix"), 400
 "#;
+        // A `loads` with no age limit checks no signature (AC-1036).
+        let (text, _) = python_rows(source, "parse_body");
+        assert!(text.contains("When no value error is raised"), "{text}");
+        assert!(!text.contains("signature is checked"), "{text}");
         let (text, _) = python_rows(source, "authorize_request");
         assert!(
             text.contains(
@@ -2670,7 +2685,7 @@ def new_custom_alias(signed_suffix):
         );
         assert!(
             text.contains(
-                "When no bad signature error is raised, the check suffix signature is the signer's unsign for the signed suffix and max age 600."
+                "When no bad signature error is raised, the check suffix signature is the signed suffix, once its signature is checked and it is at most 600 seconds old."
             ),
             "{text}"
         );
