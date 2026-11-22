@@ -1518,10 +1518,10 @@ pub(crate) async fn draft_adapter_work_packets(
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod acceptance_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests {
     use super::*;
     use core_graph::{GraphStore, Node};
