@@ -215,3 +215,69 @@ fn a_derived_name_that_carries_a_node_id_is_not_shown() {
         "{composed:?}"
     );
 }
+
+/// AC-1320 (T-1320): a system overview reads each capability's rules from
+/// 1.5, round-robin within its byte budget, so the rules are citable
+/// (#2375).
+#[test]
+fn an_overview_reads_the_rules_its_capabilities_enforce() {
+    let id = |n: u8| format!("F-{:016x}", u64::from(n));
+    let row = |rule: &str, n: u8| format!("| check\\_{n}() | {rule} | when x: 403 | {} |\n", id(n));
+    let header = "| Where | Rule | Source | Citation |\n|---|---|---|---|\n";
+    let document = format!(
+        "# D1\n\n## 1.3 Capabilities (P)\n\nrow\n\n## 1.5 Business rules (F)\n\nLead.\n\n\
+         ### Alias\n\n#### Create alias\n\n{header}{}{}{}\
+         #### Rules in the Alias area's own code\n\n{header}{}\
+         #### Block senders\n\n{header}{}\
+         ### Rate limits\n\n| Capability | Operation | Limit | Citation |\n|---|---|---|---|\n\
+         | Create alias | POST /a | 5/min | {} |\n\n## 1.6 Flows (P)\n\nB\n",
+        row("A premium user may create an alias.", 1),
+        row(
+            "Not stated in domain terms (Gap): outside the rendering rules",
+            2
+        ),
+        row("An alias name is unique.", 3),
+        row("An area rule.", 4),
+        row("A blocked sender is refused.", 5),
+        id(6),
+    );
+    let excerpt = rule_excerpt(&document, "1.3").unwrap();
+    // Every capability's first rule comes before any second one; a Gap, an
+    // area's own code and the rate limits are left out.
+    let at = |text: &str| excerpt.find(text).unwrap();
+    assert!(at("A premium user") < at("A blocked sender") && at("A blocked sender") < at("unique"));
+    assert!(excerpt.contains(&format!(
+        "| Create alias | A premium user may create an alias. | {} |",
+        id(1)
+    )));
+    assert!(
+        !excerpt.contains("(Gap)")
+            && !excerpt.contains("An area rule")
+            && !excerpt.contains(&id(6))
+    );
+    assert!(excerpt.contains("3 of 3"));
+    assert!(printed_ids(&excerpt).contains(&id(5)));
+    // 1.1 reads a smaller excerpt; other sections and a 1.5 with no stated
+    // rule read none.
+    assert!(rule_excerpt(&document, "1.1").is_some());
+    assert_eq!(rule_excerpt(&document, "1.4"), None);
+    assert_eq!(
+        rule_excerpt("# D1\n\n## 1.5 Business rules (F)\n\nNone.\n", "1.3"),
+        None
+    );
+}
+
+#[test]
+fn a_rule_excerpt_stops_at_its_budget() {
+    let header = "| Where | Rule | Source | Citation |\n|---|---|---|---|\n";
+    let mut document = String::from("# D1\n\n## 1.5 Business rules (F)\n\n");
+    for n in 0..400u16 {
+        document.push_str(&format!(
+            "### Capability {n}\n\n{header}| f() | Rule number {n} holds for every caller of it. | when x: 403 | F-{:016x} |\n\n",
+            u64::from(n)
+        ));
+    }
+    let excerpt = rule_excerpt(&document, "1.1").unwrap();
+    assert!(excerpt.len() < 6 * 1024 + 512, "{}", excerpt.len());
+    assert!(excerpt.contains(" of 400.") && !excerpt.contains("400 of 400"));
+}

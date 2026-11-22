@@ -185,6 +185,91 @@ fn summary_text(text: &str) -> String {
     kept
 }
 
+/// Sections whose system composition also reads an excerpt of the rules
+/// the capabilities enforce, with its byte budget (#2375). Capability facts
+/// carry only a title, so without the rules an overview has nothing to
+/// show what each capability does beyond its name and operations.
+const RULE_EXCERPTS: &[(&str, usize)] = &[("1.3", 16 * 1024), ("1.1", 6 * 1024)];
+
+/// Headings of 1.5 whose rows are not one capability's rules: an area's own
+/// code, a state machine, or the rate limits, whose citations are derived.
+const NOT_A_CAPABILITY: &[&str] = &["Rules in the ", "State machine", "Rate limits"];
+
+/// The excerpt of 1.5 that a system composition of section `number` reads
+/// (#2375): each capability's rules stated in domain terms with their
+/// citation, taken round-robin (every capability's first rule, then every
+/// second one) until the section's byte budget is spent, so each rule's
+/// fact is citable and a claim about what a capability enforces can cite
+/// it. `None` for another section, or when 1.5 states no such rule.
+pub fn rule_excerpt(document: &str, number: &str) -> Option<String> {
+    let (_, budget) = RULE_EXCERPTS.iter().find(|(n, _)| *n == number)?;
+    let rules = section_text(document, "1.5")?;
+    let mut by_capability: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+    let mut current: Option<usize> = None;
+    for line in rules.lines() {
+        if let Some(heading) = line
+            .strip_prefix("#### ")
+            .or_else(|| line.strip_prefix("### "))
+        {
+            current = if NOT_A_CAPABILITY
+                .iter()
+                .any(|lead| heading.starts_with(lead))
+            {
+                None
+            } else {
+                by_capability.push((heading.trim(), Vec::new()));
+                Some(by_capability.len() - 1)
+            };
+            continue;
+        }
+        let Some(at) = current else { continue };
+        let Some(cells) = line.strip_prefix("| ").and_then(|l| l.strip_suffix(" |")) else {
+            continue;
+        };
+        let cells: Vec<&str> = cells.split(" | ").collect();
+        let [_, rule, .., citation] = cells[..] else {
+            continue;
+        };
+        if !rule.contains("(Gap)") && citation.len() == 18 && printed_ids(citation).len() == 1 {
+            by_capability[at].1.push((rule, citation));
+        }
+    }
+    by_capability.retain(|(_, rows)| !rows.is_empty());
+    let total: usize = by_capability.iter().map(|(_, rows)| rows.len()).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut table = String::new();
+    let mut kept = 0usize;
+    'rounds: for round in 0.. {
+        let mut any = false;
+        for (capability, rows) in &by_capability {
+            let Some((rule, citation)) = rows.get(round) else {
+                continue;
+            };
+            any = true;
+            let row = format!("| {capability} | {rule} | {citation} |\n");
+            if table.len() + row.len() > *budget {
+                break 'rounds;
+            }
+            table.push_str(&row);
+            kept += 1;
+        }
+        if !any {
+            break;
+        }
+    }
+    if kept == 0 {
+        return None;
+    }
+    Some(format!(
+        "\n### Rules the capabilities enforce (from 1.5)\n\n\
+         Each capability's rules in domain terms, its first ones first: {kept} of {total}. A \
+         claim about what a capability enforces cites the rule's id.\n\n\
+         | Capability | Rule | Citation |\n|---|---|---|\n{table}"
+    ))
+}
+
 /// Every `F-` citation id `text` prints.
 pub(super) fn printed_ids(text: &str) -> BTreeSet<String> {
     let bytes = text.as_bytes();
