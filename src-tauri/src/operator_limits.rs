@@ -59,6 +59,10 @@ pub const PYTHON_LOCKFILE_MAX_MIB: &str = "python_lockfile_max_mib";
 pub const SEMANTIC_OPERATION_MAX_ROWS: &str = "semantic_operation_max_rows";
 pub const SEMANTIC_OPERATION_MAX_VECTOR_MIB: &str = "semantic_operation_max_vector_mib";
 
+/// Seconds and output tokens one cloud gap escalation may take (AC-1806).
+pub const CLOUD_CALL_TIMEOUT_SECONDS: &str = "cloud_call_timeout_seconds";
+pub const CLOUD_CALL_MAX_OUTPUT_TOKENS: &str = "cloud_call_max_output_tokens";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -213,6 +217,22 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: (semantic::embedding_cache::MAX_VECTOR_BYTES as u64) / MIB,
         advanced: true,
         description: "MiB of vectors one semantic preview may hold. The pass peaks near twice this in memory; a plan past it fails instead.",
+    },
+    LimitSpec {
+        key: CLOUD_CALL_TIMEOUT_SECONDS,
+        default: llm::anthropic::CloudCallLimits::MAX_TIMEOUT_SECS,
+        min: llm::anthropic::CloudCallLimits::MIN_TIMEOUT_SECS,
+        max: llm::anthropic::CloudCallLimits::MAX_TIMEOUT_SECS,
+        advanced: true,
+        description: "Seconds one cloud gap escalation may wait for its answer. A call that takes longer fails and nothing is staged. Changing it needs a fresh preview.",
+    },
+    LimitSpec {
+        key: CLOUD_CALL_MAX_OUTPUT_TOKENS,
+        default: llm::anthropic::CloudCallLimits::MAX_MAX_TOKENS as u64,
+        min: llm::anthropic::CloudCallLimits::MIN_MAX_TOKENS as u64,
+        max: llm::anthropic::CloudCallLimits::MAX_MAX_TOKENS as u64,
+        advanced: true,
+        description: "Output tokens one cloud gap escalation may ask for. A cut-off answer is refused and nothing is staged. Changing it needs a fresh preview.",
     },
 ];
 
@@ -530,6 +550,23 @@ mod tests {
         assert!(at(|key| key.min).is_some());
         assert!(at(|key| key.max + 1).is_none());
         assert!(rows.advanced && mib.advanced);
+    }
+
+    // AC-1806 / #1653: the cloud call keys default to the provider's shipped
+    // bounds and can only lower them.
+    #[test]
+    fn cloud_call_keys_default_to_the_providers_bounds_and_only_lower_them() {
+        use llm::anthropic::CloudCallLimits;
+        let timeout = spec(CLOUD_CALL_TIMEOUT_SECONDS).unwrap();
+        let tokens = spec(CLOUD_CALL_MAX_OUTPUT_TOKENS).unwrap();
+        let at = |pick: fn(&LimitSpec) -> u64| {
+            CloudCallLimits::within(pick(timeout), pick(tokens) as u32)
+        };
+        assert_eq!(at(|key| key.default), Some(CloudCallLimits::default()));
+        assert_eq!((timeout.default, tokens.default), (timeout.max, tokens.max));
+        assert!(at(|key| key.min).is_some());
+        assert!(at(|key| key.max + 1).is_none());
+        assert!(timeout.advanced && tokens.advanced);
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value

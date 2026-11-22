@@ -103,6 +103,52 @@ pub fn disclosure(lane: ClaudeLane) -> CloudDisclosure {
     }
 }
 
+/// Bounds on one cloud completion outside the bounded lane (#1653,
+/// AC-1806): how long the request may take and the output tokens it may ask
+/// for. Both may only be lowered from the shipped values, because a longer
+/// non-streaming request risks being cut off upstream. Any value other than
+/// the default is named in the provider id, so consent and provenance record
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloudCallLimits {
+    timeout_secs: u64,
+    max_tokens: u32,
+}
+
+impl CloudCallLimits {
+    pub const MIN_TIMEOUT_SECS: u64 = 60;
+    pub const MAX_TIMEOUT_SECS: u64 = 600;
+    pub const MIN_MAX_TOKENS: u32 = 1_024;
+    pub const MAX_MAX_TOKENS: u32 = 16_000;
+
+    /// Limits inside the shipped bounds, or `None`.
+    pub fn within(timeout_secs: u64, max_tokens: u32) -> Option<Self> {
+        ((Self::MIN_TIMEOUT_SECS..=Self::MAX_TIMEOUT_SECS).contains(&timeout_secs)
+            && (Self::MIN_MAX_TOKENS..=Self::MAX_MAX_TOKENS).contains(&max_tokens))
+        .then_some(Self {
+            timeout_secs,
+            max_tokens,
+        })
+    }
+
+    pub fn timeout_secs(self) -> u64 {
+        self.timeout_secs
+    }
+
+    pub fn max_tokens(self) -> u32 {
+        self.max_tokens
+    }
+}
+
+impl Default for CloudCallLimits {
+    fn default() -> Self {
+        Self {
+            timeout_secs: Self::MAX_TIMEOUT_SECS,
+            max_tokens: Self::MAX_MAX_TOKENS,
+        }
+    }
+}
+
 /// Cloud provider for one Claude lane. Declared [`Locality::Cloud`], so the
 /// egress firewall demands explicit consent bound to the exact payload
 /// before [`LlmProvider::complete`] can ever run.
@@ -111,6 +157,7 @@ pub struct AnthropicProvider {
     provider_id: String,
     api_key: String,
     endpoint: String,
+    max_tokens: u32,
     client: Client,
     bounded_client: Client,
 }
@@ -122,6 +169,15 @@ impl AnthropicProvider {
         Self::with_endpoint(lane, api_key, API_URL.to_string())
     }
 
+    /// [`Self::new`] with the project's [`CloudCallLimits`].
+    pub fn with_limits(
+        lane: ClaudeLane,
+        api_key: impl Into<String>,
+        limits: CloudCallLimits,
+    ) -> Result<Self, ProviderError> {
+        Self::build(lane, api_key, API_URL.to_string(), limits)
+    }
+
     /// Test seam: same provider against a local mock transport. Not
     /// reachable from release call sites, which pin [`API_URL`].
     #[doc(hidden)]
@@ -130,13 +186,30 @@ impl AnthropicProvider {
         api_key: impl Into<String>,
         endpoint: String,
     ) -> Result<Self, ProviderError> {
+        Self::build(lane, api_key, endpoint, CloudCallLimits::default())
+    }
+
+    fn build(
+        lane: ClaudeLane,
+        api_key: impl Into<String>,
+        endpoint: String,
+        limits: CloudCallLimits,
+    ) -> Result<Self, ProviderError> {
+        let mut provider_id = format!("anthropic:{}", lane.model_id());
+        if limits != CloudCallLimits::default() {
+            provider_id.push_str(&format!(
+                ":timeout-{}s:max-tokens-{}",
+                limits.timeout_secs, limits.max_tokens
+            ));
+        }
         Ok(Self {
-            provider_id: format!("anthropic:{}", lane.model_id()),
+            provider_id,
             lane,
             api_key: api_key.into(),
             endpoint,
+            max_tokens: limits.max_tokens,
             client: Client::builder()
-                .timeout(Duration::from_secs(600))
+                .timeout(Duration::from_secs(limits.timeout_secs))
                 .build()?,
             bounded_client: crate::bounded::build_client(Client::builder(), false)?,
         })
@@ -161,7 +234,7 @@ impl AnthropicProvider {
         let content = format!("{}\n\n{spans}", request.prompt());
         let mut body = serde_json::json!({
             "model": self.lane.model_id(),
-            "max_tokens": 16000,
+            "max_tokens": self.max_tokens,
             "system": request.system(),
             "messages": [{ "role": "user", "content": content }],
         });
@@ -285,6 +358,13 @@ impl LlmProvider for AnthropicProvider {
                 provider: self.provider_id.clone(),
                 category: message.stop_details.and_then(|details| details.category),
             });
+        }
+        if message.stop_reason.as_deref() == Some("max_tokens") {
+            // A cut-off answer is never handed on, even when what arrived
+            // still parses (AC-1806).
+            return Err(ProviderError::InvalidResponse(
+                "the answer reached the output token limit".into(),
+            ));
         }
         let text: String = message
             .content
@@ -453,6 +533,52 @@ mod tests {
         assert!(raw.contains("queueUrl = env.ORDERS"));
         // Opus lane sends no fallback beta.
         assert!(!raw.contains("server-side-fallback"));
+    }
+
+    // AC-1806 / #1653: lowered limits reach the request and the provider id,
+    // the defaults leave the id as it was, and nothing above the shipped
+    // bounds is accepted.
+    #[test]
+    fn cloud_call_limits_reach_the_request_and_the_provider_id() {
+        assert_eq!(
+            CloudCallLimits::within(600, 16_000),
+            Some(CloudCallLimits::default())
+        );
+        for (timeout, tokens) in [(59, 16_000), (601, 16_000), (600, 1_023), (600, 16_001)] {
+            assert_eq!(CloudCallLimits::within(timeout, tokens), None);
+        }
+        let default = AnthropicProvider::new(ClaudeLane::Opus, "sk-test").unwrap();
+        assert_eq!(default.id(), "anthropic:claude-opus-5-5");
+
+        let (endpoint, server) = mock_api(
+            r#"{"content":[{"type":"text","text":"{\"target\":\"ch:orders\"}"}],"stop_reason":"end_turn"}"#,
+        );
+        let limits = CloudCallLimits::within(120, 4_096).unwrap();
+        let provider =
+            AnthropicProvider::build(ClaudeLane::Opus, "sk-test", endpoint, limits).unwrap();
+        assert_eq!(
+            provider.id(),
+            "anthropic:claude-opus-5-5:timeout-120s:max-tokens-4096"
+        );
+        complete_with_consent(&provider).unwrap();
+        let raw = server.join().unwrap();
+        assert!(raw.contains("\"max_tokens\":4096"), "{raw}");
+    }
+
+    // AC-1806: an answer stopped at the output token limit is refused even
+    // when its text still parses.
+    #[test]
+    fn a_completion_cut_off_at_the_token_limit_is_refused() {
+        let (endpoint, server) = mock_api(
+            r#"{"content":[{"type":"text","text":"{\"target\":\"ch:orders\"}"}],"stop_reason":"max_tokens"}"#,
+        );
+        let provider =
+            AnthropicProvider::with_endpoint(ClaudeLane::Opus, "sk-test", endpoint).unwrap();
+        assert!(matches!(
+            complete_with_consent(&provider),
+            Err(ProviderError::InvalidResponse(reason)) if reason.contains("output token limit")
+        ));
+        server.join().unwrap();
     }
 
     #[test]

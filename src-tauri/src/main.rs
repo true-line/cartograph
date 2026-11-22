@@ -5046,7 +5046,11 @@ async fn escalation_preview(
             .map_err(|e| e.to_string())?
             .egress_policy()
             .map_err(|e| e.to_string())?;
-        let provider = egress::escalation_provider("cloud", llm::OllamaProvider::DEFAULT_PORT)?;
+        let provider = egress::escalation_provider_within(
+            "cloud",
+            llm::OllamaProvider::DEFAULT_PORT,
+            cloud_call_limits(&state)?,
+        )?;
         agents::AgentBroker::bounded_default()
             .preview_prepared(provider.as_ref(), &llm::EgressFirewall::new(policy), &task)
             .map_err(|e| e.to_string())
@@ -5093,8 +5097,18 @@ async fn run_escalation(
         settings_store.egress_policy().map_err(|e| e.to_string())
     })()
     .map_err(&fail)?;
-    let provider = egress::escalation_provider(&mode, saved_ollama_port(&state).map_err(&fail)?)
-        .map_err(&fail)?;
+    let provider = egress::escalation_provider_within(
+        &mode,
+        saved_ollama_port(&state).map_err(&fail)?,
+        // A local escalation never reads the cloud limits, so a bad saved
+        // value cannot block it (AC-1806).
+        if mode == "cloud" {
+            cloud_call_limits(&state).map_err(&fail)?
+        } else {
+            llm::anthropic::CloudCallLimits::default()
+        },
+    )
+    .map_err(&fail)?;
     // #1767: a cloud payload is recorded when it is handed to the provider,
     // so a call that then fails or times out is counted. If the record
     // cannot be written the call is not made.
@@ -8024,6 +8038,26 @@ fn semantic_operation_limits(
         .ok_or("Semantic vector bound overflows.")?;
     semantic::embedding_cache::OperationLimits::within(rows, bytes)
         .ok_or_else(|| "Saved semantic limits are outside the cache's bounds.".to_string())
+}
+
+/// The seconds and output tokens one cloud gap escalation may take (#1653,
+/// AC-1806), from the saved operator limits. The preview and the run both
+/// read them, so a change in between fails consent instead of sending a
+/// request the operator did not see.
+fn cloud_call_limits(state: &AppState) -> Result<llm::anthropic::CloudCallLimits, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    let tokens = u32::try_from(limit(operator_limits::CLOUD_CALL_MAX_OUTPUT_TOKENS)?)
+        .map_err(|error| error.to_string())?;
+    llm::anthropic::CloudCallLimits::within(
+        limit(operator_limits::CLOUD_CALL_TIMEOUT_SECONDS)?,
+        tokens,
+    )
+    .ok_or_else(|| "Saved cloud call limits are outside the provider's bounds.".to_string())
 }
 
 /// How many API references a repository may declare and how large each may
@@ -12148,6 +12182,37 @@ export function queueOrder() {
         assert_eq!(
             super::semantic_operation_limits(&state).unwrap(),
             OperationLimits::within(65_536, 256 << 20).unwrap()
+        );
+    }
+
+    // AC-1806 / #1653: the cloud call limits an escalation reads are the
+    // defaults until saved, then the saved values.
+    #[test]
+    fn a_projects_cloud_call_limits_reach_escalation() {
+        let app_data = tempfile::tempdir().unwrap();
+        let state = crate::registered_source_tests::app_state(app_data.path());
+        assert_eq!(
+            super::cloud_call_limits(&state).unwrap(),
+            llm::anthropic::CloudCallLimits::default()
+        );
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings
+                .set_operator_limit(
+                    crate::operator_limits::CLOUD_CALL_TIMEOUT_SECONDS,
+                    Some(120),
+                )
+                .unwrap();
+            settings
+                .set_operator_limit(
+                    crate::operator_limits::CLOUD_CALL_MAX_OUTPUT_TOKENS,
+                    Some(4_096),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            super::cloud_call_limits(&state).unwrap(),
+            llm::anthropic::CloudCallLimits::within(120, 4_096).unwrap()
         );
     }
 

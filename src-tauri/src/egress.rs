@@ -11,7 +11,28 @@ use llm::{ConsentGrant, EgressPreview, LlmProvider};
 /// lane and needs an API key — its absence is an explicit error, never a
 /// silent local fallback.
 pub fn escalation_provider(mode: &str, local_port: u16) -> Result<Box<dyn LlmProvider>, String> {
-    escalation_provider_with(mode, local_port, crate::provider_credentials::system())
+    escalation_provider_with(
+        mode,
+        local_port,
+        llm::anthropic::CloudCallLimits::default(),
+        crate::provider_credentials::system(),
+    )
+}
+
+/// [`escalation_provider`] with the project's cloud call limits (#1653,
+/// AC-1806). Limits other than the defaults are named in the cloud provider
+/// id, so a preview and a run built with different limits fail consent.
+pub fn escalation_provider_within(
+    mode: &str,
+    local_port: u16,
+    cloud_limits: llm::anthropic::CloudCallLimits,
+) -> Result<Box<dyn LlmProvider>, String> {
+    escalation_provider_with(
+        mode,
+        local_port,
+        cloud_limits,
+        crate::provider_credentials::system(),
+    )
 }
 
 /// [`escalation_provider`] over explicit credentials. The key comes from the
@@ -21,6 +42,7 @@ pub fn escalation_provider(mode: &str, local_port: u16) -> Result<Box<dyn LlmPro
 fn escalation_provider_with(
     mode: &str,
     local_port: u16,
+    cloud_limits: llm::anthropic::CloudCallLimits,
     credentials: &crate::provider_credentials::ProviderCredentials,
 ) -> Result<Box<dyn LlmProvider>, String> {
     match mode {
@@ -39,8 +61,12 @@ fn escalation_provider_with(
                         .to_string()
                 })?;
             Ok(Box::new(
-                llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, key)
-                    .map_err(|e| e.to_string())?,
+                llm::anthropic::AnthropicProvider::with_limits(
+                    llm::anthropic::ClaudeLane::Opus,
+                    key,
+                    cloud_limits,
+                )
+                .map_err(|e| e.to_string())?,
             ))
         }
         other => Err(format!("unknown escalation mode '{other}' (local | cloud)")),
@@ -86,9 +112,14 @@ mod tests {
     #[test]
     fn cloud_without_api_key_fails_closed() {
         let none = crate::provider_credentials::for_test(None);
-        let err = escalation_provider_with("cloud", llm::OllamaProvider::DEFAULT_PORT, &none)
-            .err()
-            .expect("missing key rejected");
+        let err = escalation_provider_with(
+            "cloud",
+            llm::OllamaProvider::DEFAULT_PORT,
+            Default::default(),
+            &none,
+        )
+        .err()
+        .expect("missing key rejected");
         assert!(err.contains("ANTHROPIC_API_KEY"));
         assert!(err.contains("Settings"));
         assert!(err.contains("stays closed"));
@@ -103,16 +134,25 @@ mod tests {
         credentials
             .save(ProviderId::Anthropic, "sk-ant-test-0123456789")
             .unwrap();
-        let provider =
-            escalation_provider_with("cloud", llm::OllamaProvider::DEFAULT_PORT, &credentials)
-                .expect("constructed");
+        let provider = escalation_provider_with(
+            "cloud",
+            llm::OllamaProvider::DEFAULT_PORT,
+            Default::default(),
+            &credentials,
+        )
+        .expect("constructed");
         assert!(provider.id().starts_with("anthropic"), "{}", provider.id());
         // The constructor makes no request; consent is still required to send.
         assert_eq!(provider.locality(), llm::Locality::Cloud);
         credentials.remove(ProviderId::Anthropic).unwrap();
         assert!(
-            escalation_provider_with("cloud", llm::OllamaProvider::DEFAULT_PORT, &credentials)
-                .is_err()
+            escalation_provider_with(
+                "cloud",
+                llm::OllamaProvider::DEFAULT_PORT,
+                Default::default(),
+                &credentials,
+            )
+            .is_err()
         );
     }
 
@@ -121,9 +161,14 @@ mod tests {
     #[test]
     fn local_escalation_uses_the_saved_port() {
         let none = crate::provider_credentials::for_test(None);
-        let saved = escalation_provider_with("local", 11500, &none).unwrap();
-        let default =
-            escalation_provider_with("local", llm::OllamaProvider::DEFAULT_PORT, &none).unwrap();
+        let saved = escalation_provider_with("local", 11500, Default::default(), &none).unwrap();
+        let default = escalation_provider_with(
+            "local",
+            llm::OllamaProvider::DEFAULT_PORT,
+            Default::default(),
+            &none,
+        )
+        .unwrap();
         assert_eq!(
             saved.bounded_profile().unwrap().endpoint_id,
             "http://127.0.0.1:11500/api/chat"
@@ -133,6 +178,63 @@ mod tests {
             "http://127.0.0.1:11434/api/chat"
         );
         assert_eq!(saved.id(), default.id());
+    }
+
+    // AC-1806 / #1653: saved cloud call limits change the cloud provider id,
+    // so consent for a preview built with other limits fails closed.
+    #[test]
+    fn cloud_call_limits_bind_the_cloud_provider_id_and_consent() {
+        use crate::provider_credentials::ProviderId;
+        let credentials = crate::provider_credentials::for_test(None);
+        credentials
+            .save(ProviderId::Anthropic, "sk-ant-test-0123456789")
+            .unwrap();
+        let build = |limits| {
+            escalation_provider_with(
+                "cloud",
+                llm::OllamaProvider::DEFAULT_PORT,
+                limits,
+                &credentials,
+            )
+            .unwrap()
+        };
+        let lowered = llm::anthropic::CloudCallLimits::within(120, 4_096).unwrap();
+        let default = build(Default::default());
+        let limited = build(lowered);
+        assert_eq!(default.id(), "anthropic:claude-opus-5-5");
+        assert_eq!(
+            limited.id(),
+            "anthropic:claude-opus-5-5:timeout-120s:max-tokens-4096"
+        );
+        let firewall = llm::EgressFirewall::new(llm::EgressPolicy::allow_cloud_for([
+            llm::AnalysisTier::Agentic,
+        ]));
+        let action = llm::CompletionAction {
+            action_id: "propose-gap-target".into(),
+            tier: llm::AnalysisTier::Agentic,
+            payload: llm::CompletionPayload {
+                response_schema: None,
+                system: "s".into(),
+                prompt: "p".into(),
+                spans: Vec::new(),
+            },
+        };
+        let preview = firewall.preview(default.as_ref(), &action).unwrap();
+        let grant = consent_grant_for_approved_step(&preview);
+        assert!(matches!(
+            firewall.complete(limited.as_ref(), &action, Some(&grant)),
+            Err(llm::ProviderError::ConsentMismatch)
+        ));
+        // The local provider takes no cloud limits.
+        let none = crate::provider_credentials::for_test(None);
+        assert_eq!(
+            escalation_provider_with("local", 11500, lowered, &none)
+                .unwrap()
+                .id(),
+            escalation_provider_with("local", 11500, Default::default(), &none)
+                .unwrap()
+                .id()
+        );
     }
 
     #[test]
