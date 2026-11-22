@@ -8,7 +8,8 @@
 #   1. sign the sidecar with src-tauri/agent-runtime.entitlements.plist;
 #   2. sign the app, without --deep, keeping its own (empty) entitlements;
 #   3. put that exact app into the disk image and sign the image;
-#   4. check the entitlements of the sidecar and the app in both places.
+#   4. check the entitlements of the sidecar and the app in both places, and
+#      that Claude Code (AC-1424) still carries Anthropic's own signature.
 #
 # Usage: macos-sign-agent-runtime.sh <signed|unsigned-dev> <Cartograph.app> <image.dmg>
 # Signed mode reads APPLE_CERTIFICATE (base64 .p12) and
@@ -23,6 +24,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 entitlements="$root/src-tauri/agent-runtime.entitlements.plist"
 jit='com.apple.security.cs.allow-jit'
 agent="$app/Contents/MacOS/cartograph-agent"
+claude_team=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).team_id' \
+  "$root/scripts/agent-runtime-claude.json")
+# The same requirement the build and the app check (Developer ID, that team).
+claude_requirement="anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$claude_team\""
 test -f "$entitlements"
 test -x "$agent"
 test -f "$dmg"
@@ -137,6 +142,10 @@ check() {
     exit 1
   fi
   echo "$bundle: $jit on cartograph-agent only"
+  # Claude Code ships as a resource, so nothing here re-signs it.
+  codesign --verify --strict -R="=$claude_requirement" "$bundle/Contents/Resources/claude-code/claude" \
+    || { echo "$bundle: Claude Code lost Anthropic's signature" >&2; exit 1; }
+  echo "$bundle: Claude Code signed by $claude_team"
 }
 check "$app"
 mkdir "$work/check"

@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
+import { claudeCodeRequirement } from './build-agent-runtime.mjs';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 // A workflow's top-level `on:` block, which alone decides what triggers it.
@@ -658,6 +659,15 @@ test('only the agent runtime holds allow-jit, signed before notarization (ADR-00
   assert.match(script, /app=\$\(codesign -d --entitlements - --xml "\$bundle" /u);
   assert.match(script, /if \[\[ "\$app" == \*"\$jit"\* \]\]; then\n\s+echo "\$bundle: the app must not hold/u);
   assert.match(script, /security delete-keychain "\$keychain"/u);
+  // AC-1424: Claude Code ships as a resource under Anthropic's signature, and
+  // the script checks it with the same requirement as the build and the app.
+  const overlay = JSON.parse(readFileSync(path.join(root, 'src-tauri/tauri.mcp-bundle.conf.json'), 'utf8'));
+  assert.deepEqual(overlay.bundle.resources, { '../target/agent-runtime/claude-code/claude': 'claude-code/claude' });
+  assert.ok(!overlay.bundle.externalBin.some((bin) => bin.includes('claude')), 'never an external binary, which Tauri re-signs');
+  const requirement = script.split('\n').find((line) => line.startsWith('claude_requirement='))
+    .slice('claude_requirement="'.length, -1).replaceAll('\\"', '"').replace('$claude_team', 'Q6L2SF6YDW');
+  assert.equal(requirement, claudeCodeRequirement('Q6L2SF6YDW'));
+  assert.match(script, /codesign --verify --strict -R="=\$claude_requirement" "\$bundle\/Contents\/Resources\/claude-code\/claude"/u);
   const result = spawnSync('bash', ['-n', path.join(root, 'scripts/macos-sign-agent-runtime.sh')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 });
