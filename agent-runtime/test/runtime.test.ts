@@ -187,6 +187,16 @@ test("Claude lane: built-in tools, settings and other servers are off; the key s
   assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
 });
 
+test("Claude lane: post_tool sees failed calls as errors, like the Pi lane", async () => {
+  const host = fakeHost({ tool: () => ({ content: "page" }) }, ["post_tool"]);
+  const options = claudeOptions(start({ lane: "claude", model: "claude-sonnet-5-5", hooks: ["post_tool"] }), host.channel, new AbortController());
+  await options.hooks.PostToolUse[0]!.hooks[0]!({ tool_name: "mcp__cartograph__query_context", tool_input: { query: {} }, tool_response: "page" });
+  await options.hooks.PostToolUseFailure[0]!.hooks[0]!({ tool_name: "mcp__cartograph__finish", tool_input: { findings: [] }, error: "read_before_finish: call read_evidence first" });
+  const posts = host.sent.filter((m) => m.type === "hook" && m.point === "post_tool") as any[];
+  assert.deepEqual(posts.map((m) => [m.tool, m.result.is_error]), [["query_context", false], ["finish", true]]);
+  assert.match(posts[1].result.content, /read_before_finish/);
+});
+
 test("serve: refuses traffic before start and a second start", async () => {
   async function* lines(...items: string[]) {
     yield* items;

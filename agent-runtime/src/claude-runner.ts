@@ -27,6 +27,12 @@ export function claudeOptions(start: StartMessage, host: HostChannel, abort: Abo
   const deny = (reason: string) => ({
     hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason },
   });
+  const postTool = async (input: any, content: string, isError: boolean) => {
+    const name = String(input?.tool_name ?? "").slice(`mcp__${SERVER_NAME}__`.length);
+    await host.hook("post_tool", { tool: name, arguments: input?.tool_input, result: { content, is_error: isError } });
+    if (host.finished) abort.abort();
+    return {};
+  };
   return {
     model: start.model,
     systemPrompt: start.system,
@@ -66,19 +72,10 @@ export function claudeOptions(start: StartMessage, host: HostChannel, abort: Abo
           ],
         },
       ],
-      PostToolUse: [
-        {
-          hooks: [
-            async (input: any) => {
-              const name = String(input?.tool_name ?? "").slice(`mcp__${SERVER_NAME}__`.length);
-              const response = JSON.stringify(input?.tool_response ?? "");
-              await host.hook("post_tool", { tool: name, arguments: input?.tool_input, result: { content: response, is_error: false } });
-              if (host.finished) abort.abort();
-              return {};
-            },
-          ],
-        },
-      ],
+      PostToolUse: [{ hooks: [async (input: any) => postTool(input, JSON.stringify(input?.tool_response ?? ""), false)] }],
+      // A failed or interrupted call (a host refusal included) is a separate SDK
+      // event; forward it so post_tool sees every executed call, as on the Pi lane.
+      PostToolUseFailure: [{ hooks: [async (input: any) => postTool(input, String(input?.error ?? ""), true)] }],
       Stop: [{ hooks: [async () => (await host.hook("stop"), {})] }],
     },
   };
