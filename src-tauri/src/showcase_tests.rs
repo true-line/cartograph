@@ -526,3 +526,164 @@ fn showcase_compose_rules_gated() {
     .unwrap();
     std::fs::write(output.join("gated-rules.md"), report).unwrap();
 }
+
+/// A fourth manual run (#258): the yield-only T2 pass at full scale.
+/// It recovers the sources, then runs the desktop's T2 preview path twice on
+/// a local embedding model with no labelled pairs and no reviewed evidence,
+/// so every family stays calibration-only and nothing is admitted (ADR-0038).
+/// It writes what the pass would stage: hop and candidate counts per family,
+/// the similarity bands of the staged proposals, the cold and warm cache
+/// statistics with their wall times, and one line per proposal with both
+/// texts as the input for drafting labels.
+/// `CARTOGRAPH_SHOWCASE_LOCAL_URL` is a loopback Ollama endpoint (a forwarder
+/// may stand in for a LAN host) and `CARTOGRAPH_SHOWCASE_EMBED_MODEL` the
+/// embedding model, by default the M7 default.
+#[test]
+#[ignore = "manual T2 yield run over local checkouts; calls a local embedding model"]
+fn showcase_t2_yield() {
+    use std::collections::BTreeMap;
+    let url = std::env::var("CARTOGRAPH_SHOWCASE_LOCAL_URL")
+        .unwrap_or_else(|_| llm::OllamaProvider::DEFAULT_URL.into());
+    let model = std::env::var("CARTOGRAPH_SHOWCASE_EMBED_MODEL")
+        .unwrap_or_else(|_| llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL.into());
+    let (output, app) = showcase_output();
+    let started = std::time::Instant::now();
+    recover(&app, &output);
+    let ingest_seconds = started.elapsed().as_secs();
+    let state = app.state::<AppState>();
+    let provider =
+        llm::OllamaProvider::new(&url, model.clone(), std::time::Duration::from_secs(600))
+            .expect("a loopback endpoint");
+    // The graph slice the desktop's `semantic_preview` reads.
+    let (nodes, edges) = {
+        let graph = state.graph.lock().unwrap();
+        let mut labels = flowtracer::FLOW_NODE_LABELS.to_vec();
+        labels.push("Resource");
+        read_filtered_graph(&*graph, &labels, flowtracer::FLOW_EDGE_LABELS).unwrap()
+    };
+    let cache = state.embedding_cache.clone().unwrap();
+    let pass = || {
+        let lease = {
+            let graph = state.graph.lock().unwrap();
+            cache
+                .lock()
+                .unwrap()
+                .bind_instance(&graph.instance_id().unwrap())
+                .unwrap()
+        };
+        let started = std::time::Instant::now();
+        let preview = build_reviewed_semantic_preview(
+            &provider,
+            Arc::clone(&cache),
+            lease,
+            &nodes,
+            &edges,
+            &[],
+            1.0,
+            None,
+        )
+        .expect("the T2 pass completes");
+        (preview, started.elapsed().as_secs_f64())
+    };
+    let (cold, cold_seconds) = pass();
+    let (warm, warm_seconds) = pass();
+    assert!(cold.approved.is_empty() && warm.approved.is_empty());
+
+    let family =
+        |key: &semantic::FamilyKey| format!("{:?}/{}", key.kind(), key.subtype().unwrap_or("null"));
+    let (hops, candidates) = semantic::graph_inputs(&nodes, &edges);
+    let mut per_family: BTreeMap<String, BTreeMap<&str, u64>> = BTreeMap::new();
+    for hop in &hops {
+        let slot = if hop.is_ann_candidate() {
+            "hops"
+        } else {
+            "hops_excluded"
+        };
+        *per_family
+            .entry(family(&hop.family()))
+            .or_default()
+            .entry(slot)
+            .or_default() += 1;
+    }
+    for candidate in &candidates {
+        *per_family
+            .entry(family(&candidate.family()))
+            .or_default()
+            .entry("candidates")
+            .or_default() += 1;
+    }
+    // The quality bands #254 measured on a VSCode subtree.
+    const BANDS: [(&str, f32); 5] = [
+        ("ge_0_95", 0.95),
+        ("0_90_to_0_95", 0.90),
+        ("0_80_to_0_90", 0.80),
+        ("0_70_to_0_80", 0.70),
+        ("lt_0_70", f32::NEG_INFINITY),
+    ];
+    let mut bands: BTreeMap<String, BTreeMap<&str, u64>> = BTreeMap::new();
+    let mut proposed_gaps = std::collections::BTreeSet::new();
+    for proposal in &cold.proposals {
+        let band = BANDS
+            .iter()
+            .find(|(_, floor)| proposal.similarity >= *floor)
+            .map(|(name, _)| *name)
+            .unwrap();
+        *bands
+            .entry(family(proposal.family()))
+            .or_default()
+            .entry(band)
+            .or_default() += 1;
+        proposed_gaps.insert(proposal.gap_id.as_str());
+    }
+    std::fs::write(
+        output.join("t2-yield.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "provider": cold.provider,
+            "model": model,
+            "ingest_and_knowledge_seconds": ingest_seconds,
+            "hops": hops.len(),
+            "ann_hops": hops.iter().filter(|hop| hop.is_ann_candidate()).count(),
+            "candidates": candidates.len(),
+            "families": per_family,
+            "proposals": cold.proposals.len(),
+            "gaps_with_a_proposal": proposed_gaps.len(),
+            "similarity_bands": bands,
+            "admitted": cold.approved.len(),
+            "evaluation": cold.evaluation,
+            "cold": { "seconds": cold_seconds, "cache": cold.embedding_cache },
+            "warm": { "seconds": warm_seconds, "cache": warm.embedding_cache },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // One line per staged proposal, both texts beside the ids, for drafting
+    // labels. Labels are drafted from source, never from this similarity.
+    let queries: BTreeMap<&str, &semantic::UnresolvedHop> =
+        hops.iter().map(|hop| (hop.gap_id.as_str(), hop)).collect();
+    let targets: BTreeMap<&str, &str> = candidates
+        .iter()
+        .map(|candidate| (candidate.node_id.as_str(), candidate.text.as_str()))
+        .collect();
+    let mut writer =
+        std::io::BufWriter::new(std::fs::File::create(output.join("t2-proposals.jsonl")).unwrap());
+    for proposal in &cold.proposals {
+        let hop = queries.get(proposal.gap_id.as_str());
+        serde_json::to_writer(
+            &mut writer,
+            &serde_json::json!({
+                "family": family(proposal.family()),
+                "gap_id": proposal.gap_id,
+                "source_id": proposal.source_id,
+                "target_id": proposal.target_id,
+                "similarity": proposal.similarity,
+                "query": hop.map(|hop| hop.query.as_str()),
+                "query_evidence": hop.map(|hop| &hop.evidence),
+                "candidate": targets.get(proposal.target_id.as_str()),
+            }),
+        )
+        .unwrap();
+        writer.write_all(b"\n").unwrap();
+    }
+    writer.flush().unwrap();
+}
