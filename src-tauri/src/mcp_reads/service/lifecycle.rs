@@ -116,5 +116,5 @@ impl Service {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;

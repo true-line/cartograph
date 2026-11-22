@@ -450,6 +450,6 @@ pub(crate) fn read(
     Ok(response)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "scoped_evidence/tests.rs"]
 mod tests;
