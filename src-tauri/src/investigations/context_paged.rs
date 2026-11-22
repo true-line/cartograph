@@ -3,11 +3,14 @@
 //! identity; each query then reads one filtered page at the pinned revision,
 //! so a task holds the facts it has seen, not the estate.
 use super::*;
-use context_hub::{ContextError, ContextFact, FactSelection, FactSource, QueryResponse};
+#[cfg(test)]
+use context_hub::QueryResponse;
+use context_hub::{ContextError, ContextFact, FactSelection, FactSource};
 use core_graph::GraphError;
 use core_graph::scoped::{FactFilter, ScopedGraphReader};
 
 /// A paged query's refusal: the selection's own, or the store's.
+#[derive(Debug)]
 pub(super) enum PagedError {
     Context(ContextError),
     Host(HostError),
@@ -127,25 +130,26 @@ impl FrozenContext {
         history: &[String],
         graph_limits: SnapshotReadLimits,
     ) -> Result<Self, HostError> {
-        let graph = state.graph.lock().map_err(|_| HostError::Operational)?;
-        let revision = graph.read_revision().map_err(scoped_graph_error)?;
-        let graph_id = graph
-            .with_scoped_reader(&revision, graph_limits, |reader| {
-                Ok::<_, GraphError>(
-                    ContextSnapshot::complete_id_in(
-                        reader,
-                        IdentityPassLimits::for_retained(graph_limits),
-                    )
-                    .map_err(|error| match error {
-                        context_hub::CompleteIdentityError::Graph(error) => {
-                            scoped_graph_error(error)
-                        }
-                        context_hub::CompleteIdentityError::Context(error) => context_error(error),
-                    }),
-                )
-            })
-            .map_err(scoped_graph_error)??;
-        drop(graph);
+        let revision = state
+            .graph
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .read_revision()
+            .map_err(scoped_graph_error)?;
+        Self::prepare_paged_at(state, request, history, graph_limits, revision)
+    }
+
+    /// [`Self::prepare_paged`] at a revision the caller already read (with
+    /// coverage, for a qualified task, AC-1060). A store that moved past it
+    /// refuses with [`HostError::InputChanged`].
+    pub(super) fn prepare_paged_at(
+        state: &AppState,
+        request: &AcquisitionRequest,
+        history: &[String],
+        graph_limits: SnapshotReadLimits,
+        revision: StoreRevision,
+    ) -> Result<Self, HostError> {
+        let graph_id = complete_id_at(state, &revision, graph_limits)?;
         if request
             .expected_graph_revision
             .as_ref()
@@ -166,8 +170,70 @@ impl FrozenContext {
     }
 }
 
+impl FrozenContext {
+    /// The revision a paged read runs at: the pinned one, or, after a store
+    /// write that left the complete graph identical (a replaced coverage
+    /// inventory, say), the current one, found by streaming the identity
+    /// again. The task keeps its frozen qualification either way (AC-0239);
+    /// a changed graph is [`HostError::InputChanged`].
+    pub(super) fn paged_revision(
+        &self,
+        state: &AppState,
+        graph_id: &str,
+    ) -> Result<StoreRevision, HostError> {
+        let mut moved = self
+            .moved_revision
+            .lock()
+            .map_err(|_| HostError::Operational)?;
+        let pinned = moved
+            .clone()
+            .or_else(|| self.scoped_revision.clone())
+            .ok_or(HostError::Operational)?;
+        let current = state
+            .graph
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .read_revision()
+            .map_err(scoped_graph_error)?;
+        if current == pinned {
+            return Ok(current);
+        }
+        if complete_id_at(state, &current, self.graph_limits)? != graph_id {
+            return Err(HostError::InputChanged);
+        }
+        *moved = Some(current.clone());
+        Ok(current)
+    }
+}
+
+/// The complete-graph identity at `revision`, streamed one row at a time.
+fn complete_id_at(
+    state: &AppState,
+    revision: &StoreRevision,
+    graph_limits: SnapshotReadLimits,
+) -> Result<String, HostError> {
+    state
+        .graph
+        .lock()
+        .map_err(|_| HostError::Operational)?
+        .with_scoped_reader(revision, graph_limits, |reader| {
+            Ok::<_, GraphError>(
+                ContextSnapshot::complete_id_in(
+                    reader,
+                    IdentityPassLimits::for_retained(graph_limits),
+                )
+                .map_err(|error| match error {
+                    context_hub::CompleteIdentityError::Graph(error) => scoped_graph_error(error),
+                    context_hub::CompleteIdentityError::Context(error) => context_error(error),
+                }),
+            )
+        })
+        .map_err(scoped_graph_error)?
+}
+
 /// One query page of the complete graph `snapshot_id` at `revision`, and the
 /// stored copies of the facts it returned.
+#[cfg(test)]
 pub(super) fn query_at(
     state: &AppState,
     revision: &StoreRevision,
@@ -175,6 +241,24 @@ pub(super) fn query_at(
     snapshot_id: &str,
     request: QueryRequest,
 ) -> Result<(QueryResponse, ScopedGraph), PagedError> {
+    match page_at(state, revision, limits, snapshot_id, None, request)? {
+        (InvestigationPageContext::Legacy(page), rows) => Ok((page, rows)),
+        (InvestigationPageContext::Qualified(_), _) => {
+            Err(PagedError::Host(HostError::Operational))
+        }
+    }
+}
+
+/// [`query_at`] for a task's page: under `qualified`, its coverage
+/// qualification, when the task has one (AC-1060).
+pub(super) fn page_at(
+    state: &AppState,
+    revision: &StoreRevision,
+    limits: SnapshotReadLimits,
+    snapshot_id: &str,
+    qualified: Option<&CoverageContext>,
+    request: QueryRequest,
+) -> Result<(InvestigationPageContext, ScopedGraph), PagedError> {
     state
         .graph
         .lock()
@@ -184,10 +268,24 @@ pub(super) fn query_at(
                 reader,
                 rows: (Vec::new(), Vec::new()),
             };
-            let response = context_hub::query_source(snapshot_id, request, &mut source)?;
+            let response = match qualified {
+                Some(qualified) => InvestigationPageContext::Qualified(qualified.query_source(
+                    QualifiedRequest {
+                        request,
+                        context_id: Some(qualified.context_id().to_owned()),
+                    },
+                    &mut source,
+                )?),
+                None => InvestigationPageContext::Legacy(context_hub::query_source(
+                    snapshot_id,
+                    request,
+                    &mut source,
+                )?),
+            };
             // The byte budget may return fewer facts than were read; keep
             // only the stored copies of those returned.
-            let returned: BTreeSet<_> = response.facts.iter().map(|f| &f.reference).collect();
+            let returned: BTreeSet<_> =
+                response.page().facts.iter().map(|f| &f.reference).collect();
             let (nodes, edges) = source.rows;
             let rows = (
                 nodes
@@ -207,4 +305,35 @@ pub(super) fn query_at(
             );
             Ok((response, rows))
         })
+}
+
+#[cfg(test)]
+impl FrozenContext {
+    /// A qualified page of this context, held or paged, without the host's
+    /// evidence inventory.
+    pub(super) fn qualified_query(
+        &self,
+        state: &AppState,
+        request: QualifiedRequest<QueryRequest>,
+    ) -> Result<QualifiedResponse<QueryResponse>, PagedError> {
+        let qualified = self
+            .qualified
+            .as_ref()
+            .ok_or(PagedError::Host(HostError::InvalidInput))?;
+        let ScopeFacts::Paged { id } = &self.snapshot else {
+            return Ok(qualified.query(request)?);
+        };
+        let revision = self.paged_revision(state, id)?;
+        state
+            .graph
+            .lock()
+            .map_err(|_| PagedError::Host(HostError::Operational))?
+            .with_scoped_reader(&revision, self.graph_limits, |reader| {
+                let mut source = StoreFacts {
+                    reader,
+                    rows: (Vec::new(), Vec::new()),
+                };
+                qualified.query_source(request, &mut source)
+            })
+    }
 }
