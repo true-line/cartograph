@@ -20,6 +20,9 @@ pub struct SourceContinuation<'a> {
     pub candidate: &'a InvestigationInput,
     pub candidate_prepared: &'a PreparedBoundedCompletion,
     pub proof: &'a UnreadSourcePreviewBound,
+    /// The firewall's decision for the acquired read, when the task egresses
+    /// to a cloud provider (#679). A refusal settles in the same transaction.
+    pub refusal: Option<completion::read_refusals::ReadDecider<'a>>,
 }
 
 pub(super) enum SourceSettlement<'a> {
@@ -59,6 +62,14 @@ struct SettlementProjection {
     attempt_offset: usize,
     additional_bytes: usize,
     counts: SettlementCounts,
+    /// Firewall refusals of this step's acquisitions (#679), outside the
+    /// reservation's settlement claim like slice 2a's separate refusal commit.
+    refusal: Option<SettlementRefusal>,
+}
+struct SettlementRefusal {
+    event: InvestigationEvent,
+    entries: Vec<completion::AttemptEntry>,
+    planned: Vec<completion::read_refusals::PlannedRefusal>,
 }
 impl SettlementPlan {
     pub(super) fn terminal(&self) -> bool {
@@ -139,6 +150,7 @@ pub(super) fn project(
         )?),
         None => None,
     };
+    let decide = continuation.as_ref().and_then(|c| c.refusal);
     Ok(SettlementPlan {
         before_hash: core_prov::content_hash(&encode(before, MAX_RECORD_BYTES)?),
         projection: materialize(
@@ -151,6 +163,7 @@ pub(super) fn project(
             kind,
             reason,
             active_milliseconds,
+            decide,
         )?,
     })
 }
@@ -166,6 +179,7 @@ fn materialize(
     kind: DispositionKind,
     reason: Option<UnavailableReason>,
     active_milliseconds: u64,
+    decide: Option<completion::read_refusals::ReadDecider<'_>>,
 ) -> Result<SettlementProjection, InvestigationStoreError> {
     #[cfg(any(test, feature = "test-support"))]
     MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
@@ -271,7 +285,9 @@ fn materialize(
     )?);
     // Keep the authenticated prefix for observation instead of loading it twice.
     // The builder derives only the same private suffix; it performs no SQL writes.
-    let (prior_count, attempts) = completion::project_observation_with_offset(
+    let mut planned = None;
+    let completed_sequence = task.detail.summary.last_event_sequence;
+    let (prior_count, mut attempts) = completion::project_observation_with_offset(
         connection,
         before,
         &mut task,
@@ -288,13 +304,61 @@ fn materialize(
                 )?,
                 None => vec![],
             };
-            completion::project_attempt_entries(
+            let refusals = match (decide, acquired) {
+                (Some(decide), true) => completion::read_refusals::plan_settlement_refusals(
+                    task,
+                    &records,
+                    ledger.as_ref().ok_or(InvestigationStoreError::Invalid)?,
+                    decide,
+                )?,
+                _ => None,
+            };
+            let mut entries = completion::project_attempt_entries(
                 records,
                 response,
                 task.detail.summary.last_event_sequence,
-            )
+            )?;
+            if let Some(refusals) = refusals {
+                // The refusal's own event follows the completion event.
+                let sequence = task
+                    .detail
+                    .summary
+                    .last_event_sequence
+                    .checked_add(1)
+                    .ok_or(InvestigationStoreError::Capacity)?;
+                entries.extend(completion::project_attempt_entries(
+                    refusals.iter().map(|r| r.record.clone()).collect(),
+                    response,
+                    sequence,
+                )?);
+                planned = Some(refusals);
+            }
+            Ok(entries)
         },
     )?;
+    let refusal = match planned {
+        None => None,
+        Some(planned) => {
+            let entries = attempts.split_off(attempts.len() - planned.len());
+            let event = prepare_event(
+                &mut task,
+                InvestigationEventKind::ReadFirewallRefused,
+                Some(step_id),
+                Some(InvestigationTool::ReadEvidence),
+                completion::read_refusals::REFUSED_MESSAGE,
+                timestamp(connection)?,
+            )?;
+            // The entries above were projected at exactly this sequence.
+            if event.sequence != completed_sequence + 1 {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            Some(SettlementRefusal {
+                event,
+                entries,
+                planned,
+            })
+        }
+    };
     super::semantic_audit_state::account_analyst_save(&mut task)?;
     let mut plan = SettlementProjection {
         task,
@@ -305,6 +369,7 @@ fn materialize(
         attempts,
         additional_bytes: 0,
         counts: SettlementCounts::default(),
+        refusal,
     };
     plan.counts = SettlementCounts {
         events: plan.events.len() as u64,

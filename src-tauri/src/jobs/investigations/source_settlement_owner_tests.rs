@@ -20,6 +20,7 @@ fn source_settlement_owner_checks_lease_revision_and_retained_gate_before_public
             candidate: &candidate,
             candidate_prepared: &prepared,
             proof: &fixture.proof,
+            refusal: None,
         };
         let execution = if case == 0 {
             &foreign.f._execution_guard
@@ -59,6 +60,7 @@ fn source_settlement_owner_checks_lease_revision_and_retained_gate_before_public
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     let detail = fixture
         .f
@@ -169,6 +171,7 @@ fn source_settlement_post_read_deadline_failure_discards_truthfully_without_acqu
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     assert_eq!(
         fixture

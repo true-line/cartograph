@@ -20,6 +20,7 @@ fn source_settlement_final_save_failure_rolls_back_every_publication_effect() {
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     let result = fixture.f.store.settle_next_prompt_source(
         &fixture.f._execution_guard,
@@ -80,6 +81,7 @@ fn source_settlement_lost_commit_ack_retains_one_acquisition_and_refuses_same_st
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     let result = fixture.f.store.settle_next_prompt_source(
         &fixture.f._execution_guard,
@@ -116,6 +118,7 @@ fn source_settlement_lost_commit_ack_retains_one_acquisition_and_refuses_same_st
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     assert_eq!(
         fixture

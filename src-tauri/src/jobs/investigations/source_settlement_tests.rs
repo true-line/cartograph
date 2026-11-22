@@ -100,6 +100,7 @@ fn source_settlement_actual_acquired_and_unavailable_use_same_bounded_rows_as_pr
             candidate: &candidate,
             candidate_prepared: &prepared,
             proof: &fixture.proof,
+            refusal: None,
         };
         let outcome = match reason.clone() {
             None => SourceSettlement::Acquired(continuation),
@@ -187,6 +188,7 @@ fn source_continuation_rejects_substituted_task_family() {
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
     let saved = source_validation::validate_saved_pending(&tx, &fixture.f.task).unwrap();

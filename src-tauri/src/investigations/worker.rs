@@ -599,23 +599,26 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>();
-                snapshot.attach_acquisition(InvestigationInput::prepare_v9_with_policy(
-                    &snapshot.request().question,
-                    self.detail.summary.specialist_id,
-                    context.ledger.clone(),
-                    &query_pages,
-                    &context.evidence,
-                    &history,
-                    &pre_call_usage,
-                    snapshot.basis(),
-                    snapshot.request(),
-                    snapshot.metadata(),
-                    &inventory_details,
-                    snapshot.preparation_mode()?,
-                    snapshot.capacity_refusal_count(),
-                    snapshot.capacity_feedback(),
-                    policy,
-                )?)?
+                snapshot.attach_acquisition(
+                    InvestigationInput::prepare_v9_withholding_with_policy(
+                        &snapshot.request().question,
+                        self.detail.summary.specialist_id,
+                        context.ledger.clone(),
+                        &query_pages,
+                        &context.supplied_evidence(),
+                        &history,
+                        &pre_call_usage,
+                        snapshot.basis(),
+                        snapshot.request(),
+                        snapshot.metadata(),
+                        &inventory_details,
+                        snapshot.preparation_mode()?,
+                        snapshot.capacity_refusal_count(),
+                        snapshot.capacity_feedback(),
+                        policy,
+                        &context.withheld,
+                    )?,
+                )?
             } else if let Some(completion_request) = completion_request {
                 let snapshot = completion_snapshot
                     .as_ref()
@@ -1559,13 +1562,18 @@ fn acquisition_error(error: Failure) -> HostError {
         _ => HostError::Operational,
     }
 }
+/// The investigation firewall: the saved egress policy and the project's
+/// saved read-deny rules on top of the defaults (ADR-0083, #679).
 fn firewall(state: &AppState) -> Result<EgressFirewall, HostError> {
+    let settings = state.settings.lock().map_err(|_| HostError::Operational)?;
     Ok(EgressFirewall::new(
-        state
-            .settings
-            .lock()
-            .map_err(|_| HostError::Operational)?
+        settings
             .egress_policy()
+            .map_err(|_| HostError::Operational)?,
+    )
+    .with_read_deny_rules(
+        settings
+            .read_deny_rules()
             .map_err(|_| HostError::Operational)?,
     ))
 }

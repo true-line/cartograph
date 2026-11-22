@@ -4861,6 +4861,31 @@ fn set_local_ollama_port(
     store.set_local_ollama_port(port).map_err(|e| e.to_string())
 }
 
+/// This project's own read-deny rules, added to the defaults that cloud
+/// investigations never receive (ADR-0083, #679).
+#[tauri::command]
+fn get_read_deny_rules(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .read_deny_rules()
+        .map(|rules| rules.project_rules().to_vec())
+        .map_err(|e| e.to_string())
+}
+
+/// Replace this project's read-deny rules; all are validated before any is
+/// saved (ADR-0083, #679). The defaults cannot be removed.
+#[tauri::command]
+fn set_read_deny_rules(
+    rules: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .set_read_deny_rules(rules)
+        .map(|rules| rules.project_rules().to_vec())
+        .map_err(|e| e.to_string())
+}
+
 /// The local completion model for new desktop investigations (#1643).
 #[tauri::command]
 fn get_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelChoice, String> {
@@ -8662,6 +8687,8 @@ fn main() {
             set_local_context_window,
             get_local_ollama_port,
             set_local_ollama_port,
+            get_read_deny_rules,
+            set_read_deny_rules,
             provider_key_status,
             knowledge_phase::knowledge_phase_status,
             set_provider_key,

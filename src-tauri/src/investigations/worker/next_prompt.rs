@@ -285,12 +285,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let input = InvestigationInput::prepare_v9_with_policy(
+        let input = InvestigationInput::prepare_v9_withholding_with_policy(
             &request.question,
             detail.summary.specialist_id,
             context.ledger.clone(),
             &query_pages,
-            &context.evidence,
+            &context.supplied_evidence(),
             history,
             &usage,
             &InvestigationTurnBasis {
@@ -305,6 +305,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             0,
             None,
             policy,
+            &context.withheld,
         )?;
         let input = match initial_contract {
             Some(contract) => {

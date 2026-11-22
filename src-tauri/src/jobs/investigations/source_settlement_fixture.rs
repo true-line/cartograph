@@ -200,6 +200,15 @@ impl Fixture {
         &self,
         reason: Option<UnavailableReason>,
     ) -> (InvestigationInput, PreparedBoundedCompletion) {
+        self.candidate_with(reason, None)
+    }
+    /// With `refusal`, the acquired read is withheld exactly as the worker
+    /// withholds a firewall-refused read, and its refusal joins the metadata.
+    pub(super) fn candidate_with(
+        &self,
+        reason: Option<UnavailableReason>,
+        refusal: Option<completion::read_refusals::ReadDecider<'_>>,
+    ) -> (InvestigationInput, PreparedBoundedCompletion) {
         let response = self.response();
         let tx = self.f.store.conn.unchecked_transaction().unwrap();
         let saved = source_validation::validate_saved_pending(&tx, &self.f.task).unwrap();
@@ -260,17 +269,34 @@ impl Fixture {
             self.f.metadata.completed_attempt_ids.len(),
         )
         .unwrap();
+        let refused = refusal.and_then(|decide| {
+            completion::read_refusals::plan_settlement_refusals(
+                &self.f.task,
+                &records,
+                &ledger,
+                decide,
+            )
+            .unwrap()
+        });
         let mut metadata = self.f.metadata.clone();
         metadata
             .completed_attempt_ids
             .extend(records.iter().map(|r| r.attempt_id.clone()));
+        let mut withheld = std::collections::BTreeSet::new();
+        if let Some(refused) = &refused {
+            metadata
+                .completed_attempt_ids
+                .extend(refused.iter().map(|r| r.record.attempt_id.clone()));
+            withheld.insert("evidence-1".to_string());
+            evidence.clear();
+        }
         let usage = usage_for(
             &saved,
             kind,
             self.f.task.detail.usage.active_milliseconds + 1,
         )
         .unwrap();
-        let input = InvestigationInput::prepare_v9_with_policy(
+        let input = InvestigationInput::prepare_v9_withholding_with_policy(
             &self.f.request.question,
             self.f.task.detail.summary.specialist_id,
             ledger,
@@ -286,6 +312,7 @@ impl Fixture {
             0,
             None,
             &INVESTIGATION_V2_POLICY,
+            &withheld,
         )
         .unwrap();
         let input = if self.f.task.detail.summary.specialist_id == SpecialistId::DomainAnalystV18 {
@@ -306,6 +333,7 @@ impl Fixture {
                         })
                     },
                     active_milliseconds: usage.active_milliseconds,
+                    refusal,
                 })
                 .unwrap()
                 .attach_acquisition(input)

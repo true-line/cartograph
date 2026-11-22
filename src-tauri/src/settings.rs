@@ -114,6 +114,7 @@ pub enum SettingsError {
     InvalidLocalModel,
     InvalidContextWindow(u32),
     InvalidLocalPort(i64),
+    InvalidReadDenyRules(llm::read_deny::ReadDenyRuleError),
     InvalidRunLimit {
         field: &'static str,
         value: u64,
@@ -159,6 +160,7 @@ impl std::fmt::Display for SettingsError {
             Self::InvalidLocalPort(port) => {
                 write!(f, "Ollama port must be 1..=65535, got {port}")
             }
+            Self::InvalidReadDenyRules(error) => write!(f, "{error}"),
             Self::InvalidRunLimit {
                 field,
                 value,
@@ -386,6 +388,12 @@ impl SettingsStore {
                  port INTEGER CHECK (port BETWEEN 1 AND 65535)
              ) STRICT;
              INSERT OR IGNORE INTO settings_local_endpoint (id) VALUES (1);
+             -- The project's own egress-read-deny/v1 rules, added to the
+             -- defaults, in order (ADR-0083, #679). A project table.
+             CREATE TABLE IF NOT EXISTS settings_read_deny_rules (
+                 position INTEGER PRIMARY KEY CHECK (position >= 0),
+                 pattern  TEXT NOT NULL UNIQUE
+             ) STRICT;
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -876,6 +884,41 @@ impl SettingsStore {
         self.local_context_window()
     }
 
+    /// The read-deny rules every investigation firewall applies: the
+    /// defaults, which cannot be removed, plus this project's saved rules in
+    /// order (ADR-0083, #679). A stored rule that no longer validates fails
+    /// closed: the caller refuses to build a firewall.
+    pub fn read_deny_rules(&self) -> Result<llm::read_deny::ReadDenyRules, SettingsError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT pattern FROM settings_read_deny_rules ORDER BY position")?;
+        let patterns = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        llm::read_deny::ReadDenyRules::with_project_rules(patterns)
+            .map_err(SettingsError::InvalidReadDenyRules)
+    }
+
+    /// Replace this project's read-deny rules. Every rule is validated first,
+    /// and nothing is written unless all are valid; duplicates collapse.
+    pub fn set_read_deny_rules(
+        &mut self,
+        patterns: Vec<String>,
+    ) -> Result<llm::read_deny::ReadDenyRules, SettingsError> {
+        let rules = llm::read_deny::ReadDenyRules::with_project_rules(patterns)
+            .map_err(SettingsError::InvalidReadDenyRules)?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM settings_read_deny_rules", [])?;
+        for (position, pattern) in rules.project_rules().iter().enumerate() {
+            tx.execute(
+                "INSERT INTO settings_read_deny_rules (position, pattern) VALUES (?1, ?2)",
+                params![position as i64, pattern],
+            )?;
+        }
+        tx.commit()?;
+        self.read_deny_rules()
+    }
+
     /// The loopback port new desktop investigations reach Ollama on (#1653):
     /// `None` is Ollama's default, [`llm::OllamaProvider::DEFAULT_PORT`].
     pub fn local_ollama_port(&self) -> Result<Option<u16>, SettingsError> {
@@ -1044,6 +1087,65 @@ mod tests {
         let mut store = SettingsStore::open(&path).unwrap();
         assert_eq!(store.local_ollama_port().unwrap(), Some(11500));
         assert_eq!(store.set_local_ollama_port(None).unwrap(), None);
+    }
+
+    // AC-1417 / #679: project read-deny rules start empty, persist in order
+    // across reopen, collapse duplicates, are replaced whole, write nothing
+    // when any rule is invalid, and fail closed on a tampered stored rule.
+    #[test]
+    fn read_deny_rules_persist_validate_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert!(store.read_deny_rules().unwrap().project_rules().is_empty());
+        let saved = store
+            .set_read_deny_rules(vec!["secrets/*".into(), "*.sql".into(), "secrets/*".into()])
+            .unwrap();
+        assert_eq!(saved.project_rules(), ["secrets/*", "*.sql"]);
+        assert!(matches!(
+            store.set_read_deny_rules(vec!["ok/*".into(), "/abs".into()]),
+            Err(SettingsError::InvalidReadDenyRules(_))
+        ));
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(
+            store.read_deny_rules().unwrap().project_rules(),
+            ["secrets/*", "*.sql"]
+        );
+        // The defaults still apply on top of the project rules.
+        assert!(
+            store
+                .read_deny_rules()
+                .unwrap()
+                .matching_rule(".env")
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .read_deny_rules()
+                .unwrap()
+                .matching_rule("secrets/a")
+                .as_deref(),
+            Some("project:0")
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE settings_read_deny_rules SET pattern = '../x' WHERE position = 0",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.read_deny_rules(),
+            Err(SettingsError::InvalidReadDenyRules(_))
+        ));
+        assert!(
+            store
+                .set_read_deny_rules(vec![])
+                .unwrap()
+                .project_rules()
+                .is_empty()
+        );
     }
 
     // #1653: the context window defaults to Ollama's own, persists across

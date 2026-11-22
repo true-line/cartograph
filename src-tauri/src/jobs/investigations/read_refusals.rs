@@ -17,7 +17,7 @@ use rusqlite::{Transaction, TransactionBehavior};
 pub(in crate::jobs::investigations) const TABLE: &str = "read_refusal_observations";
 const MAX_OBSERVATION_BYTES: usize = 4096;
 const OBSERVATION_DOMAIN: &[u8] = b"cartograph:read-refusal-observation:v1\0";
-pub(super) const REFUSED_MESSAGE: &str =
+pub(in crate::jobs::investigations) const REFUSED_MESSAGE: &str =
     "The firewall withheld an acquired read from the cloud provider.";
 
 pub(in crate::jobs::investigations) fn schema() -> Vec<String> {
@@ -115,7 +115,7 @@ thread_local! {
 
 /// The firewall refuses only toward a cloud provider, so a refusal on a task
 /// that never egresses to one is not authentic.
-fn egresses_to_cloud(task: &StoredTask) -> bool {
+pub(in crate::jobs::investigations) fn egresses_to_cloud(task: &StoredTask) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if FIXTURE_EGRESSES_TO_CLOUD.with(std::cell::Cell::get) {
         return true;
@@ -133,6 +133,111 @@ fn citation<'a>(
         .iter()
         .find(|citation| citation.citation_id == citation_id)
         .ok_or(InvestigationStoreError::Invalid)
+}
+
+/// The firewall's read decision for one acquired attempt id. The host builds
+/// it from [`llm::EgressFirewall::evaluate_read`] over the exact acquired
+/// representation; only the firewall can produce a refusal witness.
+pub type ReadDecider<'a> = &'a dyn Fn(&str) -> llm::read_deny::ReadDecision;
+
+/// One refusal planned inside a source settlement (#679 slice 2b): the
+/// `FirewallRefused` record bound to an acquisition of the same step, and the
+/// observation row that proves it. Written in the settlement's transaction.
+pub(in crate::jobs::investigations) struct PlannedRefusal {
+    pub record: AttemptRecord,
+    pub(super) observation: ReadRefusalObservation,
+}
+
+/// Decide every acquisition the settlement projects. `None` when the
+/// firewall allowed them all (or none were bound to an obligation). All of
+/// one read's acquisitions share its decision; a mixed or non-cloud refusal
+/// is not authentic.
+pub(in crate::jobs::investigations) fn plan_settlement_refusals(
+    task: &StoredTask,
+    acquired: &[AttemptRecord],
+    ledger: &InvestigationInputLedger,
+    decide: ReadDecider<'_>,
+) -> Result<Option<Vec<PlannedRefusal>>, InvestigationStoreError> {
+    let mut witnesses = Vec::with_capacity(acquired.len());
+    for record in acquired {
+        if !matches!(record.outcome, AttemptOutcome::SourceAcquired { .. }) {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        witnesses.push(match decide(&record.attempt_id) {
+            llm::read_deny::ReadDecision::Allowed => None,
+            llm::read_deny::ReadDecision::Refused(witness) => Some(witness),
+        });
+    }
+    if witnesses.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if witnesses.iter().any(Option::is_none) || !egresses_to_cloud(task) {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let policy = saved_policy(task)?;
+    let intent = validated_intent(task)?;
+    let id = &task.detail.summary.investigation_id;
+    acquired
+        .iter()
+        .zip(witnesses.into_iter().flatten())
+        .map(|(acquired, witness)| {
+            let AttemptOutcome::SourceAcquired { citation_id } = &acquired.outcome else {
+                return Err(InvestigationStoreError::Invalid);
+            };
+            let observation = ReadRefusalObservation::from_witness(&witness);
+            if acquired.input_revision != ledger.revision
+                || !observation.matches(&acquired.attempt_id, citation(ledger, citation_id)?)
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let mut record = acquired.clone();
+            record.outcome = AttemptOutcome::FirewallRefused {
+                acquired_attempt_id: acquired.attempt_id.clone(),
+                observation_hash: observation.hash()?,
+            };
+            record.attempt_id = record.content_id()?;
+            record.validate_binding_with_policy(
+                &intent.request_hash,
+                &intent.obligations,
+                id,
+                ledger,
+                &policy,
+            )?;
+            Ok(PlannedRefusal {
+                record,
+                observation,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+/// Write the planned observation rows; the caller writes the attempts and
+/// the event in the same transaction, before readback.
+pub(in crate::jobs::investigations) fn insert_planned_observations(
+    tx: &Connection,
+    id: &str,
+    planned: &[PlannedRefusal],
+) -> Result<(), InvestigationStoreError> {
+    if tx.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if !present(tx)? {
+        for statement in schema() {
+            tx.execute_batch(&statement)?;
+        }
+    }
+    for refusal in planned {
+        insert_body(
+            tx,
+            TABLE,
+            id,
+            &refusal.record.attempt_id,
+            &refusal.observation,
+            MAX_OBSERVATION_BYTES,
+        )?;
+    }
+    Ok(())
 }
 
 /// Persist one refusal per acquired attempt at the latest step, each from its

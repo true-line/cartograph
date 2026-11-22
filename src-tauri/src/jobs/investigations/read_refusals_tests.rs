@@ -1,7 +1,7 @@
 //! AC-1410: authentic per-read firewall refusals persist atomically after a
 //! real acquisition and reopen only when every bound identity still holds.
 use super::*;
-use completion::read_refusals::{TABLE, schema};
+use completion::read_refusals::{ReadDecider, TABLE, schema};
 use llm::read_deny::{ReadDecision, ReadDenialWitness, ReadDenyRules, ReadIdentity};
 use llm::{EgressFirewall, EgressPolicy, LlmProvider, Locality, ProviderCaps};
 
@@ -38,6 +38,7 @@ fn acquired() -> (Fixture, String) {
         candidate: &candidate,
         candidate_prepared: &prepared,
         proof: &fixture.proof,
+        refusal: None,
     };
     let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
     let active = fixture.f.task.detail.usage.active_milliseconds + 1;
@@ -281,4 +282,152 @@ fn local_task_refuses_a_cloud_refusal_and_its_readback() {
         reload(&fixture).err(),
         Some(InvestigationStoreError::Invalid)
     );
+}
+
+fn refusing(fixture: &Fixture, project_rule: bool) -> impl Fn(&str) -> ReadDecision + use<> {
+    let source = fixture.r.source.source.clone();
+    let rules = if project_rule {
+        ReadDenyRules::with_project_rules([source.path.clone()]).unwrap()
+    } else {
+        ReadDenyRules::default()
+    };
+    let firewall = EgressFirewall::new(EgressPolicy::default()).with_read_deny_rules(rules);
+    let read = ReadIdentity {
+        repo: source.repo.clone(),
+        path: source.path.clone(),
+        commit_sha: source.commit_sha.clone(),
+        byte_start: source.byte_start,
+        byte_end: source.byte_end,
+    };
+    move |attempt: &str| firewall.evaluate_read(&Cloud, attempt, &read, b"private text")
+}
+
+/// Project and persist one settlement whose candidate was built with
+/// `withhold` and whose continuation carries `decide`.
+fn settle(
+    fixture: &mut Fixture,
+    withhold: Option<ReadDecider<'_>>,
+    decide: Option<ReadDecider<'_>>,
+) -> Result<StoredTask, InvestigationStoreError> {
+    fixture.charge();
+    let (candidate, prepared) = fixture.candidate_with(None, withhold);
+    let continuation = SourceContinuation {
+        size_binding: None,
+        current: &fixture.current,
+        current_prepared: &fixture.prepared,
+        candidate: &candidate,
+        candidate_prepared: &prepared,
+        proof: &fixture.proof,
+        refusal: decide,
+    };
+    let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
+    let active = fixture.f.task.detail.usage.active_milliseconds + 1;
+    let next = project(
+        &tx,
+        &fixture.f.task,
+        SourceSettlement::Acquired(continuation),
+        active,
+    )
+    .and_then(|plan| persist(&tx, &fixture.f.task, plan))?;
+    tx.commit().unwrap();
+    fixture.refresh();
+    Ok(next)
+}
+
+// AC-1414: on a cloud task the firewall's refusal of the acquired read
+// commits with the acquisition in one settlement: acquired then refused
+// attempts, one refusal event after the completion event, one observation
+// without the text, and a reopen that verifies all of it.
+#[test]
+fn refusal_settles_with_its_acquisition_and_reopens() {
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(true));
+    let mut fixture = Fixture::new();
+    let decide = refusing(&fixture, true);
+    let revision = fixture.f.task.ledger_revision;
+    settle(&mut fixture, Some(&decide), Some(&decide)).unwrap();
+
+    let entries = reload(&fixture).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(
+        entries[0].record.outcome,
+        AttemptOutcome::SourceAcquired { .. }
+    ));
+    let AttemptOutcome::FirewallRefused {
+        acquired_attempt_id,
+        ..
+    } = &entries[1].record.outcome
+    else {
+        panic!("the refusal follows its acquisition");
+    };
+    assert_eq!(acquired_attempt_id, &entries[0].record.attempt_id);
+    assert_eq!(fixture.f.task.ledger_revision, revision.map(|r| r + 1));
+    let kinds: Vec<_> = fixture
+        .f
+        .store
+        .investigation_events(&fixture.f.basis.task_id, 0)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|event| event.kind)
+        .rev()
+        .take(2)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            InvestigationEventKind::ReadFirewallRefused,
+            InvestigationEventKind::ToolCompleted
+        ]
+    );
+    let body: Vec<u8> = fixture
+        .f
+        .store
+        .conn
+        .query_row(&format!("SELECT body FROM {TABLE}"), [], |r| r.get(0))
+        .unwrap();
+    assert!(!body.windows(12).any(|w| w == b"private text"));
+}
+
+// AC-1414: the candidate withholds the read exactly when the settlement
+// records its refusal, and a refusal is authentic only on a cloud task.
+// Every mismatch is refused with nothing written.
+#[test]
+fn withholding_and_refusal_must_agree() {
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(true));
+    let mut fixture = Fixture::new();
+    let decide = refusing(&fixture, true);
+    assert_eq!(
+        settle(&mut fixture, Some(&decide), None).map(|_| ()),
+        Err(InvestigationStoreError::Invalid)
+    );
+    let mut fixture = Fixture::new();
+    let decide = refusing(&fixture, true);
+    assert_eq!(
+        settle(&mut fixture, None, Some(&decide)).map(|_| ()),
+        Err(InvestigationStoreError::Invalid)
+    );
+    assert_eq!(reload(&fixture).unwrap().len(), 0);
+
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(false));
+    let mut fixture = Fixture::new();
+    let decide = refusing(&fixture, true);
+    assert_eq!(
+        settle(&mut fixture, None, Some(&decide)).map(|_| ()),
+        Err(InvestigationStoreError::Invalid)
+    );
+}
+
+// AC-1414: an allowed read settles as before, with no refusal.
+#[test]
+fn allowed_read_settles_without_refusal() {
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(true));
+    let mut fixture = Fixture::new();
+    let allow = refusing(&fixture, false);
+    settle(&mut fixture, None, Some(&allow)).unwrap();
+    let entries = reload(&fixture).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        entries[0].record.outcome,
+        AttemptOutcome::SourceAcquired { .. }
+    ));
 }
