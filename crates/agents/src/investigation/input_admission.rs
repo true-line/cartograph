@@ -8,6 +8,7 @@ use super::*;
 use crate::{InputClosureStatus, PrimarySourceScope};
 use serde::{Deserialize, Serialize};
 use staged_refusal::{CompletionCallMode, ProtectedCompletionMetadata};
+use std::collections::BTreeSet;
 
 /// A finite byte-capacity reason, independent of completion refusal feedback.
 /// Storage and tool/evidence-budget failures retain their terminal semantics.
@@ -77,6 +78,50 @@ impl InvestigationInput {
         capacity_feedback: Option<&AdmissionCapacityFeedback>,
         policy: &InvestigationPolicy,
     ) -> Result<Self, InvestigationError> {
+        Self::prepare_v9_withholding_with_policy(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            basis,
+            request,
+            metadata,
+            coverage_details,
+            mode,
+            capacity_refusal_count,
+            capacity_feedback,
+            policy,
+            &BTreeSet::new(),
+        )
+    }
+
+    /// As [`Self::prepare_v9_with_policy`], with host-withheld source citations
+    /// (#679). Each withheld id is an acquired source citation whose exact read
+    /// the host firewall refused; it is listed only as a closed
+    /// `firewall_refused` handle with no text. The caller owns the refusal
+    /// witness; this projection grants no denial or completion authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_v9_withholding_with_policy(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[&str],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+        request: &obligations::StagedObligationRequest,
+        metadata: &ProtectedCompletionMetadata,
+        coverage_details: &[&str],
+        mode: CompletionCallMode,
+        capacity_refusal_count: u32,
+        capacity_feedback: Option<&AdmissionCapacityFeedback>,
+        policy: &InvestigationPolicy,
+        withheld: &BTreeSet<String>,
+    ) -> Result<Self, InvestigationError> {
         if !specialist.uses_next_prompt_admission()
             || request.schema_version != 7
             || capacity_refusal_count > policy.limits().model_invocations
@@ -104,6 +149,7 @@ impl InvestigationInput {
             metadata,
             policy,
             7,
+            withheld,
         )?;
         prompt["schema_version"] = 9.into();
         apply_admission_progress(
@@ -551,6 +597,7 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        let withheld = withheld_source_ids(&prompt)?;
         let source_citations: Vec<_> = self
             .ledger
             .citations
@@ -559,10 +606,16 @@ impl InvestigationInput {
                 !matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata)
             })
             .collect();
+        // Withheld reads stay acquired (ordinals and limits count them) but
+        // have no supplied span.
+        let supplied_citations: Vec<_> = source_citations
+            .iter()
+            .filter(|citation| !withheld.contains(citation.citation_id.as_str()))
+            .collect();
         // Complete current source set only. A changed working set needs its own
         // explicit prospective projection and cannot inherit this certificate.
-        if source_citations.len() != self.payload.spans.len()
-            || source_citations.iter().any(|citation| {
+        if supplied_citations.len() != self.payload.spans.len()
+            || supplied_citations.iter().any(|citation| {
                 self.payload
                     .spans
                     .iter()
@@ -588,6 +641,7 @@ impl InvestigationInput {
             self.ledger
                 .citations
                 .iter()
+                .filter(|citation| !withheld.contains(citation.citation_id.as_str()))
                 .map(CitationPromptHandle::from)
                 .collect::<Vec<_>>(),
         )

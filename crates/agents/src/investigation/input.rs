@@ -534,11 +534,12 @@ impl InvestigationInput {
             usage,
             policy,
             None,
+            &std::collections::BTreeSet::new(),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_base_projected<P: AsRef<str> + serde::Serialize>(
+    pub(super) fn prepare_base_projected<P: AsRef<str> + serde::Serialize>(
         question: &str,
         specialist: SpecialistId,
         ledger: InvestigationInputLedger,
@@ -548,8 +549,11 @@ impl InvestigationInput {
         usage: &InvestigationUsage,
         policy: &InvestigationPolicy,
         request_hash: Option<&str>,
+        withheld: &std::collections::BTreeSet<String>,
     ) -> Result<Self, InvestigationError> {
-        if specialist.uses_query_history_disclosure() != request_hash.is_some() {
+        if specialist.uses_query_history_disclosure() != request_hash.is_some()
+            || (!withheld.is_empty() && !specialist.uses_compact_disclosure())
+        {
             return Err(InvestigationError::InvalidInput);
         }
         if specialist.uses_policy_selection() != (policy.profile() == "investigation-v2") {
@@ -600,7 +604,14 @@ impl InvestigationInput {
             .filter(|c| !matches!(c.origin, InvestigationEvidenceOrigin::GraphMetadata))
             .map(|c| (c.citation_id.as_str(), c))
             .collect::<BTreeMap<_, _>>();
-        if source_citations.len() != evidence.len() {
+        // A firewall-refused read stays acquired in the ledger, but only the host
+        // may withhold it: exactly one source citation with no supplied text.
+        if source_citations.len() != evidence.len() + withheld.len()
+            || withheld.iter().any(|id| {
+                !source_citations.contains_key(id.as_str())
+                    || evidence.iter().any(|source| &source.id == id)
+            })
+        {
             return Err(InvestigationError::InvalidInput);
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -698,12 +709,12 @@ impl InvestigationInput {
                 )?),
             }
             .map_err(|_| InvestigationError::InvalidInput)?;
-            let citations: Vec<_> = ledger
+            let (withheld_sources, citations): (Vec<_>, Vec<_>) = ledger
                 .citations
                 .iter()
                 .map(CitationPromptHandle::from)
-                .collect();
-            serde_json::json!({
+                .partition(|handle| withheld.contains(handle.citation_id));
+            let mut prompt = serde_json::json!({
                 "schema_version": 2,
                 "policy": COMPACT_DISCLOSURE_POLICY,
                 "question": question,
@@ -716,7 +727,18 @@ impl InvestigationInput {
                 "consumed_budgets": usage,
                 "limits": policy.limits(),
                 "coverage": "Bounded recovered context only. Captured source attests its primary source, not complete producer input closure. Unknown evidence is not absence. Findings remain T3/InferredWeak."
-            })
+            });
+            // Closed code only: no withheld text, hash or firewall reason prose.
+            // Absent when nothing is withheld, so legacy prompt identities hold.
+            if !withheld_sources.is_empty() {
+                prompt["withheld_sources"] = withheld_sources
+                    .into_iter()
+                    .map(|handle| {
+                        serde_json::json!({"handle": handle, "outcome": "firewall_refused"})
+                    })
+                    .collect();
+            }
+            prompt
         } else {
             serde_json::json!({
                 "schema_version": 1,
@@ -1379,6 +1401,32 @@ struct PriorHistory {
     invocation_outcome_pending: bool,
     authority: String,
     saved_result: Option<InvestigationResult>,
+}
+
+/// Citation ids the host withheld after an explicit firewall refusal (#679).
+/// Absent means none. Present must be a nonempty list of closed entries.
+pub(super) fn withheld_source_ids(
+    prompt: &Value,
+) -> Result<std::collections::BTreeSet<&str>, InvestigationError> {
+    let Some(entries) = prompt.get("withheld_sources") else {
+        return Ok(Default::default());
+    };
+    let entries = entries
+        .as_array()
+        .filter(|entries| !entries.is_empty())
+        .ok_or(InvestigationError::InvalidInput)?;
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in entries {
+        let id = entry
+            .as_object()
+            .filter(|object| object.len() == 2 && entry["outcome"] == "firewall_refused")
+            .and_then(|_| entry["handle"]["citation_id"].as_str())
+            .ok_or(InvestigationError::InvalidInput)?;
+        if !ids.insert(id) {
+            return Err(InvestigationError::InvalidInput);
+        }
+    }
+    Ok(ids)
 }
 
 /// Source-authored graph object keys are input too. Closed protocol field names
