@@ -92,8 +92,8 @@ const GUIDANCE: &[(&str, &str)] = &[
          areas yourself. For each area state its purpose, who uses it (an end user, an \
          API client, an administrator, a developer, an external provider) and the outcome \
          it delivers, including notable conditions and limits. A route is evidence, not \
-         content: name at most two representative routes in a statement and never \
-         enumerate routes, methods or versions.",
+         content: this section cites capabilities, which show no route, so never state \
+         or enumerate routes, URL paths, methods or versions.",
     ),
     (
         "1.4",
