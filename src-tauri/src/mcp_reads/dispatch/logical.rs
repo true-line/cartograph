@@ -11,6 +11,7 @@ pub(crate) fn logical_protocol_workspace_bytes(limits: WorkerLimits) -> Option<u
     let tools = [
         ReadTool::Capabilities,
         ReadTool::Discover,
+        ReadTool::Query,
         ReadTool::Artifacts,
         ReadTool::ReadArtifact,
         ReadTool::Evidence,
