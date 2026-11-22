@@ -3708,6 +3708,94 @@ fn environments_are_read_from_the_capture() {
     assert_eq!(checkout, ["busybox:1", "late:1"]);
 }
 
+// AC-1061: the schedule and entry-point readers' selections join the
+// capture, and with the capture they read the retained bytes: a crontab or
+// Procfile edited in the checkout afterwards changes nothing. Without the
+// flag that says the selections were retained, the checkout is read.
+#[test]
+fn schedules_and_entry_points_are_read_from_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("crontab"), "*/5 * * * * python cron.py\n").unwrap();
+    std::fs::write(root.join("cron.py"), "print('cron')\n").unwrap();
+    std::fs::write(root.join("Procfile"), "worker: python worker.py\n").unwrap();
+    std::fs::write(root.join("worker.py"), "print('worker')\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.starts_captured);
+    let capture = input.capture.as_ref().unwrap();
+    let held: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert!(
+        held.contains(&"crontab") && held.contains(&"Procfile"),
+        "{held:?}"
+    );
+    std::fs::write(root.join("crontab"), "0 0 * * * python cron.py\n").unwrap();
+    std::fs::write(root.join("Procfile"), "web: python web.py\n").unwrap();
+    std::fs::write(root.join("web.py"), "print('web')\n").unwrap();
+    let extract = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                starts_captured: captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0
+    };
+    let starts = |extraction: &adapters_lang_ts::Extraction| -> Vec<String> {
+        let mut found: Vec<String> = extraction
+            .nodes
+            .iter()
+            .filter_map(|node| match node.label.as_str() {
+                "Schedule" => node.props["schedule"].as_str().map(str::to_string),
+                "EntryPoint" => node.props["name"].as_str().map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let captured = starts(&extract(true));
+    let checkout = starts(&extract(false));
+    assert!(captured.iter().any(|s| s == "*/5 * * * *"), "{captured:?}");
+    assert!(
+        captured.iter().any(|s| s.contains("worker")),
+        "{captured:?}"
+    );
+    assert!(!captured.iter().any(|s| s.contains("web")), "{captured:?}");
+    assert!(checkout.iter().any(|s| s == "0 0 * * *"), "{checkout:?}");
+    assert!(checkout.iter().any(|s| s.contains("web")), "{checkout:?}");
+}
+
 // AC-1055: the Python observed-infrastructure pass reads the same captured
 // bytes as the Python lane, so a checkout edit after capture changes neither.
 #[test]
