@@ -1271,6 +1271,9 @@ struct ProducerReads {
     /// Whether the primary capture holds the environment reader's whole
     /// selection, so that reader reads it and not the checkout (AC-1059).
     environments_captured: bool,
+    /// Whether the primary capture holds the schedule and entry-point
+    /// readers' whole selections, so they read it (AC-1061).
+    starts_captured: bool,
     /// What the found ADR/RFC reader read and published (#1847).
     adrs: ingest::coverage::ProducerCount,
     /// Found ADR/RFC files over the size bound, in path order (#1847).
@@ -1297,6 +1300,7 @@ impl Default for ProducerReads {
             captured_ts_ran: false,
             unfollowed_links: Vec::new(),
             environments_captured: false,
+            starts_captured: false,
             adrs: ingest::coverage::ProducerCount::default(),
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
@@ -2598,8 +2602,39 @@ fn extract_tree_packed(
     {
         let schedule_id = ingest::schedules::SourceId { repo, commit };
         let symbols = unplaceholdered_set(&facts, "Symbol")?;
-        let schedule_facts = ingest::schedules::extract_dir(root, &schedule_id, &symbols)
-            .map_err(|e| e.to_string())?;
+        // A capture that holds the readers' whole selections is read in
+        // place of the checkout (AC-1061); the checkout is only listed.
+        let captured_starts = primary.filter(|_| reads.starts_captured);
+        // The readers list the capture's own paths, so whether a file a
+        // declaration names exists is the snapshot's answer.
+        let captured_paths: Vec<String> = captured_starts
+            .map(|capture| {
+                capture
+                    .manifest()
+                    .files
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let captured_read = |path: &str| -> std::io::Result<Vec<u8>> {
+            captured_starts
+                .ok_or_else(|| std::io::Error::other("no capture"))?
+                .file(path)
+                .map(|file| file.bytes().to_vec())
+                .map_err(|_| std::io::Error::other("captured start file is unavailable"))
+        };
+        let schedule_facts = match captured_starts {
+            Some(_) => ingest::schedules::extract_from_capture(
+                root,
+                &captured_paths,
+                &captured_read,
+                &schedule_id,
+                &symbols,
+            ),
+            None => ingest::schedules::extract_dir(root, &schedule_id, &symbols),
+        }
+        .map_err(|e| e.to_string())?;
         layers.schedules = LayerSummary {
             files: schedule_facts.files,
             nodes: distinct_node_count(&schedule_facts.nodes),
@@ -2627,9 +2662,18 @@ fn extract_tree_packed(
         // process, a declared console script or `bin`) becomes an
         // EntryPoint flow trigger with an ENTRY into the file it runs, or a
         // Gap naming it. An adapter's File node supersedes the reader's.
-        let entry_facts =
-            ingest::entry_points::extract_dir(root, &schedule_id, &symbols, &scheduled)
-                .map_err(|e| e.to_string())?;
+        let entry_facts = match captured_starts {
+            Some(_) => ingest::entry_points::extract_from_capture(
+                root,
+                &captured_paths,
+                &captured_read,
+                &schedule_id,
+                &symbols,
+                &scheduled,
+            ),
+            None => ingest::entry_points::extract_dir(root, &schedule_id, &symbols, &scheduled),
+        }
+        .map_err(|e| e.to_string())?;
         layers.entry_points = LayerSummary {
             files: entry_facts.files,
             nodes: distinct_node_count(&entry_facts.nodes),
@@ -5722,6 +5766,7 @@ fn run_ingest<R: tauri::Runtime>(
     let mut reads = ProducerReads {
         unfollowed_links: primary.unfollowed.clone(),
         environments_captured: primary.environments_captured,
+        starts_captured: primary.starts_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6190,6 +6235,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     let mut reads = ProducerReads {
         unfollowed_links: primary.unfollowed.clone(),
         environments_captured: primary.environments_captured,
+        starts_captured: primary.starts_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6524,6 +6570,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         let mut reads = ProducerReads {
             unfollowed_links: primary.unfollowed.clone(),
             environments_captured: primary.environments_captured,
+            starts_captured: primary.starts_captured,
             ..ProducerReads::default()
         };
         let (extraction, facts, repo_layers, repo_delta) = {

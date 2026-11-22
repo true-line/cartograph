@@ -1354,3 +1354,77 @@ jobs:
     // The steps' scripts are not entries.
     assert!(!out.edges.iter().any(|e| e.dst.ends_with("scripts/sync.py")));
 }
+
+// AC-1061 (T-1061, #385): over a source capture the schedule reader reads
+// the captured bytes of its whole selection and never the checkout: a
+// crontab, `CronJob`, script or `Dockerfile` edited, deleted or created
+// after capture changes nothing.
+#[test]
+fn captured_schedule_files_are_read_instead_of_the_checkout() {
+    let crontab = "*/5 * * * * python /code/cron.py -j stats\n@daily python jobs/cleanup.py\n0 4 * * * /code/run.sh\n";
+    let cronjob = "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: t\nspec:\n  schedule: \"0 * * * *\"\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n            - name: t\n              command: [\"python\", \"/code/cron.py\"]\n";
+    let dir = tempfile::tempdir().unwrap();
+    let write = |files: &[(&str, &str)]| {
+        for (path, body) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+    };
+    write(&[
+        ("Dockerfile", DOCKERFILE),
+        ("deploy/crontab", crontab),
+        ("k8s/cron.yaml", cronjob),
+        ("cron.py", ""),
+        ("jobs/cleanup.py", ""),
+        ("run.sh", "#!/bin/sh\n"),
+        ("README.md", "notes\n"),
+    ]);
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let symbols = BTreeSet::new();
+    let facts = |out: &ScheduleExtraction| format!("{:?} {:?} {}", out.nodes, out.edges, out.files);
+    let before = facts(&extract_dir(dir.path(), &id, &symbols).unwrap());
+
+    let paths = schedule_paths(dir.path()).unwrap();
+    assert_eq!(
+        paths,
+        [
+            "Dockerfile",
+            "cron.py",
+            "deploy/crontab",
+            "jobs/cleanup.py",
+            "k8s/cron.yaml",
+            "run.sh"
+        ]
+    );
+    let captured: BTreeMap<String, Vec<u8>> = paths
+        .iter()
+        .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+        .collect();
+
+    // After capture: edits, a deletion and a new crontab.
+    write(&[
+        ("Dockerfile", "FROM python:3.12\nWORKDIR /srv\nCOPY . .\n"),
+        ("deploy/crontab", "0 0 * * * python other.py\n"),
+        ("etc/cron.d/late", "0 2 * * * root python cron.py\n"),
+    ]);
+    std::fs::remove_file(dir.path().join("jobs/cleanup.py")).unwrap();
+    // A target no selector names: its presence is the capture's.
+    std::fs::remove_file(dir.path().join("run.sh")).unwrap();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let after = extract_from_capture(dir.path(), &keys, &read, &id, &symbols).unwrap();
+    assert_eq!(facts(&after), before);
+    assert_ne!(
+        facts(&extract_dir(dir.path(), &id, &symbols).unwrap()),
+        before
+    );
+}
