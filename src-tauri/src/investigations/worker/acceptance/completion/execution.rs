@@ -380,27 +380,6 @@ pub(in super::super) fn rows<T: DeserializeOwned + Serialize>(
         })
         .collect()
 }
-fn events(jobs: &JobStore, id: &str, maximum: usize) -> Result<Vec<InvestigationEvent>, String> {
-    let mut result = Vec::new();
-    let mut after = 0;
-    loop {
-        let page = jobs
-            .investigation_events(id, after)
-            .map_err(|error| error.to_string())?;
-        result.extend(page.items);
-        if result.len() > maximum {
-            return Err("Event journal exceeds its bound.".into());
-        }
-        if !page.has_more {
-            break;
-        }
-        if page.next_sequence <= after {
-            return Err("Event cursor did not advance.".into());
-        }
-        after = page.next_sequence;
-    }
-    Ok(result)
-}
 pub(in super::super) type SavedState = (
     InvestigationDetail,
     Option<InvestigationResult>,
@@ -408,34 +387,49 @@ pub(in super::super) type SavedState = (
     Vec<InvestigationEvent>,
 );
 pub(in super::super) fn read_state(jobs: &JobStore, id: &str) -> Result<SavedState, String> {
-    Ok((
-        jobs.investigation(id).map_err(|error| error.to_string())?,
-        jobs.investigation_result(id)
-            .map_err(|error| error.to_string())?,
-        jobs.investigation_ledger(id)
-            .map_err(|error| error.to_string())?,
-        events(jobs, id, 96)?,
-    ))
+    let state = jobs
+        .investigation_snapshot(id)
+        .map_err(|error| error.to_string())?;
+    bounded_events(state, 96)
 }
 pub(in super::super) fn read_expanded_state(
     jobs: &JobStore,
     id: &str,
 ) -> Result<SavedState, String> {
-    let detail = jobs.investigation(id).map_err(|error| error.to_string())?;
-    if detail.limits.profile != INVESTIGATION_V2_POLICY.limits().profile {
+    let state = jobs
+        .investigation_snapshot(id)
+        .map_err(|error| error.to_string())?;
+    expanded(state)
+}
+/// `read_expanded_state` plus the refusal diagnostics, from one snapshot.
+pub(in super::super) fn read_expanded_receipt_state(
+    jobs: &JobStore,
+    id: &str,
+) -> Result<
+    (
+        SavedState,
+        Vec<agents::investigation::diagnostic_sidecar::Sidecar>,
+    ),
+    String,
+> {
+    let (state, diagnostics) = jobs
+        .investigation_receipt_snapshot(id)
+        .map_err(|error| error.to_string())?;
+    Ok((expanded(state)?, diagnostics))
+}
+fn expanded(state: SavedState) -> Result<SavedState, String> {
+    if state.0.limits.profile != INVESTIGATION_V2_POLICY.limits().profile {
         return Err("Expanded receipt requires the registered V2 policy.".into());
     }
-    let policy = crate::jobs::investigations::policy_for_detail(&detail)
+    let policy = crate::jobs::investigations::policy_for_detail(&state.0)
         .map_err(|error| error.to_string())?;
-    let event_limit = policy.journal_events() as usize;
-    Ok((
-        detail,
-        jobs.investigation_result(id)
-            .map_err(|error| error.to_string())?,
-        jobs.investigation_ledger(id)
-            .map_err(|error| error.to_string())?,
-        events(jobs, id, event_limit)?,
-    ))
+    bounded_events(state, policy.journal_events() as usize)
+}
+fn bounded_events(state: SavedState, maximum: usize) -> Result<SavedState, String> {
+    if state.3.len() > maximum {
+        return Err("Event journal exceeds its bound.".into());
+    }
+    Ok(state)
 }
 fn revalidate(prepared: &PreparedState, request: &StagedObligationRequest) -> Result<(), String> {
     let state = prepared.app.state::<crate::AppState>();
