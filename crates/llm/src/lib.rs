@@ -335,6 +335,51 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<bounded::BoundedCompletion, bounded::BoundedCallError> {
         Err(bounded::BoundedCallError::unsupported())
     }
+
+    /// The credential the host's per-run model proxy adds to a tool-calling
+    /// runtime's request for this provider's bounded endpoint (ADR-0085
+    /// decision 7). The runtime itself never holds it. `None` for providers
+    /// that need none or have no tool-calling lane.
+    fn proxy_credential(&self) -> Option<UpstreamCredential> {
+        None
+    }
+}
+
+/// One request header holding a provider key. Its value never appears in
+/// `Debug` output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UpstreamCredential {
+    header: &'static str,
+    value: String,
+}
+
+impl UpstreamCredential {
+    /// A credential sent as `header: value`.
+    pub fn new(header: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            header,
+            value: value.into(),
+        }
+    }
+
+    /// The header name.
+    pub fn header(&self) -> &'static str {
+        self.header
+    }
+
+    /// The secret header value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl std::fmt::Debug for UpstreamCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamCredential")
+            .field("header", &self.header)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Records one cloud egress before it happens: the provider id and the byte

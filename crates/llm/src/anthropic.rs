@@ -233,6 +233,13 @@ impl LlmProvider for AnthropicProvider {
         true
     }
 
+    /// The key, for the host's loopback proxy in front of the Claude lane's
+    /// runtime (ADR-0085 decision 7). Only lanes with a bounded profile.
+    fn proxy_credential(&self) -> Option<crate::UpstreamCredential> {
+        (self.lane != ClaudeLane::Fable)
+            .then(|| crate::UpstreamCredential::new("x-api-key", self.api_key.clone()))
+    }
+
     fn id(&self) -> &str {
         &self.provider_id
     }
@@ -482,6 +489,19 @@ mod tests {
         assert!(raw.contains("claude-opus-5-5")); // fallback target in body
         assert!(!raw.contains("\"betas\"")); // never a body field
         assert!(!raw.contains("\"thinking\"")); // always-on: param omitted
+    }
+
+    // AC-1424 (ADR-0085 decision 7): the proxy, not the runtime, holds the
+    // key; Fable has no bounded lane and so no proxy credential.
+    #[test]
+    fn only_bounded_lanes_give_the_proxy_their_key_and_debug_hides_it() {
+        let opus = AnthropicProvider::new(ClaudeLane::Opus, "sk-proxy").unwrap();
+        let credential = opus.proxy_credential().unwrap();
+        assert_eq!(credential.header(), "x-api-key");
+        assert_eq!(credential.value(), "sk-proxy");
+        assert!(!format!("{credential:?}").contains("sk-proxy"));
+        let fable = AnthropicProvider::new(ClaudeLane::Fable, "sk-proxy").unwrap();
+        assert!(fable.proxy_credential().is_none());
     }
 
     #[test]
