@@ -3,7 +3,7 @@
 // frozen context window (ADR-0081) is sent on every request, or to vLLM's
 // OpenAI-compatible API (the DGX Spark lane), whose window is fixed at start.
 import { Agent, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
-import type { Model } from "@mariozechner/pi-ai";
+import { streamSimple, type Model } from "@mariozechner/pi-ai";
 import type { HostChannel } from "./host.ts";
 import { ollamaStreamFn } from "./ollama-stream.ts";
 import type { SidecarMessage, StartMessage } from "./protocol.ts";
@@ -42,13 +42,21 @@ export function piModel(start: StartMessage): Model<"openai-completions"> {
   return { ...base, provider: "ollama", baseUrl: start.base_url, reasoning: false };
 }
 
+/**
+ * What Pi validates a call against. The host decodes and refuses every call
+ * itself (AC-1420) and its refusal text is what the model sees, so Pi must not
+ * answer a call with its own validation error: the host's proxy would refuse a
+ * request carrying a tool result the host never sent.
+ */
+export const HOST_VALIDATED = { type: "object", additionalProperties: true } as const;
+
 /** Tools whose execution is entirely the host's. */
 export function piTools(start: StartMessage, host: HostChannel): AgentTool<any>[] {
   return start.tools.map((spec) => ({
     name: spec.name,
     label: spec.name,
     description: spec.description,
-    parameters: spec.input_schema as any,
+    parameters: HOST_VALIDATED as any,
     async execute(_id: string, params: unknown) {
       const result = await host.callTool(spec.name, params);
       if (result.is_error) {
@@ -58,6 +66,16 @@ export function piTools(start: StartMessage, host: HostChannel): AgentTool<any>[
       return { content: [{ type: "text" as const, text: result.content }], details: undefined, terminate: result.terminal };
     },
   }));
+}
+
+/** The model still sees each tool's real argument schema. */
+export function withHostSchemas(start: StartMessage, stream: StreamFn): StreamFn {
+  const schemas = new Map(start.tools.map((spec) => [spec.name, spec.input_schema]));
+  return ((model: any, context: any, options: any) =>
+    stream(model, {
+      ...context,
+      tools: (context.tools ?? []).map((tool: any) => ({ ...tool, parameters: schemas.get(tool.name) ?? tool.parameters })),
+    }, options)) as StreamFn;
 }
 
 export async function runPi(
@@ -74,9 +92,13 @@ export async function runPi(
     toolExecution: "sequential",
     // Ollama gets the native API so the frozen num_ctx travels; vLLM uses Pi's
     // own OpenAI-compatible stream.
-    ...(streamFn || start.backend !== "vllm"
-      ? { streamFn: (streamFn ?? ollamaStreamFn(start.base_url, start.token, start.context_window)) as StreamFn }
-      : {}),
+    streamFn: withHostSchemas(
+      start,
+      streamFn ??
+        (start.backend === "vllm"
+          ? (streamSimple as StreamFn)
+          : (ollamaStreamFn(start.base_url, start.token, start.context_window) as StreamFn)),
+    ),
     beforeToolCall: async ({ toolCall, args }) => {
       const outcome = await host.hook("pre_tool", { tool: toolCall.name, arguments: args });
       return outcome.allow ? undefined : { block: true, reason: outcome.reason ?? "Denied by the run's pre_tool hook." };

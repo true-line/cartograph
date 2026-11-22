@@ -4,9 +4,10 @@
 //! The runtime never holds a provider key and has no network path of its own:
 //! its only model endpoint is this proxy on `127.0.0.1`, reached with a
 //! per-run token. The host arms the proxy for exactly one model request per
-//! step, with the text the bridge just sent, and the proxy forwards a request
-//! only when its path, token, model, frozen context window and last message
-//! all match. It records the exact request size through the host's dispatch
+//! step, with the texts it sent the runtime since the model last answered, and
+//! the proxy forwards a request only when its path, token, model and frozen
+//! context window match and the messages after the model's last answer are
+//! exactly those texts. It records the exact request size through the host's dispatch
 //! callback before forwarding, so a call that then fails is still counted.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -55,6 +56,19 @@ pub struct ProxyConfig {
     pub max_response_bytes: usize,
 }
 
+/// The authorized completion's own limits for this step; the proxy applies
+/// the tighter of these and its fixed ones before any egress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallLimits {
+    /// Largest request body forwarded this step.
+    pub max_request_bytes: usize,
+    /// Largest upstream response body returned this step.
+    pub max_response_bytes: usize,
+    /// Output tokens the request may ask for (`num_predict` for Ollama,
+    /// `max_tokens` or `max_completion_tokens` otherwise); it must ask.
+    pub max_output_tokens: u32,
+}
+
 /// Why the proxy refused or failed a model request. The runtime sees only an
 /// HTTP status; the host sees the code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -77,9 +91,16 @@ pub enum ProxyRefusal {
     /// An Ollama request did not carry the frozen context window.
     #[error("context window differs from the frozen one")]
     ContextWindow,
-    /// The last message is not the text the host sent this step.
-    #[error("last message is not the authorized text")]
+    /// The messages after the model's last answer are not the texts the
+    /// host sent this step.
+    #[error("trailing messages are not the authorized texts")]
     Unauthorized,
+    /// The request asked for no output-token limit or a larger one.
+    #[error("output-token limit missing or above the step's")]
+    OutputTokens,
+    /// The host's interrupt fired before a request arrived.
+    #[error("interrupted before a model request")]
+    Interrupted,
     /// The host declined to record the egress.
     #[error("egress not recorded")]
     NotRecorded,
@@ -97,6 +118,8 @@ pub struct ProxyExchange {
     pub response_bytes: u64,
     /// Upstream HTTP status.
     pub status: u16,
+    /// The upstream response body, as returned to the runtime.
+    pub body: Vec<u8>,
 }
 
 /// A bound, per-run loopback proxy.
@@ -124,6 +147,11 @@ impl ModelProxy {
         })
     }
 
+    /// The run's fixed proxy settings.
+    pub fn config(&self) -> &ProxyConfig {
+        &self.config
+    }
+
     /// The base URL the runtime is given.
     pub fn base_url(&self) -> std::io::Result<String> {
         let SocketAddr::V4(addr) = self.listener.local_addr()? else {
@@ -132,17 +160,21 @@ impl ModelProxy {
         Ok(format!("http://{addr}/{}", self.config.run_id))
     }
 
-    /// Serves exactly one model request for this step. `authorized` is the
-    /// text the bridge sent the runtime this step; `dispatching` records the
-    /// request size and may refuse the egress.
+    /// Serves exactly one model request for this step. `authorized` holds the
+    /// texts the host sent the runtime since the model's last answer, in
+    /// order; `limits` are the step's own; `interrupt` is polled while no request has arrived and ends the
+    /// wait when it returns `true`; `dispatching` records the request size and
+    /// may refuse the egress.
     pub fn serve_one(
         &self,
-        authorized: &str,
+        authorized: &[String],
+        limits: &CallLimits,
         deadline: Instant,
+        interrupt: &dyn Fn() -> bool,
         dispatching: &dyn Fn(u64) -> bool,
     ) -> Result<ProxyExchange, ProxyRefusal> {
-        let mut stream = self.accept(deadline)?;
-        let outcome = self.handle(&mut stream, authorized, deadline, dispatching);
+        let mut stream = self.accept(deadline, interrupt)?;
+        let outcome = self.handle(&mut stream, authorized, limits, deadline, dispatching);
         if let Err(refusal) = &outcome {
             let status = match refusal {
                 ProxyRefusal::Token => "401 Unauthorized",
@@ -158,7 +190,11 @@ impl ModelProxy {
         outcome
     }
 
-    fn accept(&self, deadline: Instant) -> Result<TcpStream, ProxyRefusal> {
+    fn accept(
+        &self,
+        deadline: Instant,
+        interrupt: &dyn Fn() -> bool,
+    ) -> Result<TcpStream, ProxyRefusal> {
         loop {
             match self.listener.accept() {
                 Ok((stream, peer)) if peer.ip().is_loopback() => {
@@ -176,6 +212,9 @@ impl ModelProxy {
                     if Instant::now() >= deadline {
                         return Err(ProxyRefusal::Deadline);
                     }
+                    if interrupt() {
+                        return Err(ProxyRefusal::Interrupted);
+                    }
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 Err(_) => return Err(ProxyRefusal::Request),
@@ -186,11 +225,17 @@ impl ModelProxy {
     fn handle(
         &self,
         stream: &mut TcpStream,
-        authorized: &str,
+        authorized: &[String],
+        limits: &CallLimits,
         deadline: Instant,
         dispatching: &dyn Fn(u64) -> bool,
     ) -> Result<ProxyExchange, ProxyRefusal> {
-        let (path, headers, body) = read_request(stream, self.config.max_request_bytes)?;
+        let max_request = self.config.max_request_bytes.min(limits.max_request_bytes);
+        let max_response = self
+            .config
+            .max_response_bytes
+            .min(limits.max_response_bytes);
+        let (path, headers, body) = read_request(stream, max_request)?;
         let expected = format!("/{}{}", self.config.run_id, self.config.backend.path());
         if path != expected {
             return Err(ProxyRefusal::Path);
@@ -221,13 +266,18 @@ impl ModelProxy {
                 return Err(ProxyRefusal::ContextWindow);
             }
         }
-        let last = request
-            .get("messages")
-            .and_then(Value::as_array)
-            .and_then(|messages| messages.last())
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str);
-        if last != Some(authorized) {
+        let asked = match self.config.backend {
+            ProxyBackend::Ollama => request.pointer("/options/num_predict"),
+            ProxyBackend::OpenAiCompatible => request
+                .get("max_tokens")
+                .or_else(|| request.get("max_completion_tokens")),
+        }
+        .and_then(Value::as_u64);
+        if !asked.is_some_and(|tokens| (1..=u64::from(limits.max_output_tokens)).contains(&tokens))
+        {
+            return Err(ProxyRefusal::OutputTokens);
+        }
+        if trailing_texts(&request).as_deref() != Some(authorized) {
             return Err(ProxyRefusal::Unauthorized);
         }
         if !dispatching(body.len() as u64) {
@@ -257,10 +307,10 @@ impl ModelProxy {
             .to_owned();
         let mut upstream = Vec::new();
         response
-            .take(self.config.max_response_bytes as u64 + 1)
+            .take(max_response as u64 + 1)
             .read_to_end(&mut upstream)
             .map_err(|_| ProxyRefusal::Upstream)?;
-        if upstream.len() > self.config.max_response_bytes {
+        if upstream.len() > max_response {
             return Err(ProxyRefusal::Upstream);
         }
         write!(
@@ -274,8 +324,41 @@ impl ModelProxy {
             request_bytes: body.len() as u64,
             response_bytes: upstream.len() as u64,
             status,
+            body: upstream,
         })
     }
+}
+
+/// The texts of the messages after the model's last answer, system text
+/// excluded; `None` if one is not plain text.
+fn trailing_texts(request: &Value) -> Option<Vec<String>> {
+    let messages = request.get("messages")?.as_array()?;
+    let role = |message: &Value| {
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let after = messages
+        .iter()
+        .rposition(|message| role(message).as_deref() == Some("assistant"))
+        .map_or(0, |index| index + 1);
+    messages[after..]
+        .iter()
+        .filter(|message| role(message).as_deref() != Some("system"))
+        .map(|message| match message.get("content")? {
+            Value::String(text) => Some(text.clone()),
+            // OpenAI-style content parts: text parts only.
+            Value::Array(parts) => parts
+                .iter()
+                .map(|part| match part.get("type").and_then(Value::as_str) {
+                    Some("text") => part.get("text").and_then(Value::as_str),
+                    _ => None,
+                })
+                .collect::<Option<String>>(),
+            _ => None,
+        })
+        .collect()
 }
 
 type Request = (String, Vec<(String, String)>, Vec<u8>);

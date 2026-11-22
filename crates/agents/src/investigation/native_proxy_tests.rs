@@ -5,6 +5,12 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+const LIMITS: CallLimits = CallLimits {
+    max_request_bytes: 1 << 20,
+    max_response_bytes: 1 << 20,
+    max_output_tokens: 4096,
+};
+
 const AUTHORIZED: &str = "{\"changed\":{\"turn_progress\":{\"turn\":2}}}";
 
 /// A stand-in provider that counts requests and answers one NDJSON line.
@@ -44,7 +50,7 @@ fn proxy(upstream: &str) -> ModelProxy {
 }
 
 fn request(model: &str, num_ctx: u64, last: &str) -> Value {
-    json!({"model": model, "stream": true, "options": {"num_ctx": num_ctx},
+    json!({"model": model, "stream": true, "options": {"num_ctx": num_ctx, "num_predict": 2048},
         "messages": [{"role": "system", "content": "s"}, {"role": "tool", "tool_name": "query_context", "content": last}]})
 }
 
@@ -67,6 +73,14 @@ fn send(base: String, path: &str, token: &str, body: Value) -> std::thread::Join
     })
 }
 
+fn authorized() -> Vec<String> {
+    vec![AUTHORIZED.to_owned()]
+}
+
+fn never() -> bool {
+    false
+}
+
 fn soon() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
@@ -80,7 +94,7 @@ fn an_authorized_request_is_recorded_then_forwarded() {
     let client = send(proxy.base_url().unwrap(), "/api/chat", "run-7-token", body);
     let recorded = std::sync::Mutex::new(None);
     let exchange = proxy
-        .serve_one(AUTHORIZED, soon(), &|bytes| {
+        .serve_one(&authorized(), &LIMITS, soon(), &never, &|bytes| {
             *recorded.lock().unwrap() = Some(bytes);
             true
         })
@@ -141,7 +155,7 @@ fn refused_requests_never_reach_the_provider() {
         let proxy = proxy(&url);
         let client = send(proxy.base_url().unwrap(), path, token, body);
         let dispatched = std::sync::atomic::AtomicBool::new(false);
-        let outcome = proxy.serve_one(AUTHORIZED, soon(), &|_| {
+        let outcome = proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| {
             dispatched.store(true, Ordering::SeqCst);
             true
         });
@@ -166,7 +180,7 @@ fn an_unrecorded_egress_is_not_sent() {
         request("qwen3:30b-a3b", 32768, AUTHORIZED),
     );
     assert_eq!(
-        proxy.serve_one(AUTHORIZED, soon(), &|_| false),
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| false),
         Err(ProxyRefusal::NotRecorded)
     );
     assert_eq!(client.join().unwrap(), 403);
@@ -179,7 +193,7 @@ fn no_request_before_the_deadline_is_a_deadline_refusal() {
     let proxy = proxy(&url);
     let deadline = Instant::now() + Duration::from_millis(30);
     assert_eq!(
-        proxy.serve_one(AUTHORIZED, deadline, &|_| true),
+        proxy.serve_one(&authorized(), &LIMITS, deadline, &never, &|_| true),
         Err(ProxyRefusal::Deadline)
     );
 }
@@ -206,12 +220,75 @@ fn the_vllm_backend_serves_the_openai_path_without_num_ctx() {
         max_response_bytes: 1 << 20,
     })
     .unwrap();
-    let body =
-        json!({"model": "glm-5.3-flash", "messages": [{"role": "user", "content": AUTHORIZED}]});
+    let body = json!({"model": "glm-5.3-flash", "max_tokens": 2048, "messages": [{"role": "user", "content": AUTHORIZED}]});
     let client = send(proxy.base_url().unwrap(), "/v1/chat/completions", "t", body);
-    proxy.serve_one(AUTHORIZED, soon(), &|_| true).unwrap();
+    proxy
+        .serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true)
+        .unwrap();
     assert_eq!(client.join().unwrap(), 200);
     assert_eq!(seen.join().unwrap(), "/v1/chat/completions");
+}
+
+#[test]
+fn every_message_after_the_models_answer_must_be_one_the_host_sent() {
+    let (url, hits) = upstream();
+    let extra = "Only one tool call per turn: this call was not run.".to_owned();
+    let messages = json!([
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": [{"type": "text", "text": "start"}]},
+        {"role": "assistant", "content": null, "tool_calls": []},
+        {"role": "tool", "content": AUTHORIZED},
+        {"role": "tool", "content": extra},
+    ]);
+    let body = |messages: &Value| json!({"model": "qwen3:30b-a3b", "options": {"num_ctx": 32768, "num_predict": 2048}, "messages": messages});
+    let both = vec![AUTHORIZED.to_owned(), extra.clone()];
+    let proxy = proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        body(&messages),
+    );
+    assert_eq!(
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true),
+        Err(ProxyRefusal::Unauthorized),
+        "a tool message the host did not authorize is refused"
+    );
+    assert_eq!(client.join().unwrap(), 403);
+    let proxy = self::proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        body(&messages),
+    );
+    proxy
+        .serve_one(&both, &LIMITS, soon(), &never, &|_| true)
+        .unwrap();
+    assert_eq!(client.join().unwrap(), 200);
+    let start = json!([{"role": "system", "content": "s"}, {"role": "user", "content": [{"type": "text", "text": "start"}]}]);
+    let proxy = self::proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        body(&start),
+    );
+    proxy
+        .serve_one(&["start".to_owned()], &LIMITS, soon(), &never, &|_| true)
+        .unwrap();
+    assert_eq!(client.join().unwrap(), 200);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn an_interrupt_ends_the_wait_before_any_request() {
+    let (url, _) = upstream();
+    let proxy = proxy(&url);
+    assert_eq!(
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &|| true, &|_| true),
+        Err(ProxyRefusal::Interrupted)
+    );
 }
 
 #[test]
@@ -225,7 +302,7 @@ fn credentials_windows_and_request_lines_are_checked_exactly() {
         request("qwen3:30b-a3b", 32768, AUTHORIZED),
     );
     assert_eq!(
-        proxy.serve_one(AUTHORIZED, soon(), &|_| true),
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true),
         Err(ProxyRefusal::Token),
         "the token is case-sensitive"
     );
@@ -242,7 +319,7 @@ fn credentials_windows_and_request_lines_are_checked_exactly() {
         request("qwen3:30b-a3b", 32768, AUTHORIZED),
     );
     assert_eq!(
-        proxy.serve_one(AUTHORIZED, soon(), &|_| true),
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true),
         Err(ProxyRefusal::ContextWindow),
         "no window may be sent when none is frozen"
     );
@@ -254,10 +331,89 @@ fn credentials_windows_and_request_lines_are_checked_exactly() {
         let _ = stream.write_all(format!("POST /{}", "a".repeat(64 * 1024)).as_bytes());
     });
     assert_eq!(
-        proxy.serve_one(AUTHORIZED, soon(), &|_| true),
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true),
         Err(ProxyRefusal::Request),
         "an endless request line is refused"
     );
     flood.join().unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_steps_own_limits_bind_before_any_egress() {
+    let (url, hits) = upstream();
+    let tight = CallLimits {
+        max_output_tokens: 1024,
+        ..LIMITS
+    };
+    let proxy = proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        request("qwen3:30b-a3b", 32768, AUTHORIZED),
+    );
+    assert_eq!(
+        proxy.serve_one(&authorized(), &tight, soon(), &never, &|_| true),
+        Err(ProxyRefusal::OutputTokens),
+        "a request may not ask for more output than the step allows"
+    );
+    assert_eq!(client.join().unwrap(), 403);
+    let mut unbounded = request("qwen3:30b-a3b", 32768, AUTHORIZED);
+    unbounded["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("num_predict");
+    let proxy = self::proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        unbounded,
+    );
+    assert_eq!(
+        proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true),
+        Err(ProxyRefusal::OutputTokens),
+        "a request must ask for a limit"
+    );
+    assert_eq!(client.join().unwrap(), 403);
+    let small = CallLimits {
+        max_request_bytes: 64,
+        ..LIMITS
+    };
+    let proxy = self::proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        request("qwen3:30b-a3b", 32768, AUTHORIZED),
+    );
+    assert_eq!(
+        proxy.serve_one(&authorized(), &small, soon(), &never, &|_| true),
+        Err(ProxyRefusal::Request),
+        "the step's request-byte limit applies"
+    );
+    let _ = client.join();
+    let proxy = self::proxy(&url);
+    let tiny = CallLimits {
+        max_response_bytes: 8,
+        ..LIMITS
+    };
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        request("qwen3:30b-a3b", 32768, AUTHORIZED),
+    );
+    assert_eq!(
+        proxy.serve_one(&authorized(), &tiny, soon(), &never, &|_| true),
+        Err(ProxyRefusal::Upstream),
+        "the step's response-byte limit applies"
+    );
+    assert_eq!(client.join().unwrap(), 502);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "only the last one reached the provider"
+    );
 }

@@ -135,6 +135,29 @@ test("Pi lane: every tool call is executed by the host and refusals are fed back
   assert.equal(model.seen[0]!.systemPrompt, start().system);
 });
 
+test("Pi lane: the host, not Pi, judges a call's arguments, and the model sees the real schemas", async () => {
+  const model = scriptedModel([
+    { name: "read_evidence", arguments: { index: "zero" } },
+    { name: "finish", arguments: { findings: [] } },
+  ]);
+  const offered: unknown[] = [];
+  const streamFn = (m: any, context: any, options: any) => {
+    offered.push(context.tools.map((tool: any) => tool.parameters));
+    return model.streamFn(m, context, options);
+  };
+  const host = fakeHost({
+    tool(name, args) {
+      if (name === "read_evidence") return { content: `invalid_arguments: index must be an integer, got ${JSON.stringify(args.index)}`, is_error: true };
+      return { content: "admitted", terminal: true };
+    },
+  });
+  await runPi(start(), host.channel, () => {}, streamFn as any);
+  const calls = host.sent.filter((m) => m.type === "tool_call").map((m: any) => [m.name, m.arguments]);
+  assert.deepEqual(calls[0], ["read_evidence", { index: "zero" }], "an invalid call reaches the host unchanged");
+  assert.deepEqual(toolResultTexts(model.seen[1]!), ['error:invalid_arguments: index must be an integer, got "zero"'], "the model sees the host's refusal");
+  assert.deepEqual(offered[0], tools.map((tool) => tool.input_schema));
+});
+
 test("Pi lane: a declared pre_tool hook denies through the harness without a host tool call", async () => {
   const model = scriptedModel([
     { name: "query_context", arguments: { query: { scope: { type: "all" } } } },
