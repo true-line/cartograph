@@ -645,52 +645,35 @@ fn legacy_uses_typed_citation_correction(id: SpecialistId) -> bool {
     )
 }
 
-// ADR-0071 slice (b): the offered set is unchanged from the hand-kept desktop
-// catalog it replaces; only its order now follows the table.
+// ADR-0071 slice (b), AC-1062: a new start is offered each role's current
+// version, domain-analyst@27 while an acceptance freeze names it (AC-0589) and
+// @29 beside @28 until the tool-calling runtime ships (ADR-0085). Every other
+// version is retired and only reopens.
 #[test]
-fn offered_set_matches_the_pre_table_desktop_catalog() {
-    let mut before = vec![
-        S::DomainAnalystV3,
-        S::EvidenceAuditorV3,
-        S::DomainAnalystV4,
-        S::EvidenceAuditorV4,
-        S::DomainAnalystV5,
-        S::EvidenceAuditorV5,
-        S::DomainAnalystV6,
-        S::EvidenceAuditorV6,
-        S::DomainAnalystV7,
-        S::EvidenceAuditorV7,
-        S::SpecWriterV1,
-        S::SpecWriterV2,
-        S::GapTriagerV1,
-        S::GapTriagerV2,
-        S::SectionWriterV1,
-    ];
+fn only_current_versions_and_named_exceptions_are_offered() {
+    let mut expected = vec![S::SpecWriterV2, S::GapTriagerV2, S::SectionWriterV1];
     if crate::investigation::InvestigationPolicy::for_profile("investigation-v2").is_some() {
-        before.extend([
-            S::DomainAnalystV10,
-            S::EvidenceAuditorV10,
-            S::DomainAnalystV11,
-            S::DomainAnalystV12,
-            S::EvidenceAuditorV11,
-            S::EvidenceAuditorV12,
-            S::EvidenceAuditorV13,
+        expected.extend([
             S::EvidenceAuditorV14,
-            S::DomainAnalystV18,
-            S::DomainAnalystV19,
-            S::DomainAnalystV20,
-            S::DomainAnalystV21,
-            S::DomainAnalystV22,
-            S::DomainAnalystV23,
             S::DomainAnalystV27,
             S::DomainAnalystV28,
             S::DomainAnalystV29,
         ]);
     }
     let offered = offered_specialists();
-    assert_eq!(offered.len(), before.len());
-    for id in before {
+    assert_eq!(offered.len(), expected.len(), "{offered:?}");
+    for id in expected {
         assert!(offered.contains(&id), "{id:?}");
+    }
+    for row in SPECIALIST_TABLE
+        .iter()
+        .filter(|row| row.availability == Availability::Offered)
+    {
+        assert!(
+            matches!(row.id, S::DomainAnalystV27 | S::DomainAnalystV29),
+            "{:?} is offered without being current or a named exception",
+            row.id
+        );
     }
 }
 
