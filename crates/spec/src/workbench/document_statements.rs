@@ -2228,22 +2228,343 @@ fn with_definitions(
     };
     let mut out = said;
     let mut said_names = std::collections::BTreeSet::new();
-    for (name, _, tested) in &named {
-        if !tested || !said_names.insert(name.as_str()) {
+    let mut said_bindings = std::collections::BTreeSet::new();
+    let mut sentences = 0;
+    let mut say = |out: &mut String, what: &str, is: &str| {
+        let sentence = possessive(&format!(" Here {what} {} {is}.", agreeing(what)));
+        if is != what
+            && sentences < MAX_DEFINITION_SENTENCES
+            && crate::workbench::neutrality::projected_code_token(&sentence).is_none()
+        {
+            out.push_str(&sentence);
+            sentences += 1;
+            true
+        } else {
+            false
+        }
+    };
+    for (index, (name, _, tested)) in named.iter().enumerate() {
+        if !tested || !said_names.insert(name.clone()) {
+            continue;
+        }
+        // Two values of one name reach the conditions (`if x:` … `x = y` …
+        // `if x:`): which one a sentence means would be a guess, so neither
+        // is said.
+        if named.iter().filter(|(n, _, t)| *t && n == name).count() > 1 {
             continue;
         }
         let Some(what) = noun(&Expr::Ref(vec![name.clone()]), &cx) else {
             continue;
         };
-        let Some(is) = defined_noun(&Expr::Ref(vec![name.clone()]), &named, &cx, 0) else {
+        if let Some(is) = defined_noun(&Expr::Ref(vec![name.clone()]), &named, &cx, 0) {
+            say(&mut out, &what, &is);
+            continue;
+        }
+        // Outside the textual rules, the recorded expression is read node by
+        // node, and each local name it reads is said in a sentence of its
+        // own (AC-1040).
+        let Some(definition) = definitions
+            .iter()
+            .filter(|d| d.uses.iter().find_map(&spelled).as_deref() == Some(name.as_str()))
+            .nth(named[..index].iter().filter(|(n, ..)| n == name).count())
+        else {
             continue;
         };
-        let sentence = format!(" Here {what} is {is}.");
-        if is != what && crate::workbench::neutrality::projected_code_token(&sentence).is_none() {
-            out.push_str(&sentence);
+        let mut queue = std::collections::VecDeque::from([(name.clone(), what, definition)]);
+        while let Some((spelling, what, definition)) = queue.pop_front() {
+            if !said_bindings.insert(definition.binding_id.as_str())
+                || (spelling != *name && !said_names.insert(spelling.clone()))
+            {
+                continue;
+            }
+            let mut later = Vec::new();
+            let root = definition.expression.root as usize;
+            let Some(is) = node_noun(definitions, definition, &spelling, root, &cx, &mut later, 0)
+            else {
+                continue;
+            };
+            if say(&mut out, &what, &is) {
+                queue.extend(later);
+            }
         }
     }
     out
+}
+
+/// The most "Here … is …" sentences one statement carries.
+const MAX_DEFINITION_SENTENCES: usize = 6;
+
+/// One recorded initializer node as a noun phrase (AC-1040): a sum reads
+/// "A plus B", an index "the first of X", a member "X's y", a plain
+/// function's call "the “f” result for A", and a record lookup "the alias
+/// whose email is …"; any other method call is not said. A local name it
+/// reads is said by name and queued in `later` to be stated next, unless
+/// it is the name being defined (`x = f(x)`), whose earlier value is read
+/// in place.
+fn node_noun<'d>(
+    definitions: &'d [core_graph::rules::LocalDefinition],
+    definition: &'d core_graph::rules::LocalDefinition,
+    defining: &str,
+    index: usize,
+    cx: &Context<'_>,
+    later: &mut Vec<Queued<'d>>,
+    depth: usize,
+) -> Option<String> {
+    use core_graph::rules::{BinaryOperator, DefinitionExpressionKind as K, DependencyResolution};
+    if depth > 6 {
+        return None;
+    }
+    let nodes = &definition.expression.nodes;
+    let node = nodes.get(index)?;
+    let display =
+        |i: u32| -> Option<&str> { Some(nodes.get(i as usize)?.expression.display.as_str()) };
+    let plain = |text: &str| -> bool {
+        !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    // The recorded local an identifier node reads, with its spelling.
+    let local = |i: u32| -> Option<(&'d str, &'d core_graph::rules::LocalDefinition)> {
+        let n = nodes.get(i as usize)?;
+        let K::Identifier { dependency } = n.kind else {
+            return None;
+        };
+        let DependencyResolution::Binding { binding_id, .. } =
+            &definition.dependencies.get(dependency as usize)?.resolution
+        else {
+            return None;
+        };
+        let inner = definitions.iter().find(|d| &d.binding_id == binding_id)?;
+        Some((n.expression.display.as_str(), inner))
+    };
+    let name = |i: u32, later: &mut Vec<Queued<'d>>| -> Option<String> {
+        let n = nodes.get(i as usize)?;
+        if !matches!(n.kind, K::Identifier { .. }) {
+            return node_noun(
+                definitions,
+                definition,
+                defining,
+                i as usize,
+                cx,
+                later,
+                depth + 1,
+            );
+        }
+        let text = n.expression.display.as_str();
+        if !plain(text) {
+            return None;
+        }
+        let what = noun(&Expr::Ref(vec![text.to_owned()]), cx)?;
+        let Some((_, inner)) = local(i) else {
+            return Some(what);
+        };
+        if let Some(read) = request_read(inner.initializer.display.as_str()) {
+            return Some(read);
+        }
+        if text == defining {
+            let root = inner.expression.root as usize;
+            return node_noun(definitions, inner, text, root, cx, later, depth + 1);
+        }
+        later.push((text.to_owned(), what.clone(), inner));
+        Some(what)
+    };
+    match &node.kind {
+        K::Identifier { .. } => name(index as u32, later),
+        K::Literal => noun(&parse(node.expression.display.as_str())?, cx),
+        K::Parenthesized { value } => node_noun(
+            definitions,
+            definition,
+            defining,
+            *value as usize,
+            cx,
+            later,
+            depth + 1,
+        ),
+        K::Binary {
+            operator: BinaryOperator::Add,
+            left,
+            right,
+        } => Some(format!(
+            "{} plus {}",
+            name(*left, later)?,
+            name(*right, later)?
+        )),
+        K::Member {
+            object,
+            property,
+            computed: false,
+            ..
+        } => {
+            let property = display(*property)?;
+            if !plain(property) {
+                return None;
+            }
+            let object_node = nodes.get(*object as usize)?;
+            // `form.code.data`: the “code” form field.
+            if property == "data"
+                && let K::Member {
+                    object: form,
+                    property: field,
+                    computed: false,
+                    ..
+                } = object_node.kind
+                && let (Some(form), Some(field)) = (display(form), display(field))
+                && let Some(read) = field_read(
+                    &[form.to_owned(), field.to_owned(), "data".to_owned()],
+                    &|_| false,
+                )
+            {
+                return Some(read);
+            }
+            if let Some((text, inner)) = local(*object)
+                && json_body(inner.initializer.display.as_str())
+            {
+                return field_read(&[text.to_owned(), property.to_owned()], &|_| true);
+            }
+            if matches!(object_node.kind, K::Identifier { .. }) && local(*object).is_none() {
+                let text = object_node.expression.display.as_str();
+                return noun(&Expr::Ref(vec![text.to_owned(), property.to_owned()]), cx);
+            }
+            Some(format!(
+                "the {} of {}",
+                words(property),
+                name(*object, later)?
+            ))
+        }
+        K::Member {
+            object,
+            property,
+            computed: true,
+            ..
+        } => {
+            let ordinal = match display(*property)? {
+                "0" => "first",
+                "1" => "second",
+                "2" => "third",
+                _ => return None,
+            };
+            Some(format!("the {ordinal} of {}", name(*object, later)?))
+        }
+        K::Call {
+            callee, arguments, ..
+        } => {
+            let callee_node = nodes.get(*callee as usize)?;
+            let called = match &callee_node.kind {
+                // `len(x)` counts; `int(x)` and the like read x as it is.
+                K::Identifier { .. }
+                    if matches!(
+                        callee_node.expression.display.as_str(),
+                        "len" | "int" | "str" | "float"
+                    ) =>
+                {
+                    let [one] = arguments[..] else {
+                        return None;
+                    };
+                    let value = name(one, later)?;
+                    if callee_node.expression.display.as_str() != "len" {
+                        return Some(value);
+                    }
+                    return Some(format!(
+                        "the number of {}",
+                        value.strip_prefix("the ").unwrap_or(&value)
+                    ));
+                }
+                K::Identifier { .. } => callee_node.expression.display.as_str(),
+                K::Member {
+                    object,
+                    property,
+                    computed: false,
+                    ..
+                } => {
+                    let model = display(*object)?;
+                    let method = display(*property)?;
+                    // `Alias.get_by(email=x)`: the alias whose email is x.
+                    if is_class(model) && plain(model) && matches!(method, "get_by" | "first_by") {
+                        let mut parts = Vec::new();
+                        for argument in arguments {
+                            let K::KeywordArgument { name: key, value } =
+                                nodes.get(*argument as usize)?.kind
+                            else {
+                                return None;
+                            };
+                            let key = display(key)?;
+                            if !plain(key) {
+                                return None;
+                            }
+                            parts.push(format!("{} is {}", words(key), name(value, later)?));
+                        }
+                        if parts.is_empty() {
+                            return None;
+                        }
+                        return Some(format!(
+                            "the {} whose {}",
+                            words(model),
+                            parts.join(" and ")
+                        ));
+                    }
+                    // Any other method's result (`cache.get(k)`) is not said.
+                    return None;
+                }
+                _ => return None,
+            };
+            if !plain(called) || predicate_verb(called).is_some() {
+                return None;
+            }
+            let called = format!("the “{}” result", words(called.trim_start_matches('_')));
+            match &arguments[..] {
+                [] => Some(called),
+                [one] if !matches!(nodes.get(*one as usize)?.kind, K::KeywordArgument { .. }) => {
+                    Some(format!("{called} for {}", name(*one, later)?))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A local name queued to be stated: its spelling, its noun and its
+/// definition.
+type Queued<'d> = (String, String, &'d core_graph::rules::LocalDefinition);
+
+/// Whether an initializer is the request's JSON body.
+fn json_body(initializer: &str) -> bool {
+    let initializer = initializer.trim();
+    initializer.starts_with("request.get_json(") || initializer == "request.json"
+}
+
+/// A form field's or JSON body field's value by its name (AC-1040):
+/// `form.code.data` is the “code” form field, and `data.get("name")`, with
+/// `data` the request's JSON body, the “name” field of the JSON body.
+fn field_read(path: &[String], body: &dyn Fn(&str) -> bool) -> Option<String> {
+    let names: Vec<&str> = path.iter().map(String::as_str).collect();
+    match names[..] {
+        [.., form, field, "data"] if form.ends_with("form") => {
+            Some(format!("the “{field}” form field"))
+        }
+        [local, key] if body(local) => Some(format!("the “{key}” field of the JSON body")),
+        _ => None,
+    }
+}
+
+/// "is" or "are" for a noun phrase: "the suffixes are", "the alias is".
+fn agreeing(what: &str) -> &'static str {
+    let last = what.rsplit(' ').next().unwrap_or(what);
+    let plural = last.len() > 2
+        && last.ends_with('s')
+        && !["ss", "us", "is", "as", "os"]
+            .iter()
+            .any(|e| last.ends_with(e));
+    if plural { "are" } else { "is" }
+}
+
+/// A plural possessive written as such: "the invalid domains' intersection".
+fn possessive(text: &str) -> String {
+    text.split(' ')
+        .map(|word| match word.strip_suffix("s's") {
+            Some(stem) if agreeing(&format!("{stem}s")) == "are" => format!("{stem}s'"),
+            _ => word.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A request input read by its literal name: `request.headers.get("X")` is
@@ -2313,11 +2634,42 @@ fn defined_noun(
                 None => noun(expr, cx),
             }
         }
+        Expr::Ref(path) => {
+            let body = |local: &str| {
+                named
+                    .iter()
+                    .any(|(name, initializer, _)| name == local && json_body(initializer))
+            };
+            field_read(path, &body).or_else(|| noun(expr, cx))
+        }
+        // `len(x)` counts; `int(x)`, `str(x)` and `float(x)` are x read as
+        // a number or text (AC-1040).
+        Expr::Apply(path, args)
+            if path.len() == 1
+                && matches!(path[0].as_str(), "len" | "int" | "str" | "float")
+                && matches!(args[..], [Arg::Pos(_)]) =>
+        {
+            let [Arg::Pos(value)] = &args[..] else {
+                return None;
+            };
+            let value = defined_noun(value, named, cx, depth + 1)?;
+            Some(if path[0] == "len" {
+                format!(
+                    "the number of {}",
+                    value.strip_prefix("the ").unwrap_or(&value)
+                )
+            } else {
+                value
+            })
+        }
         // A plain function's result: `authorize_request()`.
         Expr::Call(path) if path.len() == 1 && predicate_verb(&path[0]).is_none() => Some(format!(
             "the “{}” result",
             words(path[0].trim_start_matches('_'))
         )),
+        // A method's result with no arguments (`parser.parse_args()`) reads
+        // as code unless it names a value such as the current time.
+        Expr::Call(path) if path.len() > 1 => noun(expr, cx).filter(|n| !n.contains("'s ")),
         Expr::Apply(path, args) => {
             let names: Vec<&str> = path.iter().map(String::as_str).collect();
             match (&names[..], &args[..]) {
@@ -2350,6 +2702,14 @@ fn defined_noun(
                         parts?.join(" and ")
                     ))
                 }
+                // `email.split("@")`: the email split at “@” (AC-1040).
+                ([.., "split"], [Arg::Pos(Expr::Lit(Lit::Str(at)))]) if names.len() > 1 => {
+                    let whole = noun(&Expr::Ref(path[..path.len() - 1].to_vec()), cx)?;
+                    Some(format!("{whole} split at “{at}”"))
+                }
+                // Any other method's result (`parser.parse_args()`) reads as
+                // code, not as a value, so it is not said (AC-1040).
+                ([_, _, ..], _) => None,
                 _ => noun(expr, cx),
             }
         }

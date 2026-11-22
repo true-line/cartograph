@@ -883,7 +883,17 @@ impl<'a> Index<'a> {
         // check_suffix_signature(signed_suffix)` under `not alias_suffix`.
         let mut scan = row.when.clone();
         if let Ok(parsed) = crate::rules::rule_payload(row.rule) {
-            for definition in parsed.local_definitions.iter().flatten() {
+            // Only a definition the condition itself reads (AC-1040): the
+            // locals its value reads in turn are stated, not followed.
+            let tested = |definition: &&core_graph::rules::LocalDefinition| {
+                definition.uses.iter().any(|u| {
+                    parsed.conditions.iter().any(|c| {
+                        c.expression.source.byte_start <= u.byte_start
+                            && u.byte_end <= c.expression.source.byte_end
+                    })
+                })
+            };
+            for definition in parsed.local_definitions.iter().flatten().filter(tested) {
                 // Only a recorded call of a plain name: an unsupported
                 // initializer (`a() if f else b()`) is not one call's value.
                 let nodes = &definition.expression.nodes;
@@ -2659,6 +2669,83 @@ def new_custom_alias(signed_suffix):
             "{text}"
         );
         assert!(text.contains("When an error is raised, the request is refused with status 400 (“Tampered suffix”)."), "{text}");
+    }
+
+    // AC-1040 (T-1040): a local assigned more than once is stated with the
+    // assignment that reaches the condition, and each local that value
+    // reads is stated in a sentence of its own: the website's suggested
+    // alias is its domain name plus the first alias suffix.
+    #[test]
+    fn a_reassigned_local_is_stated_with_the_value_that_reaches_it() {
+        let source = r#"
+from flask import jsonify, request
+
+def new_random_alias(user):
+    alias = None
+    hostname = request.args.get("hostname")
+    if hostname:
+        ext = tldextract.extract(hostname)
+        prefix_suggestion = ext.domain
+        prefix_suggestion = convert_to_id(prefix_suggestion)
+        suffixes = get_alias_suffixes(user)
+        suggested_alias = prefix_suggestion + suffixes[0].suffix
+        alias = Alias.get_by(email=suggested_alias)
+        if alias and not alias.user_id == user.id:
+            return jsonify(error="Taken"), 409
+
+def twice(user):
+    plan = load_plan(user)
+    if plan:
+        plan = upgrade(plan)
+        if plan:
+            return jsonify(error="Upgraded"), 409
+"#;
+        // Form and JSON body fields are named as such, `len(x)` is a count,
+        // and a plural subject agrees (AC-1040).
+        let wording = r#"
+from flask import jsonify, request
+
+def redeem(coupon_form, to_addrs):
+    code = coupon_form.code.data
+    if not code:
+        return jsonify(error="No code"), 400
+    data = request.get_json()
+    name = data.get("name")
+    if not name:
+        return jsonify(error="No name"), 400
+    recipients = len(to_addrs)
+    if recipients > 10:
+        return jsonify(error="Too many"), 400
+    parts = name.split("@")
+    if not parts:
+        return jsonify(error="No parts"), 400
+    args = parser.parse_args()
+    if not args:
+        return jsonify(error="No args"), 400
+"#;
+        let (text, _) = python_rows(wording, "redeem");
+        for said in [
+            "Here the code is the “code” form field.",
+            "Here the name is the “name” field of the JSON body.",
+            "Here the recipients are the number of to addrs.",
+            "Here the parts are the name split at “@”.",
+        ] {
+            assert!(text.contains(said), "{said}\n{text}");
+        }
+        // Another method's result is not said.
+        assert!(!text.contains("Here the args"), "{text}");
+        // Two values of `plan` reach one row's conditions: neither is said.
+        let (text, _) = python_rows(source, "twice");
+        assert!(text.contains("(“Upgraded”). |"), "{text}");
+        let (text, _) = python_rows(source, "new_random_alias");
+        assert!(
+            text.contains(
+                "Here the alias is the alias whose email is the suggested alias. Here the suggested alias is the prefix suggestion plus the suffix of the first of the suffixes. Here the prefix suggestion is the “convert to ID” result for the ext's domain. Here the suffixes are the “get alias suffixes” result for the user. |"
+            ),
+            "{text}"
+        );
+        // The functions those values call are stated, not followed.
+        assert!(!text.contains("“convert to ID” is not followed"), "{text}");
     }
 
     // AC-0915 (T-0915): a check several functions share a name with is

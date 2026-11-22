@@ -602,7 +602,12 @@ fn arena(
             DefinitionExpressionKind::Unary { .. } => {
                 node.expression.syntax_kind == "unary_expression"
             }
-            DefinitionExpressionKind::Binary { .. } | DefinitionExpressionKind::Logical { .. } => {
+            // Python spells an arithmetic operator `binary_operator`.
+            DefinitionExpressionKind::Binary { .. } => matches!(
+                node.expression.syntax_kind.as_str(),
+                "binary_expression" | "binary_operator"
+            ),
+            DefinitionExpressionKind::Logical { .. } => {
                 node.expression.syntax_kind == "binary_expression"
             }
             DefinitionExpressionKind::Unsupported { .. } => true,
