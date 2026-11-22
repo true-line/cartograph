@@ -227,7 +227,7 @@ The supported wrapper example above and this insufficient-evidence wrapper are t
 const VISIBLE_ACTION_SCHEMA_V28: &str = "Visible schema@1: turn_progress.response_schema is this call's exact response schema, identical to the provider schema field; return one object matching it. Host admission remains authoritative.";
 
 /// @29 (ADR-0085): each action is a native tool; one call per turn.
-const NATIVE_TOOLS_V29: &str = "Native tools@1: each offered action is a tool whose parameters are turn_progress.response_schema's action. Call exactly one tool per turn; its result is your next turn's input, and a refusal says what to change. Do not answer in text. Host admission remains authoritative.";
+const NATIVE_TOOLS_V29: &str = "Native tools@1: each action is a tool with turn_progress.response_schema's parameters. Call one tool per turn; its result is your next input. An undecodable call is not run and returns invalid_action; a third ends the run. Answer only by tool. Host admission is authoritative.";
 
 /// The @13 sentence naming the compiled analyst templates by content hash.
 fn compiled_schema_hashes() -> String {
