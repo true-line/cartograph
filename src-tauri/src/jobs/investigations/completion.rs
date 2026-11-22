@@ -960,7 +960,9 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
                     return Err(InvestigationStoreError::Invalid);
                 }
             }
-            AttemptOutcome::FirewallRefused { .. } => return Err(InvestigationStoreError::Invalid),
+            AttemptOutcome::FirewallRefused { .. } => {
+                read_refusals::verify(connection, task, &entry, &entries, &event)?;
+            }
         }
         entries.push(entry);
     }
@@ -977,6 +979,8 @@ pub(super) fn unavailable_message(reason: &UnavailableReason) -> &'static str {
 }
 #[path = "prospective_attempt.rs"]
 mod prospective_attempt;
+#[path = "read_refusals.rs"]
+pub(super) mod read_refusals;
 pub(super) use prospective_attempt::derive_attempt_records;
 
 fn append_attempt(

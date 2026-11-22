@@ -85,6 +85,7 @@ pub(super) fn source_replay_state(
                             | InvestigationEventKind::ToolCompleted
                             | InvestigationEventKind::ContextPrepared
                             | InvestigationEventKind::ReadUnavailable
+                            | InvestigationEventKind::ReadFirewallRefused
                             | InvestigationEventKind::EvidenceValidationReserved
                     )) =>
             {

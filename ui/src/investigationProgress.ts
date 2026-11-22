@@ -63,6 +63,7 @@ function headline(last: InvestigationEvent | undefined): string {
     case 'evidence_validation_reserved': return 'Checking captured source files';
     case 'tool_completed': return 'Action finished — sending the result to the model';
     case 'read_unavailable': return 'Requested evidence was unavailable — continuing';
+    case 'read_firewall_refused': return 'The firewall withheld a read from the cloud provider — continuing';
     case 'query_refused': return 'The model’s query was refused (not executed) — asking it to try again';
     case 'capacity_refused': case 'finish_refused': case 'source_replay_refused': case 'action_refused':
       return 'The model’s proposal was refused (not executed) — continuing';
