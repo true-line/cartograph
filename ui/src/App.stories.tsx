@@ -607,6 +607,8 @@ function installFakeCore(options: {
         return jobs;
       case 'list_job_usage':
         return [];
+      case 'get_agent_pool_controls':
+        return null;
       case 'list_nodes': {
         const label = (args as { label: string }).label;
         if (label === 'Endpoint') return [FAKE_ENDPOINT];
