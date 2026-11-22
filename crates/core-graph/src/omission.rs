@@ -597,6 +597,11 @@ pub fn is_interface_dispatch(query: &str) -> bool {
 /// Stop reason for a hop held out of candidacy as interface dispatch.
 pub const DYNAMIC_DISPATCH: &str = "dynamic dispatch - needs type hierarchy";
 
+/// Stop reason for a hop held out of candidacy because two or more
+/// candidates carry its exact name (AC-1513): an embedding of the name
+/// cannot tell homonyms apart.
+pub const NAME_COLLISION: &str = "name collision - needs import or type resolution";
+
 /// The hop query a Gap's properties establish: `raw`, then `callee`, then
 /// `reason`, trimmed.
 pub fn gap_query(props: &serde_json::Value) -> String {

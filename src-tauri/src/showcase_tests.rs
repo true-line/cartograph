@@ -595,16 +595,18 @@ fn showcase_t2_yield() {
     let (hops, candidates) = semantic::graph_inputs(&nodes, &edges);
     let mut per_family: BTreeMap<String, BTreeMap<&str, u64>> = BTreeMap::new();
     for hop in &hops {
-        let slot = if hop.is_ann_candidate() {
-            "hops"
-        } else {
-            "hops_excluded"
+        let entry = per_family.entry(family(&hop.family())).or_default();
+        let Some(exclusion) = hop.exclusion else {
+            *entry.entry("hops").or_default() += 1;
+            continue;
         };
-        *per_family
-            .entry(family(&hop.family()))
-            .or_default()
-            .entry(slot)
-            .or_default() += 1;
+        *entry.entry("hops_excluded").or_default() += 1;
+        // Excluded hops by reason (AC-0285 dispatch, AC-1513 name collision).
+        let reason = match exclusion {
+            semantic::HopExclusion::DynamicDispatch => "hops_excluded_dynamic_dispatch",
+            semantic::HopExclusion::NameCollision => "hops_excluded_name_collision",
+        };
+        *entry.entry(reason).or_default() += 1;
     }
     for candidate in &candidates {
         *per_family

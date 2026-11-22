@@ -40,6 +40,11 @@ pub enum HopExclusion {
     /// concrete type is unknown without a type hierarchy, so no embedding
     /// can resolve it.
     DynamicDispatch,
+    /// Two or more candidates of the hop's family carry its query as their
+    /// exact name, ignoring ASCII case (AC-1513). Embedding a name scores
+    /// every homonym alike (near 1.0), so similarity cannot choose between
+    /// them; the hop needs import or receiver-type resolution instead.
+    NameCollision,
 }
 
 impl HopExclusion {
@@ -47,6 +52,7 @@ impl HopExclusion {
     pub fn reason(&self) -> &'static str {
         match self {
             HopExclusion::DynamicDispatch => core_graph::omission::DYNAMIC_DISPATCH,
+            HopExclusion::NameCollision => core_graph::omission::NAME_COLLISION,
         }
     }
 }
@@ -287,7 +293,9 @@ impl AnnIndex {
 /// (#257, AC-0270); the Gap itself stays open in the graph. A hop whose
 /// query is interface dispatch (`IFace.method`) is classified out of ANN
 /// candidacy (#259, AC-0285): it stays in the list as an honest Gap tagged
-/// with its [`HopExclusion`] reason, but is never embedded or proposed.
+/// with its [`HopExclusion`] reason, but is never embedded or proposed. A
+/// hop whose query names two or more candidates of its family exactly is
+/// held out the same way as a name collision (AC-1513).
 pub fn graph_inputs(nodes: &[Node], edges: &[Edge]) -> (Vec<UnresolvedHop>, Vec<Candidate>) {
     let gaps: BTreeMap<_, _> = nodes
         .iter()
@@ -401,7 +409,36 @@ pub fn graph_inputs(nodes: &[Node], edges: &[Edge]) -> (Vec<UnresolvedHop>, Vec<
         }
     }
     candidates.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    exclude_name_collisions(&mut hops, &candidates);
     (hops, candidates)
+}
+
+/// Text key a hop query and a candidate name share when they are the same
+/// name: ASCII case is folded because the embedding model scores `basename`
+/// and `baseName` alike.
+fn name_key(text: &str) -> String {
+    text.trim().to_ascii_lowercase()
+}
+
+/// Mark every still-eligible hop whose query equals the name of two or more
+/// candidates in its family as a [`HopExclusion::NameCollision`] (AC-1513).
+/// A single same-name candidate stays eligible: it is the T0.5 rule's
+/// territory, and similarity does point at it.
+pub fn exclude_name_collisions(hops: &mut [UnresolvedHop], candidates: &[Candidate]) {
+    let mut names: BTreeMap<(FamilyKey, String), usize> = BTreeMap::new();
+    for candidate in candidates {
+        *names
+            .entry((candidate.family(), name_key(&candidate.text)))
+            .or_default() += 1;
+    }
+    for hop in hops.iter_mut().filter(|hop| hop.exclusion.is_none()) {
+        if names
+            .get(&(hop.family(), name_key(&hop.query)))
+            .is_some_and(|count| *count >= 2)
+        {
+            hop.exclusion = Some(HopExclusion::NameCollision);
+        }
+    }
 }
 
 fn resource_channel_kind(resource_type: &str) -> Option<&'static str> {
@@ -1327,6 +1364,76 @@ mod tests {
         assert!(texts.is_empty());
         // The Gap itself is untouched in the graph.
         assert!(nodes.iter().any(|node| node.label == "Gap"));
+    }
+
+    // AC-1513 (T-1513): a hop whose query names two or more candidates of its
+    // family exactly (ASCII case folded) is held out as a name collision:
+    // never embedded, never proposed, an honest Gap with its reason. One
+    // same-name candidate, or none, leaves the hop eligible.
+    #[test]
+    fn name_collision_hops_are_excluded_from_ann_candidacy() {
+        let symbol = |id: &str, name: &str| Node {
+            id: format!("sym:shop@{id}"),
+            label: "Symbol".into(),
+            props: serde_json::json!({"name": name, "kind": "Function", "prov": evidence("lib.ts")}),
+        };
+        let gap = |at: u32, callee: &str| Node {
+            id: format!("gap:call:shop@caller.ts@{at}"),
+            label: "Gap".into(),
+            props: serde_json::json!({
+                "callee": callee, "reason": "unresolved call target", "prov": evidence("caller.ts")
+            }),
+        };
+        let nodes = vec![
+            symbol("caller.ts#run", "run"),
+            symbol("a/filters.ts#join", "join"),
+            symbol("b/filters.ts#join", "join"),
+            symbol("a/paths.ts#basename", "basename"),
+            symbol("b/model.ts#baseName", "baseName"),
+            symbol("orders.ts#mergeOrders", "mergeOrders"),
+            gap(1, "join"),
+            gap(2, "BaseName"),
+            gap(3, "merge orders"),
+        ];
+        let edges: Vec<_> = (1..=3)
+            .map(|at| Edge {
+                src: "sym:shop@caller.ts#run".into(),
+                dst: format!("gap:call:shop@caller.ts@{at}"),
+                label: "CALLS".into(),
+                props: serde_json::json!({"prov": {
+                    "confidence_tier": "Gap", "evidence": evidence("caller.ts")["evidence"]
+                }}),
+            })
+            .collect();
+        let (hops, candidates) = graph_inputs(&nodes, &edges);
+        let by_query = |q: &str| hops.iter().find(|h| h.query == q).unwrap();
+        for collided in ["join", "BaseName"] {
+            let hop = by_query(collided);
+            assert_eq!(hop.exclusion, Some(HopExclusion::NameCollision));
+            assert_eq!(
+                hop.exclusion.unwrap().reason(),
+                "name collision - needs import or type resolution"
+            );
+        }
+        assert!(by_query("merge orders").is_ann_candidate());
+        let proposals = propose(&KeywordProvider, &hops, &candidates, 2).unwrap();
+        assert!(!proposals.is_empty());
+        assert!(proposals.iter().all(|p| p.gap_id.ends_with("@3")));
+        // A collided query is never embedded (`join` is embedded only as a
+        // candidate name; `BaseName` names no candidate verbatim).
+        let texts = embedding_inputs(&hops, &candidates, &[]).unwrap();
+        assert!(texts.iter().all(|t| t != "BaseName"));
+        assert!(texts.iter().any(|t| t == "merge orders"));
+        // A single same-name candidate leaves the hop eligible.
+        let mut single = hops.clone();
+        single.iter_mut().for_each(|h| h.exclusion = None);
+        let one: Vec<_> = candidates
+            .iter()
+            .filter(|c| !c.node_id.contains("b/"))
+            .cloned()
+            .collect();
+        exclude_name_collisions(&mut single, &one);
+        assert!(single.iter().all(UnresolvedHop::is_ann_candidate));
     }
 
     // AC-1507: a whole-VSCode plan (476,907 candidate symbols and 81,654 hops,
