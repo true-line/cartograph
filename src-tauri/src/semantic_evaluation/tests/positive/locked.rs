@@ -140,6 +140,15 @@ fn host_locked_receipt_path_admits_without_a_host_dataset() {
         Some(&expected)
     );
 
+    // A locked store that gains a dataset fails revalidation and preparation.
+    std::fs::create_dir(root.join("dataset")).unwrap();
+    {
+        let graph = state.graph.lock().unwrap();
+        assert!(prepared.revalidate(&state, &graph).is_err());
+    }
+    assert!(prepare(dir.path(), &state, &nodes, &edges).is_err());
+    std::fs::remove_dir(root.join("dataset")).unwrap();
+
     // A changed policy file invalidates the prepared evaluation.
     std::fs::write(root.join("policy.json"), POLICY.replace("0.9,", "0.8,")).unwrap();
     {

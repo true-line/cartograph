@@ -129,6 +129,14 @@ fn read_file(root: &Dir, name: &str) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+/// Whether `name` exists in `root`, without following a link.
+fn exists(root: &Dir, name: &str) -> Result<bool, String> {
+    match root.symlink_metadata(name) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(err(e)),
+    }
+}
 struct Store {
     app_path: PathBuf,
     app: Dir,
@@ -147,11 +155,11 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(err(e)),
         };
-        let locked = match root.symlink_metadata(LOCKED_RECEIPT) {
-            Ok(_) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(err(e)),
-        };
+        let locked = exists(&root, LOCKED_RECEIPT)?;
+        // A locked store never holds the dataset: its labels stay in the lock.
+        if locked && exists(&root, "dataset")? {
+            return Err(err("locked store holds a dataset"));
+        }
         let (dataset, names) = if locked {
             (None, &LOCKED_FILES[..])
         } else {
@@ -205,12 +213,8 @@ impl Store {
         }
         // A locked store that gains a dataset, or a reviewed store that gains
         // a receipt, is a different store.
-        let locked_now = match self.root.symlink_metadata(LOCKED_RECEIPT) {
-            Ok(_) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(err(e)),
-        };
-        if locked_now != self.dataset.is_none() {
+        let locked_now = exists(&self.root, LOCKED_RECEIPT)?;
+        if locked_now != self.dataset.is_none() || (locked_now && exists(&self.root, "dataset")?) {
             return Err(err("evaluation store layout changed"));
         }
         for (name, bytes) in &self.files {
