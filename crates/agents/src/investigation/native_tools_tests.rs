@@ -213,6 +213,19 @@ fn finish_is_wrapped_by_the_host() {
             .unwrap();
         assert!(matches!(decoded, CompletionInvestigationAction::Finish(_)));
     }
+    // GLM on vLLM sent the finish's findings array as its JSON text (9851e062
+    // smoke); the finish variants declare it an array, so it decodes back.
+    let findings = json!([{"claim_kind":"inferred_interpretation","title":"t","statement":"s",
+        "citation_ids":["c"],"limitations":["l"]}]);
+    let stringified = action_from_tool_call(
+        &tools,
+        "finish",
+        &json!({"findings": findings.to_string(), "knowledge_completeness": "partial",
+            "limitations": json!(["l"]).to_string()}),
+        "ctx:1",
+    )
+    .unwrap();
+    assert_eq!(stringified, supported);
 }
 
 #[test]

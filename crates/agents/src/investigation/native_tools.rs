@@ -422,17 +422,23 @@ fn json_type(value: &Value) -> &'static str {
 }
 
 /// The declared JSON type of `field` in a tool's schema, through one local
-/// `$ref`.
+/// `$ref`, on the schema itself or on every `anyOf` variant that declares it
+/// (the finish tool's variants), when they agree.
 fn declared_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
-    let property = &schema["properties"][field];
-    let property = match property["$ref"]
+    let resolve = |node: &'a Value| match node["$ref"]
         .as_str()
         .and_then(|r| r.strip_prefix("#/$defs/"))
     {
         Some(name) => &schema["$defs"][name],
-        None => property,
+        None => node,
     };
-    property["type"].as_str()
+    let variants = schema["anyOf"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut kinds = std::iter::once(schema)
+        .chain(variants.iter().map(resolve))
+        .filter_map(|node| node["properties"].get(field))
+        .map(|property| resolve(property)["type"].as_str());
+    let first = kinds.next()??;
+    kinds.all(|kind| kind == Some(first)).then_some(first)
 }
 
 /// Removes `type` and `context_id` from an object schema; reports whether
