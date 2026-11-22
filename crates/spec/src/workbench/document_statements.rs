@@ -657,6 +657,24 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                     ["r" | "req" | "request", "FormValue" | "PostFormValue"],
                     [Arg::Pos(Expr::Lit(Lit::Str(key)))],
                 ) => Some(format!("the {}", words(key))),
+                // A signed value read back (`signer.unsign(s, max_age=600)`,
+                // `serializer.loads(s, max_age=600)`): the value with its
+                // signature checked, and its age when one is given.
+                ([_, .., "unsign" | "loads"], [Arg::Pos(value), rest @ ..])
+                    if rest.len() <= 1
+                        && rest.iter().all(
+                            |a| matches!(a, Arg::Kw(k, Expr::Lit(Lit::Num(_))) if k == "max_age"),
+                        ) =>
+                {
+                    let value = noun(value, cx)?;
+                    Some(match rest {
+                        [Arg::Kw(_, Expr::Lit(age))] => format!(
+                            "{value}, once its signature is checked and it is at most {} seconds old",
+                            literal(age)
+                        ),
+                        _ => format!("{value}, once its signature is checked"),
+                    })
+                }
                 ([function], _) if predicate_verb(function).is_none() => Some(format!(
                     "the “{}” result",
                     words(function.trim_start_matches('_'))
@@ -670,7 +688,7 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                 {
                     let what = subject(&accessor(path), cx)?;
                     // A literal keyword input keeps its name (AC-1036):
-                    // `max_age=600` is "max age 600".
+                    // `timeout=30` is "timeout 30".
                     let inputs: Option<Vec<String>> = args
                         .iter()
                         .map(|a| match a {

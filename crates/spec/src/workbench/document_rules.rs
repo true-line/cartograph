@@ -2670,7 +2670,7 @@ def new_custom_alias(signed_suffix):
         );
         assert!(
             text.contains(
-                "When no bad signature error is raised, the check suffix signature is the signer's unsign for the signed suffix and max age 600."
+                "When no bad signature error is raised, the check suffix signature is the signed suffix, once its signature is checked and it is at most 600 seconds old."
             ),
             "{text}"
         );
