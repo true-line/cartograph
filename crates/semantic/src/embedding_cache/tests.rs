@@ -375,10 +375,11 @@ fn embedding_cache_eviction_is_sequence_ordered_and_preserves_current_operation(
         .connection
         .execute("INSERT INTO spaces VALUES(?1,1)", [&space])
         .unwrap();
-    store.connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000) INSERT INTO vectors SELECT ?1,printf('%064x',x),1,1,X'0000803f',x FROM n",[&space]).unwrap();
+    // A full store: exactly MAX_ROWS rows.
+    store.connection.execute(&format!("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{MAX_ROWS}) INSERT INTO vectors SELECT ?1,printf('%064x',x),1,1,X'0000803f',x FROM n"),[&space]).unwrap();
     store
         .connection
-        .execute("UPDATE cache_meta SET sequence=100000", [])
+        .execute(&format!("UPDATE cache_meta SET sequence={MAX_ROWS}"), [])
         .unwrap();
     store.validate().unwrap();
     let oldest = format!("{:064x}", 1);
@@ -583,6 +584,29 @@ fn embedding_cache_counter_exhaustion_recovers_before_invalidation() {
     cache.validate().unwrap();
 }
 #[test]
+fn embedding_cache_sequence_reserve_covers_a_full_plan() {
+    // AC-1507: the counter reserve grows with MAX_ROWS, so a store that
+    // cannot seal a full plan is exhausted (and recovered), never admitted.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = EmbeddingCache::open_disposable(dir.path()).unwrap();
+    cache.bind_instance(&"a".repeat(32)).unwrap();
+    for (sequence, valid) in [
+        (SEQUENCE_CEILING, true),
+        (SEQUENCE_CEILING + 1, false),
+        (i64::MAX - 100_000, false),
+    ] {
+        cache
+            .connection
+            .execute("UPDATE cache_meta SET sequence=?1", [sequence])
+            .unwrap();
+        assert_eq!(cache.validate().is_ok(), valid, "sequence {sequence}");
+    }
+    assert_eq!(
+        SEQUENCE_CEILING.checked_add(MAX_ROWS as i64),
+        Some(i64::MAX)
+    );
+}
+#[test]
 fn embedding_cache_namespace_capacity_evicts_oldest_unprotected_namespace() {
     // AC-0269: the 257th artifact namespace remains useful even below byte/row caps.
     let (_dir, cache, lease) = setup();
@@ -664,4 +688,25 @@ fn embedding_cache_working_set_accepts_exact_row_limit_and_rejects_next() {
     wrapper.embed(&["final allowed key".into()]).unwrap();
     assert_eq!(wrapper.state.lock().unwrap().vectors.len(), MAX_ROWS);
     assert!(wrapper.embed(&["one key too many".into()]).is_err());
+}
+
+#[test]
+fn vscode_scale_plans_are_cached_and_reused_without_calls() {
+    // AC-1507: a plan past the old 100k bound (VSCode has about 186k candidate
+    // symbols) is embedded once, persisted whole, and a reopened warm pass
+    // makes no embedding call.
+    let (dir, cache, _) = setup();
+    let provider = Scripted::new();
+    let texts: Vec<String> = (0..200_000).map(|n| format!("symbol {n:06}")).collect();
+    let (_, cold) = run(&provider, cache.clone(), &texts);
+    assert_eq!(cold.unique_misses, 200_000);
+    assert_eq!(cold.evictions, 0);
+    drop(cache);
+    let cache = Arc::new(Mutex::new(
+        EmbeddingCache::open(dir.path().join("cache.db")).unwrap(),
+    ));
+    let calls = provider.calls.load(Ordering::SeqCst);
+    let (_, warm) = run(&provider, cache, &texts);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(warm.unique_misses, 0);
 }
