@@ -6122,6 +6122,7 @@ export interface UrlsShape { handle(uri: string): void; }
 export interface WideShape extends UrlsShape { extra(): void; }
 export interface Lonely { ping(): void; }
 export interface Unused { idle(): void; }
+export interface Probe { scan(): void; }
 "#,
     )
     .unwrap();
@@ -6134,14 +6135,18 @@ export class Urls implements protocol.UrlsShape { handle(uri: string) {} }
 export abstract class Base implements WideShape { handle(uri: string) {} abstract extra(): void; }
 export class Leaf extends Base { extra() {} }
 export class Twig extends Base { handle(uri: string) {} extra() {} }
+export class Real { scan() {} }
 "#,
     )
     .unwrap();
     std::fs::write(
         src.join("test/mock.ts"),
         r#"
-import { UrlsShape, Lonely } from '../protocol';
+import { UrlsShape, Lonely, Probe } from '../protocol';
+import { Base, Real } from '../impl';
 export class MockUrls implements UrlsShape { handle(uri: string) {} }
+export class MockBase extends Base implements UrlsShape { extra() {} }
+export class MockProbe extends Real implements Probe {}
 export class MockLonely implements Lonely { ping() {} }
 export function probe(lonely: Lonely) { lonely.ping(); }
 export function check(urls: UrlsShape) { urls.handle('y'); }
@@ -6151,12 +6156,23 @@ export function check(urls: UrlsShape) { urls.handle('y'); }
     std::fs::write(
         src.join("use.ts"),
         r#"
-import { UrlsShape, WideShape, Lonely, Unused } from './protocol';
+import { UrlsShape, WideShape, Lonely, Unused, Probe } from './protocol';
 export function send(urls: UrlsShape) { urls.handle('x'); }
 export function wide(shape: WideShape) { shape.extra(); }
 export function ping(lonely: Lonely) { lonely.ping(); }
 export function absent(urls: UrlsShape) { urls.missing(); }
 export function idle(unused: Unused) { unused.idle(); }
+export function scan(probe: Probe) { probe.scan(); }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("local.ts"),
+        r#"
+interface Local { run(): void; }
+class Runner implements Local { run() {} }
+export function go(local: Local) { local.run(); }
+export function stop(local: Local) { local.halt(); }
 "#,
     )
     .unwrap();
@@ -6183,6 +6199,12 @@ export function idle(unused: Unused) { unused.idle(); }
         BTreeSet::from([sym("impl.ts#Leaf.extra"), sym("impl.ts#Twig.extra")])
     );
     assert_eq!(targets("use.ts#ping"), BTreeSet::new());
+    // A mock inheriting a product method is still a mock.
+    assert_eq!(targets("use.ts#scan"), BTreeSet::new());
+    assert_eq!(
+        targets("local.ts#go"),
+        BTreeSet::from([sym("local.ts#Runner.run")])
+    );
     assert_eq!(
         targets("test/mock.ts#probe"),
         BTreeSet::from([sym("test/mock.ts#MockLonely.ping")])
@@ -6204,7 +6226,7 @@ export function idle(unused: Unused) { unused.idle(); }
         .iter()
         .map(|e| e["path"].as_str().unwrap())
         .collect();
-    assert_eq!(cited, ["src/use.ts", "src/impl.ts"]);
+    assert_eq!(cited, ["src/use.ts", "src/impl.ts", "src/protocol.ts"]);
     let hashes: BTreeSet<&str> = ex
         .edges
         .iter()
@@ -6220,6 +6242,12 @@ export function idle(unused: Unused) { unused.idle(); }
         .collect();
     assert_eq!(
         gaps,
-        BTreeSet::from(["Lonely.ping", "Unused.idle", "UrlsShape.missing"])
+        BTreeSet::from([
+            "Local.halt",
+            "Lonely.ping",
+            "Probe.scan",
+            "Unused.idle",
+            "UrlsShape.missing"
+        ])
     );
 }

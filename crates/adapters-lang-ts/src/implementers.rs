@@ -55,6 +55,7 @@ struct Implements {
 struct Extends {
     interface: String,
     parents: Vec<String>,
+    evidence: EvidenceRef,
 }
 
 /// One file's clauses, awaiting the directory.
@@ -76,6 +77,9 @@ impl Pending {
 
     pub(crate) fn retarget(&mut self, commit: &str) {
         for clause in &mut self.implements {
+            clause.evidence.commit_sha = commit.to_string();
+        }
+        for clause in &mut self.extends {
             clause.evidence.commit_sha = commit.to_string();
         }
     }
@@ -124,6 +128,16 @@ fn named(cx: &FileCx<'_>, clause: TsNode<'_>, imports: &heritage::Imports<'_>) -
     out
 }
 
+fn evidence(cx: &FileCx<'_>, clause: TsNode<'_>) -> EvidenceRef {
+    EvidenceRef {
+        repo: cx.id.repo.into(),
+        path: cx.path.into(),
+        byte_start: clause.start_byte() as u64,
+        byte_end: clause.end_byte() as u64,
+        commit_sha: cx.id.commit.into(),
+    }
+}
+
 /// Every named class's `implements` clause and interface's `extends`
 /// clause in one file.
 pub(crate) fn clauses(
@@ -160,13 +174,7 @@ pub(crate) fn clauses(
                     out.implements.push(Implements {
                         class: id,
                         interfaces,
-                        evidence: EvidenceRef {
-                            repo: cx.id.repo.into(),
-                            path: cx.path.into(),
-                            byte_start: clause.start_byte() as u64,
-                            byte_end: clause.end_byte() as u64,
-                            commit_sha: cx.id.commit.into(),
-                        },
+                        evidence: evidence(cx, clause),
                     });
                 }
             }
@@ -184,6 +192,7 @@ pub(crate) fn clauses(
                     out.extends.push(Extends {
                         interface: id,
                         parents,
+                        evidence: evidence(cx, clause),
                     });
                 }
             }
@@ -202,38 +211,51 @@ pub(crate) struct Implementation {
     pub(crate) evidence: Vec<EvidenceRef>,
 }
 
-/// Every class implementing each interface, with the clause that says so.
+/// Every class implementing each interface, with the `implements` clause
+/// and each interface `extends` clause that say so.
 #[derive(Debug, Default)]
 pub(crate) struct Index {
-    implementers: HashMap<String, Vec<(String, EvidenceRef)>>,
+    implementers: HashMap<String, Vec<(String, Vec<EvidenceRef>)>>,
 }
 
 impl Index {
     /// `place` maps a guessed id to the id it names, as for bases.
     pub(crate) fn new(pending: Pending, place: impl Fn(&str) -> Option<String>) -> Self {
         let place = |id: String| place(&id).unwrap_or(id);
-        let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+        let mut parents: HashMap<String, Vec<(String, EvidenceRef)>> = HashMap::new();
         for clause in pending.extends {
-            parents
-                .entry(place(clause.interface))
-                .or_default()
-                .extend(clause.parents.into_iter().map(place));
+            let evidence = clause.evidence;
+            parents.entry(place(clause.interface)).or_default().extend(
+                clause
+                    .parents
+                    .into_iter()
+                    .map(|parent| (place(parent), evidence.clone())),
+            );
         }
-        let mut implementers: HashMap<String, Vec<(String, EvidenceRef)>> = HashMap::new();
+        let mut implementers: HashMap<String, Vec<(String, Vec<EvidenceRef>)>> = HashMap::new();
         for clause in pending.implements {
             let class = place(clause.class);
-            // Each named interface and every interface it extends.
-            let mut stack: Vec<String> = clause.interfaces.into_iter().map(place).collect();
+            // Each named interface and every interface it extends, breadth
+            // first so each is reached by its shortest chain of clauses.
+            let mut queue: std::collections::VecDeque<(String, Vec<EvidenceRef>)> = clause
+                .interfaces
+                .into_iter()
+                .map(|interface| (place(interface), vec![clause.evidence.clone()]))
+                .collect();
             let mut seen = HashSet::new();
-            while let Some(interface) = stack.pop() {
+            while let Some((interface, cited)) = queue.pop_front() {
                 if seen.len() >= MAX_WALK || !seen.insert(interface.clone()) {
                     continue;
                 }
-                stack.extend(parents.get(&interface).into_iter().flatten().cloned());
+                for (parent, extends) in parents.get(&interface).into_iter().flatten() {
+                    let mut chain = cited.clone();
+                    chain.push(extends.clone());
+                    queue.push_back((parent.clone(), chain));
+                }
                 implementers
                     .entry(interface)
                     .or_default()
-                    .push((class.clone(), clause.evidence.clone()));
+                    .push((class.clone(), cited));
             }
         }
         Self { implementers }
@@ -263,10 +285,13 @@ impl Index {
         let Some(classes) = self.implementers.get(&interface) else {
             return Vec::new();
         };
-        let mut found: BTreeMap<String, Implementation> = BTreeMap::new();
-        for (implementer, clause) in classes {
-            for (class, mut evidence) in bases.descendants(implementer, MAX_WALK) {
-                evidence.insert(0, clause.clone());
+        // Keyed by target and class: a mock and a product class may answer
+        // with one inherited method, and only [`choose`] tells them apart.
+        let mut found: BTreeMap<(String, String), Implementation> = BTreeMap::new();
+        for (implementer, clauses) in classes {
+            for (class, subclass) in bases.descendants(implementer, MAX_WALK) {
+                let mut evidence = clauses.clone();
+                evidence.extend(subclass);
                 let own = format!("{class}.{method}");
                 let target = if known.contains(&own) {
                     Some((own, Vec::new()))
@@ -279,12 +304,14 @@ impl Index {
                 };
                 if let Some((target, chain)) = target {
                     evidence.extend(chain);
-                    found.entry(target.clone()).or_insert(Implementation {
-                        dst: target,
-                        interface: interface.clone(),
-                        class,
-                        evidence,
-                    });
+                    found
+                        .entry((target.clone(), class.clone()))
+                        .or_insert(Implementation {
+                            dst: target,
+                            interface: interface.clone(),
+                            class,
+                            evidence,
+                        });
                 }
             }
         }
@@ -307,10 +334,14 @@ pub(crate) fn choose(
     site: &str,
     in_test: impl Fn(&str) -> bool,
 ) -> Vec<Implementation> {
-    let test = |found: &Implementation| in_test(symbol_path(&found.dst));
+    // A class declared in test code is a mock even when the method it
+    // answers with is inherited from product code.
+    let test = |found: &Implementation| in_test(symbol_path(&found.class));
     if !in_test(symbol_path(site)) || found.iter().any(|found| !test(found)) {
         found.retain(|found| !test(found));
     }
+    let mut targets = HashSet::new();
+    found.retain(|found| targets.insert(found.dst.clone()));
     if found.len() > MAX_ALTERNATIVES {
         found.clear();
     }

@@ -3137,7 +3137,41 @@ fn extract_source_recording(
         name: String,
         local_class: Option<String>,
         imported_type: Option<(String, String)>,
+        /// A same-file top-level interface (AC-1515).
+        local_interface: Option<String>,
     }
+    // Type names declared once in this file, at the top level, only as an
+    // interface: a nested or second declaration of the name proves nothing.
+    let local_interfaces: HashSet<String> = {
+        let mut declared: HashMap<String, (usize, bool)> = HashMap::new();
+        for node in syntax_nodes.iter().filter(|node| {
+            matches!(
+                node.kind(),
+                "interface_declaration"
+                    | "class_declaration"
+                    | "abstract_class_declaration"
+                    | "type_alias_declaration"
+                    | "enum_declaration"
+            )
+        }) {
+            let Some(name) = node.child_by_field_name("name") else {
+                continue;
+            };
+            let top = node.parent().is_some_and(|parent| {
+                parent.kind() == "program"
+                    || (parent.kind() == "export_statement"
+                        && parent.parent().is_some_and(|p| p.kind() == "program"))
+            });
+            let entry = declared.entry(cx.text(&name).to_string()).or_default();
+            entry.0 += 1;
+            entry.1 = node.kind() == "interface_declaration" && top;
+        }
+        declared
+            .into_iter()
+            .filter(|(_, (count, interface))| *count == 1 && *interface)
+            .map(|(name, _)| name)
+            .collect()
+    };
     // Resolve the type's identity where its annotation/constructor occurs.
     // A later call may have a different shadowing class in its lexical scope.
     let prove_receiver = |name: String, site: TsNode| -> Option<ReceiverProof> {
@@ -3154,11 +3188,20 @@ fn extract_source_recording(
             .imported(site, &name)
             .then(|| imported_types.get(&name).cloned())
             .flatten();
-        (local_class.is_some() || imported_type.is_some()).then_some(ReceiverProof {
-            name,
-            local_class,
-            imported_type,
-        })
+        let local_interface = (local_class.is_none()
+            && imported_type.is_none()
+            && bindings.stable_declaration(site, &name).is_none()
+            && !bindings.imported(site, &name)
+            && local_interfaces.contains(&name))
+        .then(|| name.clone());
+        (local_class.is_some() || imported_type.is_some() || local_interface.is_some()).then_some(
+            ReceiverProof {
+                name,
+                local_class,
+                imported_type,
+                local_interface,
+            },
+        )
     };
     let mut receiver_types: HashMap<usize, ReceiverProof> = HashMap::new();
     let mut this_properties: HashMap<(String, String), ReceiverProof> = HashMap::new();
@@ -3319,6 +3362,7 @@ fn extract_source_recording(
                 name: class.clone(),
                 local_class: Some(class),
                 imported_type: None,
+                local_interface: None,
             }),
             "member_expression" => {
                 let object = receiver.child_by_field_name("object");
@@ -3363,7 +3407,17 @@ fn extract_source_recording(
                     exported_type,
                 )
             })
-            .or(local_inherited);
+            .or(local_inherited)
+            // A same-file interface's member waits for its implementations
+            // (AC-1515).
+            .or_else(|| {
+                receiver_proof.local_interface.map(|interface| {
+                    (
+                        sym_id(id.repo, cx.path, &format!("{interface}.{method}")),
+                        interface,
+                    )
+                })
+            });
         let imported_dst = imported_target.as_ref().map(|(dst, _)| dst.clone());
         let Some(dst) = local_dst.clone().or(imported_dst) else {
             continue;
