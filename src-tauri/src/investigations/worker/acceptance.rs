@@ -54,23 +54,7 @@ fn source_revision() -> String {
     revision
 }
 
-pub(super) fn ordered_events(jobs: &crate::jobs::JobStore, id: &str) -> Vec<InvestigationEvent> {
-    let mut items = Vec::new();
-    let mut after = 0;
-    loop {
-        let page = jobs.investigation_events(id, after).unwrap();
-        items.extend(page.items);
-        assert!(items.len() <= 96, "Event journal exceeded the contract");
-        if !page.has_more {
-            return items;
-        }
-        assert!(
-            page.next_sequence > after,
-            "Event pagination did not advance"
-        );
-        after = page.next_sequence;
-    }
-}
+pub(super) use super::ordered_events;
 
 /// Read the actual durable records even on a failed/unknown model invocation.
 /// Source text stays in the retained capture; the report includes read status and

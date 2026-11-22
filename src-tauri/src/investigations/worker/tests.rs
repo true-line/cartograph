@@ -1138,8 +1138,29 @@ fn investigation_worker_records_unknown_transport_outcome_without_replay() {
     }
 }
 
+// The acceptance group's tests (#1924): a core-only build leaves them out.
+#[cfg(not(app_test_group = "core"))]
 #[path = "acceptance.rs"]
 mod acceptance;
+
+/// Every saved event of `id`, page by page, within the 96-event contract.
+pub(super) fn ordered_events(jobs: &crate::jobs::JobStore, id: &str) -> Vec<InvestigationEvent> {
+    let mut items = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = jobs.investigation_events(id, after).unwrap();
+        items.extend(page.items);
+        assert!(items.len() <= 96, "Event journal exceeded the contract");
+        if !page.has_more {
+            return items;
+        }
+        assert!(
+            page.next_sequence > after,
+            "Event pagination did not advance"
+        );
+        after = page.next_sequence;
+    }
+}
 
 #[path = "turn_tests.rs"]
 mod turn_tests;

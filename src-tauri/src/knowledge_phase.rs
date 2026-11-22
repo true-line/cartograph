@@ -958,6 +958,6 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "knowledge_phase_tests.rs"]
 mod tests;
