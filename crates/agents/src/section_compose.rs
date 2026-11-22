@@ -93,11 +93,11 @@ const GUIDANCE: &[(&str, &str)] = &[
          area whose name is weak or misleading. Otherwise group the capabilities into \
          areas yourself. For each area state its purpose, who uses it (an end user, an \
          API client, an administrator, a developer, an external provider) and the outcome \
-         it delivers, including notable conditions and limits. Ground each area in the \
-         facts behind its capabilities: the Endpoint facts each capability groups and \
-         the rules listed under the section. State an operation, route or method only \
-         by citing its Endpoint fact, and a condition or limit only by citing its rule; \
-         do not enumerate routes.",
+         it delivers, including notable conditions and limits. Ground each area in its \
+         capabilities and the rules listed under the section. Describe operations in \
+         domain terms: never spell out a route, URL path, HTTP method or port, and do \
+         not use the words endpoint or route. State a condition or limit only by citing \
+         its rule, and a count only when a cited fact shows it.",
     ),
     (
         "1.4",
