@@ -32,6 +32,7 @@ impl InvestigationInput {
             metadata,
             policy,
             6,
+            &std::collections::BTreeSet::new(),
         )?;
         input.finish_progressive_input(&prompt, coverage_details)
     }
@@ -50,6 +51,7 @@ impl InvestigationInput {
         metadata: &staged_refusal::ProtectedCompletionMetadata,
         policy: &InvestigationPolicy,
         request_schema: u32,
+        withheld: &std::collections::BTreeSet<String>,
     ) -> Result<(Self, Value), InvestigationError> {
         if !specialist.uses_query_history_disclosure()
             || policy.profile() != INVESTIGATION_V2_POLICY.profile()
@@ -93,6 +95,7 @@ impl InvestigationInput {
             usage,
             policy,
             Some(&contract.request_hash),
+            withheld,
         )?;
         let mut prompt: Value = serde_json::from_str(&input.payload.prompt)
             .map_err(|_| InvestigationError::InvalidInput)?;

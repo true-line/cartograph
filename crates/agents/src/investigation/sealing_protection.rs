@@ -68,6 +68,7 @@ pub(super) fn admission_protected_values(
         "inspection_requirements_hash",
         "inspection_progress",
         "omitted_sources",
+        "withheld_sources",
     ] {
         if before.get(name) != after.get(name) {
             return Err(InvestigationError::InvalidInput);

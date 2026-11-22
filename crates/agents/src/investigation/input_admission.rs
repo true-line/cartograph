@@ -8,6 +8,7 @@ use super::*;
 use crate::{InputClosureStatus, PrimarySourceScope};
 use serde::{Deserialize, Serialize};
 use staged_refusal::{CompletionCallMode, ProtectedCompletionMetadata};
+use std::collections::BTreeSet;
 
 /// A finite byte-capacity reason, independent of completion refusal feedback.
 /// Storage and tool/evidence-budget failures retain their terminal semantics.
@@ -57,6 +58,24 @@ const PATCH_INSTRUCTIONS: &str = "Return only a finish_patch object with a patch
 const FINISH_ONLY_INSTRUCTIONS: &str = "Finish only: return a finish action using the already supplied evidence. Do not query context, read evidence, or read coverage inventory. Capacity feedback grants no evidence or authority.";
 
 impl InvestigationInput {
+    /// The ledger as citation schemas see it: a firewall-refused read stays
+    /// acquired but is not citable, so its id leaves every citation enum (#679).
+    pub(super) fn citable_ledger(
+        &self,
+    ) -> Result<std::borrow::Cow<'_, InvestigationInputLedger>, InvestigationError> {
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let withheld = withheld_source_ids(&prompt)?;
+        if withheld.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(&self.ledger));
+        }
+        let mut ledger = self.ledger.clone();
+        ledger
+            .citations
+            .retain(|citation| !withheld.contains(citation.citation_id.as_str()));
+        Ok(std::borrow::Cow::Owned(ledger))
+    }
+
     /// Distinct @10/request7 path. Exact family selection does not grant
     /// dispatch or acquisition authority; the host must admit each operation.
     #[allow(clippy::too_many_arguments)]
@@ -76,6 +95,50 @@ impl InvestigationInput {
         capacity_refusal_count: u32,
         capacity_feedback: Option<&AdmissionCapacityFeedback>,
         policy: &InvestigationPolicy,
+    ) -> Result<Self, InvestigationError> {
+        Self::prepare_v9_withholding_with_policy(
+            question,
+            specialist,
+            ledger,
+            query_pages,
+            evidence,
+            supplied_history,
+            usage,
+            basis,
+            request,
+            metadata,
+            coverage_details,
+            mode,
+            capacity_refusal_count,
+            capacity_feedback,
+            policy,
+            &BTreeSet::new(),
+        )
+    }
+
+    /// As [`Self::prepare_v9_with_policy`], with host-withheld source citations
+    /// (#679). Each withheld id is an acquired source citation whose exact read
+    /// the host firewall refused; it is listed only as a closed
+    /// `firewall_refused` handle with no text. The caller owns the refusal
+    /// witness; this projection grants no denial or completion authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_v9_withholding_with_policy(
+        question: &str,
+        specialist: SpecialistId,
+        ledger: InvestigationInputLedger,
+        query_pages: &[&str],
+        evidence: &[AgentEvidence],
+        supplied_history: &[String],
+        usage: &InvestigationUsage,
+        basis: &InvestigationTurnBasis,
+        request: &obligations::StagedObligationRequest,
+        metadata: &ProtectedCompletionMetadata,
+        coverage_details: &[&str],
+        mode: CompletionCallMode,
+        capacity_refusal_count: u32,
+        capacity_feedback: Option<&AdmissionCapacityFeedback>,
+        policy: &InvestigationPolicy,
+        withheld: &BTreeSet<String>,
     ) -> Result<Self, InvestigationError> {
         if !specialist.uses_next_prompt_admission()
             || request.schema_version != 7
@@ -104,6 +167,7 @@ impl InvestigationInput {
             metadata,
             policy,
             7,
+            withheld,
         )?;
         prompt["schema_version"] = 9.into();
         apply_admission_progress(
@@ -551,6 +615,7 @@ impl InvestigationInput {
         {
             return Err(InvestigationError::InvalidInput);
         }
+        let withheld = withheld_source_ids(&prompt)?;
         let source_citations: Vec<_> = self
             .ledger
             .citations
@@ -559,10 +624,16 @@ impl InvestigationInput {
                 !matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata)
             })
             .collect();
+        // Withheld reads stay acquired (ordinals and limits count them) but
+        // have no supplied span.
+        let supplied_citations: Vec<_> = source_citations
+            .iter()
+            .filter(|citation| !withheld.contains(citation.citation_id.as_str()))
+            .collect();
         // Complete current source set only. A changed working set needs its own
         // explicit prospective projection and cannot inherit this certificate.
-        if source_citations.len() != self.payload.spans.len()
-            || source_citations.iter().any(|citation| {
+        if supplied_citations.len() != self.payload.spans.len()
+            || supplied_citations.iter().any(|citation| {
                 self.payload
                     .spans
                     .iter()
@@ -588,6 +659,7 @@ impl InvestigationInput {
             self.ledger
                 .citations
                 .iter()
+                .filter(|citation| !withheld.contains(citation.citation_id.as_str()))
                 .map(CitationPromptHandle::from)
                 .collect::<Vec<_>>(),
         )
@@ -1259,7 +1331,7 @@ impl InvestigationInput {
                 self.payload.response_schema.take(),
                 mode,
                 &choices,
-                &self.ledger,
+                &*self.citable_ledger()?,
             )?;
         }
         self.payload.response_schema = response_schema::attach_visible(
@@ -1310,7 +1382,7 @@ impl InvestigationInput {
             &mut prompt,
             Some(
                 basis
-                    .response_schema(&self.ledger)
+                    .response_schema(&*self.citable_ledger()?)
                     .map_err(|_| InvestigationError::InvalidInput)?,
             ),
         )?;
@@ -1513,7 +1585,7 @@ impl InvestigationInput {
             self.validate_finish_patch_projection(&prompt, &metadata)?;
             Some(
                 patch
-                    .response_schema(&self.ledger)
+                    .response_schema(&*self.citable_ledger()?)
                     .map_err(|_| InvestigationError::InvalidInput)?,
             )
         } else if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
@@ -1521,7 +1593,7 @@ impl InvestigationInput {
                 ordinary_schema,
                 mode,
                 choices,
-                &self.ledger,
+                &*self.citable_ledger()?,
             )?
         } else {
             ordinary_schema

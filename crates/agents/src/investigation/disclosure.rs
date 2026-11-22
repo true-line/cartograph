@@ -30,8 +30,16 @@ pub enum DisclosureOmissionReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DisclosureRepresentation {
-    Supplied { representation_hash: String },
-    Omitted { reason: DisclosureOmissionReason },
+    Supplied {
+        representation_hash: String,
+    },
+    Omitted {
+        reason: DisclosureOmissionReason,
+    },
+    /// The host firewall explicitly refused this acquired source representation
+    /// (#679). Distinct from omission and redaction; never makes a citation
+    /// eligible and carries no withheld text or hash.
+    FirewallRefused,
 }
 
 impl DisclosureRepresentation {
@@ -322,13 +330,17 @@ impl InvestigationDisclosure {
             }
         }
         for (entry, acquired) in self.facts.iter().zip(&ledger.selected_facts) {
-            if entry.fact != acquired.fact {
+            if entry.fact != acquired.fact
+                || entry.representation == DisclosureRepresentation::FirewallRefused
+            {
                 return Err(InvestigationError::InvalidInput);
             }
             entry.representation.validate()?;
         }
         for (index, entry) in self.queries.iter().enumerate() {
-            if entry.query_index != index {
+            if entry.query_index != index
+                || entry.representation == DisclosureRepresentation::FirewallRefused
+            {
                 return Err(InvestigationError::InvalidInput);
             }
             let prior_reference = progressive && index + 1 < self.queries.len();
@@ -376,7 +388,8 @@ impl InvestigationDisclosure {
                         return Err(InvestigationError::InvalidInput);
                     }
                 }
-                DisclosureRepresentation::Omitted { .. } => {
+                DisclosureRepresentation::Omitted { .. }
+                | DisclosureRepresentation::FirewallRefused => {
                     if entry.disclosed_text_hash.is_some() || entry.redacted {
                         return Err(InvestigationError::InvalidInput);
                     }
@@ -384,6 +397,9 @@ impl InvestigationDisclosure {
             }
         }
         if let Some(history) = &self.history {
+            if *history == DisclosureRepresentation::FirewallRefused {
+                return Err(InvestigationError::InvalidInput);
+            }
             history.validate()?;
         }
         bounded_bytes(self, MAX_DISCLOSURE_BYTES)?;
