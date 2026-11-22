@@ -16,6 +16,10 @@ export const ROLE_LABELS: Readonly<Record<SpecialistRole, string>> = {
 export const roleOf = (id: string): SpecialistRole | undefined =>
   Object.hasOwn(SPECIALIST_TABLE, id) ? SPECIALIST_TABLE[id as SpecialistId].role : undefined;
 
+/** ADR-0071 decision 2: a retired version only reopens; it starts no new work. */
+export const isRetired = (id: string): boolean =>
+  Object.hasOwn(SPECIALIST_TABLE, id) && SPECIALIST_TABLE[id as SpecialistId].availability === 'retired';
+
 /** The investigation profile a version runs under; the user never picks it separately. */
 export function profileFor(catalog: InvestigationCatalog | null | undefined, id: SpecialistId): string {
   if (!isExpandedSpecialist(id)) return 'investigation-v1';

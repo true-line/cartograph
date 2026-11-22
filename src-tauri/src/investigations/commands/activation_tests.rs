@@ -653,14 +653,17 @@ fn mcp_completion_retains_reservation_until_detached_worker_exits() {
                     let permit = &permit;
                     threads.spawn(move || {
                         barrier.wait();
-                        completion_start::start_access(
-                            request.clone(),
-                            app.clone(),
-                            Instant::now(),
-                            Some(session),
-                            Some(limits),
-                            Some(permit),
-                        )
+                        // A new thread: carry the fixture's retired-start scope (AC-1062).
+                        super::with_retired_starts(|| {
+                            completion_start::start_access(
+                                request.clone(),
+                                app.clone(),
+                                Instant::now(),
+                                Some(session),
+                                Some(limits),
+                                Some(permit),
+                            )
+                        })
                     })
                 })
                 .collect();
@@ -1030,14 +1033,17 @@ fn desktop_analyst26_command_rejects_creation_but_recovers_saved_nonce() {
             "domain-analyst@26",
         ] {
             request.specialist_id = role.into();
-            let error = completion_start::start_access(
-                request.clone(),
-                app.clone(),
-                Instant::now(),
-                None,
-                None,
-                None,
-            )
+            // Outside the fixture's retired-start scope: the real gate.
+            let error = super::without_retired_starts(|| {
+                completion_start::start_access(
+                    request.clone(),
+                    app.clone(),
+                    Instant::now(),
+                    None,
+                    None,
+                    None,
+                )
+            })
             .unwrap_err();
             assert!(matches!(
                 error,

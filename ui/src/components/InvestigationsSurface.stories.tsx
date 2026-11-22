@@ -512,12 +512,14 @@ export const LateTaskSelectionCannotReplaceCurrent: Story = {
 };
 
 export const LegacyHistoryRequiresExplicitReplacement: Story = {
-  // AC-0190: an unavailable saved version requires explicit replacement.
+  // AC-0190, AC-1062: a retired saved version reopens labelled retired and requires explicit replacement.
   args: { state: state({ detail: legacyInvestigationDetail(2, 'inv-fixture'),
     history: [legacyInvestigationDetail(2, 'inv-fixture')], result: legacyInvestigationResult('inv-fixture') }) },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getAllByText('domain-analyst@2')[0]).toBeVisible();
+    await expect(canvas.getByText(/retired: this run reopens read-only/)).toBeVisible();
+    await expect(canvas.getByText('domain-analyst@2 · retired')).toBeVisible();
     await expect(canvas.getByText('A local stock guard is present')).toBeVisible();
     await userEvent.click(canvas.getByRole('button', { name: 'Ask a follow-up' }));
     await expect(canvas.getByText(/Choose an available specialist explicitly/)).toBeVisible();

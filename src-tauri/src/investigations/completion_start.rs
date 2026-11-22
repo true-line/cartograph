@@ -385,7 +385,10 @@ mod tests {
                 .unwrap(),
         );
         app.manage(state);
-        let error = start(request, app.handle().clone(), Instant::now()).unwrap_err();
+        // @7 is retired (AC-1062); this checks its own scope refusal.
+        let error =
+            super::with_retired_starts(|| start(request, app.handle().clone(), Instant::now()))
+                .unwrap_err();
         assert!(
             matches!(error, InvestigationStartError::Rejected { code: "refresh_required", definitive: true, ref message } if message.contains("outside the requested scope"))
         );
