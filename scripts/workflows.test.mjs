@@ -275,7 +275,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && matrix.group == 'core' && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 15);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 16);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -380,14 +380,30 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.match(shards, /runs-on: ubuntu-latest$/mu);
   assert.match(shards, /^ {4}timeout-minutes: 60$/mu);
   assert.match(shards, /fail-fast: false/u);
-  const [, list] = shards.match(/matrix:\n +shard: \[([\d, ]+)\]\n/u) ?? [];
-  const indexes = (list ?? '').split(', ').map(Number);
-  const [, count, target] =
-    shards.match(/run: node scripts\/rust-test-shard\.mjs "\$SHARD\/(\d+)" -- (.*)\n/u) ?? [];
+  // One matrix entry per shard of each group in app-test-groups.json, so the
+  // groups' shards jointly run every test (#1924).
+  const entries = [...shards.matchAll(/^ {10}- group: ([a-z]+)\n {12}shard: (\d+)\n {12}shards: (\d+)\n/gmu)]
+    .map(([, group, shard, count]) => `${group} ${shard}/${count}`);
+  const testGroups = JSON.parse(readFileSync(path.join(root, 'scripts/app-test-groups.json'), 'utf8')).groups;
+  const expected = Object.entries(testGroups).flatMap(([group, { shards: count }]) =>
+    Array.from({ length: count }, (_, index) => `${group} ${index + 1}/${count}`));
+  assert.deepEqual(entries, expected);
+  const [, target] =
+    shards.match(/run: node scripts\/rust-test-shard\.mjs "\$SHARD\/\$SHARDS" --group "\$GROUP" -- (.*)\n/u) ?? [];
   assert.equal(target, '-p app --bin app');
-  assert.deepEqual(indexes, Array.from({ length: Number(count) }, (_, index) => index + 1));
-  assert.match(shards, new RegExp(`name: Rust app tests \\(\\$\\{\\{ matrix\\.shard \\}\\}/${count}\\)`, 'u'));
-  assert.match(shards, /SHARD: \$\{\{ matrix\.shard \}\}/u);
+  assert.match(shards, /name: Rust app tests \(\$\{\{ matrix\.group \}\} \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.shards \}\}\)/u);
+  assert.match(shards, /GROUP: \$\{\{ matrix\.group \}\}\n +SHARD: \$\{\{ matrix\.shard \}\}\n +SHARDS: \$\{\{ matrix\.shards \}\}\n/u);
+  // Every shard keeps its listed and selected tests, and the coverage job,
+  // which the complete suite requires, checks each test ran exactly once.
+  assert.match(shards, /SHARD_LIST_FILE: \$\{\{ runner\.temp \}\}\/app-test-list-/u);
+  assert.match(shards, /name: app-test-list-\$\{\{ matrix\.group \}\}-\$\{\{ matrix\.shard \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  const coverage = job('app-test-coverage');
+  assert.equal(condition(coverage), condition(rust));
+  assert.match(coverage, /needs: \[policy, merge-evidence, preflight-evidence, rust-app-tests\]/u);
+  assert.match(coverage, /pattern: app-test-list-\*-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(coverage, /run: node scripts\/rust-test-shard\.mjs --verify-coverage "\$LISTS"\/\*\.json/u);
+  assert.match(complete, /needs: \[.*\bapp-test-coverage\b.*\]/u);
+  assert.match(complete, /test "\$APP_TEST_COVERAGE" = success/u);
   assert.match(shards, /ref: \$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/u);
   assert.doesNotMatch(shards, /continue-on-error/u);
   assert.match(complete, /needs: \[.*\brust-app-tests\b.*\]/u);
@@ -772,7 +788,8 @@ test('the app crate compiles incrementally from state main saves, and only main 
   const job = (name) => workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
   const shards = job('rust-app-tests');
   const seed = job('app-incremental');
-  const key = /echo "key=app-incremental-\$LOCK_HASH-\$\(date -u \+%Y%m%d%H\)" >> "\$GITHUB_OUTPUT"/u;
+  // One entry per test group: each group compiles a different app crate.
+  const key = /echo "key=app-incremental-\$GROUP-\$LOCK_HASH-\$\(date -u \+%Y%m%d%H\)" >> "\$GITHUB_OUTPUT"/u;
   for (const contents of [shards, seed]) {
     assert.match(contents, /RUSTC_WORKSPACE_WRAPPER=\$GITHUB_WORKSPACE\/scripts\/rustc-app-incremental\.sh/u);
     assert.match(contents, /SCCACHE_PATH=\$wrapper/u);
@@ -789,7 +806,8 @@ test('the app crate compiles incrementally from state main saves, and only main 
   assert.doesNotMatch(shards, /actions\/cache(?:\/save)?@/u);
   assert.match(seed, /if: "!cancelled\(\) && github\.event_name == 'push' && needs\.ci-image\.result == 'success'"/u);
   assert.match(seed, /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
-  assert.match(seed, /run: cargo test -p app --bin app --no-run/u);
+  assert.match(seed, /group: \[acceptance, core\]/u);
+  assert.match(seed, /APP_TEST_GROUP: \$\{\{ matrix\.group \}\}\n +run: cargo test -p app --bin app --no-run/u);
   assert.match(seed, /save-if: false/u);
   // Each hour saves a new key, so the job deletes the older entries.
   assert.match(seed, /actions: write/u);
