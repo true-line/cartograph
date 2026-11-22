@@ -40,7 +40,9 @@ def candidates(text):
             calls = [norm(c) for c in cells[3].split(",") if c.strip() and c.strip() != "—"]
             steps.append({"screen": screen, "calls": calls})
         goal = re.search(r"- Endpoint: (\S+ \S+)", block)
-        out.append({"title": title, "steps": steps, "goal": norm(goal.group(1)) if goal else None})
+        # An ordered result step is the last row, after the goal call.
+        ordered = re.search(r"^- Result: ordered", block, re.M) is not None
+        out.append({"title": title, "steps": steps, "goal": norm(goal.group(1)) if goal else None, "ordered": ordered})
     return out
 
 
@@ -55,9 +57,11 @@ def score(expected, cand):
                     break
         else:
             wanted = [norm(e) for e in step.get("endpoint_any", [step["endpoint"]])]
-            # The goal is the call the journey ends at, after every screen.
+            # The goal is made on the last screen before any ordered result
+            # step: after that screen's other calls, before the result step.
             if cand["goal"] in wanted:
-                found[sid] = {"at": (len(cand["steps"]), 0), "matched": cand["goal"]}
+                at = len(cand["steps"]) - 1 - cand["ordered"]
+                found[sid] = {"at": (at, 1), "matched": cand["goal"]}
                 continue
             for i, s in enumerate(cand["steps"]):
                 hit = next((c for c in s["calls"] if c in wanted), None)
