@@ -27,7 +27,7 @@ use agents::gated_compose::{self, GatedInput, GatedStats, StageModel, Workflow};
 use agents::section_compose::{
     self, ComposeFact, ComposeGroup, ComposeInput, Composed, SECTION_COMPOSER_ROLE,
 };
-use agents::section_draft::{Claim, SectionAddress, admit};
+use agents::section_draft::{Claim, SectionAddress, SectionDraftFinish, admit};
 use core_graph::{Edge, Node};
 use llm::bounded::{
     BoundedCompletion, CallDirective, CompletionControl, CompletionLimitValues, CompletionLimits,
@@ -35,7 +35,7 @@ use llm::bounded::{
 };
 use llm::{CompletionAction, ConsentGrant, EgressFirewall, EgressPreview, LlmProvider, Locality};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -71,6 +71,9 @@ pub(crate) struct ComposeOutcome {
     /// Claims left out: a per-claim bound, or a statement naming a source
     /// identifier it cites.
     pub(crate) left_out: usize,
+    /// How many claims each check left out, by reason (#2349).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) left_out_reasons: BTreeMap<&'static str, usize>,
     /// What a gated composition did (#2083, AC-0980).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) gated: Option<GatedStats>,
@@ -82,9 +85,28 @@ impl ComposeOutcome {
             outcome: DraftingOutcome::NoDraft { reason },
             claims: 0,
             left_out: 0,
+            left_out_reasons: BTreeMap::new(),
             gated: None,
         }
     }
+}
+
+/// Leave out the claims of `finish` that `keep` refuses, counting them
+/// under `reason`. Whether every claim is now left out.
+fn leave_out(
+    finish: &mut SectionDraftFinish,
+    (left_out, reasons): (&mut usize, &mut BTreeMap<&'static str, usize>),
+    reason: &'static str,
+    keep: impl Fn(&Claim) -> bool,
+) -> bool {
+    let before = finish.claims.len();
+    finish.claims.retain(|claim| keep(claim));
+    let dropped = before - finish.claims.len();
+    if dropped > 0 {
+        *left_out += dropped;
+        *reasons.entry(reason).or_default() += dropped;
+    }
+    finish.claims.is_empty()
 }
 
 /// The address to compose, checked like a drafting run's. [`prepare`]
@@ -471,7 +493,9 @@ fn stage_as(
     let Composed {
         mut finish,
         mut left_out,
+        reasons,
     } = composed;
+    let mut reasons = reasons;
     let (nodes, edges) = (&prepared.nodes, &prepared.edges);
     // The draft is recorded against the graph the section was compiled
     // from, so that graph must still be the current one.
@@ -492,32 +516,37 @@ fn stage_as(
         .flat_map(|claim| claim.citations.iter().cloned())
         .collect();
     let source = spec::SourceIdentifiers::of(nodes, edges, &cited);
-    let before = finish.claims.len();
-    finish
-        .claims
-        .retain(|claim| !source.named_in(&claim.statement, &claim.citations));
-    left_out += before - finish.claims.len();
-    if finish.claims.is_empty() {
-        return Ok(ComposeOutcome {
-            left_out,
-            ..ComposeOutcome::none("statement_names_source")
-        });
-    }
     // A route a statement spells out must be shown by a fact it cites
-    // (#2328), not taken from the section text around it.
+    // (#2328), not taken from the section text around it; so must a figure
+    // or version, and a claim about endpoints cites one (#2349).
     let shown = spec::CitedText::of(nodes, edges, &prepared.overlay, &cited);
-    let before = finish.claims.len();
-    finish.claims.retain(|claim| {
-        shown
-            .uncited_route(&claim.statement, &claim.citations)
-            .is_none()
-    });
-    left_out += before - finish.claims.len();
-    if finish.claims.is_empty() {
-        return Ok(ComposeOutcome {
-            left_out,
-            ..ComposeOutcome::none("route_not_cited")
-        });
+    type Check<'a> = (&'static str, &'a dyn Fn(&Claim) -> bool);
+    let checks: [Check<'_>; 4] = [
+        ("statement_names_source", &|claim| {
+            !source.named_in(&claim.statement, &claim.citations)
+        }),
+        ("route_not_cited", &|claim| {
+            shown
+                .uncited_route(&claim.statement, &claim.citations)
+                .is_none()
+        }),
+        ("number_not_cited", &|claim| {
+            shown
+                .uncited_number(&claim.statement, &claim.citations)
+                .is_none()
+        }),
+        ("endpoint_not_cited", &|claim| {
+            !shown.endpoint_claim_uncited(&claim.statement, &claim.citations)
+        }),
+    ];
+    for (reason, keep) in checks {
+        if leave_out(&mut finish, (&mut left_out, &mut reasons), reason, keep) {
+            return Ok(ComposeOutcome {
+                left_out,
+                left_out_reasons: reasons,
+                ..ComposeOutcome::none(reason)
+            });
+        }
     }
     let cited: BTreeSet<String> = finish
         .claims
@@ -555,6 +584,7 @@ fn stage_as(
         Err(refusal) => {
             return Ok(ComposeOutcome {
                 left_out,
+                left_out_reasons: reasons,
                 ..ComposeOutcome::none(refusal.code())
             });
         }
@@ -575,11 +605,13 @@ fn stage_as(
             },
             claims,
             left_out,
+            left_out_reasons: reasons,
             gated: None,
         }),
         Err(DraftStoreError::Storage(error)) => Err(error.to_string()),
         Err(_) => Ok(ComposeOutcome {
             left_out,
+            left_out_reasons: reasons,
             ..ComposeOutcome::none("draft_not_storable")
         }),
     }
@@ -775,6 +807,10 @@ pub(crate) fn compose_gated(
         Composed {
             finish,
             left_out: outcome.left_out,
+            reasons: BTreeMap::from([("gated_check", outcome.left_out)])
+                .into_iter()
+                .filter(|(_, count)| *count > 0)
+                .collect(),
         },
         job_id,
         (
@@ -952,6 +988,9 @@ fn finish_job(
                 })
                 .collect();
             let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+            // Why claims were left out stays on the job (#2349); a stage
+            // that cannot be written does not fail the finished job.
+            let _ = jobs.progress_execution(execution, &left_out_stage(outcomes), 100.0);
             let update = jobs
                 .finish_execution(execution, &artifacts)
                 .map_err(|e| e.to_string())?;
@@ -961,6 +1000,27 @@ fn finish_job(
         Err(error) => crate::report_failure(app, state, execution, error),
     }
     Ok(())
+}
+
+/// The job stage a finished composition records: claims staged and left
+/// out, with the reasons (#2349), e.g. `composed: 12 staged, 4 left out
+/// (citation_not_citable 3, number_not_cited 1)`.
+fn left_out_stage(outcomes: &[&ComposeOutcome]) -> String {
+    let staged: usize = outcomes.iter().map(|outcome| outcome.claims).sum();
+    let left_out: usize = outcomes.iter().map(|outcome| outcome.left_out).sum();
+    let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
+    for (reason, count) in outcomes.iter().flat_map(|o| &o.left_out_reasons) {
+        *reasons.entry(reason).or_default() += count;
+    }
+    let mut stage = format!("composed: {staged} staged, {left_out} left out");
+    if !reasons.is_empty() {
+        let listed: Vec<String> = reasons
+            .iter()
+            .map(|(reason, count)| format!("{reason} {count}"))
+            .collect();
+        stage.push_str(&format!(" ({})", listed.join(", ")));
+    }
+    stage
 }
 
 #[cfg(test)]

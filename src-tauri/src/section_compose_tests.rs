@@ -340,13 +340,75 @@ fn a_claim_naming_a_route_its_citations_do_not_show_is_not_staged() {
         .unwrap()
         .put_node(&capability("cap:orders", "Place orders at /api/orders"))
         .unwrap();
+    let mut endpoint = capability("endpoint:POST /api/orders", "POST /api/orders");
+    endpoint.label = "Endpoint".into();
+    state.graph.lock().unwrap().put_node(&endpoint).unwrap();
     let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
     let provider = Scripted {
         reply: json!({"claims": [
             {"statement": "Shoppers place orders through POST /api/orders.",
-             "claim_kind": "implemented_behavior", "citation_ids": [id("cap:orders")]},
+             "claim_kind": "implemented_behavior",
+             "citation_ids": [id("cap:orders"), id("endpoint:POST /api/orders")]},
             {"statement": "Shoppers confirm a checkout through POST /api/checkout.",
              "claim_kind": "implemented_behavior", "citation_ids": [id("cap:checkout")]},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let mut composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    // §1.3 prints no Endpoint, so the reply could not cite one; a claim
+    // that cites it, as a section printing it would, is staged (#2349).
+    composed.finish.claims.insert(
+        0,
+        Claim {
+            statement: "Shoppers place orders through POST /api/orders.".into(),
+            kind: agents::section_draft::ClaimKind::Implemented,
+            citations: vec![id("cap:orders"), id("endpoint:POST /api/orders")],
+        },
+    );
+    assert_eq!(composed.reasons["citation_not_citable"], 1);
+    let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
+    let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
+    assert_eq!((outcome.claims, outcome.left_out), (1, 2), "{outcome:?}");
+    assert_eq!(outcome.left_out_reasons["route_not_cited"], 1);
+    let store = state.drafts.lock().unwrap();
+    let stored = store.for_job(job.id()).unwrap().unwrap();
+    assert_eq!(
+        stored.draft.claims[0].statement,
+        "Shoppers place orders through POST /api/orders."
+    );
+}
+
+/// AC-1317 (T-1317): a figure no cited fact shows, or a claim about
+/// endpoints citing none, is left out, and the job records why (#2349).
+#[test]
+fn an_uncited_figure_or_endpoint_claim_is_left_out_with_its_reason() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let cites = [id("cap:orders")];
+    let provider = Scripted {
+        reply: json!({"claims": [
+            {"statement": "Shoppers place up to 5 orders a day.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Orders are placed through dedicated endpoints.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place orders for themselves.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
         ]})
         .to_string(),
         prompts: Mutex::new(Vec::new()),
@@ -363,11 +425,16 @@ fn a_claim_naming_a_route_its_citations_do_not_show_is_not_staged() {
     .unwrap();
     let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
     let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
-    assert_eq!((outcome.claims, outcome.left_out), (1, 1));
-    let store = state.drafts.lock().unwrap();
-    let stored = store.for_job(job.id()).unwrap().unwrap();
+    assert_eq!((outcome.claims, outcome.left_out), (1, 2), "{outcome:?}");
     assert_eq!(
-        stored.draft.claims[0].statement,
-        "Shoppers place orders through POST /api/orders."
+        outcome.left_out_reasons,
+        BTreeMap::from([("endpoint_not_cited", 1), ("number_not_cited", 1)])
     );
+    assert_eq!(
+        left_out_stage(&[&outcome]),
+        "composed: 1 staged, 2 left out (endpoint_not_cited 1, number_not_cited 1)"
+    );
+    // The reasons are part of what the command returns.
+    let returned = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(returned["left_out_reasons"]["number_not_cited"], 1);
 }
