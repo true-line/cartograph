@@ -1957,7 +1957,7 @@ struct ModuleFile {
 /// exists and no package on the way binds the next segment itself (`from
 /// app import config` may then name `app/__init__.py`'s attribute).
 fn module_file(
-    root: &Path,
+    bytes: Read<'_>,
     id: &SourceId,
     known: &HashSet<&str>,
     module: &str,
@@ -1977,7 +1977,7 @@ fn module_file(
         if !known.contains(package.as_str()) {
             continue;
         }
-        let Some(init) = parse(root, &package)? else {
+        let Some(init) = parse(bytes, &package)? else {
             return Ok(None);
         };
         let cx = FileCx {
@@ -1991,11 +1991,11 @@ fn module_file(
             return Ok(None);
         }
     }
-    parse(root, rel)
+    parse(bytes, rel)
 }
 
-fn parse(root: &Path, rel: &str) -> Result<Option<ModuleFile>, ExtractError> {
-    let source = std::fs::read(root.join(rel))?;
+fn parse(bytes: Read<'_>, rel: &str) -> Result<Option<ModuleFile>, ExtractError> {
+    let source = bytes(rel)?;
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_python::LANGUAGE.into())?;
     Ok(parser.parse(&source, None).map(|tree| ModuleFile {
@@ -2014,7 +2014,7 @@ type Followed = (IdentityExpr, (String, u64, u64));
 /// member through a proven binding, and the value is itself a literal or
 /// env read. Returns the identity and the assignment it rests on.
 fn follow_module(
-    root: &Path,
+    bytes: Read<'_>,
     id: &SourceId,
     known: &HashSet<&str>,
     follows: &Follows,
@@ -2044,7 +2044,7 @@ fn follow_module(
         return Ok(None);
     }
     if !modules.contains_key(module) {
-        let file = module_file(root, id, known, module)?;
+        let file = module_file(bytes, id, known, module)?;
         modules.insert(module.to_string(), file);
     }
     let Some(Some(file)) = modules.get(module) else {
@@ -2091,7 +2091,7 @@ fn follow_module(
 /// (`getattr(module, "f")`) are not seen, so the result carries
 /// `identity_assumes_static_callers`.
 fn follow_parameter(
-    root: &Path,
+    bytes: Read<'_>,
     id: &SourceId,
     known: &HashSet<&str>,
     follows: &Follows,
@@ -2130,7 +2130,7 @@ fn follow_parameter(
         return Ok(None);
     };
     // Defined once, and named nowhere else in its own module.
-    let Some(defining) = module_file(root, id, known, module)? else {
+    let Some(defining) = module_file(bytes, id, known, module)? else {
         return Ok(None);
     };
     let cx = FileCx {
@@ -2150,7 +2150,7 @@ fn follow_parameter(
     if mentions != 1 {
         return Ok(None);
     }
-    let Some(file) = parse(root, caller)? else {
+    let Some(file) = parse(bytes, caller)? else {
         return Ok(None);
     };
     let cx = FileCx {
@@ -2203,7 +2203,7 @@ fn follow_parameter(
         name,
         local,
     };
-    follow_module(root, id, known, follows, modules, &pending)
+    follow_module(bytes, id, known, follows, modules, &pending)
 }
 
 /// Observed infrastructure for every Python source under `root`.
@@ -2238,7 +2238,40 @@ pub fn extract_dir_with_sites(
 ) -> Result<ObservedWithSites, ExtractError> {
     let mut files = Vec::new();
     collect_python_files(root, &mut files)?;
+    observe(files, &|rel| std::fs::read(root.join(rel)), id, registries)
+}
+
+/// [`extract_dir_with_sites`] over the `.py` files `paths` (repo-relative,
+/// the host's capture selection), each read through `read`, so a captured
+/// source's observed infrastructure comes from its retained bytes rather
+/// than the checkout (AC-1055, #385). Only `paths` are known modules: an
+/// identity is never followed into a file outside them.
+pub fn extract_from_sources_with_sites(
+    paths: &[String],
+    bytes: Read<'_>,
+    id: &SourceId,
+    registries: &Registries,
+) -> Result<ObservedWithSites, ExtractError> {
+    let mut files: Vec<String> = paths
+        .iter()
+        .filter(|path| path.ends_with(".py"))
+        .cloned()
+        .collect();
+    files.dedup();
+    observe(files, bytes, id, registries)
+}
+
+/// A repo-relative file's bytes.
+type Read<'a> = &'a dyn Fn(&str) -> std::io::Result<Vec<u8>>;
+
+fn observe(
+    mut files: Vec<String>,
+    bytes: Read<'_>,
+    id: &SourceId,
+    registries: &Registries,
+) -> Result<ObservedWithSites, ExtractError> {
     files.sort(); // deterministic order (US-0014)
+    files.dedup();
     let mut sites = Vec::new();
     let mut follows = Follows::default();
     let mut event_modules: Vec<String> = Vec::new();
@@ -2268,7 +2301,7 @@ pub fn extract_dir_with_sites(
         defaults: Vec::new(),
     };
     for rel in &files {
-        let source = std::fs::read(root.join(rel))?;
+        let source = bytes(rel)?;
         let first = fetches.sites.len();
         let first_event = fetches.events.len();
         extract_file(
@@ -2292,7 +2325,7 @@ pub fn extract_dir_with_sites(
         .collect();
     for pending in &follows.pending {
         if let Some((identity, source)) =
-            follow_module(root, id, &known, &follows, &mut modules, pending)?
+            follow_module(bytes, id, &known, &follows, &mut modules, pending)?
         {
             sites[pending.site].identity = Some(identity);
             sites[pending.site].identity_source = Some(source);
@@ -2301,7 +2334,7 @@ pub fn extract_dir_with_sites(
     }
     for param in &follows.params {
         if let Some((identity, source)) =
-            follow_parameter(root, id, &known, &follows, &mut modules, param)?
+            follow_parameter(bytes, id, &known, &follows, &mut modules, param)?
         {
             sites[param.site].identity = Some(identity);
             sites[param.site].identity_source = Some(source);

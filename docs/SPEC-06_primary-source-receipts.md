@@ -227,6 +227,10 @@ checkout, outside closure, so facts it derives (routes, migrations, screens)
 carry no receipt. Inspection, task evidence and MCP reads accept the prefix
 like any v3 receipt.
 
+The Python observed-infrastructure pass (AC-1055) reads the same captured
+bytes, for its files and for every module it follows an identity into, and
+follows only into captured paths. Its facts are not yet receipt-bound.
+
 ## Go lane (AC-1026, #385)
 
 A source's `.go` files (the Go adapter's own selection) join the same capture
