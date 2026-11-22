@@ -23,7 +23,9 @@ is paused or a mode is full, the new job waits as queued, in the order it was
 asked, and starts when a place frees or the pool is resumed. Cancel a waiting
 job from Jobs. Work already running continues. A waiting investigation's time
 limits start when it starts. At most two investigations are open at once,
-whatever the limits say.
+whatever the limits say. An investigation still waiting when the app closes
+is ended as interrupted the next time the app starts; start it again if you
+still need it.
 
 Review saved specialist conversations and open their findings. The list uses
 the same saved investigation history as Investigations, including its search,
