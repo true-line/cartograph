@@ -282,6 +282,12 @@ dependencies = [
 name = "app-store"
 version = "0.73.0"
 dependencies = [
+ "adapters-lang-go",
+ "adapters-lang-java",
+ "adapters-lang-kotlin",
+ "adapters-lang-python",
+ "adapters-lang-rust",
+ "adapters-lang-ts",
  "agents",
  "cap-fs-ext",
  "cap-std",

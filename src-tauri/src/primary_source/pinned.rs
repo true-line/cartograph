@@ -5,7 +5,7 @@ use source_capture::CaptureError;
 
 /// Fixed categories keep missing content separate from storage/lock failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PinnedReadError {
+pub enum PinnedReadError {
     Unavailable,
     Invalid,
     Operational,
@@ -152,7 +152,7 @@ impl PrimarySourceStore {
     /// Load one explicitly reviewer-selected corpus capture. This validates its
     /// bytes and source ownership, but does not attest that a graph fact was
     /// produced from it; that association belongs to the reviewed corpus.
-    pub(crate) fn evaluation_capture(
+    pub fn evaluation_capture(
         &self,
         guard: &RetentionGuard,
         capture_id: &str,
@@ -190,7 +190,7 @@ impl PrimarySourceStore {
         Ok(capture)
     }
 
-    pub(crate) fn task_guard(&self, source: &str) -> Result<RetentionGuard, PinnedReadError> {
+    pub fn task_guard(&self, source: &str) -> Result<RetentionGuard, PinnedReadError> {
         self.guard(source, false)
             .map_err(|_| PinnedReadError::Operational)
     }
@@ -215,7 +215,7 @@ impl PrimarySourceStore {
     /// Positive retention classification for a binding already checked against
     /// the caller's exact graph basis. Never call this with a client receipt ID
     /// alone. Reclaimed metadata cannot attest old ranges or full receipt fields.
-    pub(crate) fn task_binding_forgotten(
+    pub fn task_binding_forgotten(
         &self,
         guard: &RetentionGuard,
         binding: &core_graph::source::SourceBinding,
@@ -247,7 +247,7 @@ impl PrimarySourceStore {
     }
 
     /// [`Self::task_binding_forgotten`] for a binding in `role`.
-    pub(crate) fn task_binding_forgotten_as(
+    pub fn task_binding_forgotten_as(
         &self,
         guard: &RetentionGuard,
         role: core_graph::BindingRole,
@@ -295,7 +295,7 @@ impl PrimarySourceStore {
         }
     }
 
-    pub(crate) fn task_receipt(
+    pub fn task_receipt(
         &self,
         guard: &RetentionGuard,
         fact: &FactKey,
@@ -315,7 +315,7 @@ impl PrimarySourceStore {
 
     /// [`Self::task_receipt`] for a binding in `role`; `repo` is the
     /// binding's repo key.
-    pub(crate) fn task_receipt_as(
+    pub fn task_receipt_as(
         &self,
         guard: &RetentionGuard,
         role: core_graph::BindingRole,
@@ -352,7 +352,7 @@ impl PrimarySourceStore {
 
     /// The caller charges complete file-validation work before invoking this.
     /// The receipt and lease are already pinned; no current graph lookup occurs.
-    pub(crate) fn task_text(
+    pub fn task_text(
         &self,
         guard: &RetentionGuard,
         receipt: &Receipt,
@@ -373,7 +373,7 @@ impl PrimarySourceStore {
     /// maxima; the capture store also enforces its own hard/stored ceilings.
     /// Ordinary task_text intentionally keeps its existing capture-store policy
     /// without these additional per-session MCP limits.
-    pub(crate) fn task_text_bounded(
+    pub fn task_text_bounded(
         &self,
         guard: &RetentionGuard,
         receipt: &Receipt,
@@ -408,7 +408,7 @@ fn capture_error(error: CaptureError) -> PinnedReadError {
     }
 }
 impl PrimarySourceStore {
-    pub(crate) fn task_capture_present(
+    pub fn task_capture_present(
         &self,
         guard: &RetentionGuard,
         span: &agents::TaskCaptureSpanRef,
@@ -427,7 +427,7 @@ impl PrimarySourceStore {
         Ok(())
     }
     /// Human location inspection only; this is not agent evidence acquisition.
-    pub(crate) fn task_location(
+    pub fn task_location(
         &self,
         guard: &RetentionGuard,
         receipt: &Receipt,
@@ -446,6 +446,6 @@ impl PrimarySourceStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "pinned/preflight_tests.rs"]
 mod preflight_tests;
