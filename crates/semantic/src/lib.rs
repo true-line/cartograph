@@ -207,8 +207,11 @@ pub struct AnnIndex {
 }
 
 impl AnnIndex {
-    /// Build a cosine/F32 index. IDs and embeddings must be aligned.
-    pub fn build(ids: Vec<String>, embeddings: &[Embedding]) -> Result<Self, SemanticError> {
+    /// Build a cosine/F32 index. IDs and embeddings must be aligned. The
+    /// embeddings are consumed: each vector is freed as soon as the index holds
+    /// its copy, so a plan never holds the returned set and the index whole at
+    /// once (AC-1507).
+    pub fn build(ids: Vec<String>, embeddings: Vec<Embedding>) -> Result<Self, SemanticError> {
         if ids.is_empty() || embeddings.is_empty() || ids.len() != embeddings.len() {
             return Err(SemanticError::Index(
                 "ids and embeddings must be non-empty and aligned".into(),
@@ -235,9 +238,9 @@ impl AnnIndex {
         index
             .reserve(ids.len())
             .map_err(|error| SemanticError::Index(error.to_string()))?;
-        for (key, embedding) in embeddings.iter().enumerate() {
+        for (key, embedding) in embeddings.into_iter().enumerate() {
             index
-                .add(key as u64, embedding)
+                .add(key as u64, &embedding)
                 .map_err(|error| SemanticError::Index(error.to_string()))?;
         }
         Ok(Self { index, ids })
@@ -504,7 +507,7 @@ pub fn propose(
         let texts: Vec<String> = compatible.iter().map(|item| item.text.clone()).collect();
         let embeddings = provider.embed(&texts)?;
         let ids: Vec<String> = compatible.iter().map(|item| item.node_id.clone()).collect();
-        let index = AnnIndex::build(ids, &embeddings)?;
+        let index = AnnIndex::build(ids, embeddings)?;
         let query_texts: Vec<String> = compatible_hops
             .iter()
             .map(|hop| hop.query.clone())
@@ -928,7 +931,7 @@ mod tests {
     fn usearch_returns_cosine_nearest_neighbor() {
         let index = AnnIndex::build(
             vec!["orders".into(), "users".into()],
-            &[vec![1.0, 0.0], vec![0.0, 1.0]],
+            vec![vec![1.0, 0.0], vec![0.0, 1.0]],
         )
         .unwrap();
         let hits = index.search(&vec![0.99, 0.01], 2).unwrap();
@@ -1229,9 +1232,10 @@ mod tests {
         let ids = (0..embeddings.len())
             .map(|index| format!("candidate-{index}"))
             .collect();
-        let index = AnnIndex::build(ids, &embeddings).unwrap();
+        let first = embeddings[0].clone();
+        let index = AnnIndex::build(ids, embeddings).unwrap();
         let started = Instant::now();
-        let hits = index.search(&embeddings[0], 10).unwrap();
+        let hits = index.search(&first, 10).unwrap();
         let elapsed = started.elapsed();
         assert!(!hits.is_empty());
         assert!(

@@ -238,7 +238,7 @@ fn embedding_cache_first_writer_wins_and_dimension_is_pinned() {
         .publish(
             &lease,
             &space,
-            &[(key.clone(), 3, vec![1., 2.])],
+            &[(key.as_str(), 3, &[1., 2.][..])],
             &protected,
             &mut stats,
         )
@@ -247,7 +247,7 @@ fn embedding_cache_first_writer_wins_and_dimension_is_pinned() {
         .publish(
             &lease,
             &space,
-            &[(key.clone(), 3, vec![3., 4.])],
+            &[(key.as_str(), 3, &[3., 4.][..])],
             &protected,
             &mut stats,
         )
@@ -262,7 +262,7 @@ fn embedding_cache_first_writer_wins_and_dimension_is_pinned() {
             .publish(
                 &lease,
                 &space,
-                &[(hash(b"two"), 3, vec![1.])],
+                &[(hash(b"two").as_str(), 3, &[1.][..])],
                 &protected,
                 &mut stats
             )
@@ -394,7 +394,7 @@ fn embedding_cache_eviction_is_sequence_ordered_and_preserves_current_operation(
         .publish(
             &lease,
             &space,
-            &[(new.clone(), 3, vec![2.])],
+            &[(new.as_str(), 3, &[2.][..])],
             &protected,
             &mut stats,
         )
@@ -619,7 +619,7 @@ fn embedding_cache_namespace_capacity_evicts_oldest_unprotected_namespace() {
             .publish(
                 &lease,
                 &space,
-                &[(key.clone(), 3, vec![1.])],
+                &[(key.as_str(), 3, &[1.][..])],
                 &BTreeSet::from([(space.clone(), key.clone())]),
                 &mut stats,
             )
