@@ -6,13 +6,14 @@ use llm::{EgressFirewall, EgressPolicy, OllamaProvider};
 use serde_json::json;
 use std::time::Duration;
 struct Fixture {
-    directory: tempfile::TempDir,
     store: JobStore,
     execution: JobExecution,
     id: String,
     request: StagedObligationRequest,
     archive: InvestigationCoverageArchive,
     inventory_details: Vec<String>,
+    /// Dropped last: Windows cannot remove it while a store holds files in it (#1307).
+    directory: tempfile::TempDir,
 }
 #[path = "progressive_storage_tests.rs"]
 mod progressive_storage_tests;
