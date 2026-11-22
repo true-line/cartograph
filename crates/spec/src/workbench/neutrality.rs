@@ -311,10 +311,12 @@ pub fn route_literals(statement: &str) -> Vec<&str> {
 /// segment, and not followed by more of the path.
 fn contains_route(text: &str, route: &str) -> bool {
     let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '<' | '{' | '.');
+    // A parameter (`:id`) or a wildcard (`*`) continues a route too.
+    let more = |c: char| part(c) || matches!(c, ':' | '*');
     text.match_indices(route).any(|(start, matched)| {
         let end = start + matched.len();
         let before = !text[..start].chars().next_back().is_some_and(part);
-        let after = !text[end..].chars().next().is_some_and(part);
+        let after = !text[end..].chars().next().is_some_and(more);
         before && after
     })
 }
@@ -568,5 +570,24 @@ mod tests {
             Some("/api/admin")
         );
         assert_eq!(text.uncited_route("It is /api.", &e), Some("/api"));
+        // An Express-style parameter continues the route (#2328).
+        let users = Node {
+            id: "endpoint:GET /users/:id".into(),
+            label: "Endpoint".into(),
+            props: json!({"path": "/users/:id"}),
+        };
+        let u = vec![ids(&users)];
+        let text = CitedText::of(&[users], &[], &[], &u.iter().cloned().collect());
+        assert_eq!(text.uncited_route("It lists /users.", &u), Some("/users"));
+        assert_eq!(text.uncited_route("It reads /users/:id.", &u), None);
+        // A route right after an id's colon still counts.
+        let bare = Node {
+            id: "endpoint:/health".into(),
+            label: "Endpoint".into(),
+            props: json!({}),
+        };
+        let h = vec![ids(&bare)];
+        let text = CitedText::of(&[bare], &[], &[], &h.iter().cloned().collect());
+        assert_eq!(text.uncited_route("It answers /health.", &h), None);
     }
 }
