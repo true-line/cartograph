@@ -7,7 +7,7 @@
     "changeset": "changeset",
     "changeset:version": "changeset version && npm run version:sync",
     "package:macos": "npm run package:macos:compile && npm run package:macos:bundle",
-    "package:macos:compile": "node scripts/build-mcp-relay.mjs && tauri build --no-bundle --target universal-apple-darwin",
+    "package:macos:compile": "node scripts/build-mcp-relay.mjs && node scripts/build-agent-runtime.mjs universal-apple-darwin && tauri build --no-bundle --target universal-apple-darwin",
     "package:macos:bundle": "tauri bundle --bundles app,dmg --target universal-apple-darwin --config src-tauri/tauri.mcp-bundle.conf.json",
     "tauri": "tauri",
     "check:traceability": "node scripts/check-traceability.mjs",
