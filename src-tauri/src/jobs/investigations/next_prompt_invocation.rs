@@ -4,7 +4,7 @@ use super::*;
 use admission_contract::SavedCallBasis;
 use llm::bounded::{AuthorizedBoundedCompletion, CompletionLimits, PreparedBoundedCompletion};
 
-pub(crate) struct NextPromptInvocation<'a> {
+pub struct NextPromptInvocation<'a> {
     pub input: &'a InvestigationInput,
     pub prepared: &'a PreparedBoundedCompletion,
     /// Exact protected PRE-call RunClock sample, never a reset or lower usage.
@@ -12,7 +12,7 @@ pub(crate) struct NextPromptInvocation<'a> {
 }
 
 impl JobStore {
-    pub(crate) fn await_next_prompt_consent(
+    pub fn await_next_prompt_consent(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -24,7 +24,7 @@ impl JobStore {
         self.next_prompt_invocation_boundary(execution, revision, input, None, validate_retained)
     }
 
-    pub(crate) fn begin_next_prompt_invocation(
+    pub fn begin_next_prompt_invocation(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -202,12 +202,12 @@ impl JobStore {
             basis.validate_saved(&tx, &task)?;
         }
         save_next_prompt_task(&tx, &task, revision, false)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if FAIL_BEFORE_INVOCATION_COMMIT.with(|slot| slot.replace(false)) {
             return Err(InvestigationStoreError::Capacity);
         }
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if LOSE_INVOCATION_ACK.with(|slot| slot.replace(false)) {
             return Err(InvestigationStoreError::Storage);
         }
@@ -311,12 +311,12 @@ pub(super) fn prepare_saved_call(
     Ok((step, basis))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_BEFORE_INVOCATION_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LOSE_INVOCATION_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_invocation_tests.rs"]
 pub(super) mod tests;

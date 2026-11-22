@@ -3,7 +3,7 @@
 use super::*;
 
 impl JobStore {
-    pub(crate) fn approve_next_prompt_investigation(
+    pub fn approve_next_prompt_investigation(
         &mut self,
         id: &str,
         revision: u64,
@@ -13,7 +13,7 @@ impl JobStore {
         self.next_prompt_consent_decision(id, revision, step_id, payload_hash, true)
     }
 
-    pub(crate) fn decline_next_prompt_investigation(
+    pub fn decline_next_prompt_investigation(
         &mut self,
         id: &str,
         revision: u64,
@@ -92,12 +92,12 @@ impl JobStore {
             transitions::stop(&tx, &mut task, InvestigationStopReason::ConsentDeclined)?;
         }
         save_next_prompt_task(&tx, &task, revision, !approved)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if FAIL_BEFORE_CONSENT_COMMIT.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Capacity);
         }
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if LOSE_CONSENT_ACK.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Storage);
         }
@@ -119,12 +119,12 @@ fn pending_event(
     decode(&body, &hash)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_BEFORE_CONSENT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LOSE_CONSENT_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_consent_tests.rs"]
 mod tests;

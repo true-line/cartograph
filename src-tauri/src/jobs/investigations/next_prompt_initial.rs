@@ -5,7 +5,7 @@ use super::*;
 impl JobStore {
     /// Read-only starting metadata for the actual first prompt. The caller keeps
     /// its original request; redacted history cannot reconstruct that authority.
-    pub(crate) fn investigation_next_prompt_initial_state(
+    pub fn investigation_next_prompt_initial_state(
         &self,
         execution: &JobExecution,
         revision: u64,
@@ -58,7 +58,7 @@ impl JobStore {
         Ok((task.detail, metadata, contract))
     }
 
-    pub(crate) fn admit_next_prompt_initial_context(
+    pub fn admit_next_prompt_initial_context(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -161,12 +161,12 @@ impl JobStore {
         // Preparing the first input is not an invocation or cloud approval.
         // Do not retain this prospective call as though it had been charged.
         save_next_prompt_task(&tx, &task, revision, false)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if FAIL_BEFORE_INITIAL_COMMIT.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Capacity);
         }
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if LOSE_INITIAL_ACK.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Storage);
         }
@@ -174,12 +174,12 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_BEFORE_INITIAL_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LOSE_INITIAL_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_initial_tests.rs"]
 mod tests;
