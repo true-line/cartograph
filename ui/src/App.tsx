@@ -54,6 +54,7 @@ import {
   awaitingCuration, loadAgentPoolControls, loadJobUsage, saveAgentPoolControls,
   type AgentPoolControls, type JobUsage,
 } from './agentPool';
+import type { LocalLaneStatus } from './components/LocalLane';
 import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
@@ -255,6 +256,20 @@ export default function App() {
         void loadAgentPoolControls().then((stored) => { if (latest()) setPoolControls(stored); }, () => undefined);
       },
     );
+  }, []);
+  // The local model server check in the agent pool (#252, AC-1708): on
+  // demand only, and only the latest check's answer is shown.
+  const [localServer, setLocalServer] = useState<LocalLaneStatus | null>(null);
+  const [localServerChecking, setLocalServerChecking] = useState(false);
+  const [localServerError, setLocalServerError] = useState<string | null>(null);
+  const localServerCheck = useRef(0);
+  const checkLocalServer = useCallback(() => {
+    const check = ++localServerCheck.current;
+    setLocalServerChecking(true);
+    invoke<LocalLaneStatus>('local_lane_status').then(
+      (status) => { if (check === localServerCheck.current) { setLocalServer(status); setLocalServerError(null); } },
+      (error: unknown) => { if (check === localServerCheck.current) setLocalServerError(String(error)); },
+    ).finally(() => { if (check === localServerCheck.current) setLocalServerChecking(false); });
   }, []);
   // The closed-state dispatch hint (#251, AC-1702) shows until the first confirmed dispatch.
   const [quickDispatchHintShown, setQuickDispatchHintShown] = useState(readQuickDispatchHint);
@@ -849,6 +864,10 @@ export default function App() {
             controls={poolControls}
             controlsError={poolControlsError}
             onChangeControls={changePoolControls}
+            localServer={localServer}
+            localServerChecking={localServerChecking}
+            localServerError={localServerError}
+            onCheckLocalServer={backend === 'up' ? checkLocalServer : undefined}
             awaitingCuration={stagedError || (stagedLoading && stagedProposals.length === 0) ? null : awaitingCuration(stagedProposals)}
             onOpenJobs={() => navigate('jobs')}
             onOpenCuration={() => navigate('gaps')}

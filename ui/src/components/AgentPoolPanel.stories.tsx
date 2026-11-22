@@ -108,3 +108,16 @@ export const Paused: Story = {
     await expect(canvas.getByRole('alert')).toHaveTextContent('store busy');
   },
 };
+
+export const LocalServerStopped: Story = {
+  args: {
+    localServer: { reachable: false, start_command: 'ollama serve', models: [] },
+    onCheckLocalServer: fn(),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('agent-pool-local-server')).toHaveTextContent('The local model server did not answer. Start it with ollama serve.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Check local server' }));
+    await expect(args.onCheckLocalServer).toHaveBeenCalled();
+  },
+};

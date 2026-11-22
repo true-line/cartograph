@@ -6,6 +6,7 @@
 import type { Job, StagedProposal } from './store';
 import type { InvestigationProvider } from './investigationTypes';
 import { invokeOr } from './tauri';
+import type { LocalLaneStatus } from './components/LocalLane';
 
 /** The kinds of agent work the host records as jobs. */
 export type AgentLane = 'investigation' | 'area-expert' | 'section-draft' | 'escalation';
@@ -182,4 +183,16 @@ export function controlsLine(controls: AgentPoolControls): string {
   if (controls.paused) return 'New agent work waits until the pool is resumed. Work already running continues.';
   const limit = (count: number, mode: string) => (count === 0 ? `no ${mode} limit` : `at most ${count} ${mode}`);
   return `New agent work starts with ${limit(controls.local_limit, 'local')} and ${limit(controls.cloud_limit, 'cloud')} at a time.`;
+}
+
+/** One line on whether the local model server answers (#252, AC-1708).
+ *  Only the local server is asked; no cloud provider is called. */
+export function localServerLine(status: LocalLaneStatus): string {
+  if (!status.reachable) {
+    return `The local model server did not answer. Start it with ${status.start_command ?? 'ollama serve'}.`;
+  }
+  const missing = status.models.filter((model) => !model.installed).length;
+  return missing === 0
+    ? 'The local model server is running and every model is installed.'
+    : `The local model server is running; ${missing} of ${status.models.length} models ${missing === 1 ? 'is' : 'are'} missing (see Settings, Local lane).`;
 }
