@@ -7396,6 +7396,7 @@ fn build_spec_bundle(
     compile_spec_bundle(spec_inputs(graph, decisions, Some(review))?, mode)
 }
 
+#[cfg(test)]
 fn compile_spec_bundle(
     inputs: SpecInputs,
     mode: spec::ExportMode,
