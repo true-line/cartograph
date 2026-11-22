@@ -436,6 +436,7 @@ fn lane_pins_match_the_adapter_manifests() {
     let java = include_str!("../../../../adapters-lang-java/Cargo.toml");
     let rust = include_str!("../../../../adapters-lang-rust/Cargo.toml");
     let kotlin = include_str!("../../../../adapters-lang-kotlin/Cargo.toml");
+    let terraform = include_str!("../../../../iac/Cargo.toml");
     let ts = include_str!("../../../Cargo.toml");
     for (manifest, grammar, package) in [
         (ts, Grammar::TypeScript, "tree-sitter-typescript"),
@@ -444,6 +445,7 @@ fn lane_pins_match_the_adapter_manifests() {
         (java, Grammar::Java, "tree-sitter-java"),
         (rust, Grammar::Rust, "tree-sitter-rust"),
         (kotlin, Grammar::Kotlin, "tree-sitter-kotlin-ng"),
+        (terraform, Grammar::Terraform, "hcl-edit"),
     ] {
         let contract = contract(3, grammar).unwrap();
         let (name, version) = contract.grammar_package.split_once('@').unwrap();
