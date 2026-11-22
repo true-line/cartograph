@@ -1680,7 +1680,8 @@ fn graph_error(error: core_graph::GraphError) -> HostError {
     }
 }
 /// Whether a task scope is prepared scope-aware (#1602): a neighborhood
-/// (with a valid radius) or an area. `All` keeps the complete-graph read.
+/// (with a valid radius) or an area. `All` pages from the store instead
+/// (AC-1058, AC-1060).
 pub(super) fn scope_aware(scope: &InvestigationScope) -> Result<bool, HostError> {
     match scope {
         InvestigationScope::Neighborhood { hops, .. } => {

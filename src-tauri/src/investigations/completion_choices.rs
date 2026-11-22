@@ -6,7 +6,7 @@ use agents::investigation::{InventoryTarget, InvestigationScope, MAX_MANIFEST_BY
 use context_hub::coverage::ScopedRepo;
 use context_hub::{
     ContextSnapshot, FactReference, QueryRequest, QueryScope,
-    coverage::{CoverageQualification, CoverageStatus},
+    coverage::{CoverageContext, CoverageQualification, CoverageStatus},
 };
 use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
 use serde::Serialize;
@@ -62,6 +62,9 @@ impl ObligationChoices {
     }
 }
 
+/// The choices from a held whole graph, the reference the scoped and paged
+/// reads are checked against.
+#[cfg(test)]
 pub(super) fn choices(
     graph: (Vec<core_graph::Node>, Vec<core_graph::Edge>),
     coverage: CoverageQualification,
@@ -120,6 +123,16 @@ fn choices_in(
     let qualified = scoped
         .with_coverage(coverage)
         .map_err(|error| error.to_string())?;
+    choices_from(graph_snapshot_id, qualified, scoped_facts)
+}
+
+/// The choices a qualified context offers: one per scoped repository, with
+/// an inventory obligation for each recorded one.
+fn choices_from(
+    graph_snapshot_id: String,
+    qualified: CoverageContext,
+    scoped_facts: Option<BTreeSet<FactReference>>,
+) -> Result<ObligationChoices, String> {
     let proof = qualified
         .durable_proof()
         .map_err(|error| error.to_string())?;
@@ -266,22 +279,28 @@ pub(super) fn choices_at(
         return choices_in(graph_snapshot_id, scoped, coverage, scope)
             .map_err(SelectionError::from);
     }
-    let (base, recorded) = state
+    // A whole-system scope (AC-1311) streams only the complete-graph identity
+    // at the coverage revision and qualifies it, as a paged task does
+    // (AC-1060): its source targets bind that identity, and existence is
+    // checked against the full graph by `inspection::resolve`, so no fact is
+    // held and the choices list under retained limits the whole graph exceeds.
+    if *scope != InvestigationScope::All {
+        return Err(SelectionError::from("Invalid task scope.".to_owned()));
+    }
+    let (revision, recorded) = state
         .graph
         .lock()
         .map_err(|_| "Graph store is unavailable.".to_owned())?
-        .read_snapshot_with_coverage_and_revision_bounded(
-            graph_limits,
-            CoverageReadLimits::default(),
-        )
+        .read_coverage_records_with_revision_bounded(CoverageReadLimits::default())
         .map_err(|error| error.to_string())?;
-    let area =
-        super::area::files(state, &base.revision, scope).map_err(|error| error.to_string())?;
-    let graph = base.graph;
+    let graph_snapshot_id = FrozenContext::complete_identity_at(state, &revision, graph_limits)
+        .map_err(|error| error.to_string())?;
     let stable = crate::context::stable_scope(&before, read_scope()?);
     let coverage =
         CoverageQualification::new(&stable, &recorded).map_err(|error| error.to_string())?;
-    choices(graph, coverage, scope, area.as_ref()).map_err(SelectionError::from)
+    let qualified = CoverageContext::for_identity(graph_snapshot_id.clone(), coverage)
+        .map_err(|error| error.to_string())?;
+    choices_from(graph_snapshot_id, qualified, None).map_err(SelectionError::from)
 }
 
 /// Acceptance preparation reuses the production qualified selection, requiring
