@@ -552,8 +552,9 @@ fn caught(clause: TsNode<'_>) -> Option<TsNode<'_>> {
     let values: Vec<_> = clause
         .children_by_field_name("value", &mut cursor)
         .collect();
+    // `except (A, B):` is one tuple value naming several types.
     match values[..] {
-        [one] => Some(one),
+        [one] if one.kind() != "tuple" => Some(one),
         _ => None,
     }
 }

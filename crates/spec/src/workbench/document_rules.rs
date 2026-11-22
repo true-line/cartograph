@@ -41,7 +41,10 @@ use super::statements::Constants;
 use crate::workbench::capabilities::{Stories, Story, Support, area_name};
 use crate::workbench::citation_id;
 use crate::workbench::render::{Assertions, Literal, RenderLimit, Text};
-use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit, SourceExpression};
+use core_graph::rules::{
+    BranchPolarity, DefinitionExpressionKind, DefinitionExpressionNode, GuardedExitEvidence,
+    LocalExit, SourceExpression,
+};
 use core_graph::{Edge, FactKey, Node};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -881,16 +884,21 @@ impl<'a> Index<'a> {
         let mut scan = row.when.clone();
         if let Ok(parsed) = GuardedExitEvidence::from_value(row.rule.props["rule"].clone()) {
             for definition in parsed.local_definitions.iter().flatten() {
-                let display = definition.initializer.display.as_str();
-                let callee = display.split('(').next().unwrap_or_default();
-                if display.contains('(')
-                    && !callee.is_empty()
-                    && callee
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                // Only a recorded call of a plain name: an unsupported
+                // initializer (`a() if f else b()`) is not one call's value.
+                let nodes = &definition.expression.nodes;
+                let plain_call = match nodes.get(definition.expression.root as usize) {
+                    Some(DefinitionExpressionNode {
+                        kind: DefinitionExpressionKind::Call { callee, .. },
+                        ..
+                    }) => nodes.get(*callee as usize).is_some_and(|c| {
+                        matches!(c.kind, DefinitionExpressionKind::Identifier { .. })
+                    }),
+                    _ => false,
+                };
+                if plain_call {
                     scan.push_str(" and ");
-                    scan.push_str(&one_line(display));
+                    scan.push_str(&one_line(definition.initializer.display.as_str()));
                 }
             }
         }
@@ -2590,6 +2598,11 @@ def get_alias(alias_id):
     if not entry:
         return jsonify(error="Gone"), 410
 
+def pick(signed_suffix):
+    picked = check_suffix_signature(signed_suffix) if signed_suffix else None
+    if not picked:
+        return jsonify(error="No suffix"), 409
+
 def new_custom_alias(signed_suffix):
     try:
         alias_suffix = check_suffix_signature(signed_suffix)
@@ -2618,6 +2631,10 @@ def new_custom_alias(signed_suffix):
             ),
             "{text}"
         );
+        // An initializer that is not one call is not followed.
+        let (text, _) = python_rows(source, "pick");
+        assert!(text.contains("409"), "{text}");
+        assert!(!text.contains("check suffix signature"), "{text}");
         let (text, _) = python_rows(source, "new_custom_alias");
         assert!(
             text.contains(

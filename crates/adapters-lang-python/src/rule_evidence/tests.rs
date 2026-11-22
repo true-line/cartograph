@@ -717,6 +717,12 @@ def authorize_request():
         return "Wrong api key", 401
     g.user = api_key.user
 
+def several():
+    try:
+        return load()
+    except (ValueError, TypeError):
+        return "bad", 400
+
 def twice(data):
     suffix = data.get("s")
     suffix = suffix.strip()
@@ -775,6 +781,12 @@ def twice(data):
             .all(|d| d.role != DependencyRole::Condition
                 || matches!(d.resolution, DependencyResolution::Unresolved { .. }))
     );
+    // A handler naming several types states no branch (AC-1036).
+    assert!(all.iter().all(|(_, r)| !r.owner_id.ends_with("several")
+        || r.conditions.iter().all(|c| !matches!(
+            c.polarity,
+            BranchPolarity::RaisedBranch | BranchPolarity::UnraisedBranch
+        ))));
     for (_, rule) in &all {
         rule.validate().unwrap();
     }
