@@ -44,6 +44,7 @@ impl ScopeFacts {
     }
 
     /// The held projection; a paged scope holds none.
+    #[cfg(test)]
     pub(super) fn held(&self) -> Option<&Arc<ContextSnapshot>> {
         match self {
             Self::Held(snapshot) => Some(snapshot),
@@ -151,6 +152,9 @@ pub(super) struct FrozenContext {
     /// selection rereads exactly the selected facts at this revision instead
     /// of the whole graph. `None` for a complete-graph preparation.
     scoped_revision: Option<StoreRevision>,
+    /// For a paged scope, the later revision its reads moved to after a store
+    /// write that left the complete graph identical (AC-1060).
+    moved_revision: std::sync::Mutex<Option<StoreRevision>>,
 }
 
 /// Owned local preparation, never a deserialized or cloneable publication token.
@@ -801,17 +805,22 @@ impl FrozenContext {
         }
         let coverage_limits = coverage_preparation_limits(archive_capacity)?;
         let before = scope()?;
-        let (mut prepared, recorded) = if scope_aware(&request.scope)? {
+        let paged = request.scope == InvestigationScope::All;
+        let (mut prepared, recorded) = if paged || scope_aware(&request.scope)? {
             // Coverage and the scoped facts describe one revision: the
-            // scoped reader refuses if the store moved after this read.
+            // scoped reader refuses if the store moved after this read. A
+            // whole-system task pages from that revision (AC-1060).
             let (revision, recorded) = state
                 .graph
                 .lock()
                 .map_err(|_| HostError::Operational)?
                 .read_coverage_records_with_revision_bounded(coverage_limits)
                 .map_err(graph_error)?;
-            let prepared =
-                Self::prepare_scoped_at(state, &request, history, graph_limits, revision)?;
+            let prepared = if paged {
+                Self::prepare_paged_at(state, &request, history, graph_limits, revision)?
+            } else {
+                Self::prepare_scoped_at(state, &request, history, graph_limits, revision)?
+            };
             (prepared, recorded)
         } else {
             let (base, recorded) = state
@@ -830,10 +839,12 @@ impl FrozenContext {
         prepared.graph_limits = graph_limits;
         // Both paths retain the one already-authorized immutable scoped
         // projection from this same bounded graph read.
-        let qualified = CoverageContext::from_shared_snapshot(
-            Arc::clone(prepared.snapshot.held().ok_or(HostError::Operational)?),
-            qualification,
-        )
+        let qualified = match &prepared.snapshot {
+            ScopeFacts::Held(snapshot) => {
+                CoverageContext::from_shared_snapshot(Arc::clone(snapshot), qualification)
+            }
+            ScopeFacts::Paged { id } => CoverageContext::for_identity(id.clone(), qualification),
+        }
         .map_err(context_error)?;
         let proof = qualified.durable_proof().map_err(context_error)?;
         bounded_json(&proof, MAX_MANIFEST_BYTES)?;
@@ -944,6 +955,7 @@ impl FrozenContext {
             specialist: request.specialist_id,
             graph_limits: SnapshotReadLimits::investigation(),
             scoped_revision: None,
+            moved_revision: Default::default(),
         })
     }
 
@@ -1053,7 +1065,7 @@ impl FrozenContext {
                 }),
             };
             let read = match (&self.qualified, &self.snapshot, &self.scoped_revision) {
-                (Some(qualified), _, _) => qualified
+                (Some(qualified), ScopeFacts::Held(_), _) => qualified
                     .query(QualifiedRequest {
                         request,
                         context_id: Some(qualified.context_id().to_owned()),
@@ -1069,11 +1081,20 @@ impl FrozenContext {
                     .query(request)
                     .map(|page| (InvestigationPageContext::Legacy(page), Default::default()))
                     .map_err(paged::PagedError::Context),
-                (None, ScopeFacts::Paged { id }, Some(revision)) => {
-                    paged::query_at(state, revision, self.graph_limits, id, request)
-                        .map(|(page, rows)| (InvestigationPageContext::Legacy(page), rows))
-                }
-                (None, ScopeFacts::Paged { .. }, None) => {
+                (_, ScopeFacts::Paged { id }, Some(_)) => self
+                    .paged_revision(state, id)
+                    .map_err(paged::PagedError::Host)
+                    .and_then(|revision| {
+                        paged::page_at(
+                            state,
+                            &revision,
+                            self.graph_limits,
+                            id,
+                            self.qualified.as_ref(),
+                            request,
+                        )
+                    }),
+                (_, ScopeFacts::Paged { .. }, None) => {
                     Err(paged::PagedError::Host(HostError::Operational))
                 }
             };
@@ -1481,11 +1502,15 @@ impl FrozenContext {
             // revision it pinned: a store that moved on is a changed input,
             // and every selected fact must still equal its frozen copy.
             Some(revision) => {
+                let revision = match &self.snapshot {
+                    ScopeFacts::Paged { id } => self.paged_revision(state, id)?,
+                    ScopeFacts::Held(_) => revision.clone(),
+                };
                 let read = state
                     .graph
                     .lock()
                     .map_err(|_| HostError::Operational)?
-                    .read_selected_facts_at_revision(keys, revision, self.graph_limits)
+                    .read_selected_facts_at_revision(keys, &revision, self.graph_limits)
                     .map_err(scoped_graph_error)?;
                 if read
                     .nodes

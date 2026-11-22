@@ -252,28 +252,33 @@ fn qualified_query_and_archive_stay_frozen_after_inventory_replacement() {
 fn qualified_host_page_budget_preserves_qualification_and_continuation() {
     let fixture = Fixture::new(3);
     let mut prepared = fixture.prepare(&request()).unwrap();
-    let qualified = prepared.qualified.as_ref().unwrap();
-    let page = qualified
-        .query(QualifiedRequest {
-            request: QueryRequest {
-                max_facts: 3,
-                max_bytes: 32768,
-                ..Default::default()
+    let page = prepared
+        .qualified_query(
+            &fixture.state,
+            QualifiedRequest {
+                request: QueryRequest {
+                    max_facts: 3,
+                    max_bytes: 32768,
+                    ..Default::default()
+                },
+                context_id: None,
             },
-            context_id: None,
-        })
+        )
         .unwrap();
     let mut requested = query();
     requested.max_bytes = serde_json::to_vec(&page).unwrap().len() + 32;
-    let initial = qualified
-        .query(QualifiedRequest {
-            request: QueryRequest {
-                max_facts: 3,
-                max_bytes: requested.max_bytes,
-                ..Default::default()
+    let initial = prepared
+        .qualified_query(
+            &fixture.state,
+            QualifiedRequest {
+                request: QueryRequest {
+                    max_facts: 3,
+                    max_bytes: requested.max_bytes,
+                    ..Default::default()
+                },
+                context_id: None,
             },
-            context_id: None,
-        })
+        )
         .unwrap();
     assert_eq!(initial.response.facts.len(), 3);
     let proof = prepared.ledger.coverage.clone().unwrap();
@@ -698,20 +703,20 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         let prepared = fixture.prepare(&requested).unwrap();
         let after = take_projection_work();
         let qualified = prepared.qualified.as_ref().unwrap();
-        assert!(qualified.shares_snapshot(prepared.snapshot.held().unwrap()));
-        assert_eq!(Arc::strong_count(prepared.snapshot.held().unwrap()), 2);
-        // `All` halves the full-read work; a neighborhood (AC-1301) builds only
-        // its scope's projection, its complete identity streamed instead.
+        // `All` pages from the store and builds no projection (AC-1060); a
+        // neighborhood (AC-1301) builds only its scope's projection, its
+        // complete identity streamed instead.
         let expected = if matches!(scope, InvestigationScope::All) {
-            assert_eq!(before.constructions, 2 * after.constructions);
-            assert_eq!(before.nodes, 2 * after.nodes);
-            assert_eq!(before.edges, 2 * after.edges);
+            assert!(prepared.snapshot.held().is_none());
+            assert_eq!(qualified.snapshot_id(), prepared.snapshot.id());
             ProjectionWork {
-                constructions: 1,
-                nodes: 128,
-                edges: 127,
+                constructions: 0,
+                nodes: 0,
+                edges: 0,
             }
         } else {
+            assert!(qualified.shares_snapshot(prepared.snapshot.held().unwrap()));
+            assert_eq!(Arc::strong_count(prepared.snapshot.held().unwrap()), 2);
             ProjectionWork {
                 constructions: 1,
                 nodes: 2,
@@ -733,7 +738,7 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         };
         assert_eq!(
             serde_json::to_vec(&previous_qualified.query(page.clone()).unwrap()).unwrap(),
-            serde_json::to_vec(&qualified.query(page).unwrap()).unwrap()
+            serde_json::to_vec(&prepared.qualified_query(&fixture.state, page).unwrap()).unwrap()
         );
         eprintln!(
             "{scope:?}: projection constructor work {before:?} -> {after:?}; distinct retained scoped projections 2 -> 1; immutable handles 2 (not allocator-byte measurement)"
@@ -932,11 +937,14 @@ fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
         };
         match &frozen.qualified {
             Some(qualified) => {
-                qualified
-                    .query(QualifiedRequest {
-                        request: core_request,
-                        context_id: Some(qualified.context_id().into()),
-                    })
+                frozen
+                    .qualified_query(
+                        &fixture.state,
+                        QualifiedRequest {
+                            request: core_request,
+                            context_id: Some(qualified.context_id().into()),
+                        },
+                    )
                     .unwrap();
             }
             None => match &frozen.snapshot {
@@ -1255,9 +1263,9 @@ fn scoped_preparation_keeps_both_identities_and_retains_only_the_scope() {
             assert!(!prepared.graph.0.iter().any(|node| node.id == "mod:0"));
         }
     }
-    // A qualified `All` task still freezes the complete graph.
+    // A qualified `All` task pages from the store (AC-1060).
     let all = fixture.prepare(&request()).unwrap();
-    assert!(all.scoped_revision.is_none());
+    assert!(all.scoped_revision.is_some() && all.snapshot.held().is_none());
 }
 
 // AC-1301 (#1602): preparation cost tracks the scope, not the estate. Under retained
@@ -1619,5 +1627,121 @@ fn scoped_selection_rereads_selected_facts_at_the_pinned_revision() {
     assert!(matches!(
         prepared.select(&fixture.state, &keys),
         Err(HostError::InputChanged)
+    ));
+}
+
+// AC-1060 (#1602): a qualified whole-system task prepares under retained limits the
+// whole graph exceeds, holds no facts, and pages exactly what a held qualified
+// context gives. A store write that leaves the graph identical moves its reads to
+// the new revision; one that changes the graph is a changed input.
+#[test]
+fn a_qualified_whole_system_task_pages_from_the_store() {
+    let fixture = Fixture::new(3);
+    for index in 0..60 {
+        fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .put_node(&Node {
+                id: format!("pad:{index:03}"),
+                label: "Module".into(),
+                props: json!({"name": index}),
+            })
+            .unwrap();
+    }
+    let retained = SnapshotReadLimits {
+        max_rows: 40,
+        ..SnapshotReadLimits::default()
+    };
+    let prepared = FrozenContext::prepare_qualified_bounded(
+        &fixture.state,
+        &request(),
+        &[],
+        TEST_ARCHIVE_CAPACITY,
+        retained,
+        || Ok(fixture.scope.clone()),
+    )
+    .unwrap();
+    assert!(prepared.snapshot.held().is_none());
+    assert!(prepared.graph.0.is_empty() && prepared.graph.1.is_empty());
+    let held = {
+        let (graph, records) = fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .read_snapshot_with_coverage_bounded(
+                SnapshotReadLimits::investigation(),
+                coverage_preparation_limits(TEST_ARCHIVE_CAPACITY).unwrap(),
+            )
+            .unwrap();
+        let qualification = CoverageQualification::new(&fixture.scope, &records).unwrap();
+        projection(graph.0, graph.1)
+            .unwrap()
+            .with_coverage(qualification)
+            .unwrap()
+    };
+    assert_eq!(
+        held.context_id(),
+        prepared.qualified.as_ref().unwrap().context_id()
+    );
+    assert_eq!(
+        prepared.ledger.coverage.as_ref().unwrap().context_id,
+        held.context_id()
+    );
+    let mut cursor = None;
+    let mut pages = 0;
+    loop {
+        let request = QualifiedRequest {
+            request: QueryRequest {
+                max_facts: 7,
+                max_bytes: 8192,
+                cursor: cursor.clone(),
+                ..QueryRequest::default()
+            },
+            context_id: Some(held.context_id().to_owned()),
+        };
+        let expected = held.query(request.clone()).unwrap();
+        let page = prepared.qualified_query(&fixture.state, request).unwrap();
+        assert_eq!(page, expected);
+        pages += 1;
+        cursor = page.response.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(pages > 5);
+    // A replaced inventory leaves the graph identical: reads move on.
+    fixture.publish(0, "job:2", 3);
+    let request = QualifiedRequest {
+        request: QueryRequest {
+            max_facts: 2,
+            max_bytes: 8192,
+            ..QueryRequest::default()
+        },
+        context_id: Some(held.context_id().to_owned()),
+    };
+    assert_eq!(
+        prepared
+            .qualified_query(&fixture.state, request.clone())
+            .unwrap(),
+        held.query(request.clone()).unwrap()
+    );
+    // A changed graph is a changed input.
+    fixture
+        .state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "late".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert!(matches!(
+        prepared.qualified_query(&fixture.state, request),
+        Err(paged::PagedError::Host(HostError::InputChanged))
     ));
 }

@@ -335,7 +335,10 @@ impl CoverageQualification {
 /// A snapshot read under recorded coverage limits.
 #[derive(Debug)]
 pub struct CoverageContext {
-    snapshot: Arc<ContextSnapshot>,
+    /// The held projection; `None` for a context whose facts are read from a
+    /// store page by page (#1602).
+    snapshot: Option<Arc<ContextSnapshot>>,
+    snapshot_id: String,
     coverage: CoverageQualification,
     context_id: String,
 }
@@ -385,29 +388,50 @@ impl CoverageContext {
         snapshot: Arc<ContextSnapshot>,
         coverage: CoverageQualification,
     ) -> Result<Self, ContextError> {
+        let mut context = Self::for_identity(snapshot.id().to_owned(), coverage)?;
+        context.snapshot = Some(snapshot);
+        Ok(context)
+    }
+
+    /// Qualify a complete graph known only by its identity, whose facts a
+    /// caller reads page by page through [`Self::query_source`] (#1602). The
+    /// context id is the one [`Self::from_shared_snapshot`] gives for a
+    /// snapshot with that identity. It holds no facts, so [`Self::query`] and
+    /// [`Self::discover`] refuse with [`ContextError::FactsNotHeld`].
+    pub fn for_identity(
+        snapshot_id: String,
+        coverage: CoverageQualification,
+    ) -> Result<Self, ContextError> {
         let context_id = content_identity(
             "context-v2",
             &ContextIdentity {
-                snapshot_id: snapshot.id(),
+                snapshot_id: &snapshot_id,
                 coverage_id: &coverage.coverage_id,
             },
         )?;
         Ok(Self {
-            snapshot,
+            snapshot: None,
+            snapshot_id,
             coverage,
             context_id,
         })
     }
 
+    fn held(&self) -> Result<&ContextSnapshot, ContextError> {
+        self.snapshot.as_deref().ok_or(ContextError::FactsNotHeld)
+    }
+
     /// Test whether this context shares the supplied graph projection allocation.
     /// This exposes no graph facts or unqualified query access.
     pub fn shares_snapshot(&self, snapshot: &Arc<ContextSnapshot>) -> bool {
-        Arc::ptr_eq(&self.snapshot, snapshot)
+        self.snapshot
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, snapshot))
     }
 
     /// Graph-only snapshot identity, unchanged from [`ContextSnapshot::id`].
     pub fn snapshot_id(&self) -> &str {
-        self.snapshot.id()
+        &self.snapshot_id
     }
 
     /// Identity of the coverage block.
@@ -430,11 +454,23 @@ impl CoverageContext {
         &self,
         request: QualifiedRequest<QueryRequest>,
     ) -> Result<QualifiedResponse<QueryResponse>, ContextError> {
+        let mut held = self.held()?;
+        self.query_source(request, &mut held)
+    }
+
+    /// [`Self::query`] over `source`, whose facts are this context's complete
+    /// graph (#1602).
+    pub fn query_source<S: crate::FactSource>(
+        &self,
+        request: QualifiedRequest<QueryRequest>,
+        source: &mut S,
+    ) -> Result<QualifiedResponse<QueryResponse>, S::Error> {
         request.request.validate_limits()?;
         let continued = request.request.cursor.is_some();
         let mut inner = request.request;
         inner.max_bytes = self.inner_budget(inner.max_bytes, continued, &request.context_id)?;
-        self.respond(self.snapshot.query(inner)?)
+        let response = crate::query_source(&self.snapshot_id, inner, source)?;
+        Ok(self.respond(response)?)
     }
 
     /// Discover candidates from the shared snapshot under its recorded coverage.
@@ -458,7 +494,7 @@ impl CoverageContext {
         let continued = request.request.cursor.is_some();
         let mut inner = request.request;
         inner.max_bytes = self.inner_budget(inner.max_bytes, continued, &request.context_id)?;
-        self.respond(self.snapshot.discover(inner)?)
+        self.respond(self.held()?.discover(inner)?)
     }
 
     /// The inner page's share of `max_bytes`, after the qualification

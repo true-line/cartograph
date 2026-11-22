@@ -278,6 +278,10 @@ pub enum ContextError {
     /// An exact node selector did not name a node in the snapshot.
     #[error("unknown node: {0}")]
     UnknownNode(String),
+    /// A qualified context known only by its identity holds no facts to
+    /// query in memory; its facts are read through a fact source (#1602).
+    #[error("this context holds no facts; read them through a fact source")]
+    FactsNotHeld,
     /// A cursor belongs to different source content.
     #[error("cursor belongs to a different snapshot")]
     CursorSnapshotMismatch,
