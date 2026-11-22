@@ -68,6 +68,35 @@ fn purpose_and_scope_is_composed_from_the_sections_it_summarises() {
     assert_eq!(composition_source("# D1\n", "1.1"), None);
 }
 
+/// AC-1316 (T-1316): a summarised section is read up to its first `###`,
+/// with each table cut to 24 rows and a count of the rest (#2335).
+#[test]
+fn a_summary_reads_each_source_up_to_its_subsections_with_short_tables() {
+    let rows: String = (1..=30).map(|n| format!("| r{n} | x |\n")).collect();
+    let document = format!(
+        "# D1\n\n## 1.1 Purpose (A)\n\n_Not drafted._\n\n## 1.2 Actors (P)\n\n| Role | Ops |\n|---|---|\n{rows}\nAfter.\n\n### Detail\n\nhidden\n\n## 1.3 Capabilities (P)\n\n| A | B |\n|---|---|\n| a | b |\n\n## 1.4 Next (P)\n\nB\n"
+    );
+    let text = composition_source(&document, "1.1").unwrap();
+    assert!(
+        text.contains("| Role | Ops |\n|---|---|\n| r1 | x |\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| r24 | x |\n(6 more rows are left out.)\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("| r25 |") && !text.contains("hidden"),
+        "{text}"
+    );
+    assert!(
+        text.contains("After.") && !text.contains("### Detail"),
+        "{text}"
+    );
+    // A short table is kept whole, with no count line.
+    assert!(text.contains("| a | b |\n") && text.matches("left out").count() == 1);
+}
+
 #[test]
 fn an_overview_section_is_read_up_to_its_per_capability_detail() {
     let text = "## 1.3 Capabilities (P)\n\n| Area | Capability |\n\n### Orders\n\n#### Place order\n\nrow\n\n### Billing\n\nrow\n";
