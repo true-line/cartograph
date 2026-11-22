@@ -838,7 +838,11 @@ fn derived_frame(
             .flat_map(cited_endpoints)
             .map(|endpoint| (endpoint.id.as_str(), endpoint))
             .collect();
-        let mut roles: BTreeMap<Vec<&str>, Vec<String>> = BTreeMap::new();
+        // Each role's operations, the citation ids of the first three derived
+        // Actors behind it and how many Actors it has (#2326). Only three ids
+        // are kept, so the rendering bound's per-Actor accounting holds.
+        type Role = (Vec<String>, Vec<String>, usize);
+        let mut roles: BTreeMap<Vec<&str>, Role> = BTreeMap::new();
         for story in &stories {
             let any_of: Vec<&str> = story.node.props["any_of"]
                 .as_array()
@@ -850,9 +854,15 @@ fn derived_frame(
             let operation = operations
                 .get(endpoint)
                 .map_or_else(|| endpoint.to_owned(), |n| NodeName(n).to_string());
-            let listed = roles.entry(any_of).or_default();
+            let (listed, cited, actors) = roles.entry(any_of).or_default();
             if !listed.contains(&operation) {
                 listed.push(operation);
+            }
+            *actors += 1;
+            if cited.len() < 3 {
+                cited.push(citation_id(&FactKey::Node {
+                    id: story.node.id.clone(),
+                }));
             }
         }
         writeln!(
@@ -864,21 +874,26 @@ fn derived_frame(
             roles.len(),
             stories.len()
         )?;
-        out.push_str("| Any of | Operations | Examples |\n|---|---|---|\n")?;
-        for (any_of, operations) in &roles {
+        out.push_str("| Any of | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
+        let and_more = |more: usize| {
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            }
+        };
+        for (any_of, (operations, cited, actors)) in &roles {
             let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
             let more = operations.len() - shown.len();
             writeln!(
                 out,
-                "| {} | {} | {}{} |",
+                "| {} | {} | {}{} | {}{} |",
                 Literal(any_of.join(", ")),
                 operations.len(),
                 Literal(shown.join("; ")),
-                if more > 0 {
-                    format!("; and {more} more")
-                } else {
-                    String::new()
-                }
+                and_more(more),
+                cited.join(", "),
+                and_more(actors - cited.len()),
             )?;
         }
     } else {
