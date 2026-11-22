@@ -195,22 +195,31 @@ impl ModelProxy {
         if path != expected {
             return Err(ProxyRefusal::Path);
         }
-        let bearer = format!("bearer {}", self.config.token);
-        if !headers
+        // The scheme is case-insensitive; the credential is not.
+        let presented = headers
             .iter()
-            .any(|(name, value)| name == "authorization" && value.eq_ignore_ascii_case(&bearer))
-        {
+            .find(|(name, _)| name == "authorization")
+            .and_then(|(_, value)| value.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, credential)| credential.trim());
+        if presented != Some(self.config.token.as_str()) {
             return Err(ProxyRefusal::Token);
         }
         let request: Value = serde_json::from_slice(&body).map_err(|_| ProxyRefusal::Request)?;
         if request.get("model").and_then(Value::as_str) != Some(self.config.model.as_str()) {
             return Err(ProxyRefusal::Model);
         }
-        if self.config.backend == ProxyBackend::Ollama
-            && let Some(window) = self.config.context_window
-            && request.pointer("/options/num_ctx").and_then(Value::as_u64) != Some(window.into())
-        {
-            return Err(ProxyRefusal::ContextWindow);
+        if self.config.backend == ProxyBackend::Ollama {
+            // With no frozen window the server default stands, so none may be sent.
+            let sent = request.pointer("/options/num_ctx");
+            let frozen = match (self.config.context_window, sent) {
+                (None, None) => true,
+                (Some(window), Some(sent)) => sent.as_u64() == Some(window.into()),
+                _ => false,
+            };
+            if !frozen {
+                return Err(ProxyRefusal::ContextWindow);
+            }
         }
         let last = request
             .get("messages")
@@ -271,14 +280,32 @@ impl ModelProxy {
 
 type Request = (String, Vec<(String, String)>, Vec<u8>);
 
+/// Cap on the request line and headers together.
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+
+/// Reads one `\n`-terminated line of at most `cap` bytes; a longer, empty or
+/// unterminated line is refused before it is buffered further.
+fn bounded_line(
+    reader: &mut BufReader<&mut TcpStream>,
+    line: &mut String,
+    cap: usize,
+) -> Result<usize, ProxyRefusal> {
+    let read = (&mut *reader)
+        .take(cap as u64)
+        .read_line(line)
+        .map_err(|_| ProxyRefusal::Request)?;
+    if read == 0 || !line.ends_with('\n') {
+        return Err(ProxyRefusal::Request);
+    }
+    Ok(read)
+}
+
 /// A minimal HTTP/1.1 request reader: `POST`, headers, a `content-length`
 /// body. Chunked or oversized bodies are refused.
 fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<Request, ProxyRefusal> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|_| ProxyRefusal::Request)?;
+    bounded_line(&mut reader, &mut line, MAX_HEADER_BYTES)?;
     let mut parts = line.split_whitespace();
     if parts.next() != Some("POST") {
         return Err(ProxyRefusal::Request);
@@ -288,13 +315,11 @@ fn read_request(stream: &mut TcpStream, max_body: usize) -> Result<Request, Prox
     let mut header_bytes = 0usize;
     loop {
         let mut header = String::new();
-        let read = reader
-            .read_line(&mut header)
-            .map_err(|_| ProxyRefusal::Request)?;
-        header_bytes += read;
-        if read == 0 || header_bytes > 16 * 1024 {
-            return Err(ProxyRefusal::Request);
-        }
+        header_bytes += bounded_line(
+            &mut reader,
+            &mut header,
+            MAX_HEADER_BYTES.saturating_sub(header_bytes),
+        )?;
         let header = header.trim_end();
         if header.is_empty() {
             break;

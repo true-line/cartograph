@@ -213,3 +213,51 @@ fn the_vllm_backend_serves_the_openai_path_without_num_ctx() {
     assert_eq!(client.join().unwrap(), 200);
     assert_eq!(seen.join().unwrap(), "/v1/chat/completions");
 }
+
+#[test]
+fn credentials_windows_and_request_lines_are_checked_exactly() {
+    let (url, hits) = upstream();
+    let proxy = proxy(&url);
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "RUN-7-TOKEN",
+        request("qwen3:30b-a3b", 32768, AUTHORIZED),
+    );
+    assert_eq!(
+        proxy.serve_one(AUTHORIZED, soon(), &|_| true),
+        Err(ProxyRefusal::Token),
+        "the token is case-sensitive"
+    );
+    assert_eq!(client.join().unwrap(), 401);
+    let proxy = ModelProxy::bind(ProxyConfig {
+        context_window: None,
+        ..self::proxy(&url).config.clone()
+    })
+    .unwrap();
+    let client = send(
+        proxy.base_url().unwrap(),
+        "/api/chat",
+        "run-7-token",
+        request("qwen3:30b-a3b", 32768, AUTHORIZED),
+    );
+    assert_eq!(
+        proxy.serve_one(AUTHORIZED, soon(), &|_| true),
+        Err(ProxyRefusal::ContextWindow),
+        "no window may be sent when none is frozen"
+    );
+    assert_eq!(client.join().unwrap(), 403);
+    let proxy = self::proxy(&url);
+    let address = proxy.listener.local_addr().unwrap();
+    let flood = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        let _ = stream.write_all(format!("POST /{}", "a".repeat(64 * 1024)).as_bytes());
+    });
+    assert_eq!(
+        proxy.serve_one(AUTHORIZED, soon(), &|_| true),
+        Err(ProxyRefusal::Request),
+        "an endless request line is refused"
+    );
+    flood.join().unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
