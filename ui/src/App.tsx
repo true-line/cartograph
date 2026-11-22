@@ -265,6 +265,7 @@ export default function App() {
   const localServerCheck = useRef(0);
   const checkLocalServer = useCallback(() => {
     const check = ++localServerCheck.current;
+    setLocalServerError(null);
     setLocalServerChecking(true);
     invoke<LocalLaneStatus>('local_lane_status').then(
       (status) => { if (check === localServerCheck.current) { setLocalServer(status); setLocalServerError(null); } },
