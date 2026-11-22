@@ -584,6 +584,29 @@ fn embedding_cache_counter_exhaustion_recovers_before_invalidation() {
     cache.validate().unwrap();
 }
 #[test]
+fn embedding_cache_sequence_reserve_covers_a_full_plan() {
+    // AC-1507: the counter reserve grows with MAX_ROWS, so a store that
+    // cannot seal a full plan is exhausted (and recovered), never admitted.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cache = EmbeddingCache::open_disposable(dir.path()).unwrap();
+    cache.bind_instance(&"a".repeat(32)).unwrap();
+    for (sequence, valid) in [
+        (SEQUENCE_CEILING, true),
+        (SEQUENCE_CEILING + 1, false),
+        (i64::MAX - 100_000, false),
+    ] {
+        cache
+            .connection
+            .execute("UPDATE cache_meta SET sequence=?1", [sequence])
+            .unwrap();
+        assert_eq!(cache.validate().is_ok(), valid, "sequence {sequence}");
+    }
+    assert_eq!(
+        SEQUENCE_CEILING.checked_add(MAX_ROWS as i64),
+        Some(i64::MAX)
+    );
+}
+#[test]
 fn embedding_cache_namespace_capacity_evicts_oldest_unprotected_namespace() {
     // AC-0269: the 257th artifact namespace remains useful even below byte/row caps.
     let (_dir, cache, lease) = setup();

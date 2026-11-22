@@ -16,6 +16,10 @@ use std::{
 /// Rows one store and one operation hold: a VSCode-scale plan (about 186k
 /// candidate symbols plus their hops) fits in one pass (#259, AC-1507).
 pub const MAX_ROWS: usize = 262_144;
+/// Highest `cache_meta.sequence` a valid store may hold: it reserves one
+/// sequence number for every row a full plan can publish, so sealing never
+/// overflows the counter. A store past it is exhausted and is recovered.
+pub(crate) const SEQUENCE_CEILING: i64 = i64::MAX - MAX_ROWS as i64;
 /// Vector bytes one store and one operation hold: `MAX_ROWS` vectors of up to
 /// 1,024 f32 dimensions.
 pub const MAX_VECTOR_BYTES: usize = 1024 * 1024 * 1024;
@@ -102,7 +106,7 @@ impl EmbeddingCache {
         if objects.len() != 3 || objects.iter().any(|(_, sql)| !expected.contains(sql)) {
             return Err(error("unexpected schema objects"));
         }
-        let invalid: bool = self.connection.query_row("SELECT count(*) != 1 OR coalesce(max(NOT(singleton=1 AND typeof(instance)='text' AND length(CAST(instance AS BLOB))<=128 AND typeof(epoch)='text' AND length(CAST(epoch AS BLOB))=32 AND epoch NOT GLOB '*[^0-9a-f]*' AND typeof(generation)='integer' AND generation BETWEEN 0 AND 9223372036854775805 AND typeof(sequence)='integer' AND sequence BETWEEN 0 AND 9223372036854675807)),1) FROM cache_meta",[],|r|r.get(0)).map_err(error)?;
+        let invalid: bool = self.connection.query_row("SELECT count(*) != 1 OR coalesce(max(NOT(singleton=1 AND typeof(instance)='text' AND length(CAST(instance AS BLOB))<=128 AND typeof(epoch)='text' AND length(CAST(epoch AS BLOB))=32 AND epoch NOT GLOB '*[^0-9a-f]*' AND typeof(generation)='integer' AND generation BETWEEN 0 AND 9223372036854775805 AND typeof(sequence)='integer' AND sequence BETWEEN 0 AND ?1)),1) FROM cache_meta",[SEQUENCE_CEILING],|r|r.get(0)).map_err(error)?;
         if invalid {
             return Err(error("invalid lifecycle metadata"));
         }
