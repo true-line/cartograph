@@ -147,13 +147,14 @@ pub(crate) fn start_job_blocking(
     emit: &dyn Fn(&Job),
 ) -> Result<(Job, JobExecution), String> {
     let key = state_key(state);
-    let job = state
-        .jobs
-        .lock()
-        .map_err(|error| error.to_string())?
-        .enqueue(kind)
-        .map_err(|error| error.to_string())?;
-    let _hold = Hold::new(key, job.id);
+    // Registered under the lock that queues the job, so no later start can
+    // be admitted ahead of it.
+    let (job, _hold) = {
+        let mut jobs = state.jobs.lock().map_err(|error| error.to_string())?;
+        let job = jobs.enqueue(kind).map_err(|error| error.to_string())?;
+        let held = Hold::new(key, job.id);
+        (job, held)
+    };
     let mut reported = false;
     loop {
         let controls = state
