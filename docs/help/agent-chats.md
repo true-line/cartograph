@@ -16,6 +16,12 @@ a total over the listed work. A call whose provider reported no count is shown
 as unreported, never estimated, and none of this is verified billing.
 Specialist investigations keep their usage with each saved task.
 
+The pool's **Controls** pause new agent work or limit how many local and cloud
+agent jobs run at once. They apply when a topic-expert question, section draft
+or gap escalation starts: a paused pool or a full mode refuses it with the
+reason, and work already running continues. Specialist investigations keep
+their own runner.
+
 Review saved specialist conversations and open their findings. The list uses
 the same saved investigation history as Investigations, including its search,
 active filter, and **Load older saved tasks** continuation. Each docked task

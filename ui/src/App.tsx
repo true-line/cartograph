@@ -50,7 +50,10 @@ import { useAreaExpert } from './areaExpert';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { AgentPoolPanel } from './components/AgentPoolPanel';
-import { awaitingCuration, loadJobUsage, type JobUsage } from './agentPool';
+import {
+  awaitingCuration, loadAgentPoolControls, loadJobUsage, saveAgentPoolControls,
+  type AgentPoolControls, type JobUsage,
+} from './agentPool';
 import { SavedResultNotices } from './components/SavedResultNotices';
 import { useSavedResultNoticeStore } from './savedResultNoticeStore';
 import { AgentChatsSurface } from './components/AgentChatsSurface';
@@ -233,6 +236,26 @@ export default function App() {
   // Provider-reported usage per agent job (#252, AC-1703), read for the agent pool.
   // Null when the host could not read it, so stale counts are never shown.
   const [jobUsage, setJobUsage] = useState<JobUsage[] | null>([]);
+  // The host's agent pool controls (AC-1704); null until read.
+  const [poolControls, setPoolControls] = useState<AgentPoolControls | null>(null);
+  const [poolControlsError, setPoolControlsError] = useState<string | null>(null);
+  // Shown at once so a second change builds on the first; only the latest
+  // save's answer is applied, and a failed save re-reads what is stored.
+  const poolControlsSave = useRef(0);
+  const changePoolControls = useCallback((next: AgentPoolControls) => {
+    setPoolControlsError(null);
+    setPoolControls(next);
+    const save = ++poolControlsSave.current;
+    const latest = () => save === poolControlsSave.current;
+    void saveAgentPoolControls(next).then(
+      (stored) => { if (stored && latest()) setPoolControls(stored); },
+      (error: unknown) => {
+        if (!latest()) return;
+        setPoolControlsError(`The pool controls were not saved: ${String(error)}`);
+        void loadAgentPoolControls().then((stored) => { if (latest()) setPoolControls(stored); }, () => undefined);
+      },
+    );
+  }, []);
   // The closed-state dispatch hint (#251, AC-1702) shows until the first confirmed dispatch.
   const [quickDispatchHintShown, setQuickDispatchHintShown] = useState(readQuickDispatchHint);
   const showQuickDispatchHint = useCallback((shown: boolean) => {
@@ -360,6 +383,13 @@ export default function App() {
     );
     return () => { current = false; };
   }, [jobs, view]);
+
+  useEffect(() => {
+    if (view !== 'agent-chats') return;
+    let current = true;
+    void loadAgentPoolControls().then((stored) => { if (current) setPoolControls(stored); }, () => undefined);
+    return () => { current = false; };
+  }, [view]);
 
   // Folder drop intake (#587): the webview reports dropped paths only while
   // Connect is open; elsewhere a drop does nothing.
@@ -816,6 +846,9 @@ export default function App() {
             jobs={jobs}
             providers={investigations.catalog?.providers ?? null}
             usage={jobUsage}
+            controls={poolControls}
+            controlsError={poolControlsError}
+            onChangeControls={changePoolControls}
             awaitingCuration={stagedError || (stagedLoading && stagedProposals.length === 0) ? null : awaitingCuration(stagedProposals)}
             onOpenJobs={() => navigate('jobs')}
             onOpenCuration={() => navigate('gaps')}

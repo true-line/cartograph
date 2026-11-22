@@ -371,6 +371,7 @@ impl SettingsStore {
                  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ) STRICT;",
         )?;
+        crate::agent_pool::initialize(&conn)?;
         for tier in TIERS {
             conn.execute(
                 "INSERT OR IGNORE INTO tier_settings (tier, enabled, provider, consented)
@@ -620,6 +621,19 @@ impl SettingsStore {
             bytes_sent,
             label,
         })
+    }
+
+    /// The agent pool controls (#252, AC-1704); nothing gated by default.
+    pub fn agent_pool_controls(&self) -> rusqlite::Result<crate::agent_pool::AgentPoolControls> {
+        crate::agent_pool::read(&self.conn)
+    }
+
+    /// Persist the agent pool controls; an out-of-range limit changes nothing.
+    pub fn set_agent_pool_controls(
+        &mut self,
+        controls: &crate::agent_pool::AgentPoolControls,
+    ) -> Result<(), String> {
+        crate::agent_pool::write(&self.conn, controls)
     }
 
     /// The persisted "Ingest parallelism" setting (#236); Auto by default.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentPool, agentWorkOf, awaitingCuration, providerLine, usageLine, usageTotal } from './agentPool';
+import { agentPool, agentWorkOf, awaitingCuration, controlsLine, providerLine, usageLine, usageTotal } from './agentPool';
 import type { Job, StagedProposal } from './store';
 
 // AC-1701 (T-1701): the agent pool reads only the job kinds the host writes.
@@ -84,5 +84,13 @@ describe('usageLine and usageTotal', () => {
     const total = usageTotal([...work.active, ...work.recent], [row(1, 1, 0, 5, 1, 'a'), row(2, 2, 1, 7, 3, 'b'), row(9, 9, 0, 99, 99)]);
     expect(total).toMatchObject({ calls: 3, unreported_calls: 1, input_tokens: 12, output_tokens: 4, model: '2 models' });
     expect(usageTotal(work.active, [])).toBeNull();
+  });
+});
+
+// AC-1704 (T-1704): the controls line says what happens to new agent work.
+describe('controlsLine', () => {
+  it('names pause first, then each mode limit', () => {
+    expect(controlsLine({ paused: true, local_limit: 1, cloud_limit: 1 })).toBe('New agent work is paused. Work already running continues.');
+    expect(controlsLine({ paused: false, local_limit: 0, cloud_limit: 4 })).toBe('New agent work starts with no local limit and at most 4 cloud at a time.');
   });
 });

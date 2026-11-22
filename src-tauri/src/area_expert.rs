@@ -325,7 +325,7 @@ pub(crate) async fn run_area_ask(
     app: tauri::AppHandle,
 ) -> Result<AskOutcome, String> {
     let state = app.state::<AppState>();
-    let (running, execution) = crate::start_job(&state, &format!("area-ask:{mode}"))?;
+    let (running, execution) = crate::agent_pool::start_job(&state, &format!("area-ask:{mode}"))?;
     crate::emit_job(&app, &running);
     let worker = app.clone();
     let result = crate::off_ui_thread_for_job(execution.clone(), move |execution| {
