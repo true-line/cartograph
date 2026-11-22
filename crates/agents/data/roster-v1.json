@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "agent": "agt-analyst",
+      "name": "Domain Analyst",
+      "role": "domain-analyst",
+      "glyph": "◆",
+      "role_line": "Traces scoped business behaviour, features and design intent through cited source.",
+      "tier_ceiling": "agentic"
+    },
+    {
+      "agent": "agt-auditor",
+      "name": "Evidence Auditor",
+      "role": "evidence-auditor",
+      "glyph": "◎",
+      "role_line": "Checks that every claim's citations resolve and records coverage limits and unresolved evidence.",
+      "tier_ceiling": "agentic"
+    },
+    {
+      "agent": "agt-spec",
+      "name": "Spec Writer",
+      "role": "spec-writer",
+      "glyph": "▤",
+      "role_line": "Drafts cited specification narrative from recovered facts.",
+      "tier_ceiling": "agentic"
+    },
+    {
+      "agent": "agt-gap",
+      "name": "Gap Triager",
+      "role": "gap-triager",
+      "glyph": "◇",
+      "role_line": "Triages recorded gaps into cited design notes; never fills a gap without evidence.",
+      "tier_ceiling": "agentic"
+    },
+    {
+      "agent": "agt-section",
+      "name": "Section Writer",
+      "role": "section-writer",
+      "glyph": "§",
+      "role_line": "Drafts one catalogue section as cited claims for review.",
+      "tier_ceiling": "agentic"
+    }
+  ]
+}
