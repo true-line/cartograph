@@ -7,6 +7,7 @@ use semantic::evaluation::{
     policy::FamilyPolicy,
     reviewed::ReviewEnvelope,
 };
+use serde::Serialize;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -80,11 +81,25 @@ fn key(e: &core_prov::EvidenceRef) -> (String, String, u64, u64, String) {
     )
 }
 
-// AC-0271..0278: actual captured-directory extraction, fixed host config,
-// reviewed scoring, live admission and durable record/reopen form one path.
-// No legacy caller labels or per-fact receipt fabrication is involved.
-#[test]
-fn host_reviewed_positive_path_records_and_reopens_without_caller_labels() {
+/// A reviewed mechanism dataset over an actual captured graph: three hops,
+/// one calibration case and two evaluation cases with scripted truth.
+pub(super) struct Built {
+    pub dir: tempfile::TempDir,
+    pub state: AppState,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub selector: CorpusSelector,
+    pub observation: source::Observation,
+    pub hops: Vec<UnresolvedHop>,
+    pub candidates: Vec<Candidate>,
+    pub root: PathBuf,
+    pub dataset: PathBuf,
+    pub inputs: InputsManifest,
+    pub leakage: LeakageManifest,
+    pub labels: LabelsManifest,
+}
+
+pub(super) fn build_dataset() -> Built {
     let text = "import { alpha, beta, noDestination } from './runtime';\nexport function firstCaller() { return alpha(); }\nexport function secondCaller() { return beta(); }\nexport function thirdCaller() { return noDestination(); }\nexport function alphaImplementation() { return 'alpha-target'; }\nexport function betaImplementation() { return 'beta-target'; }\n";
     let (dir, state, nodes, edges, selector) = captured_graph_with_source(text);
     let (hops, candidates) = semantic::graph_inputs(&nodes, &edges);
@@ -201,6 +216,45 @@ fn host_reviewed_positive_path_records_and_reopens_without_caller_labels() {
     write(&dataset, "inputs.json", &inputs);
     write(&dataset, "leakage.json", &leakage);
     write(&dataset, "labels.json", &labels);
+    drop(capture);
+    drop(guard);
+    Built {
+        dir,
+        state,
+        nodes,
+        edges,
+        selector,
+        observation,
+        hops,
+        candidates,
+        root,
+        dataset,
+        inputs,
+        leakage,
+        labels,
+    }
+}
+
+// AC-0271..0278: actual captured-directory extraction, fixed host config,
+// reviewed scoring, live admission and durable record/reopen form one path.
+// No legacy caller labels or per-fact receipt fabrication is involved.
+#[test]
+fn host_reviewed_positive_path_records_and_reopens_without_caller_labels() {
+    let Built {
+        dir,
+        state,
+        nodes,
+        edges,
+        selector,
+        observation,
+        hops,
+        candidates,
+        root,
+        dataset,
+        inputs,
+        leakage,
+        labels,
+    } = build_dataset();
     // Bootstrap the observed embedding namespace with an explicit SCRIPTED
     // provider, then freeze the real policy digest into the mock owner anchor.
     let provider = Scripted(AtomicUsize::new(0));
@@ -286,3 +340,5 @@ fn host_reviewed_positive_path_records_and_reopens_without_caller_labels() {
     assert!(prepared.revalidate(&state, &graph).is_err());
     assert_eq!(provider.0.load(Ordering::SeqCst), before);
 }
+
+mod locked;
