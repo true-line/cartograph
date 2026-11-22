@@ -201,10 +201,17 @@ pub(super) fn sanitize_expression(
                             .map(|parameter| {
                                 let mut inner = parameter.walk();
                                 let named: Vec<_> = parameter.named_children(&mut inner).collect();
-                                (parameter.kind() == "required_parameter"
-                                    && named.len() == 1
-                                    && named[0].kind() == "identifier")
-                                    .then_some(named[0])
+                                // A comment in the list has no children; it
+                                // withholds the arrow like any other shape.
+                                match named.as_slice() {
+                                    [name]
+                                        if parameter.kind() == "required_parameter"
+                                            && name.kind() == "identifier" =>
+                                    {
+                                        Some(*name)
+                                    }
+                                    _ => None,
+                                }
                             })
                             .collect::<Option<Vec<_>>>()
                     }),
@@ -762,6 +769,9 @@ mod tests {
             "items.map(async (x) => 'callback-secret')",
             "items.map((x) => { return 'callback-secret'; })",
             "items.map((x: string) => 'callback-secret')",
+            "items.map((/* callback-secret */) => x)",
+            "items.map((x /* callback-secret */) => x)",
+            "items.map((x, /* callback-secret */) => x)",
             "0xffffffffffffffffffffn",
         ] {
             let (expression, redactions) = returned(source);
