@@ -1595,6 +1595,7 @@ fn extract_tree_with_registries(
         deferred_origins,
         &observation_inputs::ObservationInputs::uncaptured(state_json, pulumi_json, otel_jsonl),
         api_docs,
+        ingest::api_docs::ApiDocLimits::default(),
         cache,
         plugins,
         registries,
@@ -1763,6 +1764,7 @@ fn extract_tree_packed(
     // own input identity when they can be (ADR-0080).
     observed: &observation_inputs::ObservationInputs,
     api_docs: &[ingest::api_docs::ApiDocDeclaration],
+    api_doc_limits: ingest::api_docs::ApiDocLimits,
     cache: &mut RepoExtractionCache,
     plugins: &[ActivePlugin],
     registries: &Registries,
@@ -2427,7 +2429,7 @@ fn extract_tree_packed(
     // The same walk reads the documentation files for the coverage inventory
     // and the declared API references as documents, so each file is read
     // once (ADR-0065 decision 6, AC-1600).
-    let api_docs = ingest::api_docs::load_api_docs(root, api_docs);
+    let api_docs = ingest::api_docs::load_api_docs_within(root, api_docs, api_doc_limits);
     let declared_api_docs = declared_api_docs(&api_docs);
     let adr_read = {
         let ids: std::collections::BTreeSet<&str> =
@@ -3338,6 +3340,7 @@ fn relink_found_adrs(
     facts: &mut OperationFacts,
     recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
     documented: &Documented,
+    api_doc_limits: ingest::api_docs::ApiDocLimits,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
     // The graph is read packed and each step decodes only the labels it
@@ -3394,6 +3397,7 @@ fn relink_found_adrs(
         &repos,
         &|id| candidates.contains(id),
         documented,
+        api_doc_limits,
         |repo| {
             ensure_running_job(state, execution)?;
             operation.root(repo)
@@ -3484,6 +3488,7 @@ fn collect_found_adrs_among<'a>(
         nodes,
         &is_candidate,
         &Documented::new(),
+        ingest::api_docs::ApiDocLimits::default(),
         root_for,
     )?;
     Ok(adrs)
@@ -3514,6 +3519,7 @@ fn collect_documentation<'a>(
     repos: &[Node],
     is_candidate: &dyn Fn(&str) -> bool,
     documented: &Documented,
+    api_doc_limits: ingest::api_docs::ApiDocLimits,
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<
     (
@@ -3533,7 +3539,13 @@ fn collect_documentation<'a>(
         let root = root_for(repo)?;
         let declared = documented.get(repo);
         let api_references = declared
-            .map(|declared| declared_api_docs(&ingest::api_docs::load_api_docs(root, declared)))
+            .map(|declared| {
+                declared_api_docs(&ingest::api_docs::load_api_docs_within(
+                    root,
+                    declared,
+                    api_doc_limits,
+                ))
+            })
             .unwrap_or_default();
         let read = spec::read_documentation(
             root,
@@ -3642,6 +3654,7 @@ fn collect_documents<'a>(
         nodes,
         &|_| false,
         &documented,
+        ingest::api_docs::ApiDocLimits::default(),
         root_for,
     )?;
     Ok(documents)
@@ -5560,6 +5573,7 @@ fn run_ingest<R: tauri::Runtime>(
     cancelled()?;
     report_progress(app, state, execution, "extract", 15.0)?;
     let active_plugins = active_plugins_for_root(app, state, root).map_err(&fail)?;
+    let api_doc_limits = api_doc_limits(state).map_err(&fail)?;
     let registries = event_registries_for(app).map_err(&fail)?;
     let mut on_file = detail_throttle(app, job_id);
     let primary = state
@@ -5595,6 +5609,7 @@ fn run_ingest<R: tauri::Runtime>(
             &std::collections::BTreeSet::new(),
             &observation_inputs::ObservationInputs::default(),
             &[],
+            api_doc_limits,
             cache,
             &active_plugins,
             &registries,
@@ -5701,6 +5716,7 @@ fn run_ingest<R: tauri::Runtime>(
         &mut published,
         &mut Default::default(),
         &Documented::from([(repo.clone(), Vec::new())]),
+        api_doc_limits,
     )
     .map_err(&fail)?;
 
@@ -6023,6 +6039,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     }
     let root = operation.root(&source.repo_key).map_err(&fail)?;
     let active_plugins = active_plugins_for_root(&app, &state, root).map_err(&fail)?;
+    let api_doc_limits = api_doc_limits(&state).map_err(&fail)?;
     let registries = event_registries_for(&app).map_err(&fail)?;
     let mut on_file = detail_throttle(&app, job_id);
     // A managed clone is captured from its cloned commit's Git objects (AC-1022).
@@ -6059,6 +6076,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &std::collections::BTreeSet::new(),
             &observation_inputs::ObservationInputs::default(),
             &[],
+            api_doc_limits,
             cache,
             &active_plugins,
             &registries,
@@ -6159,6 +6177,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &mut published,
         &mut Default::default(),
         &Documented::from([(source.repo_key.clone(), Vec::new())]),
+        api_doc_limits,
     )
     .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -6289,6 +6308,7 @@ fn add_system_blocking<R: tauri::Runtime>(
     };
 
     let token = ingest::discover_token();
+    let api_doc_limits = api_doc_limits(&state).map_err(&fail)?;
     let mut cloned_commits = std::collections::BTreeMap::new();
     for (source, remote) in &admitted {
         if *remote
@@ -6389,6 +6409,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &deferred_origins,
                 &observed,
                 &entry.api_docs,
+                api_doc_limits,
                 cache,
                 &active_plugins,
                 &registries,
@@ -6594,6 +6615,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         &mut published,
         &mut recorded,
         &documented,
+        api_doc_limits,
     )
     .map_err(&fail)?;
     for (_, coverage) in &mut proofs {
@@ -7867,6 +7889,25 @@ fn selection_visited_entries(state: &AppState) -> Result<usize, String> {
         .operator_limit(operator_limits::TS_SELECTION_MAX_VISITED_ENTRIES)
         .map_err(|error| error.to_string())?;
     usize::try_from(entries).map_err(|error| error.to_string())
+}
+
+/// How many API references a repository may declare and how large each may
+/// be (#1653, AC-1804), from the saved operator limits. One operation reads
+/// them once, so its recovery and its documentation re-read agree.
+fn api_doc_limits(state: &AppState) -> Result<ingest::api_docs::ApiDocLimits, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    let docs = usize::try_from(limit(operator_limits::API_DOCS_MAX_DOCS)?)
+        .map_err(|error| error.to_string())?;
+    let bytes = limit(operator_limits::API_DOCS_MAX_MIB)?
+        .checked_mul(1024 * 1024)
+        .ok_or("API doc size overflows.")?;
+    ingest::api_docs::ApiDocLimits::within(docs, bytes)
+        .ok_or_else(|| "Saved API doc limits are outside the loader's ceilings.".to_string())
 }
 
 /// The project's source capture limits (#1653, AC-1800): the saved file
@@ -11848,6 +11889,94 @@ export function queueOrder() {
             drift_reg
                 .content
                 .contains("| served-undocumented | `GET /api/internal/health` |")
+        );
+    }
+
+    // AC-1804 (#1653): the project's API doc bounds reach recovery. Under a
+    // byte bound smaller than the declared reference, the document is a
+    // contract gap naming that bound and yields no documented routes; the
+    // saved bounds are what an operation reads.
+    #[test]
+    fn a_projects_api_doc_bounds_reach_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".cartograph")).unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join(".cartograph/api-docs.toml"),
+            "[[doc]]\npath = \"docs/api.md\"\nprefix = \"/api\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("docs/api.md"),
+            "# API Reference\n\n#### GET /api/orders\n",
+        )
+        .unwrap();
+        let root = super::paths::canonicalize(dir.path()).unwrap();
+        let recover = |limits| {
+            let (_, facts, _, _) = super::extract_tree_packed(
+                &root,
+                "local/bounded-docs",
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeSet::new(),
+                &std::collections::BTreeSet::new(),
+                &super::observation_inputs::ObservationInputs::default(),
+                &[],
+                limits,
+                &mut super::RepoExtractionCache::default(),
+                &[],
+                super::Registries::builtin(),
+                &mut |_| {},
+                None,
+                &mut Vec::new(),
+                &mut super::ProducerReads::default(),
+            )
+            .unwrap();
+            facts.into_facts().unwrap().0
+        };
+        let label = |nodes: &[Node], prefix: &str| {
+            nodes
+                .iter()
+                .filter(|node| node.id.starts_with(prefix))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let read = recover(ingest::api_docs::ApiDocLimits::default());
+        assert_eq!(label(&read, "doc-route:").len(), 1);
+        assert!(label(&read, "gap:contract:").is_empty());
+
+        let tight = ingest::api_docs::ApiDocLimits::within(16, 8).unwrap();
+        let refused = recover(tight);
+        assert!(label(&refused, "doc-route:").is_empty());
+        let gaps = label(&refused, "gap:contract:");
+        assert_eq!(gaps.len(), 1);
+        assert!(
+            gaps[0]
+                .props
+                .to_string()
+                .contains("exceeds the 8 byte limit"),
+            "{gaps:?}"
+        );
+
+        let app_data = tempfile::tempdir().unwrap();
+        let state = crate::registered_source_tests::app_state(app_data.path());
+        assert_eq!(
+            super::api_doc_limits(&state).unwrap(),
+            ingest::api_docs::ApiDocLimits::default()
+        );
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings
+                .set_operator_limit(crate::operator_limits::API_DOCS_MAX_DOCS, Some(64))
+                .unwrap();
+            settings
+                .set_operator_limit(crate::operator_limits::API_DOCS_MAX_MIB, Some(8))
+                .unwrap();
+        }
+        assert_eq!(
+            super::api_doc_limits(&state).unwrap(),
+            ingest::api_docs::ApiDocLimits::within(64, 8 << 20).unwrap()
         );
     }
 

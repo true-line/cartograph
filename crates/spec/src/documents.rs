@@ -553,7 +553,7 @@ pub fn read_documentation(
         let format =
             Format::of(&file.name).filter(|_| cases.documents && !under_build_output(path));
         let decision = crate::adr::is_decision_record(path, &file.name);
-        let decision_case = cases.decisions.filter(|_| decision);
+        let mut decision_case = cases.decisions.filter(|_| decision);
         if format.is_none() && decision_case.is_none() {
             continue;
         }
@@ -588,6 +588,15 @@ pub fn read_documentation(
                 );
             }
             continue;
+        }
+        // A project's raised API reference bound (AC-1804) widens only the
+        // contract and document cases: a declared reference that is also a
+        // decision record keeps the decision reader's own bound (AC-0685).
+        if decision_case.is_some()
+            && validated.is_some_and(|text| text.len() as u64 > crate::adr::MAX_FOUND_ADR_BYTES)
+        {
+            crate::adr::skip_found_adr(&mut read.decisions, path, crate::UnreadAdrReason::TooLarge);
+            decision_case = None;
         }
         let owned;
         let text = if let Some(validated) = validated {

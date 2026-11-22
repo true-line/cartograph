@@ -24,6 +24,47 @@ pub const MAX_API_DOCS: usize = 16;
 /// Maximum byte size of a single declared API reference document (1 MiB).
 pub const MAX_API_DOC_BYTES: u64 = 1024 * 1024;
 
+/// Most API reference documents a project may allow per repository (#1653,
+/// AC-1804).
+pub const HARD_MAX_API_DOCS: usize = 64;
+
+/// Largest single API reference document a project may allow (8 MiB). Every
+/// validated document is held in memory, so the two ceilings bound a
+/// repository's API references to 512 MiB.
+pub const HARD_MAX_API_DOC_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How many API reference documents a repository may declare and how large
+/// each may be (#1653, AC-1804). [`Default`] is [`MAX_API_DOCS`] documents of
+/// up to [`MAX_API_DOC_BYTES`]; a project may choose other bounds up to the
+/// hard ceilings. The bound of `.cartograph/api-docs.toml` itself stays fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiDocLimits {
+    max_docs: usize,
+    max_doc_bytes: u64,
+}
+
+impl Default for ApiDocLimits {
+    fn default() -> Self {
+        Self {
+            max_docs: MAX_API_DOCS,
+            max_doc_bytes: MAX_API_DOC_BYTES,
+        }
+    }
+}
+
+impl ApiDocLimits {
+    /// Bounds of `max_docs` documents of up to `max_doc_bytes` each, or
+    /// `None` when either is zero or above its hard ceiling.
+    pub fn within(max_docs: usize, max_doc_bytes: u64) -> Option<Self> {
+        ((1..=HARD_MAX_API_DOCS).contains(&max_docs)
+            && (1..=HARD_MAX_API_DOC_BYTES).contains(&max_doc_bytes))
+        .then_some(Self {
+            max_docs,
+            max_doc_bytes,
+        })
+    }
+}
+
 /// One author-declared API reference document (#739, AC-0313).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -51,7 +92,7 @@ pub struct ValidatedApiDoc {
     pub path: String,
     /// Optional URL path prefix (guaranteed to start with `/`).
     pub prefix: Option<String>,
-    /// Raw UTF-8 file contents (at most [`MAX_API_DOC_BYTES`] bytes).
+    /// Raw UTF-8 file contents (within the loaded [`ApiDocLimits`]).
     pub contents: String,
 }
 
@@ -91,8 +132,8 @@ pub(crate) enum AnchoredRead {
     /// A component is a symlink or not a directory, or the final entry is not
     /// a regular file.
     NotRegular,
-    /// The file holds more than [`MAX_API_DOC_BYTES`] bytes.
-    TooLarge,
+    /// The file holds more than the byte bound it was read under.
+    TooLarge(u64),
     /// Any other I/O failure.
     Io(std::io::Error),
 }
@@ -107,10 +148,14 @@ impl From<std::io::Error> for AnchoredRead {
 /// re-resolving the path, so the bytes are read from the exact entry that was
 /// checked. Each directory is opened by a single no-follow component. The file
 /// is opened no-follow and nonblocking, so a FIFO swapped in cannot block, and
-/// it is typed and size-checked on the opened handle. At most
-/// [`MAX_API_DOC_BYTES`] + 1 bytes are read, so a file that grows after the
-/// check is still rejected. This mirrors `source_capture`'s selected-file read.
-pub(crate) fn read_anchored(root: &Path, rel: &str) -> Result<Vec<u8>, AnchoredRead> {
+/// it is typed and size-checked on the opened handle. At most `max_bytes` + 1
+/// bytes are read, so a file that grows after the check is still rejected.
+/// This mirrors `source_capture`'s selected-file read.
+pub(crate) fn read_anchored(
+    root: &Path,
+    rel: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, AnchoredRead> {
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
     use std::io::Read;
     let not_found = |err: std::io::Error| {
@@ -136,13 +181,13 @@ pub(crate) fn read_anchored(root: &Path, rel: &str) -> Result<Vec<u8>, AnchoredR
         if !metadata.file_type().is_file() {
             return Err(AnchoredRead::NotRegular);
         }
-        if metadata.len() > MAX_API_DOC_BYTES {
-            return Err(AnchoredRead::TooLarge);
+        if metadata.len() > max_bytes {
+            return Err(AnchoredRead::TooLarge(max_bytes));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_API_DOC_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_API_DOC_BYTES {
-            return Err(AnchoredRead::TooLarge);
+        file.take(max_bytes + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(AnchoredRead::TooLarge(max_bytes));
         }
         return Ok(bytes);
     }
@@ -158,7 +203,7 @@ pub(crate) fn anchored_reason(what: &str, failure: AnchoredRead) -> String {
                 "{what} must be a regular file inside the repository, with no symlink in its path"
             )
         }
-        AnchoredRead::TooLarge => format!("{what} exceeds the {MAX_API_DOC_BYTES} byte limit"),
+        AnchoredRead::TooLarge(max_bytes) => format!("{what} exceeds the {max_bytes} byte limit"),
         AnchoredRead::Io(err) => format!("{what} cannot be read: {err}"),
     }
 }
@@ -171,6 +216,17 @@ pub(crate) fn anchored_reason(what: &str, failure: AnchoredRead) -> String {
 /// and contributes no declarations; manifest declarations, an independent
 /// source, are still validated and processed.
 pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> LoadedApiDocs {
+    load_api_docs_within(root, manifest_docs, ApiDocLimits::default())
+}
+
+/// [`load_api_docs`] under a project's `limits` (#1653, AC-1804): more
+/// declared documents than `limits` allows is one gap and no documents, and a
+/// larger document is a gap of its own.
+pub fn load_api_docs_within(
+    root: &Path,
+    manifest_docs: &[ApiDocDeclaration],
+    limits: ApiDocLimits,
+) -> LoadedApiDocs {
     let (repo_docs, config_gap) = match load_repo_config(root) {
         Ok(docs) => (docs, None),
         Err(gap) => (Vec::new(), Some(gap)),
@@ -206,7 +262,7 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
     }
 
     let max_count = merged.len().max(repo_docs.len()).max(manifest_docs.len());
-    if max_count > MAX_API_DOCS {
+    if max_count > limits.max_docs {
         return LoadedApiDocs {
             declared: true,
             docs: Vec::new(),
@@ -215,7 +271,8 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
                 .chain([ApiDocValidationGap {
                     doc_path: API_DOCS_REL_PATH.into(),
                     reason: format!(
-                        "declared {max_count} API reference docs; at most {MAX_API_DOCS} are allowed"
+                        "declared {max_count} API reference docs; at most {} are allowed",
+                        limits.max_docs
                     ),
                 }])
                 .collect(),
@@ -225,7 +282,7 @@ pub fn load_api_docs(root: &Path, manifest_docs: &[ApiDocDeclaration]) -> Loaded
     let mut docs = Vec::new();
     let mut gaps: Vec<ApiDocValidationGap> = config_gap.into_iter().collect();
     for decl in &merged {
-        match validate_one_doc(root, decl) {
+        match validate_one_doc(root, decl, limits.max_doc_bytes) {
             Ok(valid) => docs.push(valid),
             Err(gap) => gaps.push(gap),
         }
@@ -257,7 +314,7 @@ fn load_repo_config(root: &Path) -> Result<Vec<ApiDocDeclaration>, ApiDocValidat
         Ok(meta) if !meta.is_dir() && !meta.file_type().is_symlink() => return Ok(Vec::new()),
         _ => {}
     }
-    let bytes = match read_anchored(root, API_DOCS_REL_PATH) {
+    let bytes = match read_anchored(root, API_DOCS_REL_PATH, MAX_API_DOC_BYTES) {
         Ok(bytes) => bytes,
         Err(AnchoredRead::NotFound) => return Ok(Vec::new()),
         Err(failure) => {
@@ -280,6 +337,7 @@ fn load_repo_config(root: &Path) -> Result<Vec<ApiDocDeclaration>, ApiDocValidat
 fn validate_one_doc(
     root: &Path,
     decl: &ApiDocDeclaration,
+    max_doc_bytes: u64,
 ) -> Result<ValidatedApiDoc, ApiDocValidationGap> {
     let raw_path = decl.path.as_str();
     if raw_path.is_empty() {
@@ -356,10 +414,11 @@ fn validate_one_doc(
     }
 
     let norm_path = norm_parts.join("/");
-    let bytes = read_anchored(root, &norm_path).map_err(|failure| ApiDocValidationGap {
-        doc_path: norm_path.clone(),
-        reason: anchored_reason(&format!("declared API doc \"{norm_path}\""), failure),
-    })?;
+    let bytes =
+        read_anchored(root, &norm_path, max_doc_bytes).map_err(|failure| ApiDocValidationGap {
+            doc_path: norm_path.clone(),
+            reason: anchored_reason(&format!("declared API doc \"{norm_path}\""), failure),
+        })?;
     let contents = String::from_utf8(bytes).map_err(|err| ApiDocValidationGap {
         doc_path: norm_path.clone(),
         reason: format!("declared API doc \"{norm_path}\" is not valid UTF-8: {err}"),
@@ -524,6 +583,74 @@ prefix = "api"
         let not_declared = load_api_docs(plain.path(), &[]);
         assert!(!not_declared.declared);
         assert!(not_declared.docs.is_empty() && not_declared.gaps.is_empty());
+    }
+
+    // AC-1804 (#1653): a project's bounds decide how many API references a
+    // repository may declare and how large each may be; the defaults keep
+    // 16 documents of up to 1 MiB, and neither bound passes its ceiling.
+    #[test]
+    fn api_doc_limits_bound_count_and_size_within_the_hard_ceilings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let declared = (0..17)
+            .map(|n| {
+                let path = format!("docs/api{n}.md");
+                std::fs::write(root.join(&path), format!("#### GET /api/v{n}\n")).unwrap();
+                ApiDocDeclaration { path, prefix: None }
+            })
+            .collect::<Vec<_>>();
+        let default = load_api_docs(root, &declared);
+        assert!(default.docs.is_empty());
+        assert_eq!(
+            default.gaps[0].reason,
+            "declared 17 API reference docs; at most 16 are allowed"
+        );
+        let raised = ApiDocLimits::within(17, MAX_API_DOC_BYTES).unwrap();
+        let read = load_api_docs_within(root, &declared, raised);
+        assert_eq!(read.docs.len(), 17);
+        assert!(read.gaps.is_empty());
+
+        let big = MAX_API_DOC_BYTES as usize + 1;
+        std::fs::write(root.join("docs/big.md"), vec![b'a'; big]).unwrap();
+        let one = [ApiDocDeclaration {
+            path: "docs/big.md".into(),
+            prefix: None,
+        }];
+        let refused = load_api_docs(root, &one);
+        assert!(refused.docs.is_empty());
+        assert!(
+            refused.gaps[0]
+                .reason
+                .ends_with("exceeds the 1048576 byte limit")
+        );
+        let roomy = ApiDocLimits::within(MAX_API_DOCS, 2 * MAX_API_DOC_BYTES).unwrap();
+        assert_eq!(
+            load_api_docs_within(root, &one, roomy).docs[0]
+                .contents
+                .len(),
+            big
+        );
+        let tight = ApiDocLimits::within(MAX_API_DOCS, 8).unwrap();
+        let small = [ApiDocDeclaration {
+            path: "docs/api0.md".into(),
+            prefix: None,
+        }];
+        assert!(
+            load_api_docs_within(root, &small, tight).gaps[0]
+                .reason
+                .ends_with("exceeds the 8 byte limit")
+        );
+
+        assert_eq!(
+            ApiDocLimits::default(),
+            ApiDocLimits::within(16, 1 << 20).unwrap()
+        );
+        assert!(ApiDocLimits::within(0, MAX_API_DOC_BYTES).is_none());
+        assert!(ApiDocLimits::within(HARD_MAX_API_DOCS + 1, MAX_API_DOC_BYTES).is_none());
+        assert!(ApiDocLimits::within(MAX_API_DOCS, 0).is_none());
+        assert!(ApiDocLimits::within(MAX_API_DOCS, HARD_MAX_API_DOC_BYTES + 1).is_none());
+        assert!(ApiDocLimits::within(HARD_MAX_API_DOCS, HARD_MAX_API_DOC_BYTES).is_some());
     }
 
     // AC-0313 (#739): reads are anchored at the opened handle, so a FIFO at the

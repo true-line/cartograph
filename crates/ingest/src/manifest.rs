@@ -255,10 +255,10 @@ struct RepoEnv {
 /// a symlink, or a non-regular or oversized file is an error, never an
 /// empty list.
 pub fn repo_env_read(root: &Path) -> Result<BTreeSet<String>, ManifestError> {
-    use crate::api_docs::{AnchoredRead, anchored_reason, read_anchored};
+    use crate::api_docs::{AnchoredRead, MAX_API_DOC_BYTES, anchored_reason, read_anchored};
     // No symlink anywhere in the path, a regular file, bounded size: the
     // same anchored read as `.cartograph/api-docs.toml`.
-    let bytes = match read_anchored(root, REPO_ENV_REL_PATH) {
+    let bytes = match read_anchored(root, REPO_ENV_REL_PATH, MAX_API_DOC_BYTES) {
         Ok(bytes) => bytes,
         Err(AnchoredRead::NotFound) => return Ok(BTreeSet::new()),
         Err(failure) => {
