@@ -5596,6 +5596,7 @@ fn run_ingest<R: tauri::Runtime>(
             &[],
             None,
             capture_limits(state).map_err(&fail)?,
+            selection_visited_entries(state).map_err(&fail)?,
         )
         .map_err(&fail)?;
     let mut receipts = Vec::new();
@@ -6059,6 +6060,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &[],
             Some(&cloned.commit_sha),
             capture_limits(&state).map_err(&fail)?,
+            selection_visited_entries(&state).map_err(&fail)?,
         )
         .map_err(&fail)?;
     let mut receipts = Vec::new();
@@ -6388,6 +6390,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &entry.layers,
                 (*remote).then_some(commit.as_str()),
                 capture_limits(&state).map_err(&fail)?,
+                selection_visited_entries(&state).map_err(&fail)?,
             )
             .map_err(&fail)?;
         let mut receipts = Vec::new();
@@ -7880,6 +7883,16 @@ fn export_inputs(state: &AppState) -> Result<SpecInputs, String> {
     let mut inputs = read_spec_locked(state)?.inputs(Some(&review));
     inputs.view_caps = spec_view_caps(state)?;
     Ok(inputs)
+}
+
+/// Directory entries one TS/JS selection walk may examine (AC-1802),
+/// within the adapter's hard ceiling.
+fn selection_visited_entries(state: &AppState) -> Result<usize, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let entries = settings
+        .operator_limit(operator_limits::TS_SELECTION_MAX_VISITED_ENTRIES)
+        .map_err(|error| error.to_string())?;
+    usize::try_from(entries).map_err(|error| error.to_string())
 }
 
 /// The project's source capture limits (#1653, AC-1800): the saved file
