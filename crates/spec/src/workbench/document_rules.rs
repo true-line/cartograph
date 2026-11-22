@@ -598,6 +598,77 @@ impl<'a> Index<'a> {
         })
     }
 
+    /// A guard that tests a list its callable starts empty (`const found =
+    /// []`) says what is added to it (AC-1050): "Here the found start
+    /// empty, and when …, the line's product variant is added to the
+    /// found." Only the callable's own recorded `push` changes are said.
+    fn collected(&self, owner_id: &str, owner: &str, mut row: Rejection<'a>) -> Rejection<'a> {
+        let Some(said) = row.statement.as_mut() else {
+            return row;
+        };
+        let Ok(exit) = crate::rules::rule_payload(row.rule) else {
+            return row;
+        };
+        if !exit.effect.exits() {
+            return row;
+        }
+        let siblings = self.governs.get(owner_id).map_or(&[][..], Vec::as_slice);
+        for definition in exit.local_definitions.iter().flatten() {
+            if definition.initializer.display.as_str().trim() != "[]" {
+                continue;
+            }
+            // The list's name, read off a use inside a tested condition.
+            let Some(name) = definition.uses.iter().find_map(|at| {
+                let within = exit.conditions.iter().map(|c| &c.expression).find(|e| {
+                    e.source.byte_start <= at.byte_start && at.byte_end <= e.source.byte_end
+                })?;
+                let start = usize::try_from(at.byte_start - within.source.byte_start).ok()?;
+                let end = usize::try_from(at.byte_end - within.source.byte_start).ok()?;
+                let name = within.display.as_str().get(start..end)?;
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    .then(|| name.to_owned())
+            }) else {
+                continue;
+            };
+            let push = format!("{name}.push(");
+            let added: Vec<String> = siblings
+                .iter()
+                .filter_map(|sibling| {
+                    let parsed = crate::rules::rule_payload(sibling).ok()?;
+                    let LocalExit::Call { value } = &parsed.effect else {
+                        return None;
+                    };
+                    let value = value.display.as_str().trim();
+                    value
+                        .strip_prefix("await ")
+                        .unwrap_or(value)
+                        .starts_with(&push)
+                        .then_some(())?;
+                    let stated = super::statements::statement(
+                        &parsed,
+                        owner,
+                        Some(&|k| self.constant(k)),
+                        &failed_calls(sibling),
+                    )?;
+                    let stated = stated.strip_suffix('.').unwrap_or(&stated).to_owned();
+                    let mut chars = stated.chars();
+                    let first = chars.next()?;
+                    Some(format!("{}{}", first.to_lowercase(), chars.as_str()))
+                })
+                .collect();
+            if added.is_empty() || added.len() > MAX_COLLECTED_PUSHES {
+                continue;
+            }
+            said.push_str(&format!(
+                " Here the {} start empty, and {}.",
+                super::statements::words(&name),
+                added.join("; and ")
+            ));
+        }
+        row
+    }
+
     /// Each rejection exit of `owners`, in order, one at a time.
     fn each(
         &self,
@@ -612,9 +683,10 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(mut found) = rejection(rule, name, Some(&|k| self.constant(k)))
+                if let Some(found) = rejection(rule, name, Some(&|k| self.constant(k)))
                     .or_else(|| self.mail_reply(rule, owner, name))
                 {
+                    let mut found = self.collected(owner, name, found);
                     found.place = self.place(owner, name);
                     n += 1;
                     row(found)?;
@@ -1542,7 +1614,7 @@ fn state_machine<'a>(
         for owner in owners {
             for rule in index.governs.get(owner).into_iter().flatten() {
                 if let Some(row) = guarded(rule, hook_name, true, Some(&|k| index.constant(k))) {
-                    guards.push(row);
+                    guards.push(index.collected(owner, hook_name, row));
                 }
             }
         }
@@ -1762,6 +1834,10 @@ impl<'a> Index<'a> {
         Ok(shown)
     }
 }
+
+/// The most `push` changes one guard's collected-list sentence says
+/// (AC-1050).
+const MAX_COLLECTED_PUSHES: usize = 3;
 
 /// Call hops followed from a guard and the functions nested in it.
 pub(super) const GUARD_DEPTH: usize = 2;
@@ -3554,6 +3630,106 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             let text = render(&changed);
             assert!(!text.contains("Here the available variants"), "{text}");
         }
+    }
+
+    // AC-1050 (T-1050): a list a callable starts empty and fills in a loop
+    // is stated with what is added to it, and the guard that tests it says
+    // what it holds.
+    #[test]
+    fn a_list_collected_in_a_loop_is_stated() {
+        let source = "export function configureDefaultOrderProcess(options) {
+    const orderProcess: OrderProcess<OrderState> = {
+        transitions: {
+            AddingItems: { to: ['ArrangingPayment', 'Cancelled'] },
+            ArrangingPayment: { to: ['AddingItems', 'Cancelled'] },
+            Cancelled: { to: [] },
+        },
+        async onTransitionStart(fromState, toState, { ctx, order }) {
+            if (toState === 'ArrangingPayment') {
+                const variantsWithInsufficientStock: ProductVariant[] = [];
+                for (const line of order.lines) {
+                    const availableStock = await productVariantService.getSaleableStockLevel(
+                        ctx,
+                        line.productVariant,
+                    );
+                    if (line.quantity > availableStock) {
+                        variantsWithInsufficientStock.push(line.productVariant);
+                    }
+                }
+                if (variantsWithInsufficientStock.length) {
+                    return 'message.cannot-transition-to-payment-due-to-insufficient-stock';
+                }
+            }
+        },
+    };
+    return orderProcess;
+}
+";
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/order/order-process.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
+        let order = Node {
+            id: "subsystem:1".into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": "Order" }),
+        };
+        let knowledge = Stories {
+            included: Vec::new(),
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: [("file:repo@src/order/order-process.ts", &order)]
+                .into_iter()
+                .collect(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        assert!(
+            text.contains(
+                "the move is refused with the message “cannot transition to payment due to \
+                 insufficient stock”. Here the variants with insufficient stock start empty, and \
+                 when the to state is “ArrangingPayment”, and the line's quantity is more than \
+                 the available stock, the line's product variant is added to the variants with \
+                 insufficient stock."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "When the to state is “ArrangingPayment”, and the variants with insufficient \
+                 stock are not empty, the move is refused"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches(
+                "the line's product variant is added to the variants with insufficient stock."
+            )
+            .count(),
+            // The guard's sentence, the hook's change row and the area's
+            // own-code row.
+            3,
+            "{text}"
+        );
     }
 
     // AC-0951: a state machine is stated under the area of the file that

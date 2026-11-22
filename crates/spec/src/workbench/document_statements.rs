@@ -1046,6 +1046,15 @@ fn flag(path: &[String], negated: bool, cx: &Context<'_>) -> Option<String> {
         });
     }
     let who = subject(owner, cx)?;
+    if last == "length" && !owner.is_empty() {
+        // A list's length tested for truth: `found.length` reads "the
+        // found are not empty" (AC-1050).
+        return Some(if negated {
+            format!("{who} are empty")
+        } else {
+            format!("{who} are not empty")
+        });
+    }
     if predicate_verb(last).is_none() && !state_word(last) {
         // A value tested for presence: `user.trial_end` reads "the user's
         // trial end is set".
@@ -1884,6 +1893,26 @@ fn line_breaks_removed(target: &str, value: &str, cx: &Context<'_>) -> Option<St
 /// alias is no longer enabled"; `alias.delete_on = arrow.now().shift(days=+N)`
 /// is "the alias's delete on is set to N days from now"; otherwise "the
 /// alias's note is set to the note". `None` outside these rules.
+/// `found.push(line.productVariant)`, which the adapter admits only for a
+/// list the callable starts empty (AC-1050): "the line's product variant
+/// is added to the found".
+fn pushed(call: &str, cx: &Context<'_>) -> Option<String> {
+    let Expr::Apply(path, args) = parse(call.trim())? else {
+        return None;
+    };
+    let ([list, push], [Arg::Pos(value)]) = (&path[..], &args[..]) else {
+        return None;
+    };
+    if push != "push" {
+        return None;
+    }
+    Some(format!(
+        "{} is added to {}",
+        noun(value, cx)?,
+        noun(&Expr::Ref(vec![list.clone()]), cx)?
+    ))
+}
+
 fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
     let Expr::Ref(path) = parse(target.trim())? else {
         return None;
@@ -3100,7 +3129,10 @@ fn rendered(
             value.display.as_str(),
             &cx,
         )?),
-        LocalExit::Call { value } => Some(called(value.display.as_str())?),
+        LocalExit::Call { value } => match pushed(value.display.as_str(), &cx) {
+            Some(added) => Some(added),
+            None => Some(called(value.display.as_str())?),
+        },
         LocalExit::Return { .. } | LocalExit::Throw { .. } => None,
     };
     if let Some(outcome) = changed {

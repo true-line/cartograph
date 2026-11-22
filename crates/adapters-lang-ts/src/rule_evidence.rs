@@ -1175,6 +1175,11 @@ fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
         return false;
     };
     let verb = cx.text(&property);
+    // `found.push(line.productVariant)` on a list the callable starts empty
+    // (`const found = []`): a value collected for a later check (AC-1050).
+    if verb == "push" && object.kind() == "identifier" && collected_list(cx, object) {
+        return true;
+    }
     if REPOSITORY_WRITES.contains(&verb) {
         let repository = object.kind() == "call_expression"
             && object
@@ -1207,6 +1212,53 @@ fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
                     rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase())
                 })
             }))
+}
+
+/// Whether `name` reads a `const name = []` (optionally typed) declared
+/// earlier in a block that encloses it, within the same callable
+/// (AC-1050). A `const` cannot be rebound, so every value it holds was
+/// pushed into it.
+fn collected_list(cx: &FileCx<'_>, name: TsNode<'_>) -> bool {
+    let spelled = cx.text(&name);
+    let mut up = name;
+    for _ in 0..256 {
+        let Some(parent) = up.parent() else {
+            return false;
+        };
+        if callable::is_callable(parent) {
+            return false;
+        }
+        if parent.kind() == "statement_block" {
+            // The nearest block that declares the name decides.
+            let mut cursor = parent.walk();
+            for statement in parent.named_children(&mut cursor) {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    continue;
+                }
+                let mut inner = statement.walk();
+                for declarator in statement.named_children(&mut inner) {
+                    let declares = declarator.kind() == "variable_declarator"
+                        && declarator
+                            .child_by_field_name("name")
+                            .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == spelled);
+                    if !declares {
+                        continue;
+                    }
+                    return statement.kind() == "lexical_declaration"
+                        && statement.end_byte() <= name.start_byte()
+                        && statement.child(0).is_some_and(|k| k.kind() == "const")
+                        && declarator
+                            .child_by_field_name("value")
+                            .is_some_and(|v| v.kind() == "array" && v.named_child_count() == 0);
+                }
+            }
+        }
+        up = parent;
+    }
+    false
 }
 
 /// Cached unchanged source still belongs to the revision being ingested now.
