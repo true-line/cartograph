@@ -29,7 +29,9 @@ use core_graph::{Edge, Node, SqliteGraphStore, StoreRevision};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 use spec::CuratedFailure;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use crate::AppState;
 use crate::task_evidence::assessment::{self, Availability, BasisComparison};
@@ -87,36 +89,14 @@ pub(crate) struct CuratedReview {
     settled: Arc<DerivedSettlements>,
 }
 
-/// What the compile of [`DerivedDecisions::Compile`] last found, kept in
-/// memory so that a decision matching nothing does not cost every export a
-/// second compile (#1834). Nothing is persisted.
-///
-/// The answer is a function of the rows that compile reads (nodes, edges and
-/// coverage inventories, all read in one transaction with the store
-/// revision) and of the hashes looked for. It is kept under exactly those:
-/// the store revision, the graph content hash and the set of hashes. A read
-/// with any of the three different compiles again and replaces the entry,
-/// so no answer is used for another graph or another set of decisions. A
-/// compile that fails is not kept.
-#[derive(Debug, Default)]
-pub(crate) struct DerivedSettlements(Mutex<Option<Settled>>);
+pub(crate) use app_store::curated_settlements::{DerivedSettlements, Settled};
 
-#[derive(Debug)]
-struct Settled {
-    revision: StoreRevision,
-    content_hash: String,
-    /// The decided hashes no stored fact carried.
-    wanted: BTreeSet<String>,
-    /// Those of `wanted` a curatable derived statement carries.
-    carried: BTreeSet<String>,
-}
-
-impl Settled {
-    fn answers(&self, snapshot: &Snapshot<'_>, wanted: &BTreeSet<String>) -> bool {
-        &self.revision == snapshot.revision
-            && self.content_hash == snapshot.content_hash
-            && &self.wanted == wanted
-    }
+/// Whether `settled` was made for this snapshot's revision and content and
+/// for this set of hashes.
+fn answers(settled: &Settled, snapshot: &Snapshot<'_>, wanted: &BTreeSet<String>) -> bool {
+    &settled.revision == snapshot.revision
+        && settled.content_hash == snapshot.content_hash
+        && &settled.wanted == wanted
 }
 
 #[cfg(test)]
@@ -131,62 +111,60 @@ pub(crate) fn derived_compiles() -> usize {
     DERIVED_COMPILES.with(std::cell::Cell::get)
 }
 
-impl DerivedSettlements {
-    /// Which of `wanted` a curatable derived statement of `snapshot`
-    /// carries: the kept answer when it was made for this revision, content
-    /// and set, and otherwise one compile of the `best-effort` documents
-    /// with no rejection, which is then kept.
-    ///
-    /// The entry stays locked across the compile, so two exports of one
-    /// revision compile once between them. No store lock is taken while it
-    /// is held. A poisoned entry is not read or written: the compile runs.
-    fn carried(
-        &self,
-        snapshot: &Snapshot<'_>,
-        flows: &[flowtracer::Flow],
-        wanted: BTreeSet<String>,
-    ) -> Result<BTreeSet<String>, CuratedFailure> {
-        let mut entry = self.0.lock().ok();
-        if let Some(Some(settled)) = entry.as_deref()
-            && settled.answers(snapshot, &wanted)
-        {
-            return Ok(settled.carried.clone());
-        }
-        #[cfg(test)]
-        DERIVED_COMPILES.with(|count| count.set(count.get() + 1));
-        let bundle = spec::try_compile_spec_with_coverage(
-            snapshot.nodes,
-            snapshot.edges,
-            flows,
-            spec::ExportMode::BestEffort,
-            &BTreeSet::new(),
-            snapshot.coverage,
-        )
-        .map_err(|_| CuratedFailure::AssertionsNotCompiled)?;
-        let mut left = wanted.clone();
-        let mut carried = BTreeSet::new();
-        for assertion in bundle
-            .artifacts
-            .iter()
-            .flat_map(|artifact| &artifact.assertions)
-        {
-            if left.contains(&assertion.provenance.content_hash)
-                && curatable(&assertion.provenance)
-                && let Some(hash) = left.take(&assertion.provenance.content_hash)
-            {
-                carried.insert(hash);
-            }
-        }
-        if let Some(entry) = entry.as_deref_mut() {
-            *entry = Some(Settled {
-                revision: snapshot.revision.clone(),
-                content_hash: snapshot.content_hash.to_owned(),
-                wanted,
-                carried: carried.clone(),
-            });
-        }
-        Ok(carried)
+/// Which of `wanted` a curatable derived statement of `snapshot`
+/// carries: the kept answer when it was made for this revision, content
+/// and set, and otherwise one compile of the `best-effort` documents
+/// with no rejection, which is then kept.
+///
+/// The entry stays locked across the compile, so two exports of one
+/// revision compile once between them. No store lock is taken while it
+/// is held. A poisoned entry is not read or written: the compile runs.
+fn settled_carried(
+    settlements: &DerivedSettlements,
+    snapshot: &Snapshot<'_>,
+    flows: &[flowtracer::Flow],
+    wanted: BTreeSet<String>,
+) -> Result<BTreeSet<String>, CuratedFailure> {
+    let mut entry = settlements.0.lock().ok();
+    if let Some(Some(settled)) = entry.as_deref()
+        && answers(settled, snapshot, &wanted)
+    {
+        return Ok(settled.carried.clone());
     }
+    #[cfg(test)]
+    DERIVED_COMPILES.with(|count| count.set(count.get() + 1));
+    let bundle = spec::try_compile_spec_with_coverage(
+        snapshot.nodes,
+        snapshot.edges,
+        flows,
+        spec::ExportMode::BestEffort,
+        &BTreeSet::new(),
+        snapshot.coverage,
+    )
+    .map_err(|_| CuratedFailure::AssertionsNotCompiled)?;
+    let mut left = wanted.clone();
+    let mut carried = BTreeSet::new();
+    for assertion in bundle
+        .artifacts
+        .iter()
+        .flat_map(|artifact| &artifact.assertions)
+    {
+        if left.contains(&assertion.provenance.content_hash)
+            && curatable(&assertion.provenance)
+            && let Some(hash) = left.take(&assertion.provenance.content_hash)
+        {
+            carried.insert(hash);
+        }
+    }
+    if let Some(entry) = entry.as_deref_mut() {
+        *entry = Some(Settled {
+            revision: snapshot.revision.clone(),
+            content_hash: snapshot.content_hash.to_owned(),
+            wanted,
+            carried: carried.clone(),
+        });
+    }
+    Ok(carried)
 }
 
 /// Whether one artifact's bytes depend on the curated projection: the
@@ -721,7 +699,7 @@ fn current_assertion_hashes(
             return Err(CuratedFailure::DerivedDecisionsNeedCompile);
         }
     };
-    current.extend(settled.carried(snapshot, flows, wanted)?);
+    current.extend(settled_carried(settled, snapshot, flows, wanted)?);
     Ok(current)
 }
 

@@ -86,49 +86,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 
-/// Stores managed by the Tauri runtime. Graph and state spine are separate
-/// databases (ADR-0008): the graph is a disposable ingest artifact, the spine
-/// holds durable state.
-struct AppState {
-    graph: Mutex<SqliteGraphStore>,
-    jobs: Mutex<JobStore>,
-    job_execution_locks: JobExecutionLocks,
-    investigations: investigations::InvestigationRuntime,
-    findings: Mutex<FindingStore>,
-    settings: Mutex<settings::SettingsStore>,
-    decisions: Mutex<agents::DecisionLog>,
-    proposals: Mutex<agents::ProposalStore>,
-    /// Section drafts and their reviews (SPEC-15, #1748).
-    drafts: Mutex<agents::draft_store::DraftStore>,
-    work_packets: work_packets::PacketRuntime,
-    extraction_caches: Mutex<ExtractionCaches>,
-    embedding_cache: Option<Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>>,
-    /// ADR-0051 knowledge overlay, shared with the graph reset hook.
-    knowledge_overlay: Option<Arc<Mutex<core_graph::overlay::OverlayStore>>>,
-    /// Durable, host-owned authority for operational source locations.
-    sources: Arc<Mutex<SourceRegistry>>,
-    primary_sources: primary_source::PrimarySourceStore,
-    metrics: Mutex<metrics::MetricsStore>,
-    /// In memory only: what an export's second compile settled for the
-    /// current graph revision (`curated::DerivedSettlements`, #1834).
-    curated_settled: Arc<curated::DerivedSettlements>,
-}
-
-#[derive(Default)]
-struct RepoExtractionCache {
-    ts: adapters_lang_ts::IncrementalCache,
-    python: adapters_lang_python::IncrementalCache,
-    go: adapters_lang_go::IncrementalCache,
-    rust: adapters_lang_rust::IncrementalCache,
-    java: adapters_lang_java::IncrementalCache,
-    kotlin: adapters_lang_kotlin::IncrementalCache,
-    tf: iac::IncrementalCache,
-}
-
-#[derive(Default)]
-struct ExtractionCaches {
-    repos: std::collections::BTreeMap<String, RepoExtractionCache>,
-}
+use app_store::app_state::AppState;
+use app_store::extraction_cache::{ExtractionCaches, RepoExtractionCache};
 
 #[derive(Serialize)]
 struct GraphStats {

@@ -5,19 +5,9 @@ use core_graph::source::{FactKey, FactSourceState};
 use core_graph::{SnapshotReadLimits, SqliteGraphStore};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
 use tauri::Manager;
 
-pub(crate) struct PacketRuntime {
-    pub(crate) store: Mutex<::work_packets::PacketStore>,
-}
-impl PacketRuntime {
-    pub(crate) fn open(path: &std::path::Path) -> ::work_packets::PacketResult<Self> {
-        Ok(Self {
-            store: Mutex::new(::work_packets::PacketStore::open(path)?),
-        })
-    }
-}
+pub(crate) use app_store::packet_runtime::PacketRuntime;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PacketHostError {
