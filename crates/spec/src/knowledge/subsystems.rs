@@ -225,7 +225,9 @@ fn file_stem(path: &str) -> &str {
 
 /// The first source span of a deterministic, source-backed base fact.
 fn file_evidence(node: &Node) -> Option<EvidenceRef> {
-    let prov: Provenance = serde_json::from_value(node.props.get("prov")?.clone()).ok()?;
+    node.props.get("prov")?;
+    let prov: Provenance =
+        serde_json::from_value(crate::stored_prov(&node.props).into_owned()).ok()?;
     (prov.validate().is_ok()
         && prov.tier == Tier::Deterministic
         && matches!(prov.basis, None | Some(EvidenceBasis::Source)))

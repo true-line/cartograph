@@ -21,7 +21,7 @@ const SECURITY_EXTRACTOR_T1: &str = "t1.security-projection";
 const SECURITY_EXTRACTOR_T2: &str = "t2.security-projection";
 
 fn typed_provenance(props: &serde_json::Value) -> Option<Provenance> {
-    serde_json::from_value::<Provenance>(props["prov"].clone())
+    serde_json::from_value::<Provenance>(crate::stored_prov(props).into_owned())
         .ok()
         .filter(|provenance| provenance.validate().is_ok())
 }

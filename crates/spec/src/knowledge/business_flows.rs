@@ -83,7 +83,8 @@ pub struct BusinessFlowReport {
 fn support(props: &serde_json::Value) -> Option<Provenance> {
     #[cfg(test)]
     DECODED_SUPPORTS.with(|n| n.set(n.get() + 1));
-    let p = Provenance::deserialize(props.get("prov")?).ok()?;
+    props.get("prov")?;
+    let p = Provenance::deserialize(&*crate::stored_prov(props)).ok()?;
     (p.validate().is_ok()
         // Match Provenance::basis() without cloning artifact refs: absent T1
         // resolves to Observation; every other absent basis resolves to Source.
@@ -164,7 +165,7 @@ pub fn derive_business_flows(
                 valid = false;
                 break;
             };
-            charge(&props["prov"], &mut remaining)?;
+            charge(&crate::stored_prov(props), &mut remaining)?;
             let Some(p) = support(props) else {
                 valid = false;
                 break;
