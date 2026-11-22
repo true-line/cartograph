@@ -608,20 +608,36 @@ fn pending_acquisition_choices_become_native_tools() {
         let name = expected["type"].as_str().unwrap();
         let tool = tools.iter().find(|tool| tool.name == name).unwrap();
         assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.input_schema["additionalProperties"], false);
         let mut arguments = expected.as_object().unwrap().clone();
         arguments.remove("type");
         let context = arguments
             .remove("context_id")
             .map(|id| id.as_str().unwrap().to_owned())
             .unwrap_or_default();
+        for (field, value) in &arguments {
+            let property = &tool.input_schema["properties"][field];
+            assert!(property["enum"].as_array().unwrap().contains(value));
+            if value.is_object() {
+                assert_eq!(property["type"], "object", "{field} is typed");
+            }
+        }
         let arguments = serde_json::Value::Object(arguments);
-        assert!(
-            tool.input_schema["enum"]
-                .as_array()
-                .unwrap()
-                .contains(&arguments)
-        );
         let action = action_from_tool_call(&tools, name, &arguments, &context).unwrap();
+        let action: serde_json::Value = serde_json::from_str(&action).unwrap();
+        assert_eq!(action, expected);
+        // A parser that sends an object argument as its JSON text still
+        // decodes to the same choice (glm-5.3-flash on vLLM, v0.75.0 smoke).
+        let stringified: serde_json::Map<_, _> = arguments
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(field, value)| match value {
+                serde_json::Value::Object(_) => (field.clone(), value.to_string().into()),
+                _ => (field.clone(), value.clone()),
+            })
+            .collect();
+        let action = action_from_tool_call(&tools, name, &stringified.into(), &context).unwrap();
         let action: serde_json::Value = serde_json::from_str(&action).unwrap();
         assert_eq!(action, expected);
     }
