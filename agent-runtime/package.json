@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "description": "cartograph-agent sidecar: Pi (local models) and Claude Agent SDK runners behind the host's tools and egress firewall (ADR-0085)",
   "type": "module",
-  "engines": { "node": ">=22.18" },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
@@ -18,6 +20,8 @@
   },
   "devDependencies": {
     "@types/node": "22.19.1",
+    "esbuild": "0.25.12",
+    "postject": "1.0.0-alpha.6",
     "typescript": "5.9.3"
   }
 }

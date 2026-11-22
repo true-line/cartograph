@@ -11,6 +11,11 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
+// AC-1427: with CARTOGRAPH_AGENT_EXECUTABLE set, the same tests run the
+// packaged single executable (built by scripts/build-agent-runtime.mjs)
+// instead of the sources.
+const packaged = process.env.CARTOGRAPH_AGENT_EXECUTABLE;
+const command: [string, string[]] = packaged ? [packaged, []] : [process.execPath, [main]];
 
 function ndjson(res: any, lines: object[]) {
   res.writeHead(200, { "content-type": "application/x-ndjson" });
@@ -59,7 +64,7 @@ async function runProcess(answer: (res: any, step: number) => void, extra: objec
   await once(proxy, "listening");
   const port = (proxy.address() as any).port;
 
-  const child = spawn(process.execPath, [main], { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH ?? "" } });
+  const child = spawn(command[0], command[1], { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH ?? "" } });
   const received: any[] = [];
   let buffered = "";
   const write = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -102,7 +107,9 @@ async function runProcess(answer: (res: any, step: number) => void, extra: objec
   proxy.close();
   assert.equal(received[0].type, "ready");
   assert.match(received[0].runners.pi, /^pi-agent-core@\d/, "the ready line names the installed Pi runner");
-  assert.match(received[0].runners.claude, /^claude-agent-sdk@\d/);
+  // The packaged build has no Agent SDK lane yet (AC-1424), so it names none.
+  if (packaged) assert.equal(received[0].runners.claude, "");
+  else assert.match(received[0].runners.claude, /^claude-agent-sdk@\d/);
   assert.deepEqual(received.filter((m) => m.type === "tool_call").map((m) => m.name), ["query_context", "finish"]);
   assert.equal(done.reason, "finished");
   assert.equal(requests.length, 2, "one model request per turn, none after the admitted finish");

@@ -565,7 +565,7 @@ test('macOS packaging is exact-SHA, universal, fail-closed, and verified', () =>
   assert.match(workflow, /APPLE_CERTIFICATE: \$\{\{ secrets\.CSC_LINK \}\}/u);
   assert.match(workflow, /APPLE_CERTIFICATE_PASSWORD: \$\{\{ secrets\.CSC_KEY_PASSWORD \}\}/u);
   assert.match(workflow, /APPLE_API_KEY_PATH/u);
-  assert.match(workflow, /APPLE_API_KEY: \$\{\{ secrets\.APPLE_API_KEY_ID \}\}/u);
+  assert.match(workflow, /APPLE_API_KEY_ID: \$\{\{ secrets\.APPLE_API_KEY_ID \}\}/u);
   assert.match(workflow, /APPLE_API_ISSUER: \$\{\{ secrets\.APPLE_API_ISSUER \}\}/u);
   assert.match(workflow, /APPLE_SIGNING_IDENTITY: '-'/u);
   assert.match(workflow, /universal-apple-darwin/u);
@@ -587,7 +587,7 @@ test('macOS packaging compiles with no signing secrets in the environment (#480)
   const step = (name) => steps.find((block) => block.startsWith(`      - name: ${name}`)) ?? '';
   const index = (name) => steps.findIndex((block) => block.startsWith(`      - name: ${name}`));
 
-  assert.match(manifest.scripts['package:macos:compile'], /^node scripts\/build-mcp-relay\.mjs && tauri build --no-bundle --target universal-apple-darwin$/u);
+  assert.match(manifest.scripts['package:macos:compile'], /^node scripts\/build-mcp-relay\.mjs && node scripts\/build-agent-runtime\.mjs universal-apple-darwin && tauri build --no-bundle --target universal-apple-darwin$/u);
   assert.match(manifest.scripts['package:macos:bundle'], /^tauri bundle --bundles app,dmg --target universal-apple-darwin --config src-tauri\/tauri\.mcp-bundle\.conf\.json$/u);
 
   const compile = step('Compile universal binary without signing secrets');
@@ -605,8 +605,9 @@ test('macOS packaging compiles with no signing secrets in the environment (#480)
   assert.ok(index('Select signing mode') < compileAt);
   for (const name of [
     'Decode App Store Connect key',
-    'Bundle, sign, and notarize universal app',
+    'Bundle and sign universal app',
     'Bundle ad-hoc signed unsigned-dev universal app',
+    'Sign agent runtime with its own entitlements',
     'Notarize and staple disk image',
   ]) {
     assert.ok(index(name) > compileAt, `${name} must run after compilation`);
@@ -617,11 +618,48 @@ test('macOS packaging compiles with no signing secrets in the environment (#480)
     }
   });
 
-  for (const name of ['Bundle, sign, and notarize universal app', 'Bundle ad-hoc signed unsigned-dev universal app']) {
+  for (const name of ['Bundle and sign universal app', 'Bundle ad-hoc signed unsigned-dev universal app']) {
     assert.match(step(name), /npm run package:macos:bundle/u);
+    // Notarization follows the agent runtime's re-signing, so Tauri gets no
+    // App Store Connect input.
+    assert.doesNotMatch(step(name), /APPLE_API_/u);
   }
-  assert.match(step('Bundle, sign, and notarize universal app'), /APPLE_API_KEY_PATH: \$\{\{ steps\.apple_key\.outputs\.key_path \}\}/u);
+  assert.match(step('Notarize and staple disk image'), /APPLE_API_KEY_PATH: \$\{\{ steps\.apple_key\.outputs\.key_path \}\}/u);
   assert.doesNotMatch(workflow, /npm run package:macos\n/u);
+});
+
+test('only the agent runtime holds allow-jit, signed before notarization (ADR-0085, AC-1427)', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/package.yml'), 'utf8');
+  const steps = workflow.split(/\n(?= {6}- name: )/u);
+  const step = (name) => steps.find((block) => block.startsWith(`      - name: ${name}`)) ?? '';
+  const index = (name) => steps.findIndex((block) => block.startsWith(`      - name: ${name}`));
+  const resign = 'Sign agent runtime with its own entitlements';
+  assert.ok(index('Bundle ad-hoc signed unsigned-dev universal app') < index(resign));
+  assert.ok(index(resign) < index('Locate bundles'), 'the ready check runs the re-signed sidecar');
+  assert.ok(index(resign) < index('Notarize and staple disk image'), 'notarization covers the final signatures');
+  assert.match(step(resign), /bash scripts\/macos-sign-agent-runtime\.sh "\$SIGNING_MODE"/u);
+  assert.doesNotMatch(step(resign), /^\s+if:/mu, 'both signing modes re-sign the sidecar');
+  assert.match(step('Notarize and staple disk image'), /xcrun stapler staple "\$\{\{ steps\.bundles\.outputs\.app \}\}"/u);
+
+  const macos = JSON.parse(readFileSync(path.join(root, 'src-tauri/tauri.macos.conf.json'), 'utf8'));
+  assert.equal(macos.bundle.macOS.entitlements, undefined, 'the app carries no entitlements');
+  assert.equal(macos.bundle.macOS.hardenedRuntime, true);
+  const plist = readFileSync(path.join(root, 'src-tauri/agent-runtime.entitlements.plist'), 'utf8');
+  assert.deepEqual([...plist.matchAll(/<key>([^<]+)<\/key>/gu)].map((m) => m[1]), ['com.apple.security.cs.allow-jit']);
+
+  const script = readFileSync(path.join(root, 'scripts/macos-sign-agent-runtime.sh'), 'utf8');
+  const signing = script.split('\n').filter((line) => /codesign\b.*--sign|"\$\{sign\[@\]\}"/u.test(line));
+  assert.ok(signing.length >= 3);
+  for (const line of signing) assert.doesNotMatch(line, /--deep/u, line);
+  const sidecar = script.indexOf('"${sign[@]}" --entitlements "$entitlements" "$agent"');
+  const app = script.indexOf('"${sign[@]}" --preserve-metadata=entitlements,requirements "$app"');
+  assert.ok(sidecar > 0 && app > sidecar, 'the sidecar is signed before the app that seals it');
+  assert.match(script, /sidecar=\$\(codesign -d --entitlements - --xml "\$bundle\/Contents\/MacOS\/cartograph-agent"/u);
+  assert.match(script, /app=\$\(codesign -d --entitlements - --xml "\$bundle" /u);
+  assert.match(script, /if \[\[ "\$app" == \*"\$jit"\* \]\]; then\n\s+echo "\$bundle: the app must not hold/u);
+  assert.match(script, /security delete-keychain "\$keychain"/u);
+  const result = spawnSync('bash', ['-n', path.join(root, 'scripts/macos-sign-agent-runtime.sh')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('release publication is reviewed, exact-evidence-only, and idempotent', () => {

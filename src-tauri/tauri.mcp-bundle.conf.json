@@ -1,5 +1,5 @@
 {
   "bundle": {
-    "externalBin": ["../target/mcp-relay/cartograph-mcp"]
+    "externalBin": ["../target/mcp-relay/cartograph-mcp", "../target/agent-runtime/cartograph-agent"]
   }
 }

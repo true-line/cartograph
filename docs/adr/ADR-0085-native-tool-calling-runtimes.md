@@ -151,3 +151,45 @@ Facts checked for this decision (2026-11-22):
   smaller surface with the same handlers.
 - **Hand the provider key to the sidecar (ADR-0066 decision 3 as written).**
   The sidecar would then reach the provider directly, outside the firewall.
+
+## Packaging notes (AC-1427, 2026-11-22)
+
+**Signing.** The macOS app ships `cartograph-agent` as a Tauri external
+binary. Its V8 JIT needs `com.apple.security.cs.allow-jit` under the hardened
+runtime. Tauri signs every external binary with the app's one entitlements
+file, so the app keeps none. Instead, `scripts/macos-sign-agent-runtime.sh`
+runs after `tauri bundle` and before notarization:
+
+1. It re-signs the sidecar alone with
+   `src-tauri/agent-runtime.entitlements.plist`.
+2. It re-seals the app without `--deep`.
+3. It puts that app into the disk image.
+4. It checks with `codesign -d --entitlements` that the sidecar holds
+   allow-jit and the app does not.
+
+The disk image's notarization then covers the final signatures, and the
+standalone app is stapled from it.
+
+**Audit triage.** `npm audit --omit=dev` on the committed lockfile reports
+eight findings: seven high and one moderate. None is reachable from the
+shipped sidecar.
+
+- `proxy-agent`, `pac-proxy-agent`, `get-uri` and `basic-ftp` come in via
+  `@mariozechner/pi-ai`, and the findings carry through to `pi-agent-core`.
+  - Pi-ai loads `proxy-agent` only in its Amazon Bedrock provider, and only
+    when an `HTTP(S)_PROXY` or `NO_PROXY` variable is set.
+  - Pi-ai loads that provider through a computed dynamic import, which
+    esbuild cannot follow. Neither the provider nor `proxy-agent` is in the
+    packaged executable. The bundle has no occurrence of `pac-proxy-agent`,
+    `get-uri` or `basic-ftp`.
+  - In development, the host also starts only the Ollama and vLLM backends
+    against its loopback proxy. It clears the sidecar's environment to
+    `PATH`, so the proxy condition never holds either.
+  - The fix npm suggests is a major downgrade of Pi, which we don't take.
+- `@modelcontextprotocol/sdk` (fixed in 1.32.2) and `@hono/node-server`,
+  which comes in through it, are on the Claude lane only.
+  - They are external to the bundle and absent from the packaged build
+    (AC-1424).
+  - The lane uses the SDK's in-process `McpServer`. No HTTP transport, OAuth
+    client or bearer-auth path runs.
+  - AC-1424 bumps the SDK to a fixed release before the lane ships.

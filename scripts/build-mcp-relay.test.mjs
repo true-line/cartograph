@@ -51,7 +51,7 @@ test('package-only overlay resolves staged target suffix and preserves dev confi
   const overlay = JSON.parse(readFileSync(overlayPath));
   const base = JSON.parse(readFileSync(path.join(ROOT, 'src-tauri/tauri.conf.json')));
   assert.equal(base.bundle.externalBin, undefined);
-  assert.deepEqual(overlay.bundle.externalBin, ['../target/mcp-relay/cartograph-mcp']);
+  assert.deepEqual(overlay.bundle.externalBin, ['../target/mcp-relay/cartograph-mcp', '../target/agent-runtime/cartograph-agent']);
   assert.equal(path.resolve(path.dirname(overlayPath), `${overlay.bundle.externalBin[0]}-universal-apple-darwin`), path.join(ROOT, 'target/mcp-relay/cartograph-mcp-universal-apple-darwin'));
   const manifest = JSON.parse(readFileSync(path.join(ROOT, 'package.json')));
   assert.equal(manifest.scripts['package:macos'], 'npm run package:macos:compile && npm run package:macos:bundle');

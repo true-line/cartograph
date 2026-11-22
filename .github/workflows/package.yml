@@ -176,10 +176,16 @@ jobs:
         with:
           tool: cargo-about@0.9.1
 
+      # ADR-0085, AC-1427: built before the notices, which reproduce the
+      # licenses it bundles. No signing input is visible yet, and the build
+      # refuses to run if one is.
+      - name: Build agent runtime sidecar
+        run: node scripts/build-agent-runtime.mjs universal-apple-darwin
+
       - name: Generate third-party notices
         run: |
           cargo fetch --locked
-          node scripts/generate-notices.mjs
+          node scripts/generate-notices.mjs --with-agent-runtime
 
       - name: Select signing mode
         id: signing
@@ -286,15 +292,15 @@ jobs:
           test -s "$key_path"
           echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
 
-      - name: Bundle, sign, and notarize universal app
+      # Tauri signs here but does not notarize: no App Store Connect input is
+      # passed, because the agent runtime is re-signed below and notarization
+      # must cover the final signatures (the disk image step notarizes both).
+      - name: Bundle and sign universal app
         if: steps.signing.outputs.signed == 'true'
         env:
           # Map the established Photos secret names to Tauri's documented inputs.
           APPLE_CERTIFICATE: ${{ secrets.CSC_LINK }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_PATH: ${{ steps.apple_key.outputs.key_path }}
         run: npm run package:macos:bundle
 
       - name: Bundle ad-hoc signed unsigned-dev universal app
@@ -303,6 +309,21 @@ jobs:
           # Apple Silicon requires a signature; '-' is Tauri's ad-hoc identity.
           APPLE_SIGNING_IDENTITY: '-'
         run: npm run package:macos:bundle
+
+      # ADR-0085, AC-1427: Tauri signs every external binary with the app's one
+      # entitlements file, and the app has none. Only the agent runtime gets
+      # allow-jit: it is re-signed with its own file, then the app (no --deep)
+      # and the disk image are re-sealed around it.
+      - name: Sign agent runtime with its own entitlements
+        env:
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          APPLE_CERTIFICATE: ${{ steps.signing.outputs.signed == 'true' && secrets.CSC_LINK || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ steps.signing.outputs.signed == 'true' && secrets.CSC_KEY_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          dmg=$(find target/universal-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
+          bash scripts/macos-sign-agent-runtime.sh "$SIGNING_MODE" \
+            target/universal-apple-darwin/release/bundle/macos/Cartograph.app "$dmg"
 
       - name: Locate bundles
         id: bundles
@@ -316,6 +337,16 @@ jobs:
           lipo "$relay" -verify_arch arm64
           lipo "$relay" -verify_arch x86_64
           codesign --verify --strict --verbose=2 "$relay"
+          # AC-1427: the agent runtime sidecar ships signed, universal, and
+          # starts under the hardened runtime (its own allow-jit lets it print ready).
+          agent="$app/Contents/MacOS/cartograph-agent"
+          test -x "$agent"
+          lipo "$agent" -verify_arch arm64
+          lipo "$agent" -verify_arch x86_64
+          codesign --verify --strict --verbose=2 "$agent"
+          ready=$("$agent" < /dev/null | head -n 1)
+          printf '%s\n' "$ready"
+          printf '%s' "$ready" | grep -q '"type":"ready"'
           test -n "$dmg"
           test -f "$dmg"
           echo "app=$app" >> "$GITHUB_OUTPUT"
@@ -336,6 +367,9 @@ jobs:
             --issuer "$APPLE_API_ISSUER" \
             --wait
           xcrun stapler staple "$dmg"
+          # The image's notarization covers the app inside it, which is the
+          # same signed app as the standalone bundle (same CDHash).
+          xcrun stapler staple "${{ steps.bundles.outputs.app }}"
 
       - name: Verify Developer ID signature, Gatekeeper, and notarization
         if: steps.signing.outputs.signed == 'true'

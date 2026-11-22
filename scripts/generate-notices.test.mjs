@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { join } from 'node:path';
 
-import { collectJsPackages, readJsLicense, tsModule } from './generate-notices.mjs';
+import { AGENT_UNBUNDLED, agentNotices, collectJsPackages, readJsLicense, tsModule } from './generate-notices.mjs';
 
 // Synthetic lockfile exercising every inventory rule (#340): the production
 // closure starts at the root manifest's dependencies/optionalDependencies/
@@ -165,4 +165,30 @@ test('tsModule turns a one-line notices change into a one-line module change', (
   assert.equal(before.length, after.length);
   const changed = before.filter((line, i) => line !== after[i]);
   assert.deepEqual(changed, ['  "- alpha 1.0",']);
+});
+
+// ADR-0085, AC-1427: the shipped notices cover the agent runtime sidecar: the
+// pinned Node release's LICENSE and the bundled npm closure, without the
+// Claude lane's packages that this build does not carry.
+test('agent runtime notices name the pinned Node and the bundled packages only', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'cartograph-agent-notices-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'scripts'));
+  writeFileSync(join(root, 'scripts', 'agent-runtime-node.json'), JSON.stringify({ version: '22.23.5', sha256: {} }));
+  const dir = join(root, 'agent-runtime');
+  mkdirSync(join(root, 'target', 'agent-runtime'), { recursive: true });
+  writeFileSync(join(root, 'target', 'agent-runtime', 'NODE-LICENSE'), 'Node.js is licensed for use as follows:\n');
+  const packages = { '': { dependencies: Object.fromEntries([['pi-core', '1.0.0'], ...AGENT_UNBUNDLED.map((name) => [name, '1.0.0'])]) } };
+  for (const name of ['pi-core', ...AGENT_UNBUNDLED]) {
+    packages[`node_modules/${name}`] = { version: '1.0.0' };
+    const at = join(dir, 'node_modules', name);
+    mkdirSync(at, { recursive: true });
+    writeFileSync(join(at, 'package.json'), JSON.stringify({ name, license: 'MIT' }));
+    writeFileSync(join(at, 'LICENSE'), `${name} license text`);
+  }
+  writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ packages }));
+  const notices = agentNotices(root);
+  assert.match(notices, /^## Node\.js 22\.23\.5\n[\s\S]*Node\.js is licensed for use as follows:/u);
+  assert.match(notices, /## pi-core 1\.0\.0\n\nLicense: MIT\n\n```\npi-core license text\n```/u);
+  for (const name of AGENT_UNBUNDLED) assert.equal(notices.includes(`## ${name} `), false, `${name} is not bundled`);
 });

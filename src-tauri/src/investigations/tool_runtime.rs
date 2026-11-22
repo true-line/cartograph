@@ -7,10 +7,11 @@
 //! are unchanged; only the transport differs. Every other version gets the
 //! resolved provider back as it is.
 //!
-//! Until the runtime ships inside the app (AC-1427) it is found through
-//! `CARTOGRAPH_AGENT_RUNTIME` (the runtime's `src/main.ts`) and, optionally,
-//! `CARTOGRAPH_AGENT_NODE` (the Node.js executable, `node` by default). A
-//! tool-calling start without them fails before any model request.
+//! The runtime is the `cartograph-agent` executable bundled next to the app
+//! (AC-1427). `CARTOGRAPH_AGENT_RUNTIME` overrides it for development: an
+//! executable, or a `.ts`/`.js` entry script run by `CARTOGRAPH_AGENT_NODE`
+//! (`node` by default). A tool-calling start with neither fails before any
+//! model request.
 
 use agents::investigation::SpecialistId;
 use agents::investigation::native_proxy::{ModelProxy, ProxyBackend, ProxyConfig};
@@ -30,34 +31,64 @@ const MAX_RUNTIME_TURNS: u32 = 1024;
 /// request limit lowers it.
 const CONVERSATION_BYTES: usize = 1 << 20;
 
+/// The bundled runtime's file name; Tauri drops the target suffix when it
+/// places an external binary next to the app executable.
+const BUNDLED_RUNTIME: &str = "cartograph-agent";
+
 /// How to start the tool-calling runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeCommand {
-    /// The Node.js executable.
-    pub node: OsString,
-    /// The runtime's entry script.
-    pub entry: OsString,
+    /// The executable: the runtime itself, or Node.js for an entry script.
+    pub program: OsString,
+    /// The entry script when `program` is Node.js; empty otherwise.
+    pub args: Vec<OsString>,
 }
 
 impl RuntimeCommand {
-    /// The runtime named by the process environment, if any.
+    /// The runtime named by the process environment, else the one bundled
+    /// with the app, if any.
     pub(crate) fn from_env() -> Option<Self> {
-        Self::from_vars(&|name| std::env::var_os(name))
+        let bundled = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join(BUNDLED_RUNTIME)))
+            .filter(|path| path.is_file());
+        Self::from_vars(&|name| std::env::var_os(name), bundled)
     }
 
-    fn from_vars(var: &dyn Fn(&str) -> Option<OsString>) -> Option<Self> {
-        let entry = var("CARTOGRAPH_AGENT_RUNTIME").filter(|entry| !entry.is_empty())?;
+    fn from_vars(
+        var: &dyn Fn(&str) -> Option<OsString>,
+        bundled: Option<std::path::PathBuf>,
+    ) -> Option<Self> {
+        let Some(entry) = var("CARTOGRAPH_AGENT_RUNTIME").filter(|entry| !entry.is_empty()) else {
+            return bundled.map(|path| Self {
+                program: path.into(),
+                args: Vec::new(),
+            });
+        };
+        let script = std::path::Path::new(&entry)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "ts" | "js" | "mjs" | "cjs"));
+        if !script {
+            return Some(Self {
+                program: entry,
+                args: Vec::new(),
+            });
+        }
         let node = var("CARTOGRAPH_AGENT_NODE")
             .filter(|node| !node.is_empty())
             .unwrap_or_else(|| "node".into());
-        Some(Self { node, entry })
+        Some(Self {
+            program: node,
+            args: vec![entry],
+        })
     }
 
     /// The child command. Its environment holds only `PATH`, so no key or
     /// proxy setting of the app reaches the runtime (ADR-0085 decision 7).
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.node);
-        command.arg(&self.entry).env_clear();
+        let mut command = Command::new(&self.program);
+        command.args(&self.args).env_clear();
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
         }
