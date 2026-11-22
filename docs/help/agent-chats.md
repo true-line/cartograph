@@ -14,7 +14,7 @@ calls no cloud provider. Use **Open Jobs** to cancel or retry work and
 
 **Chat sessions** lists the saved chats in the loaded task history, one row
 per conversation: its newest question, how many turns it has, the newest
-turn's status and provider mode, and whether a turn is open in a pane. Sessions
+turn's status and provider mode, and whether the chat is open in a pane. Sessions
 with a turn in progress come first. **Open chat** opens the newest turn below.
 Each turn is a specialist investigation, so it counts against the controls.
 
@@ -32,8 +32,8 @@ asked, and starts when a place frees or the pool is resumed. Cancel a waiting
 job from Jobs. Work already running continues. A waiting investigation's time
 limits start when it starts. At most two investigations are open at once,
 whatever the limits say. Agent work still waiting when the app closes is
-ended as interrupted the next time the app starts; start it again if you still
-need it.
+ended, with its reason, the next time the app starts; start it again if you
+still need it.
 
 Review saved specialist conversations and open their findings. The list uses
 the same saved investigation history as Investigations, including its search,
