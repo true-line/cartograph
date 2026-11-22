@@ -715,8 +715,8 @@ export class OrderService {
 fn a_push_onto_a_list_the_callable_starts_empty_is_a_change() {
     // AC-1050 (T-1050): `found.push(v)` under a guard is a recorded change
     // only when `found` is a `const` the callable starts as `[]`; a list
-    // that starts with values, a `let`, a parameter or a list declared
-    // after the push is not.
+    // that starts with values, a `let`, a parameter, a list declared after
+    // the push, or a loop or catch binder shadowing the list is not.
     let code = r#"function check(order: any, given: any[]) {
     const found: any[] = [];
     const seeded = [1];
@@ -731,6 +731,19 @@ fn a_push_onto_a_list_the_callable_starts_empty_is_a_change() {
         }
     }
     const later = [];
+    // A loop or catch binder of the same name shadows the outer list.
+    for (const found of order.groups) {
+        if (order.bad) {
+            found.push(order.code);
+        }
+    }
+    try {
+        order.run();
+    } catch (found) {
+        if (order.bad) {
+            found.push(order.code);
+        }
+    }
     if (found.length) {
         return 'message.cannot-transition-to-payment-due-to-insufficient-stock';
     }

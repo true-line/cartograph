@@ -1279,6 +1279,26 @@ fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
             }))
 }
 
+/// Whether a binder (a pattern or declaration) binds `name` anywhere in
+/// it, within a bounded depth.
+fn binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    fn walk(cx: &FileCx<'_>, node: TsNode<'_>, name: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        if matches!(
+            node.kind(),
+            "identifier" | "shorthand_property_identifier_pattern"
+        ) {
+            return cx.text(&node) == name;
+        }
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .any(|child| walk(cx, child, name, depth + 1))
+    }
+    walk(cx, node, name, 0)
+}
+
 /// Whether `call` is `found.push(v)` on a [`collected_list`].
 fn collected_push(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
     call.kind() == "call_expression"
@@ -1305,6 +1325,17 @@ fn collected_list(cx: &FileCx<'_>, name: TsNode<'_>) -> bool {
             return false;
         };
         if callable::is_callable(parent) {
+            return false;
+        }
+        // A loop or catch binder of the same name shadows any outer list
+        // (`for (const found of groups) { found.push(v) }`): not one.
+        let binder = match parent.kind() {
+            "for_in_statement" => parent.child_by_field_name("left"),
+            "catch_clause" => parent.child_by_field_name("parameter"),
+            "for_statement" => parent.child_by_field_name("initializer"),
+            _ => None,
+        };
+        if binder.is_some_and(|b| binds(cx, b, spelled)) {
             return false;
         }
         if parent.kind() == "statement_block" {

@@ -2272,16 +2272,40 @@ fn tested_text<'e>(
     let (Some(definition), None) = (found.next(), found.next()) else {
         return shown.into();
     };
-    let init = definition.initializer.display.as_str();
-    let test = [
-        "===", "!==", "==", "!=", "||", "&&", " < ", " > ", "<=", ">=",
-    ];
+    // The recorded root must itself be a test: `a || b`, `a && b` or a
+    // comparison, through parentheses; a string or call that merely
+    // spells one is not.
+    use core_graph::rules::{BinaryOperator as B, DefinitionExpressionKind as K, LogicalOperator};
+    let nodes = &definition.expression.nodes;
+    let mut at = definition.expression.root as usize;
+    let is_test = loop {
+        match nodes.get(at).map(|n| &n.kind) {
+            Some(K::Parenthesized { value }) => at = *value as usize,
+            Some(K::Logical { operator, .. }) => {
+                break matches!(operator, LogicalOperator::And | LogicalOperator::Or);
+            }
+            Some(K::Binary { operator, .. }) => {
+                break matches!(
+                    operator,
+                    B::LooseEqual
+                        | B::LooseNotEqual
+                        | B::StrictEqual
+                        | B::StrictNotEqual
+                        | B::LessThan
+                        | B::LessThanOrEqual
+                        | B::GreaterThan
+                        | B::GreaterThanOrEqual
+                );
+            }
+            _ => break false,
+        }
+    };
     if definition.initializer.capture != core_graph::rules::ExpressionCapture::CompleteSyntax
-        || !test.iter().any(|op| init.contains(op))
+        || !is_test
     {
         return shown.into();
     }
-    format!("({})", one_line(init)).into()
+    format!("({})", one_line(definition.initializer.display.as_str())).into()
 }
 
 fn one_line(text: &str) -> String {
@@ -4398,6 +4422,56 @@ export class TaxRateService {
             Some(
                 "A tax rate's test holds when the tax category's ID equals the category ID, \
                  and the zone's ID equals the zone ID."
+            )
+        );
+    }
+
+    // AC-1052: a bare tested local reads as its definition only when the
+    // recorded definition is a test, not a string or call spelling one.
+    #[test]
+    fn a_tested_local_reads_as_its_definition_only_when_that_is_a_test() {
+        let out = adapters_lang_ts::extract_source(
+            b"export function a(variant: any) {
+    const untracked = variant.track === 'FALSE' || variant.flag === false;
+    if (untracked) {
+        throw new Error('x');
+    }
+}
+export function b(variant: any) {
+    const label = 'a || b';
+    if (label) {
+        throw new Error('x');
+    }
+}
+",
+            "src/tested.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let said = |owner: &str| {
+            let rule = out
+                .nodes
+                .iter()
+                .filter(|n| n.label == "BusinessRule")
+                .map(|n| GuardedExitEvidence::from_value(n.props["rule"].clone()).unwrap())
+                .find(|r| r.owner_id.ends_with(owner))
+                .unwrap();
+            statement(&rule, owner, None, &[])
+        };
+        assert_eq!(
+            said("#a").as_deref(),
+            Some(
+                "When the variant's track is \u{201c}FALSE\u{201d} or the variant's flag is \
+                 false, it fails with an error."
+            )
+        );
+        assert_eq!(
+            said("#b").as_deref(),
+            Some(
+                "When a label is given, it fails with an error. Here the label is \u{201c}a || b\u{201d}."
             )
         );
     }
