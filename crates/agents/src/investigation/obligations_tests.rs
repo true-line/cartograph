@@ -546,3 +546,25 @@ fn opt_in_request_family_binds_policy_role_and_envelope() {
     assert!(StagedObligationRequest::decode_with_policy(&padded, policy).is_err());
     assert_eq!(legacy.intent_hash().unwrap(), old_hash);
 }
+
+// AC-1429: every offered version that selects the expanded policy has a
+// request family, so a start of it is not refused as invalid input.
+#[test]
+fn every_offered_policy_version_has_a_request_family() {
+    let policy = &super::super::policy::INVESTIGATION_V2_POLICY;
+    for id in offered_specialists()
+        .into_iter()
+        .filter(|id| id.uses_policy_selection() && id.uses_next_prompt_admission())
+    {
+        let wire = serde_json::to_value(id).unwrap();
+        let wire = wire.as_str().unwrap();
+        assert!(
+            (1..=8).any(|schema| request_family(policy, schema, wire).is_ok()),
+            "{wire}"
+        );
+    }
+    assert_eq!(
+        request_family(policy, 7, "domain-analyst@29").unwrap().1,
+        &["domain-analyst@29"]
+    );
+}
