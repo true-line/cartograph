@@ -9,6 +9,11 @@ license-file.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The production modules gate the app's test hooks on
+# `any(test, feature = "test-support")`; this harness builds them under test.
+test-support = []
+
 [[test]]
 name = "ownership"
 path = "tests/ownership.rs"
