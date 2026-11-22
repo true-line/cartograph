@@ -438,6 +438,7 @@ impl CuratedReview {
     /// Whether `records`, `drafts` and `findings`, read later, are the ones
     /// this review read. A review that failed read none, so nothing is
     /// compared for it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn same_records(
         &self,
         records: &[ReviewedProposal],
@@ -451,6 +452,7 @@ impl CuratedReview {
 /// Where a read gets its reviews (SPEC-12 slice 4, AC-0654). The export
 /// calls [`gather`] itself; an MCP read session takes its reviews through
 /// this, so the session code names no store it does not already hold.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) trait ReviewSource {
     /// [`gather`]. Called with no graph or decision lock held.
     fn gather(&self) -> CuratedReview;
@@ -714,6 +716,7 @@ pub(crate) enum DerivedDecisions<'a> {
     /// its bound (an MCP read session). Such a decision leaves the
     /// projection not computed, with
     /// [`CuratedFailure::DerivedDecisionsNeedCompile`].
+    #[cfg_attr(not(unix), allow(dead_code))]
     NotCompiled,
 }
 

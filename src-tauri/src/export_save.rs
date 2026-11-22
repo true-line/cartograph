@@ -169,6 +169,7 @@ pub(crate) async fn save_export_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Seek;
 
     #[test]
