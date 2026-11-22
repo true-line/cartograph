@@ -3796,6 +3796,99 @@ fn schedules_and_entry_points_are_read_from_the_capture() {
     assert!(checkout.iter().any(|s| s.contains("web")), "{checkout:?}");
 }
 
+// AC-1063: the toolchain reader's selection joins the capture, and with the
+// capture it reads the retained bytes: a package.json edited in the
+// checkout afterwards changes nothing, while an env file is never retained.
+// Without the flag that says the selection was retained, the checkout is
+// read.
+#[test]
+fn toolchain_configs_are_read_from_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"shop\",\"dependencies\":{\"react\":\"^18\"}}",
+    )
+    .unwrap();
+    std::fs::write(root.join(".env"), "PORT=3000\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.toolchain_captured);
+    let capture = input.capture.as_ref().unwrap();
+    let held: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert!(held.contains(&"package.json"), "{held:?}");
+    assert!(!held.contains(&".env"), "{held:?}");
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"shop\",\"dependencies\":{\"vue\":\"^3\"}}",
+    )
+    .unwrap();
+    let extract = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                toolchain_captured: captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0
+    };
+    let tools = |extraction: &adapters_lang_ts::Extraction| -> Vec<String> {
+        let mut found: Vec<String> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Tool")
+            .map(|node| node.id.clone())
+            .collect();
+        found.sort();
+        found
+    };
+    let captured = tools(&extract(true));
+    let checkout = tools(&extract(false));
+    assert!(
+        captured.iter().any(|id| id.contains("react")),
+        "{captured:?}"
+    );
+    assert!(
+        !captured.iter().any(|id| id.contains("vue")),
+        "{captured:?}"
+    );
+    assert!(
+        captured.iter().any(|id| id.contains(".env")),
+        "{captured:?}"
+    );
+    assert!(checkout.iter().any(|id| id.contains("vue")), "{checkout:?}");
+}
+
 // AC-1055: the Python observed-infrastructure pass reads the same captured
 // bytes as the Python lane, so a checkout edit after capture changes neither.
 #[test]

@@ -349,6 +349,19 @@ or start follows, and list only the capture's own paths, so whether a file a
 declaration names exists is decided by the snapshot; otherwise, and with no capture, they read the checkout. Their
 facts carry no receipt.
 
+## Captured toolchain reads (AC-1063, #385)
+
+The toolchain reader's selection (`toolchain::is_toolchain_file`: every file a
+detector names, other than env files) joins the reader selections tried
+beside the lanes, and the capture records whether it was listed and retained
+(`toolchain_captured`). When it was, every detector reads the retained bytes,
+and a config file's cited length is its captured length; the reader lists
+only the capture's own paths and the checkout's env files. Otherwise, and with
+no capture, the reader reads the checkout. Env files are never retained,
+because they hold secrets (AC-0097): their key names and allowlisted values
+(AC-1021) are read from the checkout. Preflight's detection still reads the
+checkout, and toolchain facts carry no receipt.
+
 ## Directory-built lane facts (AC-1037, #385)
 
 The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each
