@@ -397,6 +397,9 @@ impl InvestigationDisclosure {
             }
         }
         if let Some(history) = &self.history {
+            if *history == DisclosureRepresentation::FirewallRefused {
+                return Err(InvestigationError::InvalidInput);
+            }
             history.validate()?;
         }
         bounded_bytes(self, MAX_DISCLOSURE_BYTES)?;

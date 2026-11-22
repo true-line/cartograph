@@ -1916,6 +1916,20 @@ fn withheld_refused_read_reaches_no_payload_and_seals_distinctly() {
         DisclosureRepresentation::FirewallRefused
     );
     assert!(source.disclosed_text_hash.is_none() && !source.redacted);
+    // Citation schemas never offer the withheld id, while the ledger keeps it.
+    assert!(input.ledger().citations.iter().any(|c| c.citation_id == id));
+    assert!(
+        input
+            .citable_ledger()
+            .unwrap()
+            .citations
+            .iter()
+            .all(|c| c.citation_id != id)
+    );
+    // A firewall refusal is a source state only, never a history state.
+    let mut forged = disclosure.clone();
+    forged.history = Some(DisclosureRepresentation::FirewallRefused);
+    assert!(forged.validate_with_policy(input.ledger(), policy).is_err());
     // A later read can still be measured on the withholding input.
     input
         .measure_unread_source_v9_with_policy(

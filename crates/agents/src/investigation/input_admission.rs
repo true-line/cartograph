@@ -58,6 +58,24 @@ const PATCH_INSTRUCTIONS: &str = "Return only a finish_patch object with a patch
 const FINISH_ONLY_INSTRUCTIONS: &str = "Finish only: return a finish action using the already supplied evidence. Do not query context, read evidence, or read coverage inventory. Capacity feedback grants no evidence or authority.";
 
 impl InvestigationInput {
+    /// The ledger as citation schemas see it: a firewall-refused read stays
+    /// acquired but is not citable, so its id leaves every citation enum (#679).
+    pub(super) fn citable_ledger(
+        &self,
+    ) -> Result<std::borrow::Cow<'_, InvestigationInputLedger>, InvestigationError> {
+        let prompt: Value = serde_json::from_str(&self.payload.prompt)
+            .map_err(|_| InvestigationError::InvalidInput)?;
+        let withheld = withheld_source_ids(&prompt)?;
+        if withheld.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(&self.ledger));
+        }
+        let mut ledger = self.ledger.clone();
+        ledger
+            .citations
+            .retain(|citation| !withheld.contains(citation.citation_id.as_str()));
+        Ok(std::borrow::Cow::Owned(ledger))
+    }
+
     /// Distinct @10/request7 path. Exact family selection does not grant
     /// dispatch or acquisition authority; the host must admit each operation.
     #[allow(clippy::too_many_arguments)]
@@ -1313,7 +1331,7 @@ impl InvestigationInput {
                 self.payload.response_schema.take(),
                 mode,
                 &choices,
-                &self.ledger,
+                &*self.citable_ledger()?,
             )?;
         }
         self.payload.response_schema = response_schema::attach_visible(
@@ -1364,7 +1382,7 @@ impl InvestigationInput {
             &mut prompt,
             Some(
                 basis
-                    .response_schema(&self.ledger)
+                    .response_schema(&*self.citable_ledger()?)
                     .map_err(|_| InvestigationError::InvalidInput)?,
             ),
         )?;
@@ -1567,7 +1585,7 @@ impl InvestigationInput {
             self.validate_finish_patch_projection(&prompt, &metadata)?;
             Some(
                 patch
-                    .response_schema(&self.ledger)
+                    .response_schema(&*self.citable_ledger()?)
                     .map_err(|_| InvestigationError::InvalidInput)?,
             )
         } else if SpecialistId::is_typed_citation_prompt(&self.payload.system) {
@@ -1575,7 +1593,7 @@ impl InvestigationInput {
                 ordinary_schema,
                 mode,
                 choices,
-                &self.ledger,
+                &*self.citable_ledger()?,
             )?
         } else {
             ordinary_schema
