@@ -6,7 +6,7 @@ use std::mem::size_of;
 /// Returns projection currency and writer peak. Callers supply the actual
 /// continuation verification peak, candidate prepared/disclosure retention,
 /// and retained-source callback peak. No provider execution or RSS is modeled.
-pub(crate) fn workspace(
+pub fn workspace(
     continuation_peak: usize,
     continuation_retained: usize,
     callback_peak: usize,
@@ -119,7 +119,7 @@ pub(crate) fn workspace(
     Some((projection, peak))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

@@ -70,7 +70,7 @@ pub(in crate::jobs::investigations) fn persist(
             return Err(InvestigationStoreError::Capacity);
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     inject_failure(SettlementFailure::AfterTaskSave)?;
     Ok(p.task)
 }
@@ -79,7 +79,7 @@ impl JobStore {
     /// Dispose a known host outcome while retaining the original acknowledged
     /// reservation identity. Cancellation/charge revision advances are allowed;
     /// an already published continuation is never overwritten after lost ACK.
-    pub(crate) fn discard_next_prompt_source(
+    pub fn discard_next_prompt_source(
         &mut self,
         execution: &JobExecution,
         reservation: &CommittedSourceReservation,
@@ -125,7 +125,7 @@ impl JobStore {
         )?;
         let task = persist(&tx, &before, plan)?;
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(SettlementFailure::AfterCommitAck)?;
         Ok(task.detail)
     }
@@ -177,7 +177,7 @@ impl JobStore {
         }
         let task = persist(&tx, &before, plan)?;
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(SettlementFailure::AfterCommitAck)?;
         Ok(task.detail)
     }
@@ -218,25 +218,25 @@ impl JobStore {
         )?;
         let next = persist(&tx, &task, plan)?;
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(SettlementFailure::AfterCommitAck)?;
         Ok(next.detail)
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettlementFailure {
     AfterTaskSave,
     AfterCommitAck,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static SETTLEMENT_FAILURE:std::cell::Cell<Option<SettlementFailure>>=const {std::cell::Cell::new(None)}; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_once(at: SettlementFailure) {
     SETTLEMENT_FAILURE.with(|slot| slot.set(Some(at)));
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn inject_failure(at: SettlementFailure) -> Result<(), InvestigationStoreError> {
     SETTLEMENT_FAILURE.with(|slot| {
         if slot.get() == Some(at) {

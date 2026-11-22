@@ -5,7 +5,7 @@ use read_reservations::{SavedRead, ValidationCharge};
 
 /// Expected saved identities are CAS inputs, not caller-supplied authority;
 /// every value is compared to the owner-resolved task and immutable journal.
-pub(crate) struct SourceValidationBasis<'a> {
+pub struct SourceValidationBasis<'a> {
     pub task_id: &'a str,
     pub step_id: &'a str,
     pub reservation_hash: &'a str,
@@ -29,7 +29,7 @@ impl PendingSourceRead {
 
 /// Issued only after the owner-authenticated writer COMMIT succeeds. No Clone,
 /// Deserialize, public fields or constructor: a supplied DTO is not a receipt.
-pub(crate) struct CommittedSourceValidation {
+pub struct CommittedSourceValidation {
     task_id: String,
     step_id: String,
     reservation_hash: String,
@@ -39,7 +39,7 @@ pub(crate) struct CommittedSourceValidation {
     detail: InvestigationDetail,
 }
 impl CommittedSourceValidation {
-    pub(crate) fn matches(
+    pub fn matches(
         &self,
         basis: &SourceValidationBasis<'_>,
         target: &InvestigationInspectionTarget,
@@ -55,18 +55,18 @@ impl CommittedSourceValidation {
             && self.step_id == basis.step_id
             && self.reservation_hash == basis.reservation_hash
     }
-    pub(crate) fn task_id(&self) -> &str {
+    pub fn task_id(&self) -> &str {
         &self.task_id
     }
-    #[cfg(test)]
-    pub(crate) fn step_id(&self) -> &str {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn step_id(&self) -> &str {
         &self.step_id
     }
-    #[cfg(test)]
-    pub(crate) fn reservation_hash(&self) -> &str {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reservation_hash(&self) -> &str {
         &self.reservation_hash
     }
-    pub(crate) fn detail(&self) -> &InvestigationDetail {
+    pub fn detail(&self) -> &InvestigationDetail {
         &self.detail
     }
 }
@@ -330,7 +330,7 @@ impl JobStore {
     /// Last owner/cancellation fence after charge COMMIT and before source IO.
     /// This read-only snapshot performs no retry or settlement and releases its
     /// DB borrow before returning; the host keeps retained source guards alive.
-    pub(crate) fn verify_source_validation_access(
+    pub fn verify_source_validation_access(
         &self,
         execution: &JobExecution,
         receipt: &CommittedSourceValidation,
@@ -364,7 +364,7 @@ impl JobStore {
         Ok(())
     }
 
-    pub(crate) fn charge_prepared_source_validation(
+    pub fn charge_prepared_source_validation(
         &mut self,
         execution: &JobExecution,
         basis: &SourceValidationBasis<'_>,
@@ -417,7 +417,7 @@ impl JobStore {
         task = projection.task;
         let mut reads = read_reservations::ReadTransaction::new(&tx)?;
         reads.insert_charge(&id, &reservation.binding.step_id, &charge)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(ChargeFailure::AfterWitness)?;
         persist_event(&tx, &projection.event)?;
         save_next_prompt_task(&tx, &task, basis.revision, false)?;
@@ -429,13 +429,13 @@ impl JobStore {
                 return Err(InvestigationStoreError::Capacity);
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(ChargeFailure::AfterTaskSave)?;
         validate_saved_pending(&tx, &task)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(ChargeFailure::BeforeCommit)?;
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         inject_failure(ChargeFailure::AfterCommit)?;
         // No receipt escapes on failed/uncertain commit, hence no source read.
         Ok(CommittedSourceValidation {
@@ -450,7 +450,7 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChargeFailure {
     AfterWitness,
@@ -458,9 +458,9 @@ enum ChargeFailure {
     BeforeCommit,
     AfterCommit,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {static CHARGE_FAILURE:std::cell::Cell<Option<ChargeFailure>>=const {std::cell::Cell::new(None)};}
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn inject_failure(at: ChargeFailure) -> Result<(), InvestigationStoreError> {
     CHARGE_FAILURE.with(|slot| {
         if slot.get() == Some(at) {
@@ -472,24 +472,24 @@ fn inject_failure(at: ChargeFailure) -> Result<(), InvestigationStoreError> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "source_validation_tests.rs"]
 mod tests;
-#[cfg(test)]
-pub(crate) use tests::fixture_data::{SourceValidationInitialData, captured_source_fixture};
+#[cfg(any(test, feature = "test-support"))]
+pub use tests::fixture_data::{SourceValidationInitialData, captured_source_fixture};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use tests::fixture_data::fixture_with_source_obligation as internal_source_obligation_fixture;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use tests::fixture_data::gated_source_obligation_fixture;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use tests::fixture_data::source_invocation_fixture as internal_source_invocation_fixture;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use tests::fixture_data::captured_source_invocation_for_role;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn lose_next_charge_ack() {
     CHARGE_FAILURE.with(|slot| slot.set(Some(ChargeFailure::AfterCommit)));
 }
