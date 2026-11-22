@@ -440,6 +440,8 @@ pub(crate) enum HostLimitKind {
     Unspecified,
     CumulativeQueryAndInventoryBytes,
     QueryPageBudget(agents::investigation::query_refusal::QueryBudgetDiagnostic),
+    /// The model asked again for a page it already has (#1352).
+    RepeatedQuery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +553,12 @@ impl InvestigationStopReason {
             || Self::HostLimitAt {
                 phase: Phase::Inventory,
                 limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+            }
+            .message()
+                == message
+            || Self::HostLimitAt {
+                phase: Phase::Query,
+                limit: HostLimitKind::RepeatedQuery,
             }
             .message()
                 == message
@@ -712,6 +720,9 @@ impl InvestigationStopReason {
             Self::HostLimitAt { phase, limit } => match (phase, limit) {
                 (_, HostLimitKind::QueryPageBudget(_)) => {
                     "Investigation limit reached: host_limit; phase=metadata_query; limit=query_page_budget."
+                }
+                (_, HostLimitKind::RepeatedQuery) => {
+                    "Investigation limit reached: host_limit; phase=metadata_query; limit=repeated_query."
                 }
                 (PreparationPhase::Query, HostLimitKind::CumulativeQueryAndInventoryBytes) => {
                     "Investigation limit reached: host_limit; phase=metadata_query; limit=cumulative_query_and_inventory_bytes."
