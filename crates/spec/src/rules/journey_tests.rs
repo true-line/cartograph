@@ -631,14 +631,15 @@ fn journey_candidates_enforce_ordering_cycle_budget_and_identity_contracts() {
     // 5b'. (AC-1309, T-1309) The same conditional site under a branch on the fetch's
     // own bound result (`const res = await post(…); if (res.status === 201)`)
     // is ordered, even when the fetch sits in a `try` and is not
-    // straight-line. A `result_of` naming another call proves nothing.
+    // straight-line, also when the site lists another call too. A `result_of`
+    // naming only another call proves nothing.
     for (result_of, expected) in [
         (
-            json!({"byte_start": 240, "byte_end": 310}),
+            json!([{"byte_start": 100, "byte_end": 170}, {"byte_start": 240, "byte_end": 310}]),
             JourneyResult::Ordered,
         ),
         (
-            json!({"byte_start": 100, "byte_end": 170}),
+            json!([{"byte_start": 100, "byte_end": 170}]),
             JourneyResult::Unordered,
         ),
     ] {
@@ -664,7 +665,10 @@ fn journey_candidates_enforce_ordering_cycle_budget_and_identity_contracts() {
                 "screen:simplelogin/extension@/new-alias-result/"
             );
             let site = &step.navigation.as_ref().unwrap().sites_taken[0];
-            assert_eq!((site.conditional, site.result_of), (true, Some((240, 310))));
+            assert_eq!(
+                (site.conditional, site.result_of.clone()),
+                (true, vec![(100, 170), (240, 310)])
+            );
             assert_eq!(branch.id, baseline.id);
         } else {
             assert!(branch.result_step.is_none());
