@@ -506,3 +506,55 @@ fn a_system_composition_tries_each_excerpt_listed_then_unlisted() {
     );
     assert_eq!(attempts(0), vec![(None, true)]);
 }
+
+#[test]
+fn a_rule_is_cited_with_the_capability_it_is_listed_under() {
+    // AC-1324 (T-1324, #2416).
+    let rules = BTreeMap::from([("F-rule".to_owned(), "Manage user (API)".to_owned())]);
+    let capabilities: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::from([
+        ("Manage user (API)", BTreeSet::from(["F-user"])),
+        ("Enter sudo (dashboard)", BTreeSet::from(["F-sudo"])),
+    ]);
+    let cites = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    // The rule with its own capability, alone or beside others.
+    assert!(rule_capability_cited(
+        &cites(&["F-rule", "F-user"]),
+        &rules,
+        &capabilities
+    ));
+    assert!(rule_capability_cited(
+        &cites(&["F-sudo", "F-rule", "F-user"]),
+        &rules,
+        &capabilities
+    ));
+    // The rule stated under another capability.
+    assert!(!rule_capability_cited(
+        &cites(&["F-sudo", "F-rule"]),
+        &rules,
+        &capabilities
+    ));
+    // No excerpt rule cited, or a rule whose capability is not citable.
+    assert!(rule_capability_cited(
+        &cites(&["F-sudo"]),
+        &rules,
+        &capabilities
+    ));
+    let orphan = BTreeMap::from([("F-rule".to_owned(), "Gone".to_owned())]);
+    assert!(rule_capability_cited(
+        &cites(&["F-rule"]),
+        &orphan,
+        &capabilities
+    ));
+    // Capabilities are found by name among the citable facts.
+    let facts = vec![ComposeFact {
+        citation_id: "F-user".into(),
+        label: "Capability".into(),
+        name: Some("Manage user (API)".into()),
+        tier: "Derived".into(),
+        confidence: "Verified".into(),
+    }];
+    assert_eq!(
+        capability_ids(&facts),
+        BTreeMap::from([("Manage user (API)", BTreeSet::from(["F-user"]))])
+    );
+}
