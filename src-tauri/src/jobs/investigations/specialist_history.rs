@@ -29,7 +29,7 @@ pub(super) fn matches(
     Ok(saved == &expected)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

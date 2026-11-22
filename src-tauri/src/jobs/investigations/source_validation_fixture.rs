@@ -306,28 +306,28 @@ pub(super) fn saved(f: &completion::InternalFixture) -> SavedRead {
         .unwrap()
 }
 
-pub(crate) struct SourceValidationInitialData {
+pub struct SourceValidationInitialData {
     pub ledger: InvestigationInputLedger,
     pub query_pages: Vec<String>,
     pub archive: InvestigationCoverageArchive,
     pub target: InvestigationInspectionTarget,
 }
-pub(crate) struct SourceValidationTestFixture {
+pub struct SourceValidationTestFixture {
     inner: completion::InternalFixture,
     reservation: Reservation,
     hash: String,
 }
 impl SourceValidationTestFixture {
-    pub(crate) fn lose_charge_ack(&self) {
+    pub fn lose_charge_ack(&self) {
         CHARGE_FAILURE.with(|slot| slot.set(Some(ChargeFailure::AfterCommit)));
     }
-    pub(crate) fn basis(&self) -> SourceValidationBasis<'_> {
+    pub fn basis(&self) -> SourceValidationBasis<'_> {
         basis(&self.inner, &self.hash)
     }
-    pub(crate) fn execution(&self) -> &JobExecution {
+    pub fn execution(&self) -> &JobExecution {
         &self.inner._execution_guard
     }
-    pub(crate) fn charged_bytes_after_reopen(&self) -> u64 {
+    pub fn charged_bytes_after_reopen(&self) -> u64 {
         let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
         let tx = reopened.conn.unchecked_transaction().unwrap();
         let task = load_next_prompt_task_base(&tx, &self.inner.basis.task_id).unwrap();
@@ -351,7 +351,7 @@ impl SourceValidationTestFixture {
 /// App adapter tests supply real parser/receipt/query data in this exact private
 /// directory/state.db. Only task3/reservation construction is explicit test data;
 /// prompt9 disclosure and saved call stamps use production builders/validators.
-pub(crate) fn captured_source_fixture(
+pub fn captured_source_fixture(
     initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
 ) -> SourceValidationTestFixture {
     let (f, source, _) = captured_source_invocation(initialize);

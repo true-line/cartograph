@@ -1,6 +1,6 @@
 use super::*;
 #[path = "source_validation_fixture.rs"]
-pub(crate) mod fixture_data;
+pub mod fixture_data;
 use fixture_data::*;
 
 // AC-0287: witness, actual full-file validation usage, event and task CAS are
