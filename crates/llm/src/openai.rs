@@ -220,9 +220,8 @@ mod tests {
             server.join().unwrap();
         }
 
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}/v1/models", closed.local_addr().unwrap());
-        drop(closed);
+        let (_reserved, closed) = crate::bounded::tests::refused_endpoint();
+        let endpoint = format!("http://{closed}/v1/models");
         assert_eq!(
             check_connection(&endpoint, "sk-proj-test", timeout),
             ConnectionOutcome::Unreachable
