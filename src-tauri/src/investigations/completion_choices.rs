@@ -3,11 +3,12 @@ use super::{context::FrozenContext, inspection};
 use crate::AppState;
 use agents::TaskFactKey;
 use agents::investigation::{InventoryTarget, InvestigationScope, MAX_MANIFEST_BYTES, Obligation};
+use context_hub::coverage::ScopedRepo;
 use context_hub::{
     ContextSnapshot, FactReference, QueryRequest, QueryScope,
     coverage::{CoverageQualification, CoverageStatus},
 };
-use core_graph::coverage::CoverageReadLimits;
+use core_graph::{SnapshotReadLimits, coverage::CoverageReadLimits};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use tauri::Manager;
@@ -53,7 +54,15 @@ pub(crate) struct ObligationChoices {
     scoped_facts: Option<BTreeSet<FactReference>>,
 }
 
-fn choices(
+#[cfg(test)]
+impl ObligationChoices {
+    /// The scope's fact membership, which never enters the selection wire.
+    pub(super) fn scoped_facts(&self) -> Option<&BTreeSet<FactReference>> {
+        self.scoped_facts.as_ref()
+    }
+}
+
+pub(super) fn choices(
     graph: (Vec<core_graph::Node>, Vec<core_graph::Edge>),
     coverage: CoverageQualification,
     scope: &InvestigationScope,
@@ -67,6 +76,17 @@ fn choices(
     let graph_snapshot_id = complete.id().to_owned();
     let scoped = FrozenContext::scoped_snapshot(&graph, scope, area, complete)
         .map_err(|error| error.to_string())?;
+    choices_in(graph_snapshot_id, scoped, coverage, scope)
+}
+
+/// The choices for `scoped`, the requested scope's projection, whose source
+/// targets bind the complete graph `graph_snapshot_id`.
+fn choices_in(
+    graph_snapshot_id: String,
+    scoped: ContextSnapshot,
+    coverage: CoverageQualification,
+    scope: &InvestigationScope,
+) -> Result<ObligationChoices, String> {
     // Keep membership from this exact authorized projection, not merely its
     // full-graph identity. This metadata never enters the selection wire.
     let scoped_facts = match scope {
@@ -208,13 +228,50 @@ fn current_choices_with_scope<R: tauri::Runtime>(
             .map_err(SelectionError::from),
         None => crate::context::coverage_scope(app, state).map_err(SelectionError::from),
     };
+    choices_at(
+        state,
+        scope,
+        super::context::task_graph_limits(limits.is_some()),
+        read_scope,
+    )
+}
+
+/// The current choices for `scope`, with the coverage scope read before and
+/// after the graph read so a change between them is never qualified.
+pub(super) fn choices_at(
+    state: &AppState,
+    scope: &InvestigationScope,
+    graph_limits: SnapshotReadLimits,
+    mut read_scope: impl FnMut() -> Result<Vec<ScopedRepo>, SelectionError>,
+) -> Result<ObligationChoices, SelectionError> {
     let before = read_scope()?;
+    if super::context::scope_aware(scope).map_err(|error| error.to_string())? {
+        // #1602 option A (AC-1311): a neighborhood or area reads only its
+        // scope, at the coverage revision, with the complete-graph identity
+        // streamed inside the same scoped reader, as task preparation does.
+        let (revision, recorded) = state
+            .graph
+            .lock()
+            .map_err(|_| "Graph store is unavailable.".to_owned())?
+            .read_coverage_records_with_revision_bounded(CoverageReadLimits::default())
+            .map_err(|error| error.to_string())?;
+        let area =
+            super::area::files(state, &revision, scope).map_err(|error| error.to_string())?;
+        let (graph_snapshot_id, scoped) =
+            FrozenContext::scoped_snapshot_at(state, scope, area.as_ref(), graph_limits, &revision)
+                .map_err(|error| error.to_string())?;
+        let stable = crate::context::stable_scope(&before, read_scope()?);
+        let coverage =
+            CoverageQualification::new(&stable, &recorded).map_err(|error| error.to_string())?;
+        return choices_in(graph_snapshot_id, scoped, coverage, scope)
+            .map_err(SelectionError::from);
+    }
     let (base, recorded) = state
         .graph
         .lock()
         .map_err(|_| "Graph store is unavailable.".to_owned())?
         .read_snapshot_with_coverage_and_revision_bounded(
-            super::context::task_graph_limits(limits.is_some()),
+            graph_limits,
             CoverageReadLimits::default(),
         )
         .map_err(|error| error.to_string())?;
@@ -328,7 +385,6 @@ mod tests {
     use agents::investigation::{
         InvestigationProviderMode, ObligationEnvelope, StagedObligationRequest,
     };
-    use context_hub::coverage::ScopedRepo;
 
     // AC-0266: an unrecorded repository supplies no selectable inventory authority.
     #[test]

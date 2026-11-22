@@ -1287,6 +1287,83 @@ fn a_scope_prepares_under_limits_the_whole_graph_exceeds() {
     assert_eq!(prepared.graph.0.len(), 3);
 }
 
+// AC-1311 (#1602): completion choices for a neighborhood or area read only the
+// scope at the coverage revision, and give exactly the choices a whole-graph
+// read gives; under retained limits the whole graph exceeds they still list.
+#[test]
+fn scoped_completion_choices_match_the_whole_graph_read() {
+    use super::super::completion_choices::{SelectionError, choices, choices_at};
+    let (fixture, area) = area_fixture();
+    let read_scope = || Ok::<_, SelectionError>(fixture.scope.clone());
+    for scope in [
+        InvestigationScope::Area { id: area },
+        InvestigationScope::Neighborhood {
+            anchor: "sym:alias".into(),
+            hops: 1,
+        },
+    ] {
+        let scoped = choices_at(
+            &fixture.state,
+            &scope,
+            SnapshotReadLimits::investigation(),
+            read_scope,
+        )
+        .unwrap();
+        let (base, recorded) = fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .read_snapshot_with_coverage_and_revision_bounded(
+                SnapshotReadLimits::investigation(),
+                core_graph::coverage::CoverageReadLimits::default(),
+            )
+            .unwrap();
+        let files = super::super::area::files(&fixture.state, &base.revision, &scope).unwrap();
+        let coverage =
+            context_hub::coverage::CoverageQualification::new(&fixture.scope, &recorded).unwrap();
+        let whole = choices(base.graph, coverage, &scope, files.as_ref()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&scoped).unwrap(),
+            serde_json::to_value(&whole).unwrap(),
+            "{scope:?}"
+        );
+        assert_eq!(scoped.scoped_facts(), whole.scoped_facts(), "{scope:?}");
+        assert!(scoped.scoped_facts().is_some_and(|facts| !facts.is_empty()));
+    }
+    for index in 0..60 {
+        fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .put_node(&Node {
+                id: format!("pad:{index:03}"),
+                label: "Module".into(),
+                props: json!({"name": index}),
+            })
+            .unwrap();
+    }
+    let retained = SnapshotReadLimits {
+        max_rows: 40,
+        ..SnapshotReadLimits::default()
+    };
+    let neighborhood = InvestigationScope::Neighborhood {
+        anchor: "sym:alias".into(),
+        hops: 1,
+    };
+    assert!(choices_at(&fixture.state, &neighborhood, retained, read_scope).is_ok());
+    assert!(
+        choices_at(
+            &fixture.state,
+            &InvestigationScope::All,
+            retained,
+            read_scope
+        )
+        .is_err()
+    );
+}
+
 // AC-1302 (#1602): a scope-aware context rereads only the selected facts, at the
 // revision it pinned; once the store has moved on, selection is a changed input.
 #[test]

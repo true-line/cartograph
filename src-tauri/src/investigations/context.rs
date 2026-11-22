@@ -311,6 +311,9 @@ thread_local! {
 fn take_projection_work() -> ProjectionWork {
     PROJECTION_WORK.with(std::cell::Cell::take)
 }
+/// The nodes and edges of one investigation scope.
+type ScopedGraph = (Vec<Node>, Vec<Edge>);
+
 fn projection(nodes: Vec<Node>, edges: Vec<Edge>) -> Result<ContextSnapshot, HostError> {
     #[cfg(test)]
     PROJECTION_WORK.with(|counter| {
@@ -556,13 +559,36 @@ impl FrozenContext {
     ) -> Result<Self, HostError> {
         // The overlay is read without the graph lock, at this revision.
         let area = super::area::files(state, &revision, &request.scope)?;
-        let (graph_id, graph) = state
+        let (graph_id, graph) = Self::scoped_graph_at(
+            state,
+            &request.scope,
+            area.as_ref(),
+            graph_limits,
+            &revision,
+        )?;
+        let mut prepared = Self::from_scoped(graph, graph_id, request, history)?;
+        prepared.graph_limits = graph_limits;
+        prepared.scoped_revision = Some(revision);
+        Ok(prepared)
+    }
+
+    /// The complete-graph identity and only the scope's facts of a
+    /// neighborhood or area `scope`, read through one scoped reader pinned at
+    /// `revision` (AC-1301). `area` is the area's files at that revision.
+    pub(super) fn scoped_graph_at(
+        state: &AppState,
+        scope: &InvestigationScope,
+        area: Option<&BTreeSet<String>>,
+        graph_limits: SnapshotReadLimits,
+        revision: &StoreRevision,
+    ) -> Result<(String, ScopedGraph), HostError> {
+        state
             .graph
             .lock()
             .map_err(|_| HostError::Operational)?
             // The store's own errors pass through `E: From<GraphError>`;
             // a refusal decided inside the read rides out as the inner result.
-            .with_scoped_reader(&revision, graph_limits, |reader| {
+            .with_scoped_reader(revision, graph_limits, |reader| {
                 Ok::<_, core_graph::GraphError>((|| {
                     let graph_id = ContextSnapshot::complete_id_in(
                         reader,
@@ -574,25 +600,34 @@ impl FrozenContext {
                         }
                         context_hub::CompleteIdentityError::Context(error) => context_error(error),
                     })?;
-                    let graph = match &request.scope {
+                    let graph = match scope {
                         InvestigationScope::Neighborhood { anchor, hops } => reader
                             .neighborhood(anchor, *hops as usize)
                             .map_err(scoped_graph_error)?
                             .ok_or(HostError::InvalidInput)?,
                         _ => super::area::scoped_members(
                             reader,
-                            area.as_ref().ok_or(HostError::InvalidInput)?,
+                            area.ok_or(HostError::InvalidInput)?,
                         )
                         .map_err(scoped_graph_error)?,
                     };
                     Ok::<_, HostError>((graph_id, graph))
                 })())
             })
-            .map_err(scoped_graph_error)??;
-        let mut prepared = Self::from_scoped(graph, graph_id, request, history)?;
-        prepared.graph_limits = graph_limits;
-        prepared.scoped_revision = Some(revision);
-        Ok(prepared)
+            .map_err(scoped_graph_error)?
+    }
+
+    /// [`Self::scoped_graph_at`] as the complete-graph identity and the
+    /// scope's projection, the same `scope_snapshot_id` a full read gives.
+    pub(super) fn scoped_snapshot_at(
+        state: &AppState,
+        scope: &InvestigationScope,
+        area: Option<&BTreeSet<String>>,
+        graph_limits: SnapshotReadLimits,
+        revision: &StoreRevision,
+    ) -> Result<(String, ContextSnapshot), HostError> {
+        let (graph_id, graph) = Self::scoped_graph_at(state, scope, area, graph_limits, revision)?;
+        Ok((graph_id, projection(graph.0, graph.1)?))
     }
 
     /// A context whose graph is already the task's scope, with the
@@ -1460,7 +1495,7 @@ fn graph_error(error: core_graph::GraphError) -> HostError {
 }
 /// Whether a task scope is prepared scope-aware (#1602): a neighborhood
 /// (with a valid radius) or an area. `All` keeps the complete-graph read.
-fn scope_aware(scope: &InvestigationScope) -> Result<bool, HostError> {
+pub(super) fn scope_aware(scope: &InvestigationScope) -> Result<bool, HostError> {
     match scope {
         InvestigationScope::Neighborhood { hops, .. } => {
             if *hops == 0 || *hops as usize > context_hub::MAX_NEIGHBORHOOD_HOPS {
