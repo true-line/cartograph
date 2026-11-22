@@ -102,6 +102,9 @@ pub struct Extraction {
     /// Calls on injected strategies and the classes implementing them
     /// (#2069), linked at directory completion.
     strategies: strategies::Pending,
+    /// Calls through configured instances and lookups of them (#2165),
+    /// linked at directory completion.
+    instances: instances::Pending,
     /// Barrel re-exports (AC-1504), followed at directory completion so a
     /// call through `index.ts` reaches the declaring file.
     reexports: Vec<reexports::ReExport>,
@@ -327,6 +330,7 @@ fn retarget_commit(
     for site in &mut extraction.next_routes {
         site.retarget(commit);
     }
+    extraction.instances.retarget(commit);
     extraction.strategies.retarget(commit);
     for call in &mut extraction.dependency_calls {
         call.retarget(commit);
@@ -365,6 +369,7 @@ impl Extraction {
         self.service_worker_registrations.clear();
         self.next_routes.clear();
         self.strategies = strategies::Pending::default();
+        self.instances = instances::Pending::default();
         self.reexports.clear();
         self.exported.clear();
         self.dependency_calls.clear();
@@ -3375,6 +3380,7 @@ fn extract_source_recording(
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
         state_machines::extract(&cx, &syntax_nodes, &mut out);
         strategies::sites(&cx, &syntax_nodes, &mut out.strategies);
+        instances::sites(&cx, &syntax_nodes, &import_modules, &mut out.instances);
     }
     if let Some(evidence) = service_worker {
         service_worker::mark(
@@ -3553,6 +3559,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
         .extend(ex.service_worker_registrations);
     out.next_routes.extend(ex.next_routes);
     out.strategies.extend(ex.strategies);
+    out.instances.extend(ex.instances);
     out.reexports.extend(ex.reexports);
     out.exported.extend(ex.exported);
     out.dependency_calls.extend(ex.dependency_calls);
@@ -3695,6 +3702,12 @@ fn complete_directory(
     )?;
     strategies::complete(
         std::mem::take(&mut out.strategies),
+        id.repo,
+        &known_symbols,
+        &mut *facts,
+    )?;
+    instances::complete(
+        std::mem::take(&mut out.instances),
         id.repo,
         &known_symbols,
         &mut *facts,
@@ -3958,6 +3971,7 @@ mod dependency_types;
 mod grammar;
 pub mod graphql_resolvers;
 pub mod indexeddb;
+mod instances;
 mod local_definitions;
 pub mod next_api;
 pub mod node_http;
