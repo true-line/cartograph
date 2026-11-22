@@ -609,7 +609,7 @@ fn a_vllm_request_with_tools_must_call_one() {
         "function": {"name": "finish"}}], "messages": []});
     let forward = |backend, request: &Value| {
         let body = serde_json::to_vec(request).unwrap();
-        let sent = forced_tool_choice(backend, request.clone(), body.clone()).unwrap();
+        let sent = forced_tool_choice(backend, request.clone(), body.clone(), 1 << 20).unwrap();
         (body, serde_json::from_slice::<Value>(&sent).unwrap(), sent)
     };
     let (_, sent, _) = forward(ProxyBackend::OpenAiCompatible, &offered);
@@ -626,4 +626,15 @@ fn a_vllm_request_with_tools_must_call_one() {
         let (body, _, sent) = forward(backend, &offered);
         assert_eq!(sent, body);
     }
+    // The added field may not carry a request past its limit.
+    let body = serde_json::to_vec(&offered).unwrap();
+    assert_eq!(
+        forced_tool_choice(
+            ProxyBackend::OpenAiCompatible,
+            offered.clone(),
+            body.clone(),
+            body.len()
+        ),
+        Err(ProxyRefusal::Request)
+    );
 }

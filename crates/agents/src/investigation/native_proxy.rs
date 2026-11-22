@@ -303,7 +303,7 @@ impl ModelProxy {
         if trailing.as_deref() != Some(authorized) {
             return Err(ProxyRefusal::Unauthorized);
         }
-        let body = forced_tool_choice(self.config.backend, request, body)?;
+        let body = forced_tool_choice(self.config.backend, request, body, max_request)?;
         if !dispatching(body.len() as u64) {
             return Err(ProxyRefusal::NotRecorded);
         }
@@ -377,6 +377,7 @@ fn forced_tool_choice(
     backend: ProxyBackend,
     mut request: Value,
     body: Vec<u8>,
+    max_request: usize,
 ) -> Result<Vec<u8>, ProxyRefusal> {
     let offers_tools = request
         .get("tools")
@@ -389,7 +390,11 @@ fn forced_tool_choice(
         return Ok(body);
     }
     request["tool_choice"] = Value::from("required");
-    serde_json::to_vec(&request).map_err(|_| ProxyRefusal::Request)
+    // The rewritten body keeps to the same request limit as the received one.
+    serde_json::to_vec(&request)
+        .ok()
+        .filter(|body| body.len() <= max_request)
+        .ok_or(ProxyRefusal::Request)
 }
 
 /// The texts of the messages after the model's last answer, system text

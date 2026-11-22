@@ -1844,3 +1844,36 @@ fn every_acquisition_schema_converts_to_native_tools() {
         assert!(!tools.is_empty(), "no tools for {schema}");
     }
 }
+
+// AC-1420: when one tool's offered choices vary in more than one field, the
+// per-field enums would also admit mixes that were never offered. The schema
+// lists the exact combinations and the host refuses a mix before admission.
+#[test]
+fn correlated_choices_stay_coupled_in_one_tool() {
+    use super::super::native_tools::{action_from_tool_call, tool_definitions_from_schema};
+    let context = "context-v2:c";
+    let read = |fact: &str, index: u64| serde_json::json!({"type": "read_evidence", "fact": fact, "role": "source", "index": index});
+    let schema = serde_json::json!({"anyOf": [{"enum": [read("a", 0), read("b", 1)]}]}).to_string();
+    let tools = tool_definitions_from_schema(&schema).unwrap();
+    let tool = &tools[0];
+    let exact = tool.input_schema["anyOf"].as_array().unwrap();
+    assert_eq!(exact.len(), 2, "both offered combinations are listed");
+    assert_eq!(exact[0]["properties"]["fact"]["const"], "a");
+    assert_eq!(exact[0]["properties"]["index"]["const"], 0);
+    assert_eq!(tool.input_schema["properties"]["index"]["type"], "integer");
+    for (fact, index) in [("a", 0), ("b", 1)] {
+        let arguments = serde_json::json!({"fact": fact, "role": "source", "index": index});
+        let action = action_from_tool_call(&tools, "read_evidence", &arguments, context).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&action).unwrap(),
+            read(fact, index)
+        );
+    }
+    let mixed = serde_json::json!({"fact": "a", "role": "source", "index": 1});
+    let refusal = action_from_tool_call(&tools, "read_evidence", &mixed, context).unwrap_err();
+    assert_eq!(refusal.code, "not_offered");
+    // A single varying field has no mixes, so no combination list is needed.
+    let single = serde_json::json!({"anyOf": [{"enum": [read("a", 0), read("a", 1)]}]}).to_string();
+    let tools = tool_definitions_from_schema(&single).unwrap();
+    assert!(tools[0].input_schema.get("anyOf").is_none());
+}

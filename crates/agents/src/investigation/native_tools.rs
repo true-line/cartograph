@@ -94,6 +94,10 @@ pub struct ToolDefinition {
     /// Whether the host injects `context_id`; the model never supplies it.
     #[serde(skip)]
     host_context_id: bool,
+    /// For acquisition-choice tools, the exact argument objects offered; a
+    /// call must be one of them, never a mix of their fields.
+    #[serde(skip)]
+    offered: Option<Vec<Value>>,
 }
 
 /// Why a tool call was refused before or at admission. Returned to the model
@@ -178,6 +182,7 @@ pub fn tool_definitions_from_schema(
             description: tool.description(),
             input_schema: input,
             host_context_id,
+            offered: None,
         });
     }
     if !finish.is_empty() {
@@ -205,6 +210,7 @@ pub fn tool_definitions_from_schema(
                 "$defs": defs,
             }),
             host_context_id: false,
+            offered: None,
         });
     }
     Ok(tools)
@@ -253,6 +259,7 @@ fn enum_tools(values: &Value, tools: &mut Vec<ToolDefinition>) -> Result<(), Inv
             description: tool.description(),
             input_schema: typed_choices(&actions),
             host_context_id: context.unwrap_or(false),
+            offered: Some(actions),
         });
     }
     Ok(())
@@ -290,12 +297,39 @@ fn typed_choices(actions: &[Value]) -> Value {
             required.push(field);
         }
     }
-    serde_json::json!({
+    // Per-field enums alone would also admit mixes of different choices'
+    // fields. When they could, the exact combinations are listed too, so a
+    // constrained decoder emits only an offered one.
+    let combinations: usize = properties
+        .values()
+        .map(|property| property["enum"].as_array().map_or(1, Vec::len))
+        .product();
+    let mixes =
+        actions.len() > 1 && (combinations > actions.len() || required.len() < properties.len());
+    let mut schema = serde_json::json!({
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": false,
-    })
+    });
+    if mixes {
+        let exact: Vec<Value> = actions
+            .iter()
+            .map(|action| {
+                let fields = action.as_object().cloned().unwrap_or_default();
+                serde_json::json!({
+                    "properties": fields
+                        .iter()
+                        .map(|(field, value)| (field.clone(), serde_json::json!({ "const": value })))
+                        .collect::<Map<_, _>>(),
+                    "required": fields.keys().collect::<Vec<_>>(),
+                    "additionalProperties": false,
+                })
+            })
+            .collect();
+        schema["anyOf"] = exact.into();
+    }
+    schema
 }
 
 fn json_type(value: &Value) -> &'static str {
@@ -380,6 +414,16 @@ pub fn action_from_tool_call(
         {
             *value = decoded;
         }
+    }
+    if tool
+        .offered
+        .as_ref()
+        .is_some_and(|offered| !offered.contains(&Value::Object(arguments.clone())))
+    {
+        return Err(ToolRefusal::new(
+            "not_offered",
+            "Call with exactly one of the offered argument combinations; do not mix fields of different choices.",
+        ));
     }
     let mut action = Map::new();
     action.insert("type".into(), Value::String(name.into()));
