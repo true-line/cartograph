@@ -627,19 +627,19 @@ pub fn extract_dir(
     extract_selected(id, &classes, &source_paths, &read, on_file)
 }
 
-/// [`extract_dir`] over `classes`, `.class` paths whose bytes `read`
-/// returns (a capture's retained bytes, not the checkout). The checkout's
-/// Java and Kotlin source paths still decide which classes have source; a
-/// Kotlin file's package header is read through `read` too.
+/// [`extract_dir`] over a capture: `classes` are the `.class` paths and
+/// `source_paths` the Java and Kotlin paths it retained, and `read` returns
+/// their retained bytes, not the checkout's. Which classes have source is
+/// decided by the same capture the source adapters read, so an edit to the
+/// checkout after capture neither drops nor duplicates a class.
 pub fn extract_dir_from(
-    root: &std::path::Path,
     id: &SourceId<'_>,
     classes: &[String],
+    source_paths: &[String],
     read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
     on_file: &mut dyn FnMut(&str),
 ) -> std::io::Result<Extraction> {
-    let (_, source_paths) = walk(root)?;
-    extract_selected(id, classes, &source_paths, read, on_file)
+    extract_selected(id, classes, source_paths, read, on_file)
 }
 
 /// The `.class` files the ordinary walk of `root` selects, sorted: the

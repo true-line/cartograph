@@ -2322,16 +2322,18 @@ fn extract_tree_packed(
             |path: &str| on_file(&format!("Reading compiled JVM classes — {path}"));
         let captured_classes = captured_lane_paths(primary, ".class");
         let jvm = if let (Some(capture), false) = (primary, captured_classes.is_empty()) {
+            // Which classes have source is read from the same capture.
+            let mut captured_sources = captured_lane_paths(primary, ".java");
+            captured_sources.extend(captured_lane_paths(primary, ".kt"));
             adapters_artifact_jvm::extract_dir_from(
-                root,
                 &jvm_id,
                 &captured_classes,
-                &|path| match capture.file(path) {
-                    Ok(file) => Ok(file.bytes().to_vec()),
-                    // A Kotlin source outside the capture only names its
-                    // package, to decide which classes have source.
-                    Err(_) if path.ends_with(".kt") => std::fs::read(root.join(path)),
-                    Err(_) => Err(std::io::Error::other("captured class file is unavailable")),
+                &captured_sources,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| std::io::Error::other("captured file is unavailable"))
                 },
                 &mut jvm_progress,
             )
@@ -5013,6 +5015,10 @@ fn record_ingest_metrics(
         ("t0.adapter-rust", layers.rust.files),
         ("t0.adapter-java", layers.java.files),
         ("t0.adapter-kotlin", layers.kotlin.files),
+        (
+            adapters_artifact_jvm::EXTRACTOR_ID,
+            layers.jvm_classes.files,
+        ),
         ("t0.iac-terraform", layers.tf.files),
         ("t0.webextension", layers.webext.files),
     ]

@@ -4337,8 +4337,15 @@ fn shipped_jvm_classes_are_read_from_the_capture() {
             .iter()
             .any(|entry| entry.path == "lib/Store.class")
     );
-    // The checkout changes after capture; the read must not see it.
+    // The checkout changes after capture; the read must not see it: neither
+    // the class bytes nor a Java source added for the class.
     std::fs::write(root.join("lib/Store.class"), b"not a class").unwrap();
+    std::fs::create_dir_all(root.join("com/acme/pay")).unwrap();
+    std::fs::write(
+        root.join("com/acme/pay/Ledger.java"),
+        b"package com.acme.pay;",
+    )
+    .unwrap();
     let mut receipts = Vec::new();
     let (extraction, _, _) = {
         let mut caches = state.extraction_caches.lock().unwrap();
