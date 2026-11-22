@@ -2247,6 +2247,12 @@ fn with_definitions(
         if !tested || !said_names.insert(name.clone()) {
             continue;
         }
+        // Two values of one name reach the conditions (`if x:` … `x = y` …
+        // `if x:`): which one a sentence means would be a guess, so neither
+        // is said.
+        if named.iter().filter(|(n, _, t)| *t && n == name).count() > 1 {
+            continue;
+        }
         let Some(what) = noun(&Expr::Ref(vec![name.clone()]), &cx) else {
             continue;
         };

@@ -20,8 +20,8 @@ use tree_sitter::Node as TsNode;
 /// between it and `usage` is admitted only in an earlier clause of an `if`
 /// statement whose later clause holds `usage`, which cannot both run, or as
 /// the target of the assignment `usage` is the value of. One after `usage`
-/// is admitted only when no loop between the assignment's block and
-/// `usage` can carry it back.
+/// is admitted unless it is inside a loop, between the assignment's block
+/// and `usage`, that could carry it back.
 pub(super) fn sole_assignment<'tree>(
     name: &str,
     usage: TsNode<'tree>,
@@ -41,11 +41,16 @@ pub(super) fn sole_assignment<'tree>(
         .iter()
         .filter_map(|site| plain(*site, usage).map(|(a, b)| (*site, a, b)))
         .max_by_key(|(site, ..)| site.start_byte())?;
-    if within_loop(usage, block) {
-        return None;
-    }
+    let loops = loops_between(usage, block);
     let killed = assignment.parent()?.start_byte();
     for other in sites.iter().filter(|other| other.id() != site.id()) {
+        // A binding inside a loop around `usage` can come round before it.
+        if loops
+            .iter()
+            .any(|l| l.start_byte() <= other.start_byte() && other.end_byte() <= l.end_byte())
+        {
+            return None;
+        }
         if other.end_byte() <= killed || other.start_byte() >= usage.end_byte() {
             continue;
         }
@@ -89,20 +94,20 @@ fn plain<'tree>(
     Some((assignment, block))
 }
 
-/// Whether a loop between `block` and `usage` could run a later binding
-/// before `usage` again.
-fn within_loop(usage: TsNode<'_>, block: TsNode<'_>) -> bool {
+/// The loops between `block` and `usage`, innermost first.
+fn loops_between<'tree>(usage: TsNode<'tree>, block: TsNode<'tree>) -> Vec<TsNode<'tree>> {
+    let mut out = Vec::new();
     let mut node = usage.parent();
     while let Some(n) = node {
         if n.id() == block.id() {
-            return false;
+            break;
         }
         if matches!(n.kind(), "for_statement" | "while_statement") {
-            return true;
+            out.push(n);
         }
         node = n.parent();
     }
-    false
+    out
 }
 
 /// Whether `site` is the target of the assignment whose value holds `usage`

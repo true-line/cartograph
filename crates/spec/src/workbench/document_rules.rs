@@ -2690,7 +2690,17 @@ def new_random_alias(user):
         alias = Alias.get_by(email=suggested_alias)
         if alias and not alias.user_id == user.id:
             return jsonify(error="Taken"), 409
+
+def twice(user):
+    plan = load_plan(user)
+    if plan:
+        plan = upgrade(plan)
+        if plan:
+            return jsonify(error="Upgraded"), 409
 "#;
+        // Two values of `plan` reach one row's conditions: neither is said.
+        let (text, _) = python_rows(source, "twice");
+        assert!(text.contains("(“Upgraded”). |"), "{text}");
         let (text, _) = python_rows(source, "new_random_alias");
         assert!(
             text.contains(

@@ -826,6 +826,13 @@ def looped(items):
         if not value:
             return "missing", 404
         value = item
+
+def steady(items):
+    value = None
+    value = load()
+    while items:
+        if not value:
+            return "absent", 404
 "#;
     let out = recover(code);
     let all = rules(&out);
@@ -858,6 +865,8 @@ def looped(items):
     }
     assert!(initializers("branch", "missing").is_empty());
     assert!(initializers("looped", "missing").is_empty());
+    // A loop with no binding of the name inside it carries nothing back.
+    assert_eq!(initializers("steady", "absent"), ["load()"]);
     let (_, created) = all
         .iter()
         .find(|(_, r)| value(r).1.contains("create(suggested)"))
