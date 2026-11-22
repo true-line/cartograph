@@ -13,10 +13,10 @@
 use std::path::{Path, PathBuf};
 
 /// The evidence `repo` prefix of a captured observation input.
-pub(crate) const INPUT_REPO_PREFIX: &str = "input/";
+pub const INPUT_REPO_PREFIX: &str = "input/";
 
 /// The capture source identity of `source_id`'s observation inputs.
-pub(crate) fn input_source_id(source_id: &str) -> String {
+pub fn input_source_id(source_id: &str) -> String {
     format!("{INPUT_REPO_PREFIX}{source_id}")
 }
 
@@ -25,7 +25,7 @@ const INPUT_COMMIT: &str = "workdir";
 
 /// One declared observation input file.
 #[derive(Debug)]
-pub(crate) struct ObservationInput {
+pub struct ObservationInput {
     /// The path as the manifest declares it.
     declared: String,
     /// Where it is read from when it is not captured.
@@ -36,24 +36,24 @@ pub(crate) struct ObservationInput {
 
 /// Every observation input of one repo, with their capture when there is one.
 #[derive(Debug, Default)]
-pub(crate) struct ObservationInputs {
-    pub(crate) state_json: Option<ObservationInput>,
-    pub(crate) pulumi_json: Option<ObservationInput>,
-    pub(crate) otel_jsonl: Vec<ObservationInput>,
+pub struct ObservationInputs {
+    pub state_json: Option<ObservationInput>,
+    pub pulumi_json: Option<ObservationInput>,
+    pub otel_jsonl: Vec<ObservationInput>,
     capture: Option<source_capture::Capture>,
     repo: String,
 }
 
 /// An input's bytes as the parser reads them, and the path its evidence cites.
-pub(crate) struct ReadInput {
-    pub(crate) raw: String,
-    pub(crate) cited_path: String,
+pub struct ReadInput {
+    pub raw: String,
+    pub cited_path: String,
 }
 
 impl ObservationInputs {
     /// Inputs read from disk with uncaptured evidence, as before ADR-0080.
-    #[cfg(test)]
-    pub(crate) fn uncaptured(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn uncaptured(
         state_json: Option<&Path>,
         pulumi_json: Option<&Path>,
         otel_jsonl: &[PathBuf],
@@ -76,7 +76,7 @@ impl ObservationInputs {
     /// Those inside `base` are captured together under `input/<source_id>`;
     /// when they cannot all be captured, the subset that fits the capture
     /// limits is kept, and the rest stay uncaptured.
-    pub(crate) fn declared(
+    pub fn declared(
         base: &Path,
         source_id: &str,
         state_json: Option<&str>,
@@ -122,7 +122,7 @@ impl ObservationInputs {
 
     /// Read `input` for the `field` parser: its captured bytes, which must be
     /// UTF-8, or the file on disk when it is not captured.
-    pub(crate) fn read(&self, input: &ObservationInput, field: &str) -> Result<ReadInput, String> {
+    pub fn read(&self, input: &ObservationInput, field: &str) -> Result<ReadInput, String> {
         let display = input.read_path.display();
         match (&input.captured, &self.capture) {
             (Some(path), Some(capture)) => {
@@ -150,7 +150,7 @@ impl ObservationInputs {
     /// Bind the uncaptured-form evidence the T1 passes wrote for captured
     /// inputs to the input identity: each `prov` or `observed_prov` entry
     /// with no repo and no commit whose path is a captured input's.
-    pub(crate) fn cite<'a>(&self, props: impl IntoIterator<Item = &'a mut serde_json::Value>) {
+    pub fn cite<'a>(&self, props: impl IntoIterator<Item = &'a mut serde_json::Value>) {
         let Some(capture) = &self.capture else {
             return;
         };
@@ -179,13 +179,13 @@ impl ObservationInputs {
 
     /// The input capture, retained beside the owning source's captures
     /// (ADR-0080 slice 2a).
-    pub(crate) fn capture(&self) -> Option<&source_capture::Capture> {
+    pub fn capture(&self) -> Option<&source_capture::Capture> {
         self.capture.as_ref()
     }
 
     /// The declared paths read without a capture, as the manifest writes
     /// them, for coverage (AC-1041).
-    pub(crate) fn uncaptured_paths(&self) -> Vec<String> {
+    pub fn uncaptured_paths(&self) -> Vec<String> {
         self.state_json
             .iter()
             .chain(&self.pulumi_json)
