@@ -207,6 +207,10 @@ fn compile(
         .capabilities
         .iter()
         .chain(&read.knowledge.actors)
+        // The areas 1.3 prints, so a summary of them can cite them (#2319).
+        .chain(read.knowledge.subsystems.iter().filter(|fact| {
+            matches!(&fact.item, core_graph::overlay::OverlayItem::Node(node) if node.label == "Subsystem")
+        }))
         .cloned()
         .collect();
     let overlay = Arc::new(

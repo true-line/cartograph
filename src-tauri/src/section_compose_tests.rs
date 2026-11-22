@@ -198,6 +198,29 @@ fn purpose_and_scope_is_composed_from_the_sections_it_summarises() {
     assert!(matches!(outcome.outcome, DraftingOutcome::Staged { .. }));
 }
 
+/// AC-1313: the capability areas §1.3 prints are citable facts of the
+/// composition, so §1.1 can cite its main areas (#2319).
+#[test]
+fn the_capability_areas_are_citable_beside_capabilities_and_actors() {
+    let (_dir, state) = crate::area_briefing::tests::state();
+    let compiled = compile(&state, "1.0", "D1", "1.1", "system").unwrap();
+    let areas: Vec<&str> = compiled
+        .derived
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            core_graph::overlay::OverlayItem::Node(node) if node.label == "Subsystem" => {
+                Some(node.id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        areas,
+        ["subsystem:cluster:alias", "subsystem:cluster:mailbox"]
+    );
+    assert_eq!(compiled.overlay.len(), 2);
+}
+
 #[test]
 fn a_composition_is_refused_off_the_system_or_an_area_scope_or_after_the_graph_changed() {
     let (_dir, state) = state();
