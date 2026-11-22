@@ -525,7 +525,7 @@ fn association_schema_migrates_without_clearing_schema_four_facts_and_rejects_in
     drop(store);
     for corruption in [
         "DROP TABLE source_binding_meta",
-        "PRAGMA ignore_check_constraints=ON; UPDATE source_binding_meta SET version=3",
+        "PRAGMA ignore_check_constraints=ON; UPDATE source_binding_meta SET version=4",
         "DROP TRIGGER source_binding_node_update",
         "CREATE VIEW source_binding_unknown AS SELECT 1",
         "CREATE UNIQUE INDEX unrelated_unique_repo ON source_node_bindings(repo_key)",
@@ -1013,10 +1013,10 @@ fn coverage_record(repo: &str) -> crate::coverage::CoverageRecord {
 }
 
 #[test]
-fn fresh_store_is_version_two_and_exact_v1_migrates_with_empty_omission_tables() {
-    // AC-0314: fresh stores open at schema v2; an exact v1 store migrates in
-    // one immediate transaction with empty omission tables, while a v1 store
-    // with an extra object is rejected. (T-0314)
+fn fresh_store_is_current_and_exact_v1_migrates_with_empty_omission_tables() {
+    // AC-0314: fresh stores open at the current schema; an exact v1 store
+    // migrates in one immediate transaction with empty omission tables, while
+    // a v1 store with an extra object is rejected. (T-0314)
     let fresh = SqliteGraphStore::open_in_memory().unwrap();
     let fresh_version: i64 = fresh
         .conn
@@ -1024,7 +1024,7 @@ fn fresh_store_is_version_two_and_exact_v1_migrates_with_empty_omission_tables()
             row.get(0)
         })
         .unwrap();
-    assert_eq!(fresh_version, 2);
+    assert_eq!(fresh_version, SCHEMA_VERSION);
 
     let directory = tempfile::tempdir().unwrap();
     let v1_path = directory.path().join("exact-v1.db");
@@ -1058,7 +1058,7 @@ fn fresh_store_is_version_two_and_exact_v1_migrates_with_empty_omission_tables()
             row.get(0)
         })
         .unwrap();
-    assert_eq!(migrated_version, 2);
+    assert_eq!(migrated_version, SCHEMA_VERSION);
     let counts: (i64, i64, i64) = migrated
         .conn
         .query_row(
@@ -1831,4 +1831,232 @@ fn later_binding_from_another_repo_takes_precedence_over_existing_omission() {
             "{omission:?}"
         );
     }
+}
+
+fn observation(node: &Node, repo: &str) -> SourceBinding {
+    SourceBinding {
+        receipt_id: format!(
+            "obs-input-v1:{}",
+            core_prov::content_hash(node.id.as_bytes())
+        ),
+        ..node_binding(node, repo, "observed")
+    }
+}
+
+#[test]
+fn exact_v2_store_migrates_to_empty_observation_tables() {
+    // AC-1047 (ADR-0079): an exact v2 store keeps its facts and bindings and
+    // gains empty observed binding tables in one transaction; a v2 store
+    // with an extra object is rejected.
+    let directory = tempfile::tempdir().unwrap();
+    for extra in [
+        None,
+        Some("CREATE INDEX source_binding_extra ON source_node_bindings(receipt_id)"),
+    ] {
+        let path = directory.path().join(format!("v2-{}.db", extra.is_some()));
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, props TEXT NOT NULL DEFAULT '{}') STRICT;
+                     CREATE TABLE edges (src TEXT NOT NULL REFERENCES nodes(id), dst TEXT NOT NULL REFERENCES nodes(id), label TEXT NOT NULL, props TEXT NOT NULL DEFAULT '{}', PRIMARY KEY (src,dst,label)) STRICT;
+                     INSERT INTO nodes(id,label) VALUES ('retained','Symbol');",
+                )
+                .unwrap();
+            for (_, _, sql) in SCHEMA_V2 {
+                connection.execute_batch(sql).unwrap();
+            }
+            connection
+                .execute(
+                    "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 2)",
+                    [],
+                )
+                .unwrap();
+            if let Some(extra) = extra {
+                connection.execute_batch(extra).unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", GRAPH_SCHEMA_VERSION)
+                .unwrap();
+        }
+        let opened = SqliteGraphStore::open(&path);
+        if extra.is_some() {
+            assert!(matches!(
+                opened,
+                Err(GraphError::SourceBinding("incompatible association schema"))
+            ));
+            continue;
+        }
+        let migrated = opened.unwrap();
+        let version: i64 = migrated
+            .conn
+            .query_row("SELECT version FROM source_binding_meta", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(migrated.fact_counts().unwrap().0, 1);
+        assert!(
+            migrated
+                .source_observations_for_repo("repo/a")
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn observed_bindings_publish_beside_primary_ones_and_follow_their_facts() {
+    // AC-1047 (ADR-0079): a fact can hold a primary and an observed binding
+    // at once; each role is replaced per repo with the publication, checked
+    // against the final fact, never taken over from another repo, and
+    // dropped when its fact changes.
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    let (a, ae, b, _) = seed(&mut store);
+    let observed_a = observation(&node("a"), "repo/a");
+    let snapshot = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+                &snapshot,
+                &GraphPatch::default(),
+                "repo/a",
+                &[a.clone(), ae.clone()],
+                std::slice::from_ref(&observed_a),
+                None,
+                SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store.source_bindings_for_repo("repo/a").unwrap(),
+        vec![a.clone(), ae.clone()]
+    );
+    assert_eq!(
+        store.source_observations_for_repo("repo/a").unwrap(),
+        vec![observed_a.clone()]
+    );
+    assert_eq!(
+        store
+            .current_source_observation(&FactKey::from_node(&node("a")))
+            .unwrap(),
+        Some(observed_a.clone())
+    );
+    // Another repo's fact, a stale digest and a duplicate are refused.
+    let current = store.read_snapshot().unwrap();
+    let takeover = observation(&node("b"), "repo/a");
+    let mut stale = observation(&node("a"), "repo/a");
+    stale.emitted_fact_digest = node_digest(&node("changed")).unwrap();
+    for observations in [
+        vec![observed_a.clone(), observed_a.clone()],
+        vec![observation(&node("b"), "repo/b")],
+        vec![stale],
+    ] {
+        assert!(
+            store
+                .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+                    &current,
+                    &GraphPatch::default(),
+                    "repo/a",
+                    &[a.clone(), ae.clone()],
+                    &observations,
+                    None,
+                    SourceOmissions::NONE,
+                )
+                .is_err()
+        );
+    }
+    // repo/b's observation of b is its own; repo/a cannot take it over.
+    let current = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+                &current,
+                &GraphPatch::default(),
+                "repo/b",
+                std::slice::from_ref(&b),
+                &[observation(&node("b"), "repo/b")],
+                None,
+                SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    let current = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+                &current,
+                &GraphPatch::default(),
+                "repo/a",
+                &[a.clone(), ae.clone()],
+                &[takeover],
+                None,
+                SourceOmissions::NONE,
+            )
+            .is_err()
+    );
+    // A publication without observations removes this repo's only.
+    let current = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_bindings_if_snapshot_matches(
+                &current,
+                &GraphPatch::default(),
+                "repo/a",
+                &[a.clone(), ae],
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .source_observations_for_repo("repo/a")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.source_observations_for_repo("repo/b").unwrap().len(),
+        1
+    );
+    // A changed fact drops its observed binding, as it does the primary one.
+    let mut changed = node("b");
+    changed.props["name"] = serde_json::json!("changed");
+    store.put_node(&changed).unwrap();
+    assert!(
+        store
+            .source_observations_for_repo("repo/b")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .source_bindings_for_repo("repo/b")
+            .unwrap()
+            .iter()
+            .all(|binding| binding.fact != FactKey::from_node(&node("b")))
+    );
+}
+
+#[test]
+fn an_observation_only_change_advances_the_revision() {
+    // AC-1047: observed rows are not generation-watched, so publication bumps
+    // the revision itself when they change and the facts do not.
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    store.put_node(&node("a")).unwrap();
+    let before = store.read_revision().unwrap();
+    let snapshot = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+                &snapshot,
+                &GraphPatch::default(),
+                "repo/a",
+                &[],
+                &[observation(&node("a"), "repo/a")],
+                None,
+                SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    let after = store.read_revision().unwrap();
+    assert!(after.generation > before.generation);
 }
