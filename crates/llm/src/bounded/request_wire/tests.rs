@@ -22,7 +22,7 @@ fn borrowed_ollama_request_preserves_wire_and_exact_cap() {
     for text in [String::new(), "café\n\"\\\0".into(), "\0".repeat(4096)] {
         for tokens in [0, 1, u32::MAX] {
             matches_wire_and_cap(
-                &ollama(&text, &text, &text, tokens, None, false),
+                &ollama(&text, &text, &text, tokens, None, false, None),
                 json!({
                     "model":text,
                     "messages":[{"role":"system","content":text},{"role":"user","content":text}],
@@ -32,6 +32,20 @@ fn borrowed_ollama_request_preserves_wire_and_exact_cap() {
             );
         }
     }
+}
+
+// #1653: a chosen context window is the only addition to the request bytes.
+#[test]
+fn ollama_context_window_is_sent_only_when_chosen() {
+    matches_wire_and_cap(
+        &ollama("m", "s", "u", 7, None, false, Some(32768)),
+        json!({
+            "model":"m",
+            "messages":[{"role":"system","content":"s"},{"role":"user","content":"u"}],
+            "stream":false,"format":"json","think":false,
+            "options":{"num_ctx":32768,"num_predict":7}
+        }),
+    );
 }
 
 #[test]

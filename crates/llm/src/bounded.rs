@@ -1248,6 +1248,7 @@ pub(super) fn complete_ollama(
     client: &Client,
     profile: &ProviderProfile,
     think: bool,
+    context_window: Option<u32>,
     request: &AuthorizedBoundedCompletion,
     control: &CompletionControl<'_>,
 ) -> Result<BoundedCompletion, BoundedCallError> {
@@ -1261,6 +1262,7 @@ pub(super) fn complete_ollama(
             request.limits().0.max_output_tokens,
             response_schema(request.payload())?,
             think,
+            context_window,
         ),
         request.limits().0.request_bytes,
         FailureCode::RequestTooLarge,
