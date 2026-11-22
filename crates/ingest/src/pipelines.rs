@@ -1127,32 +1127,69 @@ fn dockerfile(text: &str) -> Result<Decl, &'static str> {
 /// ordered facts. Deterministic for a given tree: the walk is sorted, and
 /// every id derives from the path and the declared position.
 pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<PipelineExtraction> {
+    let paths = pipeline_paths(root)?;
+    Ok(extract_from_sources(
+        &paths,
+        &|rel| std::fs::read(root.join(rel)),
+        id,
+    ))
+}
+
+/// The workflow and `Dockerfile` paths the walk of `root` selects, sorted:
+/// the files a source's capture retains for this reader (AC-1057).
+pub fn pipeline_paths(root: &Path) -> std::io::Result<Vec<String>> {
     let walked = source_walk::files(
         root,
         &crate::preflight::skip_dir,
         source_walk::Gitignores::Honor,
     )?;
+    Ok(walked
+        .into_iter()
+        .filter(|file| format_of(&file.name, &file.rel).is_some())
+        .map(|file| file.rel)
+        .collect())
+}
+
+/// Whether the repo-relative `rel` is a file this reader parses.
+pub fn is_pipeline_file(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    format_of(name, rel).is_some()
+}
+
+/// [`extract_dir`] over the repo-relative `paths`, each read through
+/// `read`, so a captured source's pipelines come from its retained bytes
+/// rather than the checkout (AC-1057, #385). A path this reader does not
+/// parse is ignored; bytes that are not UTF-8 are unread, as on disk.
+pub fn extract_from_sources(
+    paths: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+) -> PipelineExtraction {
+    let mut paths: Vec<&String> = paths.iter().filter(|rel| is_pipeline_file(rel)).collect();
+    paths.sort();
+    paths.dedup();
     let mut out = PipelineExtraction::default();
-    for file in &walked {
-        let Some(format) = format_of(&file.name, &file.rel) else {
+    for rel in paths {
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        let Some(format) = format_of(name, rel) else {
             continue;
         };
-        let parsed = match std::fs::read_to_string(&file.path) {
-            Ok(text) => parse(format, &text),
-            Err(_) => Err("file is not readable UTF-8 text"),
+        let parsed = match read(rel).map(String::from_utf8) {
+            Ok(Ok(text)) => parse(format, &text),
+            _ => Err("file is not readable UTF-8 text"),
         };
         match parsed {
             Ok(decl) => {
                 out.files += 1;
-                emit(id, &file.rel, format, decl, &mut out);
+                emit(id, rel, format, decl, &mut out);
             }
             Err(reason) => out.unread.push(Unread {
-                path: file.rel.clone(),
+                path: rel.clone(),
                 reason,
             }),
         }
     }
-    Ok(out)
+    out
 }
 
 fn emit(id: &SourceId, rel: &str, format: Format, decl: Decl, out: &mut PipelineExtraction) {
