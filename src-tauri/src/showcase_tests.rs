@@ -379,9 +379,14 @@ fn showcase_ask_areas() {
                 .egress
                 .payload_hash
                 .clone();
-            ask(&state, provider.as_ref(), &prepared, Some(hash), &|| {
-                CallDirective::Continue
-            })
+            ask(
+                &state,
+                provider.as_ref(),
+                &prepared,
+                Some(hash),
+                &|| CallDirective::Continue,
+                None,
+            )
         });
         match asked {
             Err(error) => {

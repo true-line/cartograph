@@ -16,7 +16,10 @@ mod evaluation;
 mod execution;
 #[path = "jobs/investigations.rs"]
 pub(crate) mod investigations;
+#[path = "jobs/usage.rs"]
+mod usage;
 pub(crate) use execution::{ClaimMode, ClaimPlan, ExecutionCheck, ExecutionUpdate};
+pub use usage::{CallUsage, JobUsage};
 #[cfg(test)]
 #[path = "jobs/ownership_tests.rs"]
 mod ownership_tests;
@@ -132,6 +135,7 @@ impl JobStore {
         )?;
         evaluation::initialize(&mut conn)?;
         migrate_v1_jobs(&conn)?;
+        usage::initialize(&conn)?;
         let namespace = execution::initialize(&mut conn, path.as_ref())?;
         investigations::initialize(&mut conn, &namespace)?;
         Ok(Self { conn, namespace })
@@ -291,8 +295,28 @@ impl JobStore {
             [],
         )?;
         let removed = tx.execute(&format!("DELETE FROM jobs WHERE {FINISHED}"), [])?;
+        usage::prune(&tx)?;
         tx.commit()?;
         Ok(removed)
+    }
+
+    /// Add one model call's provider-reported usage to job `id` (AC-1703).
+    pub fn add_usage(&mut self, id: i64, call: &CallUsage<'_>) -> rusqlite::Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        execution::validate(&tx, &self.namespace)?;
+        usage::add(&tx, id, call)?;
+        tx.commit()
+    }
+
+    /// The recorded usage of every job that still exists, newest first.
+    pub fn list_usage(&self) -> rusqlite::Result<Vec<JobUsage>> {
+        let tx = self.conn.unchecked_transaction()?;
+        execution::validate(&tx, &self.namespace)?;
+        let usage = usage::list(&tx)?;
+        tx.commit()?;
+        Ok(usage)
     }
 
     /// All jobs, newest first, with tracking from the same read transaction.
@@ -511,6 +535,60 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .unwrap();
         assert_eq!(timeout, 5_000);
+    }
+
+    // AC-1703 (T-1703): a job's usage sums its calls, keeps unreported calls
+    // apart, survives reopen and goes with the job when it is cleared.
+    #[test]
+    fn job_usage_sums_calls_and_is_cleared_with_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = JobStore::open(&path).unwrap();
+        let job = store.enqueue("area-ask:cloud").unwrap();
+        let other = store.enqueue("section-compose:spec:1:all:local").unwrap();
+        let call = |model, input, output, bytes| CallUsage {
+            model,
+            input_tokens: input,
+            output_tokens: output,
+            request_bytes: bytes,
+        };
+        store
+            .add_usage(job.id, &call("m1", Some(100), Some(20), 1_000))
+            .unwrap();
+        store
+            .add_usage(job.id, &call("m2", Some(50), Some(5), 500))
+            .unwrap();
+        store
+            .add_usage(job.id, &call("m2", None, Some(9), 70))
+            .unwrap();
+        store
+            .add_usage(other.id, &call("local", Some(1), Some(1), 10))
+            .unwrap();
+        drop(store);
+
+        let mut store = JobStore::open(&path).unwrap();
+        let usage = store.list_usage().unwrap();
+        assert_eq!(usage.len(), 2);
+        assert_eq!(
+            usage.iter().find(|row| row.job_id == job.id).unwrap(),
+            &JobUsage {
+                job_id: job.id,
+                calls: 3,
+                unreported_calls: 1,
+                input_tokens: 150,
+                output_tokens: 25,
+                request_bytes: 1_570,
+                model: "m2".into(),
+            }
+        );
+
+        store.finish(job.id, &[]).unwrap();
+        store.clear_finished().unwrap();
+        let usage = store.list_usage().unwrap();
+        assert_eq!(
+            usage.iter().map(|row| row.job_id).collect::<Vec<_>>(),
+            vec![other.id]
+        );
     }
 
     #[test]

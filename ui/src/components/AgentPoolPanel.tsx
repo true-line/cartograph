@@ -1,7 +1,10 @@
 import type { Job } from '../store';
 import type { InvestigationProvider } from '../investigationTypes';
 import { stageLabel } from '../stageLabels';
-import { LANE_LABEL, LANE_OUTPUT, agentPool, providerLine, type AgentLane, type AgentWork } from '../agentPool';
+import {
+  LANE_LABEL, LANE_OUTPUT, agentPool, providerLine, usageLine, usageTotal,
+  type AgentLane, type AgentWork, type JobUsage,
+} from '../agentPool';
 
 export interface AgentPoolPanelProps {
   jobs: Job[];
@@ -9,6 +12,9 @@ export interface AgentPoolPanelProps {
   providers: InvestigationProvider[] | null;
   /** Undecided staged proposals in the loaded page; null when not loaded. */
   awaitingCuration: number | null;
+  /** Provider-reported usage per job (AC-1703); empty when none is recorded,
+   *  null when it could not be read. */
+  usage?: JobUsage[] | null;
   onOpenJobs: () => void;
   onOpenCuration: () => void;
   onViewInvestigation?: (id: string) => void;
@@ -16,8 +22,9 @@ export interface AgentPoolPanelProps {
 
 const LANES: AgentLane[] = ['investigation', 'area-expert', 'section-draft', 'escalation'];
 
-function WorkRow({ item, onViewInvestigation }: {
+function WorkRow({ item, usage, onViewInvestigation }: {
   item: AgentWork;
+  usage?: JobUsage;
   onViewInvestigation?: (id: string) => void;
 }) {
   const { job } = item;
@@ -36,6 +43,7 @@ function WorkRow({ item, onViewInvestigation }: {
           {job.status === 'running' && job.stage ? ` · ${stageLabel(job.stage)}` : ''}
           {' · updated '}{job.updated_at}
         </p>
+        {usage && <p className="muted" data-testid={`agent-pool-usage-${job.id}`}>{usageLine(usage)}</p>}
         {job.status === 'failed' && job.error && <p className="job-error">{job.error}</p>}
       </div>
       {investigation && onViewInvestigation && (
@@ -53,9 +61,11 @@ function WorkRow({ item, onViewInvestigation }: {
  * person. Read-only: controls stay on Jobs and in curation.
  */
 export function AgentPoolPanel({
-  jobs, providers, awaitingCuration, onOpenJobs, onOpenCuration, onViewInvestigation,
+  jobs, providers, awaitingCuration, usage = [], onOpenJobs, onOpenCuration, onViewInvestigation,
 }: AgentPoolPanelProps) {
   const pool = agentPool(jobs);
+  const usageOf = new Map((usage ?? []).map((row) => [row.job_id, row]));
+  const total = usageTotal([...pool.active, ...pool.recent], usage ?? []);
   return (
     <section className="agent-pool" aria-labelledby="agent-pool-title">
       <header className="agent-pool-header">
@@ -87,7 +97,7 @@ export function AgentPoolPanel({
           ? <p className="muted" data-testid="agent-pool-idle">No agent work is queued or running.</p>
           : <ul className="agent-pool-rows">
             {pool.active.map((item) => (
-              <WorkRow key={item.job.id} item={item} onViewInvestigation={onViewInvestigation} />
+              <WorkRow key={item.job.id} item={item} usage={usageOf.get(item.job.id)} onViewInvestigation={onViewInvestigation} />
             ))}
           </ul>}
       </section>
@@ -97,11 +107,24 @@ export function AgentPoolPanel({
           <h3>Recently finished</h3>
           <ul className="agent-pool-rows">
             {pool.recent.map((item) => (
-              <WorkRow key={item.job.id} item={item} onViewInvestigation={onViewInvestigation} />
+              <WorkRow key={item.job.id} item={item} usage={usageOf.get(item.job.id)} onViewInvestigation={onViewInvestigation} />
             ))}
           </ul>
         </section>
       )}
+
+      <section aria-label="Reported model use">
+        <h3>Reported model use</h3>
+        <p data-testid="agent-pool-usage-total">
+          {usage === null
+            ? 'Reported model use could not be read.'
+            : total ? `Listed work: ${usageLine(total)}` : 'No model use is recorded for the listed work.'}
+        </p>
+        <p className="muted">
+          Token counts are what each provider reported, not verified billing. Specialist
+          investigations keep their usage with each saved task.
+        </p>
+      </section>
 
       <section aria-label="Configured providers">
         <h3>Providers</h3>

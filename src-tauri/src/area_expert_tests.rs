@@ -48,14 +48,38 @@ fn a_question_is_answered_from_the_areas_briefing() {
         "not_known": ["The briefing holds no rule about deleting an alias."],
         "ask_instead": ["Mailbox", "Billing"],
     }));
-    let asked = ask(&state, &provider, &prepared, None, &|| {
-        CallDirective::Continue
-    })
+    // AC-1703 (T-1703): the call's usage is added to the asking job.
+    let job = state
+        .jobs
+        .lock()
+        .unwrap()
+        .enqueue("area-ask:local")
+        .unwrap();
+    let asked = ask(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        Some(job.id),
+    )
     .unwrap();
     // The scripted provider reports no token usage; the request is sized.
     assert_eq!(asked.usage.model, "scripted-model");
     assert_eq!(asked.usage.input_tokens, None);
     assert!(asked.usage.request_bytes > 0);
+    let recorded = state.jobs.lock().unwrap().list_usage().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        (
+            recorded[0].job_id,
+            recorded[0].calls,
+            recorded[0].unreported_calls
+        ),
+        (job.id, 1, 1)
+    );
+    assert_eq!(recorded[0].request_bytes, asked.usage.request_bytes);
+    assert_eq!(recorded[0].model, "scripted-model");
     let answer = asked.answer.unwrap();
     assert!(answer.statements.is_empty());
     assert_eq!(answer.left_out, 1);
@@ -77,9 +101,16 @@ fn a_question_is_answered_from_the_areas_briefing() {
         prompts: Mutex::new(Vec::new()),
     };
     assert_eq!(
-        ask(&state, &prose, &prepared, None, &|| CallDirective::Continue)
-            .unwrap()
-            .answer,
+        ask(
+            &state,
+            &prose,
+            &prepared,
+            None,
+            &|| CallDirective::Continue,
+            None
+        )
+        .unwrap()
+        .answer,
         Err("reply_not_the_schema")
     );
 }

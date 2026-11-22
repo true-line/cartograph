@@ -5,6 +5,7 @@
 // proposals); nothing is inferred about a live worker or about spend.
 import type { Job, StagedProposal } from './store';
 import type { InvestigationProvider } from './investigationTypes';
+import { invokeOr } from './tauri';
 
 /** The kinds of agent work the host records as jobs. */
 export type AgentLane = 'investigation' | 'area-expert' | 'section-draft' | 'escalation';
@@ -107,4 +108,51 @@ export function awaitingCuration(proposals: readonly StagedProposal[]): number {
 export function providerLine(provider: InvestigationProvider): string {
   const where = `${provider.mode} · ${provider.provider_id} · ${provider.model}`;
   return provider.available ? `${where}: configured` : `${where}: unavailable (${provider.unavailable_reason ?? 'no reason given'})`;
+}
+
+/** What one job's model calls used, as the providers reported it (AC-1703).
+ *  Not verified billing; a call with no reported count is not estimated. */
+export interface JobUsage {
+  job_id: number;
+  calls: number;
+  unreported_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  request_bytes: number;
+  model: string;
+}
+
+/** The recorded usage of every job; empty when the host cannot say. */
+export async function loadJobUsage(): Promise<JobUsage[]> {
+  return invokeOr<JobUsage[]>('list_job_usage', []);
+}
+
+/** One line on what a job's calls used, as reported. */
+export function usageLine(usage: JobUsage): string {
+  const calls = `${usage.calls} ${usage.calls === 1 ? 'call' : 'calls'}`;
+  const reported = usage.calls - usage.unreported_calls;
+  const tokens = reported > 0
+    ? `${usage.input_tokens.toLocaleString('en-US')} input and ${usage.output_tokens.toLocaleString('en-US')} output tokens`
+    : 'no token count reported';
+  const missing = usage.unreported_calls > 0 && reported > 0
+    ? `; ${usage.unreported_calls} ${usage.unreported_calls === 1 ? 'call' : 'calls'} reported no count`
+    : '';
+  return `${calls} to ${usage.model}: ${tokens}${missing}, as the provider reported.`;
+}
+
+/** Usage summed over the listed agent work. */
+export function usageTotal(work: readonly AgentWork[], usage: readonly JobUsage[]): JobUsage | null {
+  const byJob = new Map(usage.map((row) => [row.job_id, row]));
+  const rows = work.map((item) => byJob.get(item.job.id)).filter((row): row is JobUsage => row !== undefined);
+  if (rows.length === 0) return null;
+  const models = new Set(rows.map((row) => row.model));
+  return rows.reduce((sum, row) => ({
+    ...sum,
+    calls: sum.calls + row.calls,
+    unreported_calls: sum.unreported_calls + row.unreported_calls,
+    input_tokens: sum.input_tokens + row.input_tokens,
+    output_tokens: sum.output_tokens + row.output_tokens,
+    request_bytes: sum.request_bytes + row.request_bytes,
+  }), { job_id: 0, calls: 0, unreported_calls: 0, input_tokens: 0, output_tokens: 0, request_bytes: 0,
+    model: models.size === 1 ? rows[0].model : `${models.size} models` });
 }

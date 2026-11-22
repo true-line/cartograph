@@ -1207,6 +1207,13 @@ fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> {
     jobs.list().map_err(|e| e.to_string())
 }
 
+/// The provider-reported usage of every job's model calls (AC-1703).
+#[tauri::command]
+fn list_job_usage(state: State<'_, AppState>) -> Result<Vec<jobs::JobUsage>, String> {
+    let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+    jobs.list_usage().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn list_evals(state: State<'_, AppState>) -> Result<Vec<EvalResult>, String> {
     let jobs = state.jobs.lock().map_err(|error| error.to_string())?;
@@ -8425,6 +8432,7 @@ fn main() {
             run_plugin_gate,
             clear_finished_jobs,
             list_jobs,
+            list_job_usage,
             list_evals,
             proposals::record_agent_decision,
             proposals::list_staged_proposals,

@@ -10,6 +10,12 @@ live, a configured provider is not proof a model answers, and agent output is
 never promoted over T0/T1 facts. Use **Open Jobs** to cancel or retry work and
 **Open curation** to decide proposals.
 
+Under each topic-expert question and section draft, the pool shows how many
+model calls it made and the input and output tokens the provider reported, with
+a total over the listed work. A call whose provider reported no count is shown
+as unreported, never estimated, and none of this is verified billing.
+Specialist investigations keep their usage with each saved task.
+
 Review saved specialist conversations and open their findings. The list uses
 the same saved investigation history as Investigations, including its search,
 active filter, and **Load older saved tasks** continuation. Each docked task
