@@ -296,6 +296,7 @@ fn receipt_id(value: &str) -> bool {
         .or_else(|| value.strip_prefix("java-primary-v1:"))
         .or_else(|| value.strip_prefix("rs-primary-v1:"))
         .or_else(|| value.strip_prefix("kt-primary-v1:"))
+        .or_else(|| value.strip_prefix("tf-primary-v1:"))
         .is_some_and(hash)
 }
 
