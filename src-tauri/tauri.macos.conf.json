@@ -4,7 +4,6 @@
     "targets": ["app", "dmg"],
     "macOS": {
       "hardenedRuntime": true,
-      "entitlements": "entitlements.plist",
       "minimumSystemVersion": "10.13"
     }
   }

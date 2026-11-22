@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ADR-0085, AC-1427: only the bundled cartograph-agent sidecar is signed
+	     with this file (scripts/macos-sign-agent-runtime.sh). It is a Node
+	     executable whose V8 JIT needs MAP_JIT under the hardened runtime. The
+	     app itself carries no entitlements. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>
