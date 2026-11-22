@@ -761,4 +761,30 @@ fn a_reply_losing_claims_to_uncited_figures_is_asked_once_more() {
     let (kept, _, how) =
         screen_or_retry(&state, &Cloud, &prepared, first(2), &continue_, None).unwrap();
     assert_eq!((how, kept.finish.claims.len()), (None, 1));
+    // A local retry whose call fails keeps the first reply; a cancelled job
+    // still fails.
+    struct Failing;
+    impl LlmProvider for Failing {
+        fn id(&self) -> &str {
+            "local-failing"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Local
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let (kept, _, how) =
+        screen_or_retry(&state, &Failing, &prepared, first(2), &continue_, None).unwrap();
+    assert_eq!((how, kept.finish.claims.len()), (Some("kept_first"), 1));
+    let cancelled = || CallDirective::Cancelled;
+    assert!(screen_or_retry(&state, &Failing, &prepared, first(2), &cancelled, None).is_err());
 }

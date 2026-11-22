@@ -665,8 +665,9 @@ const RETRY_MIN_LEFT_OUT: usize = 2;
 /// [`screen`] `composed`, and on a local provider whose reply lost at least
 /// [`RETRY_MIN_LEFT_OUT`] claims to [`RETRY_REASONS`], ask once more with
 /// [`section_compose::corrected`] and keep the screened reply with more
-/// claims, the first on a tie or an unreadable retry (#2449). A cloud
-/// consent covers one payload, so a cloud composition is not asked again.
+/// claims, the first on a tie, an unreadable or failed retry, or one over
+/// the input ceiling (#2449). A cloud consent covers one payload, so a
+/// cloud composition is not asked again.
 /// Returns the reply kept, why it has no claim left, and whether a retry
 /// ran.
 fn screen_or_retry(
@@ -691,7 +692,21 @@ fn screen_or_retry(
         return Ok((composed, reason, None));
     }
     let action = section_compose::corrected(&prepared.action);
-    let text = complete(state, provider, &action, None, check, job_id)?.text;
+    // The retry is optional: a request the correction puts over the input
+    // ceiling is not sent, and a failed call keeps the first reply unless
+    // the job was cancelled or lost.
+    let ceiling = limits()?
+        .values()
+        .input_bytes
+        .saturating_sub(INPUT_MARGIN_BYTES);
+    if payload_bytes(&action) > ceiling {
+        return Ok((composed, reason, Some("kept_first")));
+    }
+    let text = match complete(state, provider, &action, None, check, job_id) {
+        Ok(completion) => completion.text,
+        Err(error) if check() != CallDirective::Continue => return Err(error),
+        Err(_) => return Ok((composed, reason, Some("kept_first"))),
+    };
     let Ok(mut second) = section_compose::decode(&prepared.address, &text, &prepared.citable)
     else {
         return Ok((composed, reason, Some("kept_first")));
