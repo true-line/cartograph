@@ -513,7 +513,12 @@ impl VolatileFinish {
                     None => kept.push(text),
                 }
             }
-            if !limitation_edits.is_empty() {
+            // The room schema offers every unflagged slot below the cap; a
+            // withdraw of a slot this finish does not have removes nothing.
+            if limitation_edits.iter().any(|(index, edit)| {
+                saved.flagged_limitations.binary_search(index).is_ok()
+                    || !matches!(edit, Edit::WithdrawLimitation { withdraw: true, .. })
+            }) {
                 return Err(PatchRejection::InvalidIndex);
             }
             *limitations = kept;
