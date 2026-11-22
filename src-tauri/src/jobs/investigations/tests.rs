@@ -20,9 +20,10 @@ mod chat_tests;
 mod held_recovery_tests;
 
 struct Fixture {
-    directory: tempfile::TempDir,
     store: JobStore,
     locks: JobExecutionLocks,
+    /// Dropped last: Windows cannot remove it while a store holds files in it (#1307).
+    directory: tempfile::TempDir,
 }
 impl Fixture {
     fn new() -> Self {

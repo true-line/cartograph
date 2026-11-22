@@ -50,7 +50,7 @@ fn saved(f: &InitialFixture) -> Vec<Vec<u8>> {
 fn recover(
     f: InitialFixture,
     candidate: InvestigationRecoveryCandidate,
-) -> (JobStore, tempfile::TempDir, String, InvestigationDetail) {
+) -> (tempfile::TempDir, JobStore, String, InvestigationDetail) {
     let InitialFixture {
         directory,
         mut store,
@@ -79,7 +79,7 @@ fn recover(
             .unwrap()
             .is_none()
     );
-    (store, directory, id, detail)
+    (directory, store, id, detail)
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn next_prompt_recovery_ready_and_consent_interrupt_without_new_call_or_usage() 
         let before = f.f.task.detail.usage.clone();
         let ledger = f.f.ledger.clone();
         let candidate = candidate(&f.f);
-        let (_store, directory, id, detail) = recover(f.f, candidate);
+        let (directory, _store, id, detail) = recover(f.f, candidate);
         assert_eq!(detail.summary.status, InvestigationStatus::Interrupted);
         assert_eq!(detail.usage, before);
         let reopened = JobStore::open(directory.path().join("state.db")).unwrap();
@@ -155,7 +155,7 @@ fn next_prompt_recovery_invocation_keeps_call_charge_and_never_replays() {
     f.begin();
     let before = f.f.task.detail.usage.clone();
     let candidate = candidate(&f.f);
-    let (store, directory, id, detail) = recover(f.f, candidate);
+    let (directory, store, id, detail) = recover(f.f, candidate);
     assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
     assert_eq!(detail.usage.model_invocations, before.model_invocations);
     assert_eq!(
@@ -216,7 +216,7 @@ fn next_prompt_recovery_source_unknown_retains_read_accounting_and_validation_ch
         );
         tx.commit().unwrap();
         let candidate = candidate(&f);
-        let (_store, directory, id, detail) = recover(f, candidate);
+        let (directory, _store, id, detail) = recover(f, candidate);
         assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
         assert_eq!(detail.usage, before);
         let reopened = JobStore::open(directory.path().join("state.db")).unwrap();

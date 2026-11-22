@@ -7,7 +7,6 @@ use agents::investigation::staged_refusal::CompletionCallMode;
 /// Uses a real existing job/ledger/archive fixture, then explicitly writes the
 /// new internal DTO/invocation as test data; this is not a production migration.
 pub(in crate::jobs::investigations) struct InternalFixture {
-    pub directory: tempfile::TempDir,
     pub store: JobStore,
     pub task: StoredTask,
     pub request: StagedObligationRequest,
@@ -16,6 +15,8 @@ pub(in crate::jobs::investigations) struct InternalFixture {
     pub metadata: ProtectedCompletionMetadata,
     pub basis: SavedCallBasis,
     pub(in crate::jobs::investigations) _execution_guard: JobExecution,
+    /// Dropped last: Windows cannot remove it while a store holds files in it (#1307).
+    pub directory: tempfile::TempDir,
 }
 fn clone_task(task: &StoredTask) -> StoredTask {
     serde_json::from_slice(&encode(task, MAX_RECORD_BYTES).unwrap()).unwrap()
