@@ -308,3 +308,139 @@ fn historical_source_limits_database_reopens() {
         let _ = store.investigation_result(&id).unwrap();
     }
 }
+
+/// A cloud provider that queries once, reads the source, then finishes.
+/// It records whether any call after the read carried source spans.
+struct RefusedSource {
+    calls: AtomicUsize,
+    spans_after_read: AtomicUsize,
+    withheld_seen: AtomicUsize,
+}
+impl LlmProvider for RefusedSource {
+    fn id(&self) -> &str {
+        "anthropic:claude-opus-5-5"
+    }
+    fn locality(&self) -> Locality {
+        Locality::Cloud
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        NextProvider::new(false).capabilities()
+    }
+    fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        panic!("offline fixture must never embed")
+    }
+    fn supports_bounded_response_schema(&self) -> bool {
+        true
+    }
+    fn bounded_profile(&self) -> Result<ProviderProfile, BoundedCallError> {
+        llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, "unused")
+            .unwrap()
+            .bounded_profile()
+    }
+    fn complete_bounded(
+        &self,
+        request: &AuthorizedBoundedCompletion,
+        _: &CompletionControl<'_>,
+    ) -> Result<BoundedCompletion, BoundedCallError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(call < 3, "unexpected extra call");
+        let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
+        if call >= 2 {
+            self.spans_after_read
+                .fetch_add(request.payload().spans.len(), Ordering::SeqCst);
+            if prompt["withheld_sources"][0]["outcome"] == "firewall_refused" {
+                self.withheld_seen.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let action = match call {
+            0 => json!({"type":"query_context","context_id":prompt["context_id"],"query":{
+                "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
+                "max_facts":1,"max_bytes":32768,"cursor":null}}),
+            1 => {
+                let option = &prompt["compact_context"]["evidence_options"][0];
+                let range = option["ranges"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|range| range["role"] == "definition_initializer")
+                    .unwrap();
+                json!({"type":"read_evidence","fact":option["fact"],"role":range["role"],"index":range["index"]})
+            }
+            _ => json!({"schema_version":1,"outcome":"insufficient_evidence","action":{
+                "type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence",
+                "limitations":["The acquired source was withheld from this provider."]}}),
+        };
+        Ok(BoundedCompletion {
+            text: action.to_string(),
+            requested_model: "claude-opus-5-5".into(),
+            response_model: Some("claude-opus-5-5".into()),
+            provider_request_id: None,
+            usage: None,
+            request_bytes: 100,
+            response_bytes: 100,
+        })
+    }
+}
+
+// AC-1414 / #679: on a cloud run, a read whose path the firewall denies is
+// acquired, settled with its refusal in one transaction, and withheld: no
+// later call carries its span, the next prompt names it `firewall_refused`,
+// and the store keeps the acquisition, the refusal and its event.
+#[test]
+fn hosted_refused_read_is_withheld_and_recorded() {
+    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = Some(vec!["*".into()]));
+    let local = NextProvider::new(false);
+    let base = CompletionFixture::new(&local, SpecialistId::DomainAnalystV9, true, false, false);
+    let request = base.request.clone();
+    let provider = Arc::new(RefusedSource {
+        calls: AtomicUsize::new(0),
+        spans_after_read: AtomicUsize::new(0),
+        withheld_seen: AtomicUsize::new(0),
+    });
+    let f = NextFixture::from_completion_base(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV10,
+        base,
+        request,
+    );
+    run_with_approvals(&f, provider.clone());
+    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = None);
+    let state = f.base.base.app.state::<AppState>();
+    let detail = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_owned_detail(&f.execution, &f.id)
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        3,
+        "{:?}",
+        detail.error
+    );
+    assert_eq!(provider.spans_after_read.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.withheld_seen.load(Ordering::SeqCst), 1);
+    assert_eq!(detail.usage.evidence_items, 1);
+    let events = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_events(&f.id, 0)
+        .unwrap();
+    assert!(
+        events
+            .items
+            .iter()
+            .any(|event| event.kind == InvestigationEventKind::ReadFirewallRefused)
+    );
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation_owned_detail(&f.execution, &f.id)
+            .unwrap(),
+        detail
+    );
+    // The refusal is an authentic own-role attempt, so an insufficient-evidence
+    // finish with a limitation completes.
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+}
