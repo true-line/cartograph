@@ -556,3 +556,44 @@ export const InterpretationBacklogIsSeparateFromSystemGaps: Story = {
     ).toBeInTheDocument();
   },
 };
+
+// #1601 pilot: in a narrow window a class head's fixed tails (extractor,
+// omission chip, tier) took the whole row, so the label shrank to one
+// character per line and read as vertical text. The label keeps a readable
+// width and the tails wrap below it instead.
+export const NarrowClassLabelStaysReadable: Story = {
+  decorators: [
+    (StoryComponent) => (
+      <div style={{ width: 340 }}>
+        <StoryComponent />
+      </div>
+    ),
+  ],
+  args: {
+    summary: {
+      gaps: 340,
+      unsupported: 0,
+      no_evidence: 0,
+      drift: 0,
+      open_findings: 340,
+      graph_facts: 40_000,
+    },
+    gaps: SCALE_GAPS.slice(0, 340),
+    drift: [],
+    registerFindings: [],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const classes = within(canvas.getByLabelText('Gap classes'));
+    const heads = classes.getAllByRole('button', { expanded: false });
+    for (const head of heads) {
+      const label = head.querySelector('.register-text');
+      await expect(label).not.toBeNull();
+      const box = label!.getBoundingClientRect();
+      // At least about 12 characters wide, never a one-character column.
+      await expect(box.width).toBeGreaterThanOrEqual(120);
+      const lineHeight = parseFloat(getComputedStyle(label!).lineHeight) || 20;
+      await expect(box.height).toBeLessThanOrEqual(lineHeight * 3);
+    }
+  },
+};

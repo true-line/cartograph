@@ -3882,6 +3882,7 @@ button.status-live-link:hover {
 .register-row {
   width: 100%;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.7rem;
   padding: 0.7rem 0.95rem;
@@ -4001,12 +4002,17 @@ button.register-row:hover {
 }
 
 .register-text {
-  flex: 1;
+  /* A readable basis (#1601): with fixed tails the label used to shrink to
+     one character per line; now the tails wrap below it instead. */
+  flex: 1 1 12rem;
+  min-width: min(12rem, 100%);
   overflow-wrap: anywhere;
 }
 
 .register-tail {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: 0.74rem;
   color: var(--accent);
