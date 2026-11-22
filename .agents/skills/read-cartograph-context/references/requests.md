@@ -62,6 +62,13 @@ narrow it, or `{ type: "node", id: nodeId }` for one node. Continue a non-null
 `context_id: page.context_id`. A fact the session does not show is absent from
 every page, so an empty neighborhood is not proof that a relation does not exist.
 
+In a scoped session the same tool takes the neighborhood fields at the top
+level: `{ session_id, session_basis_id, anchor, hops, kind, labels, max_facts,
+max_bytes, cursor }`, and the page is at `structuredContent.relations.page`.
+Only the neighborhood scope is offered; read one node with
+`cartograph_read_fact`. A neighborhood larger than the window limits returns a
+limit error, not a partial page: lower `hops` or narrow from a closer anchor.
+
 ## Official artifact
 
 ```js

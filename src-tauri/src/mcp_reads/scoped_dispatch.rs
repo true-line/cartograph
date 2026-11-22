@@ -5,7 +5,9 @@ use super::{
         DispatchAction, DispatchLimits, EvidenceWorkLimits, error_response, fits, inner_cap, parse,
         success, tool_error,
     },
-    scoped_session::{ScopedDiscoveryRequest, ScopedReadContext, ScopedReadSession},
+    scoped_session::{
+        ScopedDiscoveryRequest, ScopedReadContext, ScopedReadSession, ScopedRelationsRequest,
+    },
 };
 use crate::AppState;
 use core_graph::source::FactKey;
@@ -13,10 +15,11 @@ use mcp_wire::admission::{Action, Admission, ReadTool};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-pub(super) const TOOLS: [ReadTool; 6] = [
+pub(super) const TOOLS: [ReadTool; 7] = [
     ReadTool::Capabilities,
     ReadTool::Discover,
     ReadTool::ReadFact,
+    ReadTool::Query,
     ReadTool::Evidence,
     ReadTool::Artifacts,
     ReadTool::ReadArtifact,
@@ -164,8 +167,29 @@ impl<'a> ScopedDispatcher<'a> {
         cap: usize,
     ) -> Result<Value, ReadError> {
         match tool {
-            // Not offered in scoped sessions; admission never routes it here.
-            ReadTool::Query => Err(ReadError::InvalidRequest),
+            ReadTool::Query => {
+                let args: Relations = parse(args)?;
+                self.check(&args.session_id, &args.session_basis_id)?;
+                let inner =
+                    self.envelope_cap(id, "Scoped neighborhood relations.", "relations", cap)?;
+                let request = ScopedRelationsRequest {
+                    anchor: args.anchor,
+                    hops: args.hops,
+                    kind: args.kind,
+                    labels: args.labels,
+                    max_facts: args.max_facts,
+                    max_bytes: inner,
+                    cursor: args.cursor.map(|c| context_hub::QueryCursor {
+                        snapshot_id: c.snapshot_id,
+                        selection_id: c.selection_id,
+                        offset: c.offset,
+                    }),
+                };
+                let response = self
+                    .session
+                    .relations(ctx, &args.session_basis_id, request)?;
+                self.wrap(id, "Scoped neighborhood relations.", "relations", response)
+            }
             ReadTool::Capabilities => {
                 let _: Empty = parse(args)?;
                 self.session.check_current(ctx)?;
@@ -402,6 +426,32 @@ struct Detail {
     fact: Fact,
     #[serde(rename = "max_bytes")]
     _max_bytes: std::num::NonZeroUsize,
+}
+/// A neighborhood of one exact node (AC-1810). Every budget is required and
+/// no unknown field is accepted; one node is `cartograph_read_fact`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Relations {
+    session_id: String,
+    session_basis_id: String,
+    anchor: String,
+    hops: usize,
+    #[serde(default)]
+    kind: Option<context_hub::FactKind>,
+    #[serde(default)]
+    labels: Vec<String>,
+    max_facts: usize,
+    #[serde(rename = "max_bytes")]
+    _max_bytes: std::num::NonZeroUsize,
+    #[serde(default)]
+    cursor: Option<RelationsCursor>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelationsCursor {
+    snapshot_id: String,
+    selection_id: String,
+    offset: usize,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]

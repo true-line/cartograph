@@ -185,6 +185,37 @@ pub(crate) fn required_bytes(limits: WorkerLimits) -> Option<usize> {
         json_bytes(w)?,
         json_bytes(w)?,
     ])?;
+    // AC-1810: acquisition holds the raw neighborhood, its decode workspace
+    // and the reader's node/edge maps and frontiers while the visible clones
+    // build one ContextSnapshot (retained facts and indexes plus identity).
+    // The raw graph is dropped before the core query runs over the snapshot;
+    // the page then gains the cloned coverage and its scoped wrapper Values.
+    let rows = limits.graph.max_rows;
+    let frontier_ids = sum(&[limits.graph.max_bytes, set::<String>(rows)?])?;
+    let neighborhood_snapshot = logical::snapshot(limits.graph)?;
+    let acquire = sum(&[
+        graph,
+        limits.graph.max_bytes,
+        sum(&[limits.graph.max_bytes, map::<String, Node>(rows)?])?,
+        sum(&[
+            limits.graph.max_bytes,
+            map::<(String, String, String), Edge>(rows)?,
+        ])?,
+        frontier_ids.checked_mul(2)?,
+        slots::<&Node>(rows)?,
+        slots::<&Edge>(rows)?,
+        neighborhood_snapshot.retained,
+        neighborhood_snapshot.identity_peak,
+    ])?;
+    let page = sum(&[
+        neighborhood_snapshot.retained,
+        logical::query_workspace(limits.graph, r)?.peak_bytes,
+        coverage.retained,
+        coverage.retained,
+        json_bytes(w)?,
+        json_bytes(w)?,
+    ])?;
+    let relations = acquire.max(page);
     let scoped = sum(&[
         complete.retained_session_bytes,
         ids,
@@ -197,7 +228,8 @@ pub(crate) fn required_bytes(limits: WorkerLimits) -> Option<usize> {
         selected
             .checked_add(candidates)?
             .max(evidence)
-            .max(partition_phase),
+            .max(partition_phase)
+            .max(relations),
     ])?;
     Some(full.max(scoped))
 }
@@ -242,6 +274,22 @@ mod tests {
         limits.dispatch.max_response_bytes = std::num::NonZeroUsize::new(1).unwrap();
         limits.max_request_frame_bytes = std::num::NonZeroUsize::new(1).unwrap();
         assert!(required_bytes(limits).unwrap() >= metadata().unwrap() + fixed_basis().unwrap());
+    }
+
+    #[test]
+    fn neighborhood_relations_reserve_snapshot_and_query_payloads() {
+        // AC-1810: the scoped relations phase owns a whole visible-neighborhood
+        // snapshot and the core query's cloned page alongside it, independent
+        // of a tiny response transport.
+        let mut limits = crate::mcp_reads::worker::tests::limits();
+        limits.dispatch.max_response_bytes = std::num::NonZeroUsize::new(1).unwrap();
+        let snapshot = logical::snapshot(limits.graph).unwrap();
+        let query =
+            logical::query_workspace(limits.graph, limits.max_request_frame_bytes.get()).unwrap();
+        assert!(
+            required_bytes(limits).unwrap()
+                >= snapshot.retained + snapshot.identity_peak.max(query.peak_bytes)
+        );
     }
 
     #[test]
