@@ -1158,6 +1158,10 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agents` · ADR-0085 · T-1428
 - **AC-1429** Given the expanded profile, when the catalog lists analysts, then `domain-analyst@29` is offered beside the current @28: its prompt is @28's with the one-JSON-object sentence replaced by a one-tool-call sentence, it carries every @28 capability plus `native_tool_runtime`, a start on a cloud provider or without the installed runtime is refused before anything runs, and each run gets its own runtime process and loopback proxy around the provider the start resolved, whose identity is unchanged; every other version keeps the bounded loop (ADR-0085).
 - **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1429
+- **AC-1430** Given an @29 run in which an obligation's only read was refused for prompt capacity, when a supported finish names that obligation in a top-level limitation by the first 12 characters of its obligation_id, then the finish is accepted with that obligation recorded as capacity-disclosed, never as met: the observation stays unattempted and unacquired, only a supported result may carry it, refusals keep their derived assessment, and reopen re-derives the disclosure only from the bound capacity exclusions (ADR-0085).
+- **Trace:** H4 · `agents` · ADR-0085 · T-1430
+- **AC-1431** Given an @29 finish refused for prose located in top-level limitations, when the next step is offered, then it is a finish patch that must replace or withdraw every flagged limitation and finding, each as a required key, and a refusal whose only unmet entries are capacity exclusions is also patchable, the patch giving one required disclosure per gap keyed by its 12-character name that the host appends as a name-prefixed limitation; a full finish sent on a patch step is read as the patch at the flagged indices, leaving unflagged rows as first admitted; older roles keep their whole-answer fallback and their saved marker and schema bytes (ADR-0085).
+- **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1431
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned
