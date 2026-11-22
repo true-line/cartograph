@@ -18,7 +18,9 @@ Parse immutable captured buffers in the production TypeScript lane and mint
 versioned per-fact receipts for direct lexical rule/owner observations. Bind the
 complete emitted fact, original ranges, registered ownership and producer/grammar
 identity. Keep receipts outside graph properties and legacy provenance/staging.
-Disable participating TS cache reuse until cache attestation is implemented.
+Disable participating TS cache reuse until cache attestation is implemented
+(*amended by ADR-0087:* attested parses of unchanged retained bytes are reused
+and their receipts minted afresh over the current capture).
 
 Publish explicit current fact-to-receipt associations in the same SQLite graph
 transaction as repository reconciliation. Ordinary fact mutations invalidate the
