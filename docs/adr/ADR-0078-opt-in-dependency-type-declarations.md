@@ -50,13 +50,15 @@ author, package by package, as ADR-0075 decided for env values.
 3. **What is proven.** A call `name()` on a named import, or `ns.name()` on a
    namespace import, from a listed package's root specifier is proven when
    the package's declarations export `name` as a function, class, variable
-   or namespace. The proven call becomes a `CALLS` edge from the calling
-   symbol to the package's existing `mod:` boundary, with
-   `resolution: "dependency-types"`, the `member`, the `declaration` kind,
-   the package-relative declaration file and the installed `package_version`.
-   Its evidence is the call site plus the dependency's declaring line in the
-   importer's `package.json`. A package the importer's manifest does not
-   declare proves nothing.
+   or namespace. The proven calls become one `CALLS` edge per caller and
+   package, from the calling symbol to the package's existing `mod:`
+   boundary, because the graph keys a relation by source, target and label.
+   The edge has `resolution: "dependency-types"`, the sorted `members` the
+   caller reaches, their `declarations` kinds and package-relative
+   `declared_in` files in the same order, and the installed
+   `package_version`. Its evidence is every call site plus the dependency's
+   declaring line in the importer's `package.json`. A package the importer's
+   manifest does not declare proves nothing.
 4. **No new Gaps.** A call the declarations do not prove (a default import, a
    subpath specifier, `export =`, a missing or ambiguous member, a package
    past its bounds or not installed) stays omitted, as it is today. The

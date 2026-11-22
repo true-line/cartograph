@@ -181,7 +181,9 @@ pub(crate) fn complete(
     let canonical_root = root.canonicalize()?;
     // One read per (package, installed directory).
     let mut packages: BTreeMap<(String, PathBuf), Result<Package, String>> = BTreeMap::new();
-    let mut edges = Vec::new();
+    // One edge per caller and package: the graph keys a relation by
+    // `(src, dst, label)`, so every member a caller reaches is kept on it.
+    let mut edges: BTreeMap<(String, String), Proven> = BTreeMap::new();
     for call in calls {
         let Some(name) = resolution::package_name(&call.spec) else {
             continue;
@@ -225,24 +227,30 @@ pub(crate) fn complete(
         if kind == Kind::Type {
             continue;
         }
-        let mut edge = call.edge;
-        edge.props["resolution"] = "dependency-types".into();
-        edge.props["member"] = call.member.clone().into();
-        edge.props["declaration"] = kind.as_str().into();
-        edge.props["declared_in"] = file.into();
-        if let Some(version) = &package.version {
-            edge.props["package_version"] = version.clone().into();
-        }
-        if let Ok(mut prov) = serde_json::from_value::<Provenance>(edge.props["prov"].clone()) {
-            prov.evidence
-                .extend(evidence.iter().cloned().map(|mut cited: EvidenceRef| {
-                    cited.commit_sha = id.commit.to_string();
-                    cited
-                }));
-            edge.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
-        }
+        let Ok(mut prov) = serde_json::from_value::<Provenance>(call.edge.props["prov"].clone())
+        else {
+            continue;
+        };
+        prov.evidence
+            .extend(evidence.iter().cloned().map(|mut cited: EvidenceRef| {
+                cited.commit_sha = id.commit.to_string();
+                cited
+            }));
         report.calls_proven += 1;
-        edges.push(edge);
+        let key = (call.edge.src.clone(), call.edge.dst.clone());
+        let proven = edges.entry(key).or_insert_with(|| Proven {
+            edge: call.edge,
+            version: package.version.clone(),
+            members: BTreeMap::new(),
+            prov: None,
+        });
+        proven
+            .members
+            .insert(call.member.clone(), (kind.as_str(), file));
+        match &mut proven.prov {
+            None => proven.prov = Some(prov),
+            Some(held) => held.evidence.extend(prov.evidence),
+        }
     }
     for ((name, _), outcome) in packages {
         match outcome {
@@ -252,8 +260,45 @@ pub(crate) fn complete(
     }
     report.packages_read.dedup();
     report.packages_unavailable.dedup();
+    let edges = edges
+        .into_values()
+        .map(Proven::into_edge)
+        .collect::<Vec<_>>();
     facts.append(Vec::new(), edges)?;
     Ok(report)
+}
+
+/// The calls one caller makes into one package, merged into its edge.
+struct Proven {
+    edge: Edge,
+    version: Option<String>,
+    /// member -> (declaration kind, package-relative declaring file).
+    members: BTreeMap<String, (&'static str, String)>,
+    prov: Option<Provenance>,
+}
+
+impl Proven {
+    fn into_edge(self) -> Edge {
+        let mut edge = self.edge;
+        edge.props["resolution"] = "dependency-types".into();
+        let (members, rest): (Vec<_>, Vec<_>) = self.members.into_iter().unzip();
+        let (kinds, files): (Vec<_>, Vec<_>) = rest.into_iter().unzip();
+        edge.props["members"] = members.into();
+        edge.props["declarations"] = kinds.into();
+        edge.props["declared_in"] = files.into();
+        if let Some(version) = self.version {
+            edge.props["package_version"] = version.into();
+        }
+        if let Some(mut prov) = self.prov {
+            // Call sites in walk order, each manifest line once.
+            let mut seen = BTreeSet::new();
+            prov.evidence.retain(|cited| {
+                seen.insert((cited.path.clone(), cited.byte_start, cited.byte_end))
+            });
+            edge.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
+        }
+        edge
+    }
 }
 
 /// `@types/<name>`, with a scope folded the DefinitelyTyped way.
@@ -376,16 +421,24 @@ fn read_inside(canonical_root: &Path, path: &Path, limit: u64) -> Result<Vec<u8>
 
 /// `types`, `typings`, or the `types` condition of the `.` export.
 fn types_entry(json: &serde_json::Value) -> Option<String> {
+    /// A `types` value: a path, or nested conditions
+    /// (`"types": {"import": "./index.d.mts", "require": "./index.d.cts"}`).
+    fn declared(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::String(entry) => Some(entry),
+            serde_json::Value::Object(map) => ["types", "import", "require", "default"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(declared)),
+            _ => None,
+        }
+    }
     fn condition(value: &serde_json::Value) -> Option<&str> {
         match value {
-            serde_json::Value::Object(map) => map
-                .get("types")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    ["import", "require", "default"]
-                        .iter()
-                        .find_map(|key| map.get(*key).and_then(condition))
-                }),
+            serde_json::Value::Object(map) => map.get("types").and_then(declared).or_else(|| {
+                ["import", "require", "default"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(condition))
+            }),
             _ => None,
         }
     }

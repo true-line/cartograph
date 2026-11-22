@@ -63,6 +63,7 @@ export function checkout() {
 }
 export function settle() {
     billing.refund(5);
+    billing.charge(1);
 }
 ";
 
@@ -91,10 +92,10 @@ fn storage_package() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "node_modules/billing/package.json",
-            r#"{"name": "billing", "version": "2.0.1", "exports": {".": {"types": "./index.d.ts", "import": "./index.mjs"}}}"#,
+            r#"{"name": "billing", "version": "2.0.1", "exports": {".": {"import": "./index.mjs", "types": {"import": "./types/main.d.ts", "require": "./types/main.d.cts"}}}}"#,
         ),
         (
-            "node_modules/billing/index.d.ts",
+            "node_modules/billing/types/main.d.ts",
             "declare function charge(amount: number): void;\nexport { charge };\nexport declare const refund: (amount: number) => void;\nexport declare namespace Refunds { function create(): void; }\n",
         ),
         (
@@ -152,9 +153,9 @@ fn allowlisted_package_calls_reach_their_boundary() {
             (
                 edge.src.as_str(),
                 edge.dst.as_str(),
-                edge.props["member"].as_str().unwrap(),
-                edge.props["declaration"].as_str().unwrap(),
-                edge.props["declared_in"].as_str().unwrap(),
+                edge.props["members"].clone(),
+                edge.props["declarations"].clone(),
+                edge.props["declared_in"].clone(),
                 edge.props["package_version"].as_str().unwrap(),
             )
         })
@@ -165,25 +166,26 @@ fn allowlisted_package_calls_reach_their_boundary() {
             (
                 "sym:acme/shop@src/checkout.ts#checkout",
                 "mod:@acme/storage",
-                "upload",
-                "function",
-                "dist/upload.d.ts",
+                serde_json::json!(["upload"]),
+                serde_json::json!(["function"]),
+                serde_json::json!(["dist/upload.d.ts"]),
                 "3.1.4",
             ),
             (
                 "sym:acme/shop@src/checkout.ts#checkout",
                 "mod:billing",
-                "charge",
-                "function",
-                "index.d.ts",
+                serde_json::json!(["charge"]),
+                serde_json::json!(["function"]),
+                serde_json::json!(["types/main.d.ts"]),
                 "2.0.1",
             ),
             (
+                // Both members one caller reaches stay on its one edge.
                 "sym:acme/shop@src/checkout.ts#settle",
                 "mod:billing",
-                "refund",
-                "variable",
-                "index.d.ts",
+                serde_json::json!(["charge", "refund"]),
+                serde_json::json!(["function", "variable"]),
+                serde_json::json!(["types/main.d.ts", "types/main.d.ts"]),
                 "2.0.1",
             ),
         ]
@@ -196,6 +198,13 @@ fn allowlisted_package_calls_reach_their_boundary() {
     .map(|cited| cited["path"].as_str().unwrap().to_string())
     .collect();
     assert_eq!(evidence, ["src/checkout.ts", "package.json"]);
+    // The settle edge cites both call sites and the manifest line once.
+    let cited = calls[2].props["prov"]["evidence"].as_array().unwrap();
+    let paths: Vec<_> = cited.iter().map(|c| c["path"].as_str().unwrap()).collect();
+    assert_eq!(
+        paths,
+        ["src/checkout.ts", "package.json", "src/checkout.ts"]
+    );
     // The boundary the calls reach is still the import's external module.
     let module = out
         .nodes
@@ -211,7 +220,7 @@ fn allowlisted_package_calls_reach_their_boundary() {
                 ("legacy".into(), "`export =` (CommonJS) declarations".into()),
                 ("untyped".into(), "no type declarations".into()),
             ],
-            calls_proven: 3,
+            calls_proven: 4,
         }
     );
 }
@@ -273,9 +282,15 @@ fn unlisted_packages_are_never_read() {
     let out = extract_project(Some("read = [\"billing\"]\n"));
     let members: Vec<_> = dependency_calls(&out)
         .iter()
-        .map(|edge| edge.props["member"].as_str().unwrap().to_string())
+        .map(|edge| edge.props["members"].clone())
         .collect();
-    assert_eq!(members, ["charge", "refund"]);
+    assert_eq!(
+        members,
+        [
+            serde_json::json!(["charge"]),
+            serde_json::json!(["charge", "refund"])
+        ]
+    );
     assert_eq!(out.dependency_types.packages_read, ["billing"]);
 }
 
@@ -314,12 +329,15 @@ fn ambiguous_star_exports_prove_nothing() {
         .iter()
         .map(|edge| {
             (
-                edge.props["member"].as_str().unwrap().to_string(),
-                edge.props["declared_in"].as_str().unwrap().to_string(),
+                edge.props["members"].clone(),
+                edge.props["declared_in"].clone(),
             )
         })
         .collect();
-    assert_eq!(members, [("pick".to_string(), "a.d.ts".to_string())]);
+    assert_eq!(
+        members,
+        [(serde_json::json!(["pick"]), serde_json::json!(["a.d.ts"]))]
+    );
 }
 
 // AC-1506: a package without its own types falls back to `@types/<name>`,
