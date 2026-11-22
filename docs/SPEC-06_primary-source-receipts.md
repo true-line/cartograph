@@ -332,4 +332,7 @@ ADR-0079). Each retained one is published as the fact's observed binding,
 beside its primary binding and in the same transaction, in
 `source_node_observations` or `source_edge_observations` (association
 schema v3); a later recovery that no longer binds it reclaims it
-(AC-1047). Readers do not yet resolve the observed role (AC-1049).
+(AC-1047). The app describes and reads an observed binding on its own,
+admitting only the source's input identity, and shows it as "Observed in"
+beside the declaration, never in its place (AC-1049). Scoped MCP evidence
+does not yet resolve the observed role (AC-1051).
