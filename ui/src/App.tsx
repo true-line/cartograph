@@ -239,11 +239,21 @@ export default function App() {
   // The host's agent pool controls (AC-1704); null until read.
   const [poolControls, setPoolControls] = useState<AgentPoolControls | null>(null);
   const [poolControlsError, setPoolControlsError] = useState<string | null>(null);
+  // Shown at once so a second change builds on the first; only the latest
+  // save's answer is applied, and a failed save re-reads what is stored.
+  const poolControlsSave = useRef(0);
   const changePoolControls = useCallback((next: AgentPoolControls) => {
     setPoolControlsError(null);
+    setPoolControls(next);
+    const save = ++poolControlsSave.current;
+    const latest = () => save === poolControlsSave.current;
     void saveAgentPoolControls(next).then(
-      (stored) => { if (stored) setPoolControls(stored); },
-      (error: unknown) => setPoolControlsError(`The pool controls were not saved: ${String(error)}`),
+      (stored) => { if (stored && latest()) setPoolControls(stored); },
+      (error: unknown) => {
+        if (!latest()) return;
+        setPoolControlsError(`The pool controls were not saved: ${String(error)}`);
+        void loadAgentPoolControls().then((stored) => { if (latest()) setPoolControls(stored); }, () => undefined);
+      },
     );
   }, []);
   // The closed-state dispatch hint (#251, AC-1702) shows until the first confirmed dispatch.
