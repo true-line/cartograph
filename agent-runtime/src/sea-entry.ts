@@ -4,18 +4,16 @@
 // single executable has no node_modules to read them from.
 import { createInterface } from "node:readline";
 import { serve } from "./main.ts";
+import { runClaude } from "./claude-runner.ts";
 import { runPi } from "./pi-runner.ts";
 import type { RunnerVersions } from "./protocol.ts";
 
 declare const CARTOGRAPH_RUNNERS: RunnerVersions;
 
-// The Agent SDK lane is not in this build yet (AC-1424). Its version is empty,
-// so the host refuses a Claude run before it starts; this is the backstop.
-const claude: Parameters<typeof serve>[1]["claude"] = async (_start, _host, done) =>
-  done({ type: "done", reason: "error", detail: "the Claude lane is not in this build" });
-
+// Both lanes are bundled. The Claude lane drives the Claude Code executable
+// the host names in its start message (AC-1424).
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-serve({ lines, write: (line) => process.stdout.write(line) }, { pi: runPi, claude }, CARTOGRAPH_RUNNERS).then(
+serve({ lines, write: (line) => process.stdout.write(line) }, { pi: runPi, claude: runClaude }, CARTOGRAPH_RUNNERS).then(
   () => process.exit(0),
   (error) => {
     process.stderr.write(`${String(error)}\n`);

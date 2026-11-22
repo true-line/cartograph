@@ -1,5 +1,8 @@
 {
   "bundle": {
-    "externalBin": ["../target/mcp-relay/cartograph-mcp", "../target/agent-runtime/cartograph-agent"]
+    "externalBin": ["../target/mcp-relay/cartograph-mcp", "../target/agent-runtime/cartograph-agent"],
+    "resources": {
+      "../target/agent-runtime/claude-code/claude": "claude-code/claude"
+    }
   }
 }

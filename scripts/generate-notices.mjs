@@ -32,9 +32,6 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const NOTICES_PATH = join(ROOT, 'THIRD-PARTY-NOTICES.md');
 const TS_PATH = join(ROOT, 'ui', 'src', 'generated', 'thirdPartyNotices.ts');
 const LOCK_PATH = join(ROOT, 'ui', 'package-lock.json');
-// Not in the packaged sidecar yet: the Claude lane ships with AC-1424, and
-// these join the notices then.
-export const AGENT_UNBUNDLED = ['@anthropic-ai/claude-agent-sdk', '@modelcontextprotocol/sdk'];
 const check = process.argv.includes('--check');
 const withAgentRuntime = process.argv.includes('--with-agent-runtime');
 
@@ -180,6 +177,8 @@ function jsNotices() {
 // The `cartograph-agent` sidecar (ADR-0085) is one Node.js single executable:
 // the pinned Node release plus the bundled npm packages. The build verifies
 // Node's LICENSE against its pin and leaves it in target/agent-runtime/.
+// The macOS app also carries Claude Code, unmodified, for the Claude lane
+// (AC-1424); its terms are the Agent SDK's.
 export function agentNotices(root = ROOT) {
   const dir = join(root, 'agent-runtime');
   const pin = JSON.parse(readFileSync(join(root, 'scripts', 'agent-runtime-node.json'), 'utf8'));
@@ -187,13 +186,25 @@ export function agentNotices(root = ROOT) {
   if (!existsSync(licensePath)) throw new Error('build the agent runtime (scripts/build-agent-runtime.mjs) before its notices');
   const node = readFileSync(licensePath, 'utf8').trimEnd();
   const lock = JSON.parse(readFileSync(join(dir, 'package-lock.json'), 'utf8'));
-  const packages = packageNotices(collectJsPackages(lock, { exclude: AGENT_UNBUNDLED }), dir, [
+  const packages = packageNotices(collectJsPackages(lock), dir, [
     'The agent runtime sidecar (`cartograph-agent`) bundles the following npm',
     'packages. Each is used under the terms of its declared license. This list is',
     'generated from the production dependency tree of',
     '`agent-runtime/package-lock.json`; do not edit by hand.',
   ]);
-  return [`## Node.js ${pin.version}`, '', 'License: MIT (with the bundled licenses below)', '', '```', node, '```', '', packages].join('\n');
+  const claude = JSON.parse(readFileSync(join(root, 'scripts', 'agent-runtime-claude.json'), 'utf8'));
+  const sdkTerms = readFileSync(join(dir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'LICENSE.md'), 'utf8').trimEnd();
+  const claudeCode = [
+    `## Claude Code (from @anthropic-ai/claude-agent-sdk ${claude.sdk_version})`,
+    '',
+    'The macOS app carries the Agent SDK\'s Claude Code executable unmodified,',
+    `under Anthropic PBC's own Developer ID signature (team ${claude.team_id}).`,
+    '',
+    '```',
+    sdkTerms,
+    '```',
+  ].join('\n');
+  return [`## Node.js ${pin.version}`, '', 'License: MIT (with the bundled licenses below)', '', '```', node, '```', '', claudeCode, '', packages].join('\n');
 }
 
 function build({ agentRuntime = false } = {}) {

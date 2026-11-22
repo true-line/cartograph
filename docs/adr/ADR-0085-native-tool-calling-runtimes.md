@@ -171,8 +171,7 @@ The disk image's notarization then covers the final signatures, and the
 standalone app is stapled from it.
 
 **Audit triage.** `npm audit --omit=dev` on the committed lockfile reports
-eight findings: seven high and one moderate. None is reachable from the
-shipped sidecar.
+six high findings. None is reachable from the shipped sidecar.
 
 - `proxy-agent`, `pac-proxy-agent`, `get-uri` and `basic-ftp` come in via
   `@mariozechner/pi-ai`, and the findings carry through to `pi-agent-core`.
@@ -186,10 +185,51 @@ shipped sidecar.
     against its loopback proxy. It clears the sidecar's environment to
     `PATH`, so the proxy condition never holds either.
   - The fix npm suggests is a major downgrade of Pi, which we don't take.
-- `@modelcontextprotocol/sdk` (fixed in 1.32.2) and `@hono/node-server`,
-  which comes in through it, are on the Claude lane only.
-  - They are external to the bundle and absent from the packaged build
-    (AC-1424).
-  - The lane uses the SDK's in-process `McpServer`. No HTTP transport, OAuth
-    client or bearer-auth path runs.
-  - AC-1424 bumps the SDK to a fixed release before the lane ships.
+- AC-1424 pinned `@modelcontextprotocol/sdk` at 1.32.2, which also moves
+  `@hono/node-server` to 2.1.11, so neither is reported any more. The lane
+  uses the SDK's in-process `McpServer`; no HTTP transport, OAuth client or
+  bearer-auth path runs.
+
+## Packaging notes (AC-1424, 2026-11-22): the Claude lane
+
+**Claude Code as a resource.** The Agent SDK runs its loop in Anthropic's
+native `claude` executable, from the per-platform package
+`@anthropic-ai/claude-agent-sdk-<platform>`. The app ships it unmodified as
+`Contents/Resources/claude-code/claude`, keeping Anthropic's Developer ID
+signature (team `Q6L2SF6YDW`, hardened runtime). We add no entitlement to
+the app for it, and we don't lipo or re-sign it. The sidecar bundles the SDK
+itself and receives the path in its start message.
+
+**Its entitlements, for the scan** (as Anthropic signs them, from
+`codesign -d --entitlements` on 0.3.330 darwin-arm64):
+
+- `com.apple.security.cs.allow-jit`
+- `com.apple.security.cs.allow-unsigned-executable-memory`
+- `com.apple.security.cs.disable-library-validation`
+- `com.apple.security.device.audio-input`
+- `com.apple.security.automation.apple-events`
+
+These apply to that process only. It runs with the sidecar's cleared
+environment, a per-run temporary `HOME`, and no credential: its only network
+peer is the host's per-run loopback proxy, which holds the API key and
+serves only armed steps.
+
+**Pins and checks.** `scripts/agent-runtime-claude.json` pins the SDK
+version, the signing team and each platform binary's sha256.
+
+- At build time, `scripts/build-agent-runtime.mjs` refuses a lockfile whose
+  SDK differs from the pin, checks the binary's sha256, and checks its
+  signature with `codesign --verify --strict` against a requirement for a
+  Developer ID Application certificate of that team.
+- After signing, `scripts/macos-sign-agent-runtime.sh` checks the same
+  requirement on the bundled copy, so our re-seal kept it intact.
+- At launch, the host hashes the file and runs the same `codesign` check
+  before every spawn. A Claude start that fails either is refused before any
+  request.
+
+**Architectures.** `release.yml` builds one universal app today, and the
+Claude Code binary is about 160 MB per slice, so the universal app carries
+only the darwin-arm64 build. A Cloud tool-calling start on an Intel Mac is
+refused with a clear message, and Local runs are unaffected. Follow-up:
+per-architecture builds, with each DMG carrying only its own Claude Code
+slice, which adds the darwin-x64 lane.

@@ -102,6 +102,9 @@ test("protocol refuses a non-loopback model endpoint and undeclared hook points"
   assert.throws(() => parseHostMessage(line({ lane: "openai" })), /lane/);
   assert.throws(() => parseHostMessage(line({ backend: "tgi" })), /backend/);
   assert.throws(() => parseHostMessage(line({ lane: "claude", backend: "ollama" })), /pi lane only/);
+  assert.throws(() => parseHostMessage(line({ lane: "pi", claude_executable: "/x/claude" })), /claude lane only/);
+  assert.throws(() => parseHostMessage(line({ lane: "claude", claude_executable: "" })), /claude lane only/);
+  assert.equal((parseHostMessage(line({ lane: "claude", claude_executable: "/x/claude" })) as any).claude_executable, "/x/claude");
   assert.equal((parseHostMessage(line({ backend: "vllm" })) as StartMessage).backend, "vllm");
   assert.throws(() => parseHostMessage(JSON.stringify({ type: "exec", command: "ls" })), /unknown/);
   assert.equal(parseHostMessage(line({})).type, "start");
@@ -200,7 +203,12 @@ test("Pi lane: max_turns stops a run that never finishes", async () => {
 
 test("Claude lane: built-in tools, settings and other servers are off; the key stays in the host", async () => {
   const host = fakeHost({ tool: () => ({ content: "page" }) });
-  const options = claudeOptions(start({ lane: "claude", model: "claude-sonnet-5-5" }), host.channel, new AbortController());
+  const options = claudeOptions(
+    start({ lane: "claude", model: "claude-sonnet-5-5", claude_executable: "/App/Contents/Resources/claude-code/claude", max_output_tokens: 2048 }),
+    host.channel,
+    new AbortController(),
+    "/tmp/run-home",
+  );
   assert.deepEqual(options.tools, []);
   assert.deepEqual(options.allowedTools, ["mcp__cartograph__query_context", "mcp__cartograph__read_evidence", "mcp__cartograph__finish"]);
   assert.deepEqual(options.settingSources, []);
@@ -208,7 +216,14 @@ test("Claude lane: built-in tools, settings and other servers are off; the key s
   assert.deepEqual(Object.keys(options.mcpServers), ["cartograph"]);
   assert.equal(options.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:41234/run-1");
   assert.equal(options.env.ANTHROPIC_API_KEY, "proxy-token");
-  assert.equal(Object.keys(options.env).filter((key) => /KEY|TOKEN|SECRET/.test(key) && key !== "ANTHROPIC_API_KEY").length, 0);
+  assert.equal(Object.keys(options.env).filter((key) => /KEY|TOKEN|SECRET/.test(key) && !["ANTHROPIC_API_KEY", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"].includes(key)).length, 0);
+  // AC-1424: the host-verified Claude Code, in the run's own empty home, asking
+  // for no more output than the host's step allows.
+  assert.equal(options.pathToClaudeCodeExecutable, "/App/Contents/Resources/claude-code/claude");
+  assert.equal(options.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "2048");
+  assert.equal(options.cwd, "/tmp/run-home");
+  assert.equal(options.env.HOME, "/tmp/run-home");
+  assert.equal(options.env.CLAUDE_CONFIG_DIR, "/tmp/run-home/.claude");
   assert.equal((await options.canUseTool("Bash")).behavior, "deny");
   assert.equal((await options.canUseTool("mcp__cartograph__finish")).behavior, "allow");
   const pre = options.hooks.PreToolUse[0]!.hooks[0]!;

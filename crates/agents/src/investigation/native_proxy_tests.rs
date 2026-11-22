@@ -45,6 +45,7 @@ fn proxy(upstream: &str) -> ModelProxy {
         context_window: Some(32768),
         max_request_bytes: 1 << 20,
         max_response_bytes: 1 << 20,
+        credential: None,
     })
     .unwrap()
 }
@@ -218,6 +219,7 @@ fn the_vllm_backend_serves_the_openai_path_without_num_ctx() {
         context_window: Some(65536),
         max_request_bytes: 1 << 20,
         max_response_bytes: 1 << 20,
+        credential: None,
     })
     .unwrap();
     let body = json!({"model": "glm-5.3-flash", "max_tokens": 2048, "messages": [{"role": "user", "content": AUTHORIZED}]});
@@ -416,4 +418,183 @@ fn the_steps_own_limits_bind_before_any_egress() {
         1,
         "only the last one reached the provider"
     );
+}
+
+/// A stand-in Messages API that records each request's head and answers one
+/// SSE stream.
+fn anthropic_upstream() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = heads.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            if let Ok((target, headers, _)) = read_request(&mut stream, 1 << 20) {
+                let mut head = target;
+                for (name, value) in headers {
+                    head.push_str(&format!("\n{name}: {value}"));
+                }
+                seen.lock().unwrap().push(head);
+            }
+            let body = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (url, heads)
+}
+
+fn anthropic_proxy(upstream: &str) -> ModelProxy {
+    ModelProxy::bind(ProxyConfig {
+        run_id: "run-7".into(),
+        token: "run-7-token".into(),
+        upstream: upstream.into(),
+        backend: ProxyBackend::Anthropic,
+        model: "claude-opus-4-8".into(),
+        context_window: None,
+        max_request_bytes: 1 << 20,
+        max_response_bytes: 1 << 20,
+        credential: Some(llm::UpstreamCredential::new("x-api-key", "sk-real")),
+    })
+    .unwrap()
+}
+
+/// The request shape the Claude Agent SDK's runtime sends after a tool call:
+/// its system blocks and environment message, then the host's tool result.
+fn messages_request(max_tokens: u64, extra: Option<Value>) -> Value {
+    let mut result = vec![json!({"tool_use_id": "toolu_1", "type": "tool_result",
+        "content": [{"type": "text", "text": AUTHORIZED}], "cache_control": {"type": "ephemeral"}})];
+    result.extend(extra);
+    json!({"model": "claude-opus-4-8", "max_tokens": max_tokens, "stream": true,
+        "system": [{"type": "text", "text": "system text"}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "task text"}]},
+            {"role": "system", "content": "# Environment"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "mcp__cartograph__query_context", "input": {}}]},
+            {"role": "user", "content": result}]})
+}
+
+/// Sends one request as the Claude lane's runtime would.
+fn send_messages(
+    base: String,
+    target: &str,
+    key: &str,
+    body: Value,
+) -> std::thread::JoinHandle<u16> {
+    let target = target.to_owned();
+    let key = key.to_owned();
+    std::thread::spawn(move || {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("{base}{target}"))
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "claude-code-20250219")
+            .json(&body)
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
+    })
+}
+
+// AC-1424 (ADR-0085 decision 7): the Claude lane's runtime reaches the
+// Messages API only through the proxy, with the per-run token as its key; the
+// proxy swaps in the real key and checks the same limits and texts.
+#[test]
+fn the_claude_lane_gets_the_real_key_only_at_the_proxy() {
+    let (url, heads) = anthropic_upstream();
+    let proxy = anthropic_proxy(&url);
+    let client = send_messages(
+        proxy.base_url().unwrap(),
+        "/v1/messages?beta=true",
+        "run-7-token",
+        messages_request(2048, None),
+    );
+    let exchange = proxy
+        .serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true)
+        .unwrap();
+    assert_eq!(client.join().unwrap(), 200);
+    assert_eq!(exchange.status, 200);
+    let head = heads.lock().unwrap().pop().unwrap();
+    assert!(head.starts_with("/v1/messages?beta=true\n"), "{head}");
+    assert!(
+        head.contains("\nx-api-key: sk-real"),
+        "the real key goes upstream"
+    );
+    assert!(!head.contains("run-7-token"), "the per-run token does not");
+    assert!(head.contains("\nanthropic-version: 2023-06-01"));
+    assert!(head.contains("\nanthropic-beta: claude-code-20250219"));
+    assert!(!format!("{:?}", proxy.config()).contains("sk-real"));
+
+    let refused = |target: &str, key: &str, body: Value| {
+        let proxy = anthropic_proxy(&url);
+        let client = send_messages(proxy.base_url().unwrap(), target, key, body);
+        let outcome = proxy.serve_one(&authorized(), &LIMITS, soon(), &never, &|_| true);
+        (outcome.unwrap_err(), client.join().unwrap())
+    };
+    assert_eq!(
+        refused("/v1/messages", "sk-real", messages_request(2048, None)),
+        (ProxyRefusal::Token, 401)
+    );
+    assert_eq!(
+        refused(
+            "/v1/messages?other=1",
+            "run-7-token",
+            messages_request(2048, None)
+        ),
+        (ProxyRefusal::Path, 404)
+    );
+    assert_eq!(
+        refused(
+            "/v1/messages/count_tokens",
+            "run-7-token",
+            messages_request(2048, None)
+        ),
+        (ProxyRefusal::Path, 404)
+    );
+    assert_eq!(
+        refused("/v1/messages", "run-7-token", messages_request(8192, None)),
+        (ProxyRefusal::OutputTokens, 403)
+    );
+    let reminder = json!({"type": "text", "text": "<system-reminder>extra</system-reminder>"});
+    assert_eq!(
+        refused(
+            "/v1/messages",
+            "run-7-token",
+            messages_request(2048, Some(reminder))
+        ),
+        (ProxyRefusal::Unauthorized, 403),
+        "any text the host did not send is refused"
+    );
+    assert_eq!(
+        heads.lock().unwrap().len(),
+        0,
+        "no refused request reached upstream"
+    );
+}
+
+#[test]
+fn messages_trailing_texts_are_one_per_block_after_the_last_answer() {
+    let request = json!({"messages": [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "n", "input": {}}]},
+        {"role": "system", "content": "environment"},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+            {"type": "tool_result", "tool_use_id": "b", "content": [{"type": "text", "text": "tw"}, {"type": "text", "text": "o"}]},
+            {"type": "text", "text": "three"}]}]});
+    assert_eq!(
+        anthropic_trailing_texts(&request),
+        Some(vec!["one".into(), "two".into(), "three".into()])
+    );
+    let image =
+        json!({"messages": [{"role": "user", "content": [{"type": "image", "source": {}}]}]});
+    assert_eq!(anthropic_trailing_texts(&image), None);
 }

@@ -5,6 +5,7 @@
 // comes back to the host as a protocol message.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
@@ -107,9 +108,7 @@ async function runProcess(answer: (res: any, step: number) => void, extra: objec
   proxy.close();
   assert.equal(received[0].type, "ready");
   assert.match(received[0].runners.pi, /^pi-agent-core@\d/, "the ready line names the installed Pi runner");
-  // The packaged build has no Agent SDK lane yet (AC-1424), so it names none.
-  if (packaged) assert.equal(received[0].runners.claude, "");
-  else assert.match(received[0].runners.claude, /^claude-agent-sdk@\d/);
+  assert.match(received[0].runners.claude, /^claude-agent-sdk@\d/, "both lanes are in every build");
   assert.deepEqual(received.filter((m) => m.type === "tool_call").map((m) => m.name), ["query_context", "finish"]);
   assert.equal(done.reason, "finished");
   assert.equal(requests.length, 2, "one model request per turn, none after the admitted finish");
@@ -160,4 +159,117 @@ test("cartograph-agent runs a Pi loop against vLLM's OpenAI-compatible API (DGX 
   assert.equal(second.at(-1).tool_call_id, "t1");
   assert.equal(second.at(-1).content, "page 1: 3 facts");
   assert.equal(second.at(-2).tool_calls[0].function.name, "query_context");
+});
+
+// AC-1424: the Claude lane drives the real Claude Code executable through the
+// Agent SDK. Its only model endpoint is the stand-in proxy, reached with the
+// per-run token as its key, and every tool call comes back to the host.
+const claudeCode =
+  process.env.CARTOGRAPH_CLAUDE_CODE ||
+  (() => {
+    const slice = `${process.platform}-${process.arch}`;
+    const candidate = fileURLToPath(new URL(`../node_modules/@anthropic-ai/claude-agent-sdk-${slice}/claude`, import.meta.url));
+    return existsSync(candidate) ? candidate : "";
+  })();
+
+function messagesSse(res: any, step: number, toolUse: { id: string; name: string; input: object }) {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  const event = (type: string, data: object) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+  const message = { id: `msg_${step}`, type: "message", role: "assistant", model: "claude-opus-4-8", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } };
+  event("message_start", { message });
+  event("content_block_start", { index: 0, content_block: { type: "tool_use", id: toolUse.id, name: toolUse.name, input: {} } });
+  event("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(toolUse.input) } });
+  event("content_block_stop", { index: 0 });
+  event("message_delta", { delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 5 } });
+  event("message_stop", {});
+  res.end();
+}
+
+test("cartograph-agent runs a Claude Agent SDK loop over stdio against the loopback proxy", { skip: !claudeCode && "no Claude Code for this platform" }, async () => {
+  const requests: { url: string; key: string | undefined; body: any }[] = [];
+  let admitted = false;
+  let refused = 0;
+  const proxy = createServer(async (req, res) => {
+    const payload = await body(req);
+    // Like the host's proxy, nothing is served once the finish is admitted.
+    if (admitted) {
+      refused += 1;
+      res.writeHead(403, { "content-length": "0" });
+      res.end();
+      return;
+    }
+    requests.push({ url: req.url ?? "", key: req.headers["x-api-key"] as string | undefined, body: payload });
+    const step = requests.length;
+    messagesSse(res, step, step === 1
+      ? { id: "toolu_1", name: "mcp__cartograph__query_context", input: { query: { scope: { type: "all" } } } }
+      : { id: "toolu_2", name: "mcp__cartograph__finish", input: { findings: [] } });
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  const port = (proxy.address() as any).port;
+  const child = spawn(command[0], command[1], { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH ?? "" } });
+  const received: any[] = [];
+  let buffered = "";
+  const write = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
+  const finished = new Promise<any>((resolve) => {
+    child.stdout.on("data", (data) => {
+      buffered += data;
+      let newline;
+      while ((newline = buffered.indexOf("\n")) >= 0) {
+        const message = JSON.parse(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        received.push(message);
+        if (message.type === "tool_call") {
+          const terminal = message.name === "finish";
+          admitted ||= terminal;
+          write({ type: "tool_result", call_id: message.call_id, content: terminal ? "admitted" : "page 1: 3 facts", is_error: false, terminal });
+        }
+        if (message.type === "done") resolve(message);
+      }
+    });
+  });
+  write({
+    type: "start",
+    run_id: "run-8",
+    lane: "claude",
+    model: "claude-opus-4-8",
+    base_url: `http://127.0.0.1:${port}/run-8`,
+    token: "run-8-token",
+    system: "system text",
+    prompt: "task text",
+    tools: [
+      { name: "query_context", description: "q", input_schema: { type: "object", properties: { query: { type: "object" } }, required: ["query"] } },
+      { name: "finish", description: "f", input_schema: { type: "object", properties: { findings: { type: "array" } }, required: ["findings"] } },
+    ],
+    hooks: [],
+    max_turns: 8,
+    max_output_tokens: 2048,
+    claude_executable: claudeCode,
+  });
+  const done = await finished;
+  child.stdin.end();
+  await once(child, "exit");
+  proxy.close();
+  assert.equal(received[0].type, "ready");
+  assert.match(received[0].runners.claude, /^claude-agent-sdk@\d/, "the ready line names the Agent SDK");
+  assert.deepEqual(received.filter((m) => m.type === "tool_call").map((m) => m.name), ["query_context", "finish"]);
+  assert.equal(done.reason, "finished");
+  assert.equal(requests.length, 2, "one model request served per turn, none after the admitted finish");
+  // Claude Code may try again before it is stopped; the proxy serves none.
+  assert.ok(refused <= 8, `${refused} refused`);
+  for (const request of requests) {
+    assert.equal(request.url, "/run-8/v1/messages?beta=true");
+    assert.equal(request.key, "run-8-token", "the proxy token, never a provider key");
+    assert.equal(request.body.model, "claude-opus-4-8");
+    assert.equal(request.body.max_tokens, 2048, "the host's step output limit");
+    assert.deepEqual(request.body.tools.map((t: any) => t.name).filter((n: string) => n.startsWith("mcp__")).sort(), ["mcp__cartograph__finish", "mcp__cartograph__query_context"]);
+    assert.ok(request.body.tools.every((t: any) => t.name.startsWith("mcp__cartograph__") || t.name === "DeferredToolPlaceholder"), "no built-in tools");
+  }
+  // Claude Code may follow it with a system-role note, which the host's
+  // proxy leaves out of the texts it checks.
+  const last = requests[1]!.body.messages.filter((m: any) => m.role !== "system").at(-1);
+  assert.equal(last.role, "user");
+  assert.equal(last.content[0].type, "tool_result");
+  assert.equal(last.content[0].tool_use_id, "toolu_1");
+  assert.deepEqual(last.content[0].content, [{ type: "text", text: "page 1: 3 facts" }], "the host's tool result goes back to the model");
 });

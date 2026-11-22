@@ -157,6 +157,9 @@ pub struct SessionConfig {
     /// Conversation byte budget before the bridge restarts the runtime; a
     /// step's own request limit can lower it.
     pub budget_bytes: usize,
+    /// The Claude lane's Claude Code executable, which the host verified
+    /// before starting the runtime (AC-1424); unused on the Pi lane.
+    pub claude_executable: Option<String>,
 }
 
 /// The runtime's self-reported identity, from its `ready` line.
@@ -431,11 +434,20 @@ impl<L: RuntimeLink> NativeSession<L> {
         if let Some(window) = proxy.context_window {
             start["context_window"] = json!(window);
         }
-        if self.config.lane == RuntimeLane::Pi {
-            start["backend"] = json!(match proxy.backend {
-                ProxyBackend::Ollama => "ollama",
-                ProxyBackend::OpenAiCompatible => "vllm",
-            });
+        match self.config.lane {
+            RuntimeLane::Pi => {
+                start["backend"] = json!(match proxy.backend {
+                    ProxyBackend::Ollama => "ollama",
+                    ProxyBackend::OpenAiCompatible => "vllm",
+                    ProxyBackend::Anthropic => "anthropic",
+                });
+            }
+            RuntimeLane::Claude => {
+                let Some(executable) = &self.config.claude_executable else {
+                    return Err(not_sent(FailureCode::Transport));
+                };
+                start["claude_executable"] = json!(executable);
+            }
         }
         link.send(&start)
             .map_err(|_| not_sent(FailureCode::Transport))?;

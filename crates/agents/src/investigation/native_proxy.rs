@@ -24,6 +24,10 @@ pub enum ProxyBackend {
     /// An OpenAI-compatible `/v1/chat/completions` (vLLM), whose context
     /// window is fixed when the server starts.
     OpenAiCompatible,
+    /// Anthropic's Messages API, for the Claude lane (AC-1424). The runtime
+    /// presents the per-run token as `x-api-key`; the proxy replaces it with
+    /// the configured credential.
+    Anthropic,
 }
 
 impl ProxyBackend {
@@ -31,6 +35,7 @@ impl ProxyBackend {
         match self {
             Self::Ollama => "/api/chat",
             Self::OpenAiCompatible => "/v1/chat/completions",
+            Self::Anthropic => "/v1/messages",
         }
     }
 }
@@ -54,6 +59,8 @@ pub struct ProxyConfig {
     pub max_request_bytes: usize,
     /// Largest upstream response body returned.
     pub max_response_bytes: usize,
+    /// The provider key the proxy adds upstream; the runtime never sees it.
+    pub credential: Option<llm::UpstreamCredential>,
 }
 
 /// The authorized completion's own limits for this step; the proxy applies
@@ -235,18 +242,28 @@ impl ModelProxy {
             .config
             .max_response_bytes
             .min(limits.max_response_bytes);
-        let (path, headers, body) = read_request(stream, max_request)?;
+        let (target, headers, body) = read_request(stream, max_request)?;
+        let anthropic = self.config.backend == ProxyBackend::Anthropic;
+        let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
         let expected = format!("/{}{}", self.config.run_id, self.config.backend.path());
-        if path != expected {
+        // The Agent SDK's runtime asks for `?beta=true`; nothing else passes.
+        let query_allowed = query.is_empty() || (anthropic && query == "beta=true");
+        if path != expected || !query_allowed {
             return Err(ProxyRefusal::Path);
         }
-        // The scheme is case-insensitive; the credential is not.
-        let presented = headers
-            .iter()
-            .find(|(name, _)| name == "authorization")
-            .and_then(|(_, value)| value.split_once(' '))
+        let header = |wanted: &str| {
+            headers
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, value)| value.as_str())
+        };
+        // The scheme is case-insensitive; the credential is not. The Claude
+        // lane's runtime sends the token as its API key.
+        let presented = header("authorization")
+            .and_then(|value| value.split_once(' '))
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-            .map(|(_, credential)| credential.trim());
+            .map(|(_, credential)| credential.trim())
+            .or_else(|| header("x-api-key").filter(|_| anthropic));
         if presented != Some(self.config.token.as_str()) {
             return Err(ProxyRefusal::Token);
         }
@@ -271,29 +288,51 @@ impl ModelProxy {
             ProxyBackend::OpenAiCompatible => request
                 .get("max_tokens")
                 .or_else(|| request.get("max_completion_tokens")),
+            ProxyBackend::Anthropic => request.get("max_tokens"),
         }
         .and_then(Value::as_u64);
         if !asked.is_some_and(|tokens| (1..=u64::from(limits.max_output_tokens)).contains(&tokens))
         {
             return Err(ProxyRefusal::OutputTokens);
         }
-        if trailing_texts(&request).as_deref() != Some(authorized) {
+        let trailing = if anthropic {
+            anthropic_trailing_texts(&request)
+        } else {
+            trailing_texts(&request)
+        };
+        if trailing.as_deref() != Some(authorized) {
             return Err(ProxyRefusal::Unauthorized);
         }
         if !dispatching(body.len() as u64) {
             return Err(ProxyRefusal::NotRecorded);
         }
         let url = format!(
-            "{}{}",
+            "{}{}{}{query}",
             self.config.upstream.trim_end_matches('/'),
-            self.config.backend.path()
+            self.config.backend.path(),
+            if query.is_empty() { "" } else { "?" },
         );
         let left = deadline.saturating_duration_since(Instant::now());
-        let response = self
+        let mut upstream_request = self
             .client
             .post(url)
             .header("content-type", "application/json")
-            .timeout(left.max(Duration::from_millis(1)))
+            .timeout(left.max(Duration::from_millis(1)));
+        if let Some(credential) = &self.config.credential {
+            upstream_request = upstream_request.header(credential.header(), credential.value());
+        }
+        if anthropic {
+            // The wire version and beta features the runtime's request is
+            // written for; neither carries a credential.
+            upstream_request = upstream_request.header(
+                "anthropic-version",
+                header("anthropic-version").unwrap_or("2023-06-01"),
+            );
+            if let Some(betas) = header("anthropic-beta") {
+                upstream_request = upstream_request.header("anthropic-beta", betas);
+            }
+        }
+        let response = upstream_request
             .body(body.clone())
             .send()
             .map_err(|_| ProxyRefusal::Upstream)?;
@@ -359,6 +398,53 @@ fn trailing_texts(request: &Value) -> Option<Vec<String>> {
             _ => None,
         })
         .collect()
+}
+
+/// The Messages API texts after the model's last answer: one per text block
+/// and one per tool result, in order; system-role messages excluded. `None`
+/// if a block is of any other kind.
+fn anthropic_trailing_texts(request: &Value) -> Option<Vec<String>> {
+    let messages = request.get("messages")?.as_array()?;
+    fn role(message: &Value) -> Option<&str> {
+        message.get("role").and_then(Value::as_str)
+    }
+    let after = messages
+        .iter()
+        .rposition(|message| role(message) == Some("assistant"))
+        .map_or(0, |index| index + 1);
+    let text_of = |content: &Value| -> Option<String> {
+        match content {
+            Value::String(text) => Some(text.clone()),
+            Value::Array(parts) => parts
+                .iter()
+                .map(|part| match part.get("type").and_then(Value::as_str) {
+                    Some("text") => part.get("text").and_then(Value::as_str),
+                    _ => None,
+                })
+                .collect::<Option<String>>(),
+            _ => None,
+        }
+    };
+    let mut texts = Vec::new();
+    for message in messages[after..]
+        .iter()
+        .filter(|message| role(message) != Some("system"))
+    {
+        match message.get("content")? {
+            Value::String(text) => texts.push(text.clone()),
+            Value::Array(blocks) => {
+                for block in blocks {
+                    match block.get("type").and_then(Value::as_str)? {
+                        "text" => texts.push(block.get("text")?.as_str()?.to_owned()),
+                        "tool_result" => texts.push(text_of(block.get("content")?)?),
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(texts)
 }
 
 type Request = (String, Vec<(String, String)>, Vec<u8>);

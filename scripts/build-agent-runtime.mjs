@@ -4,10 +4,14 @@
 // and a pinned, checksum-verified Node release. The app ships it as a Tauri
 // external binary, so the packaged app needs no install step.
 //
+// AC-1424: on macOS it also stages the Claude Code executable the Agent SDK
+// drives, checked against its pinned sha256 and Anthropic's Developer ID
+// signature. It ships as an app resource, so it keeps that signature.
+//
 // Never run under signing credentials: the app bundle step signs the result.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,14 +38,39 @@ export function pinnedNode(root = ROOT) {
   return pin;
 }
 
-/** `pi-agent-core@<locked version>`, from agent-runtime's lockfile. */
+/** Target triple -> the Claude Code slice its app carries (AC-1424). The
+ * universal app carries arm64 only until per-architecture builds exist. */
+export const CLAUDE_CODE_SLICES = { 'universal-apple-darwin': 'darwin-arm64' };
+
+/** The pinned Claude Code: SDK version, signing team and sha256 per slice. */
+export function pinnedClaudeCode(root = ROOT) {
+  const pin = JSON.parse(readFileSync(path.join(root, 'scripts/agent-runtime-claude.json'), 'utf8'));
+  if (!/^[A-Z0-9]{10}$/u.test(pin.team_id ?? '')) throw new Error('pinned Claude Code has no signing team');
+  if (!/^\d+\.\d+\.\d+$/u.test(pin.sdk_version ?? '')) throw new Error('pinned Claude Code has no exact SDK version');
+  return pin;
+}
+
+/** The code requirement Claude Code must meet: Apple-issued Developer ID
+ * Application certificate of the pinned team. The app checks the same one. */
+export function claudeCodeRequirement(team) {
+  return 'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists '
+    + 'and certificate leaf[field.1.2.840.113635.100.6.1.13] exists '
+    + `and certificate leaf[subject.OU] = "${team}"`;
+}
+
+/** `pi-agent-core@<locked>` and `claude-agent-sdk@<locked>`, from the lockfile. */
 export function lockedRunners(root = ROOT) {
   const lock = JSON.parse(readFileSync(path.join(root, 'agent-runtime/package-lock.json'), 'utf8'));
-  const version = lock.packages?.['node_modules/@mariozechner/pi-agent-core']?.version;
-  if (typeof version !== 'string' || version === '') throw new Error('pi-agent-core is not locked');
-  // The Agent SDK lane is not in the packaged build yet (AC-1424): an empty
-  // version makes the host refuse a Claude run before it starts.
-  return { pi: `pi-agent-core@${version}`, claude: '' };
+  const locked = (name) => {
+    const version = lock.packages?.[`node_modules/${name}`]?.version;
+    if (typeof version !== 'string' || version === '') throw new Error(`${name.split('/').at(-1)} is not locked`);
+    return version;
+  };
+  const pi = locked('@mariozechner/pi-agent-core');
+  const claude = locked('@anthropic-ai/claude-agent-sdk');
+  const pinned = pinnedClaudeCode(root).sdk_version;
+  if (claude !== pinned) throw new Error(`Claude Code is pinned for claude-agent-sdk ${pinned}, the lockfile has ${claude}`);
+  return { pi: `pi-agent-core@${pi}`, claude: `claude-agent-sdk@${claude}` };
 }
 
 function archiveName(version, slice) {
@@ -56,9 +85,10 @@ function defaultBundle({ root, entry, outfile, runners }) {
   const esbuild = createRequire(path.join(root, 'agent-runtime/package.json'))('esbuild');
   esbuild.buildSync({
     entryPoints: [entry], outfile, bundle: true, platform: 'node', target: 'node22', format: 'cjs',
-    // Only reached on the Claude lane, which this build does not carry.
-    external: ['@anthropic-ai/claude-agent-sdk', '@modelcontextprotocol/sdk'],
-    define: { CARTOGRAPH_RUNNERS: JSON.stringify(runners), 'import.meta.url': 'undefined' },
+    // ESM dependencies read import.meta.url (the Agent SDK builds a require
+    // from it); in the single executable it is the executable's own URL.
+    banner: { js: 'const __cartograph_import_meta_url = require("node:url").pathToFileURL(__filename).href;' },
+    define: { CARTOGRAPH_RUNNERS: JSON.stringify(runners), 'import.meta.url': '__cartograph_import_meta_url' },
     legalComments: 'eof', logLevel: 'warning',
   });
 }
@@ -75,6 +105,8 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
   if (!slices.includes(host)) throw new Error(`target ${target} must be built on one of ${slices.join(', ')}`);
   const node = pinnedNode(root);
   const runners = lockedRunners(root);
+  const claudeCode = pinnedClaudeCode(root);
+  const claudeSlice = CLAUDE_CODE_SLICES[target];
   const work = path.join(root, 'target', 'agent-runtime');
   const output = path.join(work, `cartograph-agent-${target}`);
   const temporary = `${output}.tmp`;
@@ -85,10 +117,24 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
   rmSync(output, { force: true });
   rmSync(temporary, { force: true });
   rmSync(path.join(work, 'NODE-LICENSE'), { force: true });
+  rmSync(path.join(work, 'claude-code'), { recursive: true, force: true });
   try {
     run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { ...options, cwd: path.join(root, 'agent-runtime') });
     const script = path.join(work, 'cartograph-agent.cjs');
     bundle({ root, entry: path.join(root, 'agent-runtime/src/sea-entry.ts'), outfile: script, runners });
+    if (claudeSlice) {
+      // From the locked install; copied byte for byte so Anthropic's
+      // signature stays valid, then checked as the app will check it.
+      const source = path.join(root, `agent-runtime/node_modules/@anthropic-ai/claude-agent-sdk-${claudeSlice}/claude`);
+      if (!existsSync(source) || sha256(source) !== claudeCode.sha256?.[claudeSlice]) {
+        throw new Error(`Claude Code for ${claudeSlice} does not match its pinned sha256`);
+      }
+      const staged = path.join(work, 'claude-code', 'claude');
+      mkdirSync(path.dirname(staged), { recursive: true });
+      copyFileSync(source, staged);
+      chmodSync(staged, 0o755);
+      run('codesign', ['--verify', '--strict', '-R', `=${claudeCodeRequirement(claudeCode.team_id)}`, staged], options);
+    }
     const binaries = {};
     const licenses = [];
     for (const slice of slices) {

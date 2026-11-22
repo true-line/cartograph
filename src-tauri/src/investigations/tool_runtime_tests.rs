@@ -9,6 +9,7 @@ fn runtime() -> RuntimeCommand {
     RuntimeCommand {
         program: "node".into(),
         args: vec!["agent-runtime/src/main.ts".into()],
+        claude_code: None,
     }
 }
 
@@ -110,8 +111,17 @@ fn the_proxy_targets_the_resolved_providers_own_upstream() {
             None
         ))
     );
+    // AC-1424: Claude's own endpoint, behind the keyed Anthropic proxy.
     assert_eq!(
         upstream("anthropic:x", "https://api.anthropic.com/v1/messages"),
+        Ok((
+            "https://api.anthropic.com".to_owned(),
+            ProxyBackend::Anthropic,
+            None
+        ))
+    );
+    assert_eq!(
+        upstream("ollama:x", "https://api.anthropic.com/v1/messages"),
         Err(ToolRuntimeError::UnsupportedProvider)
     );
 }
@@ -136,6 +146,7 @@ fn the_runtime_is_bundled_or_named_by_the_environment_and_gets_no_app_secrets() 
     let exe = |program: &str| RuntimeCommand {
         program: program.into(),
         args: Vec::new(),
+        claude_code: None,
     };
     assert_eq!(RuntimeCommand::from_vars(&vars(&[]), None), None);
     assert_eq!(
@@ -168,6 +179,7 @@ fn the_runtime_is_bundled_or_named_by_the_environment_and_gets_no_app_secrets() 
         Some(RuntimeCommand {
             program: "node".into(),
             args: vec!["/r/main.ts".into()],
+            claude_code: None,
         })
     );
     assert_eq!(
@@ -181,6 +193,7 @@ fn the_runtime_is_bundled_or_named_by_the_environment_and_gets_no_app_secrets() 
         Some(RuntimeCommand {
             program: "/opt/node".into(),
             args: vec!["/r/agent.cjs".into()],
+            claude_code: None,
         })
     );
     for (runtime, expected) in [
@@ -188,6 +201,7 @@ fn the_runtime_is_bundled_or_named_by_the_environment_and_gets_no_app_secrets() 
             RuntimeCommand {
                 program: "/opt/node".into(),
                 args: vec!["/r/main.ts".into()],
+                claude_code: None,
             },
             vec!["/r/main.ts"],
         ),
@@ -201,4 +215,92 @@ fn the_runtime_is_bundled_or_named_by_the_environment_and_gets_no_app_secrets() 
             assert!(value.is_some());
         }
     }
+}
+
+// AC-1424: a Claude start needs the runtime and the pinned Claude Code; the
+// run's key goes to the proxy only, and the run names the Claude lane.
+#[test]
+fn the_claude_lane_needs_the_pinned_claude_code_and_keeps_the_key_at_the_proxy() {
+    let claude: Arc<dyn LlmProvider> = Arc::new(
+        llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, "sk-host")
+            .unwrap(),
+    );
+    let start = |claude_code: Option<PathBuf>| {
+        provider_for_run(
+            SpecialistId::DomainAnalystV29,
+            "inv_1",
+            &claude,
+            Some(&RuntimeCommand {
+                claude_code,
+                ..runtime()
+            }),
+        )
+        .err()
+    };
+    assert_eq!(start(None), Some(ToolRuntimeError::ClaudeCode));
+    let dir = tempfile::tempdir().unwrap();
+    let impostor = dir.path().join("claude");
+    std::fs::write(&impostor, b"not claude").unwrap();
+    assert_eq!(
+        start(Some(impostor.clone())),
+        Some(ToolRuntimeError::ClaudeCode),
+        "a binary off the pin is refused before any runtime starts"
+    );
+    assert_eq!(
+        verify_claude_code(&impostor),
+        Err(ToolRuntimeError::ClaudeCode)
+    );
+    assert_eq!(
+        verify_claude_code(&dir.path().join("missing")),
+        Err(ToolRuntimeError::ClaudeCode)
+    );
+    // Fable has no bounded lane and so no tool-calling one.
+    let fable: Arc<dyn LlmProvider> = Arc::new(
+        llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Fable, "sk-host")
+            .unwrap(),
+    );
+    assert!(
+        provider_for_run(
+            SpecialistId::DomainAnalystV29,
+            "inv_1",
+            &fable,
+            Some(&runtime())
+        )
+        .is_err()
+    );
+}
+
+// AC-1424: the pin names the Anthropic team and one sha256 per platform; on
+// macOS the requirement accepts only that team's Developer ID certificate.
+#[test]
+fn the_claude_code_pin_is_well_formed() {
+    let (sha, team) = claude_code_pin("darwin-arm64").unwrap();
+    assert_eq!(sha.len(), 64);
+    assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(team, "Q6L2SF6YDW");
+    assert!(claude_code_pin("linux-x64").is_some());
+    assert!(claude_code_pin("win32-x64").is_none());
+    let requirement = claude_code_requirement(&team);
+    assert!(requirement.starts_with("anchor apple generic and "));
+    assert!(requirement.contains("certificate leaf[subject.OU] = \"Q6L2SF6YDW\""));
+    assert!(
+        requirement.contains("1.2.840.113635.100.6.1.13"),
+        "Developer ID Application"
+    );
+    // The build (scripts/build-agent-runtime.mjs) checks this exact string.
+    assert_eq!(
+        requirement,
+        "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and \
+         certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate \
+         leaf[subject.OU] = \"Q6L2SF6YDW\""
+    );
+}
+
+// AC-1429: the start's turn cap is one the runtime accepts; a larger one would
+// fail every run at its first start.
+#[test]
+fn the_runtime_turn_cap_is_within_what_the_runtime_accepts() {
+    let protocol = include_str!("../../../agent-runtime/src/protocol.ts");
+    assert!(protocol.contains("maxTurns < 1 || maxTurns > 256"));
+    assert!((1..=256).contains(&MAX_RUNTIME_TURNS));
 }
