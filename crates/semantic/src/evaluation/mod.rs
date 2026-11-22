@@ -7,3 +7,5 @@ pub mod policy;
 pub mod scoring;
 
 pub mod reviewed;
+
+pub mod locked;
