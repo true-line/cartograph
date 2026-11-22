@@ -303,6 +303,15 @@ fn bounded_diagram_view(
 
     let truncated =
         nodes.len() < nodes_total || edges.len() < edges_total || flows.len() < flows_total;
+    // A view hands its facts to the Workbench whole, as they were stored: a
+    // compacted rule payload is parsed back to its object (#2215).
+    for node in nodes.iter_mut().filter(|node| node.label == "BusinessRule") {
+        if let Some(text) = node.props["rule"].as_str()
+            && let Ok(rule @ serde_json::Value::Object(_)) = serde_json::from_str(text)
+        {
+            node.props["rule"] = rule;
+        }
+    }
 
     SpecDiagramView {
         artifact_id: artifact.id.clone(),
