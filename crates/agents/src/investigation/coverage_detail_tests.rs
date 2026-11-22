@@ -13,6 +13,7 @@ fn coverage_detail_is_budgeted_supplied_and_disclosed_without_source_citations()
         schema_version: 2,
         coverage: Some(archive.proof.clone()),
         coverage_reads: vec![],
+        artifact_reads: vec![],
         graph_snapshot_id: archive.proof.snapshot_id.clone(),
         scope_snapshot_id: archive.proof.snapshot_id.clone(),
         revision: 0,

@@ -87,6 +87,7 @@ impl InvestigationInputLedger {
             .queries
             .len()
             .checked_add(self.coverage_reads.len())
+            .and_then(|count| count.checked_add(self.artifact_reads.len()))
             .ok_or(InvestigationError::LimitExceeded)?
             > limits.tool_actions as usize
         {
@@ -96,7 +97,10 @@ impl InvestigationInputLedger {
             for read in &self.coverage_reads {
                 read.validate(proof)?;
             }
-        } else if !self.coverage_reads.is_empty() {
+            for read in &self.artifact_reads {
+                read.validate(proof)?;
+            }
+        } else if !self.coverage_reads.is_empty() || !self.artifact_reads.is_empty() {
             return Err(InvestigationError::InvalidInput);
         }
         InvestigationQueryBudget::from_ledger(self)?;
