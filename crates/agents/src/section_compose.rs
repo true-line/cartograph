@@ -59,7 +59,8 @@ from the system's knowledge graph, and one row per fact you may cite. Write dens
 concrete statements in domain terms: what the system offers, to whom, under which \
 conditions, with which limits, orderings, statuses and messages. Group related facts \
 into one statement; do not restate each table row. Every statement rests only on the \
-facts it cites. Never write a file path, a file name or a code identifier (a function, \
+facts it cites: name no screen, actor, channel or behaviour that none of them \
+names. Never write a file path, a file name or a code identifier (a function, \
 class, module or variable name): those stay in the citations. URL routes, HTTP methods \
 and statuses, field names and user-facing messages are part of the observable contract \
 and may be stated, but a route you state must be one a fact you cite shows: cite its \
