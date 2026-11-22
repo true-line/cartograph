@@ -444,7 +444,7 @@ impl Service {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests {
     use super::*;
     use std::{num::NonZeroUsize, time::Duration};
@@ -812,7 +812,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod configuration_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -859,6 +859,6 @@ mod configuration_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "service/task_session_tests.rs"]
 mod task_session_tests;
