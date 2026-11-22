@@ -319,6 +319,25 @@ impl JobStore {
         Ok(usage)
     }
 
+    /// How many running jobs have a kind starting with any of `prefixes`,
+    /// counted in SQL so no job row is loaded (AC-1808).
+    pub fn count_running_with_prefix(&self, prefixes: &[&str]) -> rusqlite::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        execution::validate(&tx, &self.namespace)?;
+        let mut count = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT COUNT(*) FROM jobs WHERE status = 'running'
+                 AND substr(kind, 1, length(?1)) = ?1",
+            )?;
+            for prefix in prefixes {
+                count += stmt.query_row([prefix], |row| row.get::<_, i64>(0))? as usize;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// All jobs, newest first, with tracking from the same read transaction.
     pub fn list(&self) -> rusqlite::Result<Vec<Job>> {
         let tx = self.conn.unchecked_transaction()?;

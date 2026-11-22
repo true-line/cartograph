@@ -29,6 +29,7 @@ pub mod draft_store;
 pub mod finding_curation;
 pub mod gated_compose;
 pub mod investigation;
+pub mod pipeline_roster;
 pub mod prepared;
 pub mod roster;
 pub mod section_change;

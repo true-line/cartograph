@@ -13,6 +13,7 @@ mod context;
 mod curated;
 mod curated_workbench;
 mod drop_intake;
+mod pipeline_activity;
 use app_store::egress;
 use app_store::escalation;
 use app_store::evidence;
@@ -6969,6 +6970,8 @@ async fn semantic_preview(
     precision_floor: f32,
     state: State<'_, AppState>,
 ) -> Result<SemanticPreview, String> {
+    // The Flow Tracer and Contract Matcher run while this is held (AC-1808).
+    let _activity = pipeline_activity::SemanticPreviewActivity::begin(&state);
     let (nodes, edges, cache, lease) = {
         let graph = state.graph.lock().map_err(|error| error.to_string())?;
         let cache = state
@@ -8517,6 +8520,7 @@ fn main() {
             manifest_draft::save_system_manifest,
             investigations::commands::investigation_specialists,
             investigations::commands::list_agents,
+            investigations::commands::list_pipeline_agents,
             investigations::commands::start_investigation,
             investigations::section_drafts::section_redraft_question,
             investigations::section_drafts::section_draft_question,
