@@ -40,6 +40,12 @@ pub const MAX_VISITED_ENTRIES: usize = 100_000;
 /// (#1653). The walk retains only selected paths, so entries cost time, not
 /// memory.
 pub const HARD_MAX_VISITED_ENTRIES: usize = 1_000_000;
+/// Maximum unfollowed symlink paths one selection retains for reporting. It
+/// stays at the historical entry bound when a project raises
+/// [`SelectionLimits::max_visited_entries`], so a raised walk never retains
+/// more symlink paths than the default walk could; one past it fails the
+/// selection whole.
+pub const MAX_UNFOLLOWED_LINKS: usize = MAX_VISITED_ENTRIES;
 /// Maximum nested directory depth below the host-selected root.
 pub const MAX_DIRECTORY_DEPTH: usize = 64;
 /// Maximum receipt memory retained in one adapter result, before host
@@ -197,6 +203,7 @@ pub fn enumerate_selection_within(
         limits.max_visited_entries,
         MAX_DIRECTORY_DEPTH,
         limits.max_files,
+        MAX_UNFOLLOWED_LINKS,
     )
 }
 
@@ -210,6 +217,7 @@ fn enumerate_with_limits(
     max_entries: usize,
     max_depth: usize,
     max_files: usize,
+    max_unfollowed: usize,
 ) -> Result<Selection, CapturedError> {
     struct Walk {
         files: Vec<String>,
@@ -218,6 +226,7 @@ fn enumerate_with_limits(
         max_entries: usize,
         max_depth: usize,
         max_files: usize,
+        max_unfollowed: usize,
     }
     impl Walk {
         fn visit(
@@ -261,6 +270,9 @@ fn enumerate_with_limits(
                     if !valid_path(&path) {
                         return Err(CapturedError::Invalid("symlink path"));
                     }
+                    if self.unfollowed.len() == self.max_unfollowed {
+                        return Err(CapturedError::Limit("unfollowed links"));
+                    }
                     self.unfollowed.push(path);
                     continue;
                 }
@@ -296,6 +308,7 @@ fn enumerate_with_limits(
         max_entries,
         max_depth,
         max_files,
+        max_unfollowed,
     };
     walk.visit(directory, "", &IgnoreRules::default(), 0)?;
     walk.files.sort();

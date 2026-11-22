@@ -455,15 +455,15 @@ fn captured_enumeration_preserves_selection_and_enforces_budgets() {
     );
     let root = Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority()).unwrap();
     assert!(matches!(
-        enumerate_with_limits(&root, 0, 64, 8192),
+        enumerate_with_limits(&root, 0, 64, 8192, MAX_UNFOLLOWED_LINKS),
         Err(CapturedError::Limit("visited entries"))
     ));
     assert!(matches!(
-        enumerate_with_limits(&root, 100, 0, 8192),
+        enumerate_with_limits(&root, 100, 0, 8192, MAX_UNFOLLOWED_LINKS),
         Err(CapturedError::Limit("directory depth"))
     ));
     assert!(matches!(
-        enumerate_with_limits(&root, 100, 64, 1),
+        enumerate_with_limits(&root, 100, 64, 1, MAX_UNFOLLOWED_LINKS),
         Err(CapturedError::Limit("selected files"))
     ));
 }
@@ -555,6 +555,31 @@ fn captured_and_ordinary_walks_select_the_same_gitignore_filtered_files() {
             .all(|id| !id.contains("build/") && !id.contains("vendor/"))
     );
     assert!(files.iter().any(|id| id.ends_with("src/app.ts")));
+}
+
+// AC-1802 (#1653): a raised entry bound never lets one selection retain more
+// unfollowed symlink paths than the default walk could; one past the bound
+// fails the selection whole.
+#[cfg(unix)]
+#[test]
+fn unfollowed_links_stay_bounded_when_the_walk_is_raised() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["a.ts", "b.ts", "c.ts"] {
+        std::os::unix::fs::symlink("missing.ts", directory.path().join(name)).unwrap();
+    }
+    let root = Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority()).unwrap();
+    assert_eq!(
+        enumerate_with_limits(&root, 100, 64, 8192, 3)
+            .unwrap()
+            .unfollowed
+            .len(),
+        3
+    );
+    assert!(matches!(
+        enumerate_with_limits(&root, 100, 64, 8192, 2),
+        Err(CapturedError::Limit("unfollowed links"))
+    ));
+    assert_eq!(MAX_UNFOLLOWED_LINKS, MAX_VISITED_ENTRIES);
 }
 
 #[cfg(unix)]
