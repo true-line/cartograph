@@ -54,6 +54,7 @@ adapters-lang-go = { workspace = true }
 adapters-lang-rust = { workspace = true }
 adapters-lang-java = { workspace = true }
 adapters-lang-kotlin = { workspace = true }
+adapters-artifact-jvm = { workspace = true }
 dynamic = { workspace = true }
 iac = { workspace = true }
 events = { workspace = true }
