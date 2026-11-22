@@ -36,6 +36,9 @@ pub const COMPUTED_TARGET_REASON: &str =
 /// Gap reason: a navigation target that names no recovered screen.
 pub const UNKNOWN_SCREEN_REASON: &str = "navigation target is not a recovered screen";
 
+/// `(byte_start, byte_end)` of a call.
+type ByteRange = (u64, u64);
+
 /// `(file, exported owner, member)` of a function or static method.
 type Key = (String, String, Option<String>);
 
@@ -66,6 +69,9 @@ struct Call {
     /// The calling Symbol, or the caller's file at module level.
     source: String,
     conditional: bool,
+    /// The calls whose `const` results the branches around the site read
+    /// ([`result_branch`]), as byte ranges in source order.
+    result_of: Vec<ByteRange>,
     evidence: EvidenceRef,
 }
 
@@ -183,6 +189,146 @@ fn conditional(node: TsNode<'_>) -> bool {
         child = parent;
     }
     false
+}
+
+/// The calls the branches around `node` test the results of (ADR-0050
+/// decision 4, result step): for every `if` or ternary around `node` within
+/// its callable, every name its condition reads that is bound by
+/// `const name = call(…)` or `const name = await call(…)` earlier in an
+/// enclosing block of the same callable. Returns those calls' byte ranges in
+/// source order. Only `const` qualifies, so the name still holds the call's
+/// result when the condition reads it.
+fn result_branch(cx: &FileCx<'_>, node: TsNode<'_>) -> Vec<ByteRange> {
+    let mut ranges = Vec::new();
+    let mut child = node;
+    while let Some(parent) = child.parent() {
+        if callable::is_callable(parent) {
+            break;
+        }
+        if matches!(parent.kind(), "if_statement" | "ternary_expression")
+            && let Some(condition) = parent.child_by_field_name("condition")
+            && condition.id() != child.id()
+        {
+            let mut names = Vec::new();
+            identifiers(cx, condition, &mut names);
+            ranges.extend(
+                names
+                    .iter()
+                    .filter_map(|name| bound_call(cx, parent, name))
+                    .map(|call| (call.start_byte() as u64, call.end_byte() as u64)),
+            );
+        }
+        child = parent;
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    ranges
+}
+
+/// Whether `pattern` (a binding name or destructuring pattern) binds `name`.
+/// Default values inside the pattern are not bindings.
+fn pattern_binds(cx: &FileCx<'_>, pattern: TsNode<'_>, name: &str) -> bool {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => cx.text(&pattern) == name,
+        "assignment_pattern" | "object_assignment_pattern" => pattern
+            .child_by_field_name("left")
+            .is_some_and(|left| pattern_binds(cx, left, name)),
+        "pair_pattern" => pattern
+            .child_by_field_name("value")
+            .is_some_and(|value| pattern_binds(cx, value, name)),
+        _ => {
+            let mut walk = pattern.walk();
+            pattern
+                .named_children(&mut walk)
+                .any(|child| pattern_binds(cx, child, name))
+        }
+    }
+}
+
+/// Whether `parent`, entered from `child`, binds `name` for `child`: a
+/// `catch (name)` parameter, a `for (… name of/in …)` header, or a
+/// `for (let name …;;)` initializer. Such a binding shadows any outer one.
+fn shadows(cx: &FileCx<'_>, parent: TsNode<'_>, child: TsNode<'_>, name: &str) -> bool {
+    let field = match parent.kind() {
+        "catch_clause" => "parameter",
+        "for_in_statement" => "left",
+        "for_statement" => "initializer",
+        _ => return false,
+    };
+    parent.child_by_field_name(field).is_some_and(|binding| {
+        binding.id() != child.id()
+            && match binding.kind() {
+                "lexical_declaration" | "variable_declaration" => {
+                    let mut walk = binding.walk();
+                    binding.named_children(&mut walk).any(|declarator| {
+                        declarator
+                            .child_by_field_name("name")
+                            .is_some_and(|n| pattern_binds(cx, n, name))
+                    })
+                }
+                _ => pattern_binds(cx, binding, name),
+            }
+    })
+}
+
+/// Every identifier read in `node`, outside nested callables. Property
+/// names are `property_identifier` nodes, so they are never read.
+fn identifiers(cx: &FileCx<'_>, node: TsNode<'_>, out: &mut Vec<String>) {
+    if node.kind() == "identifier" {
+        out.push(cx.text(&node).to_string());
+        return;
+    }
+    let mut walk = node.walk();
+    for child in node.named_children(&mut walk) {
+        if !callable::is_callable(child) {
+            identifiers(cx, child, out);
+        }
+    }
+}
+
+/// The call bound to `name` by the nearest declaration of `name` before
+/// `site` in an enclosing block, without leaving `site`'s callable. `None`
+/// when that declaration is not `const name = [await] call(…)`, or when a
+/// `catch` parameter or loop header in between rebinds `name`.
+fn bound_call<'tree>(cx: &FileCx<'_>, site: TsNode<'tree>, name: &str) -> Option<TsNode<'tree>> {
+    let mut child = site;
+    while let Some(parent) = child.parent() {
+        if callable::is_callable(parent) || shadows(cx, parent, child, name) {
+            return None;
+        }
+        if parent.kind() == "statement_block" {
+            let mut walk = parent.walk();
+            let before: Vec<_> = parent
+                .named_children(&mut walk)
+                .take_while(|statement| statement.id() != child.id())
+                .collect();
+            for statement in before.into_iter().rev() {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    continue;
+                }
+                let mut inner = statement.walk();
+                for declarator in statement.named_children(&mut inner) {
+                    if declarator
+                        .child_by_field_name("name")
+                        .is_none_or(|n| n.kind() != "identifier" || cx.text(&n) != name)
+                    {
+                        continue;
+                    }
+                    let constant = statement.child(0).is_some_and(|k| k.kind() == "const");
+                    let mut value = declarator.child_by_field_name("value")?;
+                    if value.kind() == "await_expression" {
+                        value = value.named_child(0)?;
+                    }
+                    return (constant && value.kind() == "call_expression").then_some(value);
+                }
+            }
+        }
+        child = parent;
+    }
+    None
 }
 
 fn target(cx: &FileCx<'_>, proofs: &Proofs<'_, '_>, local: &Constants, arg: TsNode<'_>) -> Target {
@@ -353,6 +499,7 @@ pub(crate) fn extract<'tree>(
                     args: read(&args[..args.len().min(1)]),
                     source,
                     conditional: conditional(node),
+                    result_of: result_branch(cx, node),
                     evidence: evidence(cx, node),
                 });
                 continue;
@@ -365,6 +512,7 @@ pub(crate) fn extract<'tree>(
                     args: read(&args),
                     source,
                     conditional: conditional(node),
+                    result_of: result_branch(cx, node),
                     evidence: evidence(cx, node),
                 });
             }
@@ -379,6 +527,7 @@ pub(crate) fn extract<'tree>(
                 args: read(&args),
                 source,
                 conditional: conditional(node),
+                result_of: result_branch(cx, node),
                 evidence: evidence(cx, node),
             });
         }
@@ -428,9 +577,9 @@ pub(crate) fn complete(
     #[derive(Default)]
     struct Link {
         evidence: Vec<EvidenceRef>,
-        /// Each call: its evidence, whether it is conditional, and how the
-        /// router was proven.
-        sites: Vec<(EvidenceRef, bool, &'static str)>,
+        /// Each call: its evidence, whether it is conditional, how the
+        /// router was proven, and the calls whose results branches read.
+        sites: Vec<(EvidenceRef, bool, &'static str, Vec<ByteRange>)>,
     }
     let mut links: BTreeMap<(String, String), Link> = BTreeMap::new();
     let (mut gap_nodes, mut gap_edges) = (Vec::new(), Vec::new());
@@ -483,8 +632,12 @@ pub(crate) fn complete(
                 let link = links
                     .entry((call.source.clone(), screen.clone()))
                     .or_default();
-                link.sites
-                    .push((call.evidence.clone(), call.conditional, via));
+                link.sites.push((
+                    call.evidence.clone(),
+                    call.conditional,
+                    via,
+                    call.result_of.clone(),
+                ));
                 link.evidence.append(&mut cited);
                 continue;
             }
@@ -517,21 +670,29 @@ pub(crate) fn complete(
         });
         link.evidence.dedup();
         let order = |e: &EvidenceRef| (e.path.clone(), e.byte_start, e.byte_end);
-        link.sites.sort_by_key(|(e, _, _)| order(e));
+        link.sites.sort_by_key(|(e, _, _, _)| order(e));
         // The store keeps one edge per (source, target): every call stays
         // listed with its own flag (ADR in #987, decision 3).
-        let conditional = link.sites.iter().all(|(_, conditional, _)| *conditional);
+        let conditional = link.sites.iter().all(|(_, conditional, _, _)| *conditional);
         let sites: Vec<_> = link
             .sites
             .iter()
-            .map(|(e, conditional, via)| {
-                serde_json::json!({
+            .map(|(e, conditional, via, result_of)| {
+                let mut site = serde_json::json!({
                     "path": e.path,
                     "byte_start": e.byte_start,
                     "byte_end": e.byte_end,
                     "conditional": conditional,
                     "via": via,
-                })
+                });
+                // Only a branch on a bound call's result records it (AC-1309).
+                if !result_of.is_empty() {
+                    site["result_of"] = result_of
+                        .iter()
+                        .map(|(start, end)| serde_json::json!({"byte_start": start, "byte_end": end}))
+                        .collect();
+                }
+                site
             })
             .collect();
         edges.push(Edge {
@@ -572,6 +733,7 @@ mod fact_access_tests {
             args: vec![target],
             source: "sym:nav".into(),
             conditional: false,
+            result_of: Vec::new(),
             evidence: evidence(at),
         }
     }

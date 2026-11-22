@@ -4824,6 +4824,107 @@ fn vue_navigations_link_symbols_to_screens_through_proven_wrappers() {
 }
 
 #[test]
+fn vue_navigations_record_a_branch_on_a_bound_call_result() {
+    // AC-1309 (T-1309): SimpleLogin's `const res = await callAPI(…)` then
+    // `if (res.status === 201) navigateTo(RESULT)`, inside `try`, records the
+    // call the branch tests. A `let`, a branch on another name, and a branch
+    // inside a callback record nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "popup/Navigation.js",
+        "let router = null;\nconst PATH = { ROOT: '/', RESULT: '/result' };\n\
+         class Navigation {\n  static PATH = PATH;\n\
+         \x20 static getRoutes(c) { return [{ path: PATH.ROOT, component: c.Root }, \
+         { path: PATH.RESULT, component: c.Root }]; }\n\
+         \x20 static setRouter($router) { router = $router; }\n\
+         \x20 static navigateTo(path) { router.push(path); }\n\
+         }\nexport default Navigation;\n",
+    );
+    write(
+        "popup/Root.vue",
+        "<template><div/></template>\n<script>\nexport default {}\n</script>\n",
+    );
+    write(
+        "popup/App.vue",
+        "<template><router-view/></template>\n<script>\n\
+         import VueRouter from 'vue-router';\nimport Navigation from './Navigation';\n\
+         import Root from './Root.vue';\n\
+         const router = new VueRouter({ routes: Navigation.getRoutes({ Root }) });\n\
+         export default {\n  router,\n  mounted() {\n    Navigation.setRouter(this.$router);\n  },\n};\n</script>\n",
+    );
+    let flow = "<template><div/></template>\n<script>\nimport Navigation from './Navigation';\n\
+         export default {\n  methods: {\n\
+         \x20   async proven() {\n      try {\n        const res = await callAPI(1);\n        \
+         if (res.status === 201) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n      } catch (e) {}\n    },\n\
+         \x20   async reassigned() {\n      let res = await callAPI(2);\n      \
+         if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n    },\n\
+         \x20   async other(flag) {\n      const res = await callAPI(3);\n      \
+         if (flag) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n    },\n\
+         \x20   async later() {\n      const res = await callAPI(4);\n      \
+         setTimeout(() => { if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); } }, 1);\n    },\n\
+         \x20   async both() {\n      const first = await callAPI(5);\n      const second = await callAPI(6);\n      \
+         if (first.ok && second.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n    },\n\
+         \x20   async caught() {\n      const res = await callAPI(7);\n      \
+         try { run(); } catch (res) { if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); } }\n    },\n\
+         \x20   async looped(values) {\n      const res = await callAPI(8);\n      \
+         for (const res of values) { if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); } }\n    },\n\
+         \x20   async destructured(values) {\n      const res = await callAPI(9);\n      \
+         for (const { res } of values) { if (res) { Navigation.navigateTo(Navigation.PATH.RESULT); } }\n    },\n\
+         \x20 },\n};\n</script>\n";
+    write("popup/Flow.vue", flow);
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    // `source` is part of the navigating Symbol's id; the callback in
+    // `later` is its own `anon` Symbol.
+    let result_of = |source: &str| {
+        let edge = out
+            .edges
+            .iter()
+            .find(|e| {
+                e.label == "NAVIGATES_TO"
+                    && e.src.contains(source)
+                    && e.dst == "screen:qwtm/example@/result"
+            })
+            .unwrap_or_else(|| panic!("{source}"));
+        let sites = edge.props["sites"].as_array().unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0]["conditional"], true);
+        sites[0].get("result_of").cloned()
+    };
+    let start = flow.find("callAPI(1)").unwrap() as u64;
+    assert_eq!(
+        result_of(".proven@"),
+        Some(serde_json::json!([
+            {"byte_start": start, "byte_end": start + "callAPI(1)".len() as u64}
+        ]))
+    );
+    assert_eq!(result_of(".reassigned@"), None);
+    assert_eq!(result_of(".other@"), None);
+    assert_eq!(result_of("#anon@"), None);
+    // Every bound call the condition reads is listed, in source order.
+    let range = |call: &str| {
+        let start = flow.find(call).unwrap() as u64;
+        serde_json::json!({"byte_start": start, "byte_end": start + call.len() as u64})
+    };
+    assert_eq!(
+        result_of(".both@"),
+        Some(serde_json::json!([
+            range("callAPI(5)"),
+            range("callAPI(6)")
+        ]))
+    );
+    // A `catch` parameter or loop binding shadows the outer `const`.
+    assert_eq!(result_of(".caught@"), None);
+    assert_eq!(result_of(".looped@"), None);
+    assert_eq!(result_of(".destructured@"), None);
+}
+
+#[test]
 fn vue_router_tables_follow_export_clauses_default_children_and_bindings() {
     // AC-0349 (#990 review): a table exported through `export { a as b }`
     // resolves, a default child (`path: ''`) is its parent's URL, and a

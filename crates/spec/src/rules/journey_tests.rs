@@ -628,6 +628,54 @@ fn journey_candidates_enforce_ordering_cycle_budget_and_identity_contracts() {
     assert_eq!(cond_cand.result, JourneyResult::Unordered);
     assert!(cond_cand.result_step.is_none());
 
+    // 5b'. (AC-1309, T-1309) The same conditional site under a branch on the fetch's
+    // own bound result (`const res = await post(…); if (res.status === 201)`)
+    // is ordered, even when the fetch sits in a `try` and is not
+    // straight-line, also when the site lists another call too. A `result_of`
+    // naming only another call proves nothing.
+    for (result_of, expected) in [
+        (
+            json!([{"byte_start": 100, "byte_end": 170}, {"byte_start": 240, "byte_end": 310}]),
+            JourneyResult::Ordered,
+        ),
+        (
+            json!([{"byte_start": 100, "byte_end": 170}]),
+            JourneyResult::Unordered,
+        ),
+    ] {
+        let mut edges_branch = edges_conditional.clone();
+        for e in &mut edges_branch {
+            if e.label == "NAVIGATES_TO"
+                && e.dst == "screen:simplelogin/extension@/new-alias-result/"
+            {
+                e.props["sites"][0]["result_of"] = result_of.clone();
+            }
+            if e.label == "FETCHES" && e.dst == "ep:simplelogin/app@POST:/api/v2/alias/custom/new" {
+                e.props["straight_line"] = json!(false);
+            }
+        }
+        let (_, branch_refs) = refs(&nodes, &edges_branch);
+        let branch = &candidates(&node_refs, &branch_refs, &flows, JourneyBudget::default())[0];
+        assert_eq!(branch.result, expected, "{result_of}");
+        if expected == JourneyResult::Ordered {
+            assert_eq!(branch.label, baseline.label);
+            let step = branch.result_step.as_ref().unwrap();
+            assert_eq!(
+                step.screen,
+                "screen:simplelogin/extension@/new-alias-result/"
+            );
+            let site = &step.navigation.as_ref().unwrap().sites_taken[0];
+            assert_eq!(
+                (site.conditional, site.result_of.clone()),
+                (true, vec![(100, 170), (240, 310)])
+            );
+            assert_eq!(branch.id, baseline.id);
+        } else {
+            assert!(branch.result_step.is_none());
+            assert_eq!(branch.label, "Main → POST /api/v2/alias/custom/new");
+        }
+    }
+
     // 5c. (#1012 review) The same unconditional navigation after a call that
     // is not straight-line in the Symbol (`if (flag) await post(…)` and then
     // `router.push(…)`): the navigation can run without the call, so the

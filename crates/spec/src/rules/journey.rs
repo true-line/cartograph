@@ -86,14 +86,15 @@ impl GoalBasis {
 
 /// Whether a post-goal navigation was proven to execute after the goal call.
 ///
-/// In `journey-candidate@1` (v1), a conditional navigation after the call is
-/// also [`JourneyResult::Unordered`], because a branch specifically on that
-/// call's result is not proven yet.
+/// A navigation under a branch is [`JourneyResult::Ordered`] only when the
+/// branch tests the goal call's own bound result (AC-1309).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JourneyResult {
-    /// Unconditional navigation site in the same `Symbol` and file path at or after the
-    /// `byte_end` of a fetch that is straight-line in that Symbol's body.
+    /// A navigation site in the same `Symbol` and file path at or after the
+    /// `byte_end` of the fetch: unconditional after a fetch that is
+    /// straight-line in that Symbol's body, or under a branch on the fetch's
+    /// bound result.
     Ordered,
     /// No post-goal navigation with proven ordering.
     Unordered,
@@ -146,6 +147,11 @@ pub struct NavigationSite {
     pub byte_end: u64,
     /// Whether the navigation call site lies inside a branch or catch block.
     pub conditional: bool,
+    /// The `(byte_start, byte_end)` of each call whose bound result a branch
+    /// around this site tests (`const res = await call(…); if (res.status …)`),
+    /// as the adapter recorded them; empty otherwise (AC-1309).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub result_of: Vec<(u64, u64)>,
 }
 
 /// The `NAVIGATES_TO` edge and sites taken to reach a step's screen.
@@ -494,6 +500,7 @@ fn parse_navigation_sites(edge: &Edge) -> Vec<NavigationSite> {
                     byte_start: site["byte_start"].as_u64()?,
                     byte_end: site["byte_end"].as_u64()?,
                     conditional: site["conditional"].as_bool().unwrap_or(edge_cond),
+                    result_of: result_of(site),
                 })
             })
             .collect();
@@ -512,7 +519,17 @@ fn parse_navigation_sites(edge: &Edge) -> Vec<NavigationSite> {
             byte_start: ev.byte_start,
             byte_end: ev.byte_end,
             conditional: edge_cond,
+            result_of: Vec::new(),
         })
+        .collect()
+}
+
+fn result_of(site: &serde_json::Value) -> Vec<(u64, u64)> {
+    site["result_of"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|range| Some((range["byte_start"].as_u64()?, range["byte_end"].as_u64()?)))
         .collect()
 }
 
@@ -530,6 +547,7 @@ fn parse_init_navigation_sites(edge: &Edge) -> Vec<NavigationSite> {
                 byte_start: site["byte_start"].as_u64()?,
                 byte_end: site["byte_end"].as_u64()?,
                 conditional: site["conditional"].as_bool().unwrap_or(edge_cond),
+                result_of: result_of(site),
             })
         })
         .collect()
@@ -2198,10 +2216,16 @@ fn finalize_candidate<'a>(
 /// - the navigation site's `byte_start` is at or after the fetch's `byte_end`, and
 /// - that site has `conditional == false`.
 ///
-/// A conditional navigation after the call is also `"unordered"` in v1, because
-/// a branch specifically on the call's result is not proven yet. `"ordered"`
-/// says the navigation follows the call being made; it does not say the
-/// call completed or succeeded first, since an unawaited call is still made.
+/// Or, whatever `straight_line` says (AC-1309): the site is after the fetch
+/// in the same Symbol and file, and its `result_of` lists exactly the fetch's
+/// byte range. The adapter records that only for a branch whose condition
+/// reads a `const` bound to the call, so the call was made before the
+/// branch ran (`const res = await callAPI(…); if (res.status === 201)`).
+///
+/// Any other conditional navigation after the call is `"unordered"`.
+/// `"ordered"` says the navigation follows the call being made; it does not
+/// say the call completed or succeeded first, since an unawaited call is
+/// still made.
 #[expect(clippy::too_many_arguments)]
 fn find_ordered_result_step<'a>(
     goal_screen_id: &str,
@@ -2217,9 +2241,8 @@ fn find_ordered_result_step<'a>(
     let Some(fetch_ev) = &goal_call.evidence else {
         return (JourneyResult::Unordered, None, None);
     };
-    if goal_call.straight_line != Some(true) {
-        return (JourneyResult::Unordered, None, None);
-    }
+    let straight_line = goal_call.straight_line == Some(true);
+    let fetch_range = (fetch_ev.byte_start, fetch_ev.byte_end);
     let Some(closure) = closures.get(goal_screen_id) else {
         return (JourneyResult::Unordered, None, None);
     };
@@ -2238,7 +2261,8 @@ fn find_ordered_result_step<'a>(
             .filter(|site| {
                 site.path == fetch_ev.path
                     && site.byte_start >= fetch_ev.byte_end
-                    && !site.conditional
+                    && ((straight_line && !site.conditional)
+                        || site.result_of.contains(&fetch_range))
             })
             .cloned()
             .collect();
