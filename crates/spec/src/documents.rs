@@ -1318,7 +1318,7 @@ pub fn documentation_drift(
         for endpoint in endpoints.into_iter().take(MAX_DRIFT_LINKS) {
             // The endpoint's own evidence where it has any, else the
             // reference it was compared with.
-            let served_at = Provenance::deserialize(&endpoint.props["prov"])
+            let served_at = Provenance::deserialize(&*crate::stored_prov(&endpoint.props))
                 .ok()
                 .map(|prov| prov.evidence)
                 .filter(|evidence| !evidence.is_empty())

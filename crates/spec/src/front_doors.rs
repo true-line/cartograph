@@ -32,7 +32,9 @@ fn repo(endpoint: &Node) -> Option<&str> {
 /// The directory of the file an endpoint is registered in, from its
 /// provenance.
 fn registered_in(endpoint: &Node) -> Option<&str> {
-    let path = endpoint.props["prov"]["evidence"][0]["path"].as_str()?;
+    let path = crate::workbench::stored_spans(&endpoint.props)
+        .first()?
+        .path?;
     Some(path.rsplit_once('/').map_or("", |(dir, _)| dir))
 }
 
