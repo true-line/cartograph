@@ -1274,6 +1274,9 @@ struct ProducerReads {
     /// Whether the primary capture holds the schedule and entry-point
     /// readers' whole selections, so they read it (AC-1061).
     starts_captured: bool,
+    /// Whether the primary capture holds the toolchain reader's whole
+    /// selection, so it reads it (AC-1063).
+    toolchain_captured: bool,
     /// What the found ADR/RFC reader read and published (#1847).
     adrs: ingest::coverage::ProducerCount,
     /// Found ADR/RFC files over the size bound, in path order (#1847).
@@ -1301,6 +1304,7 @@ impl Default for ProducerReads {
             unfollowed_links: Vec::new(),
             environments_captured: false,
             starts_captured: false,
+            toolchain_captured: false,
             adrs: ingest::coverage::ProducerCount::default(),
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
@@ -2561,9 +2565,37 @@ fn extract_tree_packed(
     {
         let tool_id = ingest::toolchain::SourceId { repo, commit };
         let mut tool_progress = |path: &str| on_file(&format!("Reading configuration — {path}"));
-        let tool_facts =
-            ingest::toolchain::extract_dir_reading(root, &tool_id, &read, &mut tool_progress)
-                .map_err(|e| e.to_string())?;
+        // A capture that holds the reader's whole selection is read in place
+        // of the checkout (AC-1063); env files, which no capture retains,
+        // still come from the checkout.
+        let tool_facts = match primary {
+            Some(capture) if reads.toolchain_captured => {
+                let captured: Vec<String> = capture
+                    .manifest()
+                    .files
+                    .iter()
+                    .filter(|entry| ingest::toolchain::is_toolchain_file(&entry.path))
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                ingest::toolchain::extract_from_capture(
+                    root,
+                    &captured,
+                    &|path| {
+                        capture
+                            .file(path)
+                            .map(|file| file.bytes().to_vec())
+                            .map_err(|_| {
+                                std::io::Error::other("captured config file is unavailable")
+                            })
+                    },
+                    &tool_id,
+                    &read,
+                    &mut tool_progress,
+                )
+            }
+            _ => ingest::toolchain::extract_dir_reading(root, &tool_id, &read, &mut tool_progress),
+        }
+        .map_err(|e| e.to_string())?;
         layers.tools = LayerSummary {
             files: tool_facts.files,
             nodes: distinct_node_count(&tool_facts.nodes),
@@ -5767,6 +5799,7 @@ fn run_ingest<R: tauri::Runtime>(
         unfollowed_links: primary.unfollowed.clone(),
         environments_captured: primary.environments_captured,
         starts_captured: primary.starts_captured,
+        toolchain_captured: primary.toolchain_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6236,6 +6269,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         unfollowed_links: primary.unfollowed.clone(),
         environments_captured: primary.environments_captured,
         starts_captured: primary.starts_captured,
+        toolchain_captured: primary.toolchain_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6571,6 +6605,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             unfollowed_links: primary.unfollowed.clone(),
             environments_captured: primary.environments_captured,
             starts_captured: primary.starts_captured,
+            toolchain_captured: primary.toolchain_captured,
             ..ProducerReads::default()
         };
         let (extraction, facts, repo_layers, repo_delta) = {

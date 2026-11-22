@@ -2049,6 +2049,7 @@ impl PrimarySourceStore {
                 unfollowed: Vec::new(),
                 environments_captured: false,
                 starts_captured: false,
+                toolchain_captured: false,
                 _guard: None,
             });
         }
@@ -2118,11 +2119,11 @@ impl PrimarySourceStore {
             paths.dedup();
             paths
         };
-        // The environment (AC-1059), schedule and entry-point (AC-1061)
-        // readers' selections, read for every layer selection, are tried with
-        // the lanes first. When the whole set cannot be retained, the lanes
-        // are retained without them and the readers read the checkout, so
-        // they never cost a lane its capture.
+        // The environment (AC-1059), schedule and entry-point (AC-1061) and
+        // toolchain (AC-1063) readers' selections, read for every layer
+        // selection, are tried with the lanes first. When the whole set
+        // cannot be retained, the lanes are retained without them and the
+        // readers read the checkout, so they never cost a lane its capture.
         let environments = ingest::environments::environment_paths(root).ok();
         let starts = ingest::schedules::schedule_paths(root)
             .and_then(|mut paths| {
@@ -2130,17 +2131,20 @@ impl PrimarySourceStore {
                 Ok(paths)
             })
             .ok();
+        let toolchain = ingest::toolchain::toolchain_paths(root).ok();
         let readers: Vec<String> = environments
             .iter()
             .chain(&starts)
+            .chain(&toolchain)
             .flatten()
             .cloned()
             .collect();
-        let mut capture = (environments.is_some() || starts.is_some())
+        let mut capture = (environments.is_some() || starts.is_some() || toolchain.is_some())
             .then(|| capture_paths(&with(&readers)).ok())
             .flatten();
         let environments_captured = capture.is_some() && environments.is_some();
         let starts_captured = capture.is_some() && starts.is_some();
+        let toolchain_captured = capture.is_some() && toolchain.is_some();
         if capture.is_none() && !lanes.is_empty() {
             capture = capture_paths(&with(&[])).ok();
         }
@@ -2156,6 +2160,7 @@ impl PrimarySourceStore {
             unfollowed: selection.unfollowed,
             environments_captured,
             starts_captured,
+            toolchain_captured,
             _guard: Some(guard),
         })
     }
@@ -2304,6 +2309,9 @@ pub struct PrimaryInput {
     /// Whether the capture holds the schedule and entry-point readers' whole
     /// selections (AC-1061); when it does not, they read the checkout.
     pub starts_captured: bool,
+    /// Whether the capture holds the toolchain reader's whole selection
+    /// (AC-1063); when it does not, that reader reads the checkout.
+    pub toolchain_captured: bool,
     _guard: Option<RetentionGuard>,
 }
 
