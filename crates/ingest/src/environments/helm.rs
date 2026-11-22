@@ -256,6 +256,20 @@ pub(super) struct Helmfile {
 }
 
 /// A helmfile, or why it yields no `Environment`.
+/// The repository paths the helmfile at `rel` names as values files, in
+/// the order its releases name them.
+pub(super) fn named_values(rel: &str, text: &str) -> Vec<String> {
+    let Ok(helmfile) = helmfile(text) else {
+        return Vec::new();
+    };
+    helmfile
+        .releases
+        .iter()
+        .flat_map(|release| release.values.iter())
+        .filter_map(|(path, _)| normalise(dir_of(rel), path))
+        .collect()
+}
+
 pub(super) fn helmfile(text: &str) -> Result<Helmfile, (&'static str, Span)> {
     let whole = (0, text.len() as u64);
     if text.contains("{{") {

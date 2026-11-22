@@ -700,15 +700,36 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
     ))
 }
 
-/// The files [`extract_dir`] would open under `root`: every file
-/// [`is_environment_file`] selects, in path order. A source capture retains
-/// them (AC-1059).
+/// The files [`extract_dir`] would open under `root`, in path order: every
+/// file [`is_environment_file`] selects and every walked file a selected
+/// helmfile names as a values file. A source capture retains them (AC-1059).
 pub fn environment_paths(root: &Path) -> std::io::Result<Vec<String>> {
-    Ok(walk(root)?
-        .into_iter()
-        .map(|file| file.rel)
+    let walked: BTreeSet<String> = walk(root)?.into_iter().map(|file| file.rel).collect();
+    let mut paths: BTreeSet<String> = walked
+        .iter()
         .filter(|rel| is_environment_file(rel))
-        .collect())
+        .cloned()
+        .collect();
+    let named = named_values(paths.iter().map(|rel| {
+        let text = helmfile_rel(rel)
+            .then(|| std::fs::read_to_string(root.join(rel)).ok())
+            .flatten();
+        (rel.as_str(), text)
+    }));
+    paths.extend(named.into_iter().filter(|rel| walked.contains(rel)));
+    Ok(paths.into_iter().collect())
+}
+
+fn helmfile_rel(rel: &str) -> bool {
+    helm::HELMFILE_NAMES.contains(&rel.rsplit('/').next().unwrap_or(rel))
+}
+
+/// The values files the helmfiles among `files` name.
+fn named_values<'a>(files: impl Iterator<Item = (&'a str, Option<String>)>) -> BTreeSet<String> {
+    files
+        .filter_map(|(rel, text)| Some(helm::named_values(rel, &text?)))
+        .flatten()
+        .collect()
 }
 
 /// True when this reader may open `rel`: a Compose file, an environment
@@ -739,11 +760,22 @@ pub fn extract_from_capture(
     read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
     id: &SourceId,
 ) -> std::io::Result<EnvironmentExtraction> {
-    let held: std::collections::BTreeSet<&str> = captured.iter().map(String::as_str).collect();
+    let held: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
+    // A values file a captured helmfile names is selected too, so whether
+    // it is read never depends on the checkout.
+    let named = named_values(held.iter().map(|rel| {
+        let text = helmfile_rel(rel)
+            .then(|| read(rel).ok())
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        (*rel, text)
+    }));
     let mut walked = walk(root)?;
-    walked.retain(|file| !is_environment_file(&file.rel) || held.contains(file.rel.as_str()));
-    let listed: std::collections::BTreeSet<String> =
-        walked.iter().map(|file| file.rel.clone()).collect();
+    walked.retain(|file| {
+        !(is_environment_file(&file.rel) || named.contains(&file.rel))
+            || held.contains(file.rel.as_str())
+    });
+    let listed: BTreeSet<String> = walked.iter().map(|file| file.rel.clone()).collect();
     for rel in held {
         if !listed.contains(rel) {
             walked.push(source_walk::WalkedFile {

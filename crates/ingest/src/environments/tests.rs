@@ -1369,3 +1369,48 @@ fn captured_bytes_are_read_instead_of_the_checkout() {
     // Without the capture the checkout's changes are read.
     assert_ne!(serialized(&extract_in(dir.path())), before);
 }
+
+// AC-1059: a values file a helmfile names is retained whatever its name, so
+// over a capture its keys never depend on the checkout: deleting it there,
+// or creating one the helmfile names after capture, changes nothing.
+#[test]
+fn helmfile_named_values_files_are_captured() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (
+                "charts/shop/Chart.yaml",
+                "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
+            ),
+            (
+                "deploy/helmfile.yaml",
+                "releases:\n  - name: shop\n    chart: ../charts/shop\n    values:\n      - prod\n      - late\n",
+            ),
+            ("deploy/prod", "replicaCount: 5\n"),
+        ],
+    );
+    let before = serialized(&extract_in(dir.path()));
+    let paths = environment_paths(dir.path()).unwrap();
+    assert!(paths.contains(&"deploy/prod".to_string()), "{paths:?}");
+    let captured: std::collections::BTreeMap<String, Vec<u8>> = paths
+        .iter()
+        .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+        .collect();
+    std::fs::remove_file(dir.path().join("deploy/prod")).unwrap();
+    write(dir.path(), &[("deploy/late", "replicaCount: 9\n")]);
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let after = extract_from_capture(dir.path(), &keys, &read, &id).unwrap();
+    assert_eq!(serialized(&after), before);
+    assert_ne!(serialized(&extract_in(dir.path())), before);
+}
