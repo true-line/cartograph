@@ -48,6 +48,12 @@ pub const PLUGIN_DEADLINE_SECONDS: &str = "plugin_deadline_seconds";
 pub const API_DOCS_MAX_DOCS: &str = "api_docs_max_docs";
 pub const API_DOCS_MAX_MIB: &str = "api_docs_max_mib";
 
+/// Alembic revision files and MiB, and lockfile MiB, Python recovery reads
+/// (AC-0338, AC-1805).
+pub const PYTHON_ALEMBIC_MAX_REVISIONS: &str = "python_alembic_max_revisions";
+pub const PYTHON_ALEMBIC_MAX_FILE_MIB: &str = "python_alembic_max_file_mib";
+pub const PYTHON_LOCKFILE_MAX_MIB: &str = "python_lockfile_max_mib";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -162,6 +168,30 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: ingest::api_docs::HARD_MAX_API_DOC_BYTES / MIB,
         advanced: false,
         description: "MiB one declared API reference document may hold. A larger document is not read and is recorded as a gap.",
+    },
+    LimitSpec {
+        key: PYTHON_ALEMBIC_MAX_REVISIONS,
+        default: 4096,
+        min: 1,
+        max: adapters_lang_python::PythonLimits::HARD_MAX_ALEMBIC_REVISIONS as u64,
+        advanced: true,
+        description: "Alembic revision files a migration history may have before it is recorded as not replayed. Every revision is held in memory during the replay.",
+    },
+    LimitSpec {
+        key: PYTHON_ALEMBIC_MAX_FILE_MIB,
+        default: 1,
+        min: 1,
+        max: adapters_lang_python::PythonLimits::HARD_MAX_ALEMBIC_FILE_BYTES / MIB,
+        advanced: true,
+        description: "MiB alembic.ini or one Alembic revision file may hold before the history is recorded as not replayed.",
+    },
+    LimitSpec {
+        key: PYTHON_LOCKFILE_MAX_MIB,
+        default: 8,
+        min: 1,
+        max: adapters_lang_python::PythonLimits::HARD_MAX_LOCKFILE_BYTES / MIB,
+        advanced: true,
+        description: "MiB one root lockfile may hold. A larger lockfile is not read, so the pins it may hold are recorded as unchecked.",
     },
 ];
 
@@ -444,6 +474,24 @@ mod tests {
         assert!(ApiDocLimits::within(docs.min as usize, mib.min * MIB).is_some());
         assert!(ApiDocLimits::within(docs.max as usize + 1, mib.max * MIB).is_none());
         assert!(ApiDocLimits::within(docs.max as usize, (mib.max + 1) * MIB).is_none());
+    }
+
+    // AC-1805 / #1653: the Python keys default to the adapter's bounds and
+    // stop at its hard ceilings.
+    #[test]
+    fn python_keys_default_to_the_adapter_bounds_and_stop_at_its_ceilings() {
+        use adapters_lang_python::PythonLimits;
+        let revisions = spec(PYTHON_ALEMBIC_MAX_REVISIONS).unwrap();
+        let file = spec(PYTHON_ALEMBIC_MAX_FILE_MIB).unwrap();
+        let lock = spec(PYTHON_LOCKFILE_MAX_MIB).unwrap();
+        let at = |pick: fn(&LimitSpec) -> u64| {
+            PythonLimits::within(pick(revisions) as usize, pick(file) * MIB, pick(lock) * MIB)
+        };
+        assert_eq!(at(|key| key.default), Some(PythonLimits::default()));
+        assert!(at(|key| key.min).is_some());
+        assert!(at(|key| key.max).is_some());
+        assert!(at(|key| key.max + 1).is_none());
+        assert!(revisions.advanced && file.advanced && lock.advanced);
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value

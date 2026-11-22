@@ -48,6 +48,55 @@ pub enum ExtractError {
     Io(#[from] std::io::Error),
 }
 
+/// Bounds on the auxiliary inputs directory resolution reads (#1653,
+/// AC-1805): Alembic revision files and their size, and lockfile size.
+/// [`Default`] is the long-standing 4,096 revisions of up to 1 MiB and 8 MiB
+/// lockfiles; a project may choose other bounds up to the hard ceilings.
+/// Past a bound the result is the same explicit gap as before, never a
+/// failed extraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythonLimits {
+    max_alembic_revisions: usize,
+    max_alembic_file_bytes: u64,
+    max_lockfile_bytes: u64,
+}
+
+impl PythonLimits {
+    /// Most Alembic revision files a project may allow. Every revision's
+    /// source and syntax tree are held for the replay.
+    pub const HARD_MAX_ALEMBIC_REVISIONS: usize = 16_384;
+    /// Largest `alembic.ini` or revision file a project may allow (4 MiB).
+    pub const HARD_MAX_ALEMBIC_FILE_BYTES: u64 = 4 << 20;
+    /// Largest lockfile a project may allow (64 MiB).
+    pub const HARD_MAX_LOCKFILE_BYTES: u64 = 64 << 20;
+
+    /// These bounds, or `None` when one is zero or above its hard ceiling.
+    pub fn within(
+        max_alembic_revisions: usize,
+        max_alembic_file_bytes: u64,
+        max_lockfile_bytes: u64,
+    ) -> Option<Self> {
+        ((1..=Self::HARD_MAX_ALEMBIC_REVISIONS).contains(&max_alembic_revisions)
+            && (1..=Self::HARD_MAX_ALEMBIC_FILE_BYTES).contains(&max_alembic_file_bytes)
+            && (1..=Self::HARD_MAX_LOCKFILE_BYTES).contains(&max_lockfile_bytes))
+        .then_some(Self {
+            max_alembic_revisions,
+            max_alembic_file_bytes,
+            max_lockfile_bytes,
+        })
+    }
+}
+
+impl Default for PythonLimits {
+    fn default() -> Self {
+        Self {
+            max_alembic_revisions: alembic::MAX_REVISIONS,
+            max_alembic_file_bytes: alembic::MAX_FILE_BYTES,
+            max_lockfile_bytes: flask_admin_library::MAX_LOCK_BYTES,
+        }
+    }
+}
+
 /// Identity of the source being recovered.
 pub struct SourceId<'a> {
     /// Repository identity.
@@ -2398,6 +2447,18 @@ pub fn extract_dir_incremental_with_progress(
     cache: &mut IncrementalCache,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    extract_dir_incremental_within(root, id, cache, on_file, PythonLimits::default())
+}
+
+/// [`extract_dir_incremental_with_progress`] under a project's `limits`
+/// (#1653, AC-1805).
+pub fn extract_dir_incremental_within(
+    root: &Path,
+    id: &SourceId<'_>,
+    cache: &mut IncrementalCache,
+    on_file: &mut dyn FnMut(&str),
+    limits: PythonLimits,
+) -> Result<(Extraction, IncrementalStats), ExtractError> {
     let files = python_paths(root)?;
     extract_dir_with(
         root,
@@ -2407,6 +2468,7 @@ pub fn extract_dir_incremental_with_progress(
         cache,
         on_file,
         &mut |_, _| {},
+        limits,
     )
 }
 
@@ -2432,6 +2494,27 @@ pub fn extract_dir_from_sources(
     on_file: &mut dyn FnMut(&str),
     on_parsed: &mut dyn FnMut(&str, &Extraction),
 ) -> Result<Extraction, ExtractError> {
+    extract_dir_from_sources_within(
+        root,
+        id,
+        files,
+        read,
+        on_file,
+        on_parsed,
+        PythonLimits::default(),
+    )
+}
+
+/// [`extract_dir_from_sources`] under a project's `limits` (#1653, AC-1805).
+pub fn extract_dir_from_sources_within(
+    root: &Path,
+    id: &SourceId<'_>,
+    files: &[String],
+    read: &(dyn Fn(&str) -> std::io::Result<Vec<u8>> + Sync),
+    on_file: &mut dyn FnMut(&str),
+    on_parsed: &mut dyn FnMut(&str, &Extraction),
+    limits: PythonLimits,
+) -> Result<Extraction, ExtractError> {
     extract_dir_with(
         root,
         id,
@@ -2440,10 +2523,12 @@ pub fn extract_dir_from_sources(
         &mut IncrementalCache::default(),
         on_file,
         on_parsed,
+        limits,
     )
     .map(|(extraction, _)| extraction)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_dir_with(
     root: &Path,
     id: &SourceId<'_>,
@@ -2452,6 +2537,7 @@ fn extract_dir_with(
     cache: &mut IncrementalCache,
     on_file: &mut dyn FnMut(&str),
     on_parsed: &mut dyn FnMut(&str, &Extraction),
+    limits: PythonLimits,
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
     let active = files.iter().cloned().collect::<BTreeSet<_>>();
     let mut stats = IncrementalStats {
@@ -2580,7 +2666,13 @@ fn extract_dir_with(
         }
     }
     resolve_absolute_imports(&mut out, id.repo);
-    flask_admin::resolve(&mut out, id.repo, root, id.commit);
+    flask_admin::resolve(
+        &mut out,
+        id.repo,
+        root,
+        id.commit,
+        limits.max_lockfile_bytes,
+    );
     resolve_routes(&mut out, id.repo);
     let functions = responses::resolve(&mut out, id.repo);
     rate_limits::resolve_proven(&mut out);
@@ -2588,7 +2680,13 @@ fn extract_dir_with(
     target_tests::resolve(&mut out, id.repo);
     sqlalchemy::resolve(&mut out, id.repo);
     flask_pages::resolve(&mut out, id.repo, id.commit, Some(root));
-    alembic::extract(root, id, &mut out)?;
+    alembic::extract(
+        root,
+        id,
+        &mut out,
+        limits.max_alembic_revisions,
+        limits.max_alembic_file_bytes,
+    )?;
     let local_names = local_module_names(root)?;
     let Extraction { nodes, edges, .. } = &mut out;
     core_graph::placeholder::close_over_endpoints(

@@ -1595,7 +1595,7 @@ fn extract_tree_with_registries(
         deferred_origins,
         &observation_inputs::ObservationInputs::uncaptured(state_json, pulumi_json, otel_jsonl),
         api_docs,
-        ingest::api_docs::ApiDocLimits::default(),
+        RecoveryLimits::default(),
         cache,
         plugins,
         registries,
@@ -1764,7 +1764,7 @@ fn extract_tree_packed(
     // own input identity when they can be (ADR-0080).
     observed: &observation_inputs::ObservationInputs,
     api_docs: &[ingest::api_docs::ApiDocDeclaration],
-    api_doc_limits: ingest::api_docs::ApiDocLimits,
+    limits: RecoveryLimits,
     cache: &mut RepoExtractionCache,
     plugins: &[ActivePlugin],
     registries: &Registries,
@@ -1933,7 +1933,7 @@ fn extract_tree_packed(
         let captured_python = captured_lane_paths(primary, ".py");
         let (python, stats) = if let (Some(capture), false) = (primary, captured_python.is_empty())
         {
-            let python = adapters_lang_python::extract_dir_from_sources(
+            let python = adapters_lang_python::extract_dir_from_sources_within(
                 root,
                 &python_id,
                 &captured_python,
@@ -1945,6 +1945,7 @@ fn extract_tree_packed(
                 },
                 &mut python_progress,
                 &mut |_, _| {},
+                limits.python,
             )
             .map_err(|error| error.to_string())?;
             // Facts are bound in their final form, after directory resolution,
@@ -1964,11 +1965,12 @@ fn extract_tree_packed(
             };
             (python, stats)
         } else {
-            adapters_lang_python::extract_dir_incremental_with_progress(
+            adapters_lang_python::extract_dir_incremental_within(
                 root,
                 &python_id,
                 &mut cache.python,
                 &mut python_progress,
+                limits.python,
             )
             .map_err(|error| error.to_string())?
         };
@@ -2429,7 +2431,7 @@ fn extract_tree_packed(
     // The same walk reads the documentation files for the coverage inventory
     // and the declared API references as documents, so each file is read
     // once (ADR-0065 decision 6, AC-1600).
-    let api_docs = ingest::api_docs::load_api_docs_within(root, api_docs, api_doc_limits);
+    let api_docs = ingest::api_docs::load_api_docs_within(root, api_docs, limits.api_docs);
     let declared_api_docs = declared_api_docs(&api_docs);
     let adr_read = {
         let ids: std::collections::BTreeSet<&str> =
@@ -5573,7 +5575,7 @@ fn run_ingest<R: tauri::Runtime>(
     cancelled()?;
     report_progress(app, state, execution, "extract", 15.0)?;
     let active_plugins = active_plugins_for_root(app, state, root).map_err(&fail)?;
-    let api_doc_limits = api_doc_limits(state).map_err(&fail)?;
+    let limits = recovery_limits(state).map_err(&fail)?;
     let registries = event_registries_for(app).map_err(&fail)?;
     let mut on_file = detail_throttle(app, job_id);
     let primary = state
@@ -5609,7 +5611,7 @@ fn run_ingest<R: tauri::Runtime>(
             &std::collections::BTreeSet::new(),
             &observation_inputs::ObservationInputs::default(),
             &[],
-            api_doc_limits,
+            limits,
             cache,
             &active_plugins,
             &registries,
@@ -5716,7 +5718,7 @@ fn run_ingest<R: tauri::Runtime>(
         &mut published,
         &mut Default::default(),
         &Documented::from([(repo.clone(), Vec::new())]),
-        api_doc_limits,
+        limits.api_docs,
     )
     .map_err(&fail)?;
 
@@ -6039,7 +6041,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     }
     let root = operation.root(&source.repo_key).map_err(&fail)?;
     let active_plugins = active_plugins_for_root(&app, &state, root).map_err(&fail)?;
-    let api_doc_limits = api_doc_limits(&state).map_err(&fail)?;
+    let limits = recovery_limits(&state).map_err(&fail)?;
     let registries = event_registries_for(&app).map_err(&fail)?;
     let mut on_file = detail_throttle(&app, job_id);
     // A managed clone is captured from its cloned commit's Git objects (AC-1022).
@@ -6076,7 +6078,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             &std::collections::BTreeSet::new(),
             &observation_inputs::ObservationInputs::default(),
             &[],
-            api_doc_limits,
+            limits,
             cache,
             &active_plugins,
             &registries,
@@ -6177,7 +6179,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &mut published,
         &mut Default::default(),
         &Documented::from([(source.repo_key.clone(), Vec::new())]),
-        api_doc_limits,
+        limits.api_docs,
     )
     .map_err(&fail)?;
     ensure_running_job(&state, &execution)?;
@@ -6308,7 +6310,7 @@ fn add_system_blocking<R: tauri::Runtime>(
     };
 
     let token = ingest::discover_token();
-    let api_doc_limits = api_doc_limits(&state).map_err(&fail)?;
+    let limits = recovery_limits(&state).map_err(&fail)?;
     let mut cloned_commits = std::collections::BTreeMap::new();
     for (source, remote) in &admitted {
         if *remote
@@ -6409,7 +6411,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 &deferred_origins,
                 &observed,
                 &entry.api_docs,
-                api_doc_limits,
+                limits,
                 cache,
                 &active_plugins,
                 &registries,
@@ -6615,7 +6617,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         &mut published,
         &mut recorded,
         &documented,
-        api_doc_limits,
+        limits.api_docs,
     )
     .map_err(&fail)?;
     for (_, coverage) in &mut proofs {
@@ -7889,6 +7891,46 @@ fn selection_visited_entries(state: &AppState) -> Result<usize, String> {
         .operator_limit(operator_limits::TS_SELECTION_MAX_VISITED_ENTRIES)
         .map_err(|error| error.to_string())?;
     usize::try_from(entries).map_err(|error| error.to_string())
+}
+
+/// The project's bounds on the inputs one recovery reads (#1653): declared
+/// API references (AC-1804) and Python's auxiliary inputs (AC-1805). One
+/// operation reads them once and every repository it recovers uses them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecoveryLimits {
+    api_docs: ingest::api_docs::ApiDocLimits,
+    python: adapters_lang_python::PythonLimits,
+}
+
+fn recovery_limits(state: &AppState) -> Result<RecoveryLimits, String> {
+    Ok(RecoveryLimits {
+        api_docs: api_doc_limits(state)?,
+        python: python_limits(state)?,
+    })
+}
+
+/// Alembic revision files and size, and lockfile size, from the saved
+/// operator limits (#1653, AC-1805), within the adapter's hard ceilings.
+fn python_limits(state: &AppState) -> Result<adapters_lang_python::PythonLimits, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    let mib = |key| {
+        limit(key)?
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| "Python limit overflows.".to_string())
+    };
+    let revisions = usize::try_from(limit(operator_limits::PYTHON_ALEMBIC_MAX_REVISIONS)?)
+        .map_err(|error| error.to_string())?;
+    adapters_lang_python::PythonLimits::within(
+        revisions,
+        mib(operator_limits::PYTHON_ALEMBIC_MAX_FILE_MIB)?,
+        mib(operator_limits::PYTHON_LOCKFILE_MAX_MIB)?,
+    )
+    .ok_or_else(|| "Saved Python limits are outside the adapter's ceilings.".to_string())
 }
 
 /// How many API references a repository may declare and how large each may
@@ -11923,7 +11965,10 @@ export function queueOrder() {
                 &std::collections::BTreeSet::new(),
                 &super::observation_inputs::ObservationInputs::default(),
                 &[],
-                limits,
+                super::RecoveryLimits {
+                    api_docs: limits,
+                    ..Default::default()
+                },
                 &mut super::RepoExtractionCache::default(),
                 &[],
                 super::Registries::builtin(),
@@ -11977,6 +12022,93 @@ export function queueOrder() {
         assert_eq!(
             super::api_doc_limits(&state).unwrap(),
             ingest::api_docs::ApiDocLimits::within(64, 8 << 20).unwrap()
+        );
+    }
+
+    // AC-1805 (#1653): the project's Python bounds reach recovery. Under a
+    // revision bound below the history's length, the Alembic replay is a
+    // gap naming the bound; the defaults replay it, and the saved keys are
+    // what an operation reads.
+    #[test]
+    fn a_projects_python_bounds_reach_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("migrations/versions")).unwrap();
+        std::fs::write(
+            dir.path().join("alembic.ini"),
+            "[alembic]\nscript_location = migrations\n",
+        )
+        .unwrap();
+        for (name, id, down) in [("a1.py", "a1", "None"), ("b2.py", "b2", "'a1'")] {
+            std::fs::write(
+                dir.path().join("migrations/versions").join(name),
+                format!(
+                    "from alembic import op\nimport sqlalchemy as sa\n\nrevision = '{id}'\ndown_revision = {down}\n\n\ndef upgrade():\n    op.create_table('t_{id}', sa.Column('id', sa.Integer()))\n"
+                ),
+            )
+            .unwrap();
+        }
+        let root = super::paths::canonicalize(dir.path()).unwrap();
+        let recover = |python| {
+            let (_, facts, _, _) = super::extract_tree_packed(
+                &root,
+                "local/bounded-py",
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeSet::new(),
+                &std::collections::BTreeSet::new(),
+                &super::observation_inputs::ObservationInputs::default(),
+                &[],
+                super::RecoveryLimits {
+                    python,
+                    ..Default::default()
+                },
+                &mut super::RepoExtractionCache::default(),
+                &[],
+                super::Registries::builtin(),
+                &mut |_| {},
+                None,
+                &mut Vec::new(),
+                &mut super::ProducerReads::default(),
+            )
+            .unwrap();
+            let mut reasons = facts
+                .into_facts()
+                .unwrap()
+                .0
+                .into_iter()
+                .filter(|node| node.label == "Gap" && node.props["kind"] == "migration-gap")
+                .map(|node| node.props["reason"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            reasons.sort();
+            reasons
+        };
+        assert!(recover(adapters_lang_python::PythonLimits::default()).is_empty());
+        let one = adapters_lang_python::PythonLimits::within(1, 1 << 20, 8 << 20).unwrap();
+        assert_eq!(
+            recover(one),
+            ["Alembic history not replayed: more than 1 revision files"]
+        );
+
+        let app_data = tempfile::tempdir().unwrap();
+        let state = crate::registered_source_tests::app_state(app_data.path());
+        assert_eq!(
+            super::recovery_limits(&state).unwrap(),
+            super::RecoveryLimits::default()
+        );
+        {
+            let mut settings = state.settings.lock().unwrap();
+            for (key, value) in [
+                (crate::operator_limits::PYTHON_ALEMBIC_MAX_REVISIONS, 16_384),
+                (crate::operator_limits::PYTHON_ALEMBIC_MAX_FILE_MIB, 4),
+                (crate::operator_limits::PYTHON_LOCKFILE_MAX_MIB, 64),
+            ] {
+                settings.set_operator_limit(key, Some(value)).unwrap();
+            }
+        }
+        assert_eq!(
+            super::recovery_limits(&state).unwrap().python,
+            adapters_lang_python::PythonLimits::within(16_384, 4 << 20, 64 << 20).unwrap()
         );
     }
 
