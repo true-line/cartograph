@@ -424,6 +424,7 @@ impl InvestigationInput {
                     } else {
                         ActionRefusalReason::ActionNotOffered
                     },
+                    patch_rejection: None,
                     invocation_ordinal: policy.limits().model_invocations,
                     action_hash: "f".repeat(64),
                     choices_hash: "f".repeat(64),
@@ -1063,6 +1064,7 @@ pub(super) fn reserve_projection_bytes(policy: &InvestigationPolicy) -> Option<u
         progress["action_feedback"] = serde_json::to_value(ActionRefusalFeedback {
             query_budget: Some(query_refusal::QueryBudgetDiagnostic::reservation()),
             reason: ActionRefusalReason::QueryPageBudget,
+            patch_rejection: None,
             invocation_ordinal: u32::MAX,
             action_hash: "f".repeat(64),
             choices_hash: "f".repeat(64),

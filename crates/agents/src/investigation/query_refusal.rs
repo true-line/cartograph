@@ -336,6 +336,7 @@ mod tests {
         let feedback = ActionRefusalFeedback {
             query_budget: record.budget,
             reason: ActionRefusalReason::QueryPageBudget,
+            patch_rejection: None,
             invocation_ordinal: 1,
             action_hash: record.action_hash.clone(),
             choices_hash: "f".repeat(64),
@@ -499,6 +500,7 @@ mod feedback_budget_tests {
         let mut reserved = ActionRefusalFeedback {
             query_budget: None,
             reason: ActionRefusalReason::ActionNotOffered,
+            patch_rejection: None,
             invocation_ordinal: INVESTIGATION_V2_POLICY.limits().model_invocations,
             action_hash: "f".repeat(64),
             choices_hash: "f".repeat(64),

@@ -419,6 +419,19 @@ impl VolatileFinish {
         self.merge_with(raw, saved, false)
     }
 
+    /// @29 (#2431): the rejection [`Self::merge_with`] would return, while the
+    /// holder stays. A rejected patch can then go back to the model within the
+    /// run's `invalid_action` allowance. The merge runs on a transient copy of
+    /// the candidate, which is dropped (released, not securely erased).
+    pub fn rejection(&self, raw: &str, saved: &PatchBasis, whole: bool) -> Option<PatchRejection> {
+        Self {
+            basis: self.basis.clone(),
+            finish: self.finish.clone(),
+        }
+        .merge_with(raw, saved, whole)
+        .err()
+    }
+
     /// As [`Self::merge`]. With `whole` (@29 only), a reply that is a full
     /// finish rather than a patch is read as one: each flagged finding and
     /// flagged limitation is taken from the same index of that finish, so the
