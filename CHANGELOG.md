@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.75.0
+
+### Minor Changes
+
+- a6a5249: TypeScript calls through an interface, such as an RPC proxy typed `ExtHostUrlsShape` or an injected `ILogService`, now link to the method on each class that implements the interface instead of staying an open gap. The links are marked inferred, name the interface and implementation, and never point product code at test mocks (#258, AC-1515).
+- 461c2be: A project can change how many Alembic revision files a migration history may have, how large each may be, and how large a lockfile may be before Python recovery records a gap (advanced operator limits) (#1653).
+
+### Patch Changes
+
+- bf2d191: The signed macOS build checks Claude Code's Anthropic signature correctly again, so the release that carries the bundled tool-calling runtime can be published (AC-1424).
+
 ## 0.74.0
 
 ### Minor Changes
