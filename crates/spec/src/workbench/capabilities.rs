@@ -627,7 +627,15 @@ fn actor_renderer_parts(
 ) -> Option<super::accounting::RendererWorkspaceParts> {
     use super::accounting::{RendererWorkspaceParts, slots, sum};
     Some(RendererWorkspaceParts {
-        references_bytes: slots::<&Node>(actor_count)?,
+        references_bytes: sum(&[
+            slots::<&Node>(actor_count)?,
+            // D1 1.2 keeps at most one citation id per Actor, three per
+            // caller role, until the role table is written (#2326).
+            slots::<String>(actor_count)?,
+            actor_count.checked_mul(
+                super::citation_id(&core_graph::FactKey::Node { id: String::new() }).len(),
+            )?,
+        ])?,
         current_bytes: sum(&[
             super::accounting::json_bytes(actor_json_bytes)?, // current provenance Value
             super::accounting::json_bytes(actor_json_bytes)?, // simultaneous typed decode

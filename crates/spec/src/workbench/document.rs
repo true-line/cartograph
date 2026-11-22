@@ -838,8 +838,11 @@ fn derived_frame(
             .flat_map(cited_endpoints)
             .map(|endpoint| (endpoint.id.as_str(), endpoint))
             .collect();
-        // Each role's operations and the derived Actors behind it (#2326).
-        let mut roles: BTreeMap<Vec<&str>, (Vec<String>, Vec<String>)> = BTreeMap::new();
+        // Each role's operations, the citation ids of the first three derived
+        // Actors behind it and how many Actors it has (#2326). Only three ids
+        // are kept, so the rendering bound's per-Actor accounting holds.
+        type Role = (Vec<String>, Vec<String>, usize);
+        let mut roles: BTreeMap<Vec<&str>, Role> = BTreeMap::new();
         for story in &stories {
             let any_of: Vec<&str> = story.node.props["any_of"]
                 .as_array()
@@ -851,13 +854,16 @@ fn derived_frame(
             let operation = operations
                 .get(endpoint)
                 .map_or_else(|| endpoint.to_owned(), |n| NodeName(n).to_string());
-            let (listed, actors) = roles.entry(any_of).or_default();
+            let (listed, cited, actors) = roles.entry(any_of).or_default();
             if !listed.contains(&operation) {
                 listed.push(operation);
             }
-            actors.push(citation_id(&FactKey::Node {
-                id: story.node.id.clone(),
-            }));
+            *actors += 1;
+            if cited.len() < 3 {
+                cited.push(citation_id(&FactKey::Node {
+                    id: story.node.id.clone(),
+                }));
+            }
         }
         writeln!(
             out,
@@ -876,11 +882,9 @@ fn derived_frame(
                 String::new()
             }
         };
-        for (any_of, (operations, actors)) in &roles {
+        for (any_of, (operations, cited, actors)) in &roles {
             let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
             let more = operations.len() - shown.len();
-            // At most three of the role's Actors, so a composer can cite it.
-            let cited: Vec<&str> = actors.iter().take(3).map(String::as_str).collect();
             writeln!(
                 out,
                 "| {} | {} | {}{} | {}{} |",
@@ -889,7 +893,7 @@ fn derived_frame(
                 Literal(shown.join("; ")),
                 and_more(more),
                 cited.join(", "),
-                and_more(actors.len() - cited.len()),
+                and_more(actors - cited.len()),
             )?;
         }
     } else {
