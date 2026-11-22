@@ -24,6 +24,7 @@ fn fixture(repositories: usize) -> (CoverageContext, InvestigationInputLedger) {
         schema_version: 2,
         coverage: Some(context.durable_proof().unwrap()),
         coverage_reads: vec![],
+        artifact_reads: vec![],
         graph_snapshot_id: context.snapshot_id().into(),
         scope_snapshot_id: context.snapshot_id().into(),
         revision: 0,

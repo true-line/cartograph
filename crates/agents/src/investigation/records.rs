@@ -596,6 +596,10 @@ pub struct InvestigationInputLedger {
     pub coverage: Option<context_hub::coverage::CoverageProof>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage_reads: Vec<InvestigationCoverageReadManifest>,
+    /// Compiled-artifact pages (ADR-0089). Absent in every older ledger, so
+    /// their bytes and fingerprints are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_reads: Vec<InvestigationArtifactReadManifest>,
     pub graph_snapshot_id: String,
     pub scope_snapshot_id: String,
     pub revision: u64,
@@ -732,6 +736,8 @@ pub enum InvestigationActionDecodeDiagnostic {
     QueryShape,
     InventoryContext,
     InventoryShape,
+    ArtifactContext,
+    ArtifactShape,
     ReplayContext,
     ReplayReference,
     EvidenceShape,
@@ -762,6 +768,8 @@ impl From<ActionDecodeStage> for InvestigationActionDecodeDiagnostic {
                 Rule::QueryShape => Self::QueryShape,
                 Rule::InventoryContext => Self::InventoryContext,
                 Rule::InventoryShape => Self::InventoryShape,
+                Rule::ArtifactContext => Self::ArtifactContext,
+                Rule::ArtifactShape => Self::ArtifactShape,
                 Rule::ReplayContext => Self::ReplayContext,
                 Rule::ReplayReference => Self::ReplayReference,
                 Rule::EvidenceShape => Self::EvidenceShape,

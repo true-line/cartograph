@@ -19,6 +19,7 @@ fn fixture(
         schema_version: 2,
         coverage: Some(proof),
         coverage_reads: vec![],
+        artifact_reads: vec![],
         graph_snapshot_id: snapshot.id().into(),
         scope_snapshot_id: snapshot.id().into(),
         revision: 0,
