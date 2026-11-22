@@ -210,7 +210,6 @@ impl ReadBasis {
             },
         }
     }
-    #[cfg(unix)]
     fn digest_workspace() -> Option<usize> {
         use context_hub::logical::{count, sum};
         let prefix = "mcp-read-basis-v1";

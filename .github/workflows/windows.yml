@@ -70,7 +70,8 @@ jobs:
     # The Linux Rust lane's three test groups and the app's two test groups
     # (scripts/app-test-groups.json), plus fmt and clippy. Each app group
     # builds only its own tests (APP_TEST_GROUP, src-tauri/build.rs) and runs
-    # them in one plain libtest process.
+    # them in one plain libtest process. The acceptance build still compiles
+    # the core group's tests, so that lane filters to its one prefix.
     strategy:
       fail-fast: false
       matrix:
@@ -91,6 +92,7 @@ jobs:
           - lane: app-acceptance
             packages: -p app --lib
             app_group: acceptance
+            filter: 'investigations::worker::tests::acceptance::'
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -158,9 +160,11 @@ jobs:
         env:
           PACKAGES: ${{ matrix.packages }}
           APP_TEST_GROUP: ${{ matrix.app_group }}
+          FILTER: ${{ matrix.filter }}
         # PACKAGES is a list of cargo arguments: split it on spaces. Every
         # package runs, so one run lists all of a lane's Windows failures.
-        run: cargo test --locked --no-fail-fast $PACKAGES
+        # FILTER, when set, is the libtest name filter for the lane.
+        run: cargo test --locked --no-fail-fast $PACKAGES -- $FILTER
 
   # An unsigned NSIS installer with both sidecars, as an artifact for manual
   # testing. It is never published: release.yml ships macOS only until the
