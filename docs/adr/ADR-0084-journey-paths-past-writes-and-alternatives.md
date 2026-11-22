@@ -49,9 +49,14 @@ holds except for these changes.
    inputs as `@1`), records `alternative_of` with the primary's id, and
    `journeys.md` titles it `{label} (via {screens not on the primary})` and
    names its primary. It is InferredWeak like every journey candidate.
-5. **Budget.** `JourneyBudget` gains `max_alternatives = 64` per entry screen,
-   next to `max_screens = 6`, `max_expanded_states = 256`,
-   `max_calls_per_screen = 64` and `max_candidates = 32` (primaries) per entry.
+5. **Budget.** `JourneyBudget` gains `max_alternatives = 64` per entry screen.
+   Two `@1` bounds are raised so that searching past writes loses no goal on
+   the SimpleLogin showcase: `max_expanded_states` from 256 to 4096 and
+   `max_candidates` (primaries) from 32 to 64. `max_screens = 6` and
+   `max_calls_per_screen = 64` are unchanged. Measured on the showcase's Flask
+   index entry: with no bounds the search expands 3,783 states and finds 40
+   goals and 1,088 alternatives. At 256 states it found 39 goals, and with 32
+   primaries it kept only 32 of 33.
    Alternatives are kept best-ranked first across that entry's goals; when
    more qualify, the rest are dropped, each kept candidate of that entry
    records `truncated: "alternatives"`, and `alternatives_complete` is false.
@@ -68,12 +73,18 @@ holds except for these changes.
   Its `alternatives` count can grow, because paths past writes are counted
   too, and its id changes with the version.
 - Because `@1`'s paths are searched first, expanding past writes never
-  takes budget from them. It can still exhaust the rest, so an entry can
-  now record `truncated: "expanded_states"` where `@1` did not.
-- Goals reachable only past a write add primaries. When an entry then has
-  more than `max_candidates` goals, the best-ranked are kept (every `@1`
-  goal ranks first) and the entry records `truncated: "candidates"`.
-- The added candidates are bounded per entry by `max_alternatives`.
+  takes budget from them. A larger graph can still exhaust the rest, and the
+  entry then records `truncated: "expanded_states"`.
+- Goals reachable only past a write add primaries. When an entry has more
+  than `max_candidates` goals, the best-ranked are kept (every `@1` goal
+  ranks first) and the entry records `truncated: "candidates"`.
+- Alternatives are extra paths to goals that are already kept, so they are
+  bounded and their cut loses no goal. The showcase's Flask index entry keeps
+  64 of 1,088 and records `truncated: "alternatives"`. Keeping all of them
+  would make `journeys.md` 4 MB instead of 0.4 MB.
+- Cost on the showcase run: peak memory stays about 2.2 GB and the run about
+  165 s, the same as with the `@1` bounds. The Flask index entry's search
+  peaks below 2.25 GB with 38,268 goal paths ranked.
 
 ## Alternatives considered
 
