@@ -135,9 +135,9 @@ pub struct FactIndexRow {
     pub fact: FactKey,
     /// Every subject kind the citing assertions gave it, sorted: a node
     /// label, an edge label, `FlowHop`, or a synthesized kind.
-    pub subject_kinds: Vec<String>,
+    pub subject_kinds: Vec<SharedText>,
     /// Ids of the artifacts with an assertion citing this fact, sorted.
-    pub cited_by: Vec<String>,
+    pub cited_by: Vec<SharedText>,
     /// True when the citing assertions do not agree on the evidence record.
     /// Every distinct record is then listed and names its own artifacts.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -167,13 +167,130 @@ pub struct FactRecord {
     /// Evidence basis: the recorded one, or the tier's default.
     pub evidence_basis: EvidenceBasis,
     /// The extractor that produced the fact.
-    pub extractor_id: String,
+    pub extractor_id: SharedText,
     /// Every evidence span: repository, path, byte range and commit.
-    pub evidence: Vec<EvidenceRef>,
+    pub evidence: Vec<FactSpan>,
     /// The artifacts citing the fact with this record, sorted. Listed only
     /// when the row's `provenance_differs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cited_by: Vec<String>,
+    pub cited_by: Vec<SharedText>,
+}
+
+/// A string a fact index holds many times over (an artifact id, a subject
+/// kind, an extractor, a repository, a path or a commit), shared rather than
+/// copied into every row (#2215). It serializes, compares and prints as the
+/// string it holds.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SharedText(std::sync::Arc<str>);
+
+impl SharedText {
+    /// The text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SharedText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for SharedText {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for SharedText {
+    fn from(text: &str) -> Self {
+        Self(text.into())
+    }
+}
+
+impl PartialEq<str> for SharedText {
+    fn eq(&self, other: &str) -> bool {
+        *self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for SharedText {
+    fn eq(&self, other: &&str) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl PartialEq<String> for SharedText {
+    fn eq(&self, other: &String) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl fmt::Debug for SharedText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.0, f)
+    }
+}
+
+impl fmt::Display for SharedText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for SharedText {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedText {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|text| Self(text.into()))
+    }
+}
+
+/// One evidence span of a [`FactRecord`]: an [`EvidenceRef`] whose
+/// repository, path and commit are shared across the index's rows. It
+/// serializes as the [`EvidenceRef`] it stands for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactSpan {
+    /// Repository the evidence lives in (e.g. `owner/name`).
+    pub repo: SharedText,
+    /// Path within the repository.
+    pub path: SharedText,
+    /// Byte span start (inclusive).
+    pub byte_start: u64,
+    /// Byte span end (exclusive).
+    pub byte_end: u64,
+    /// Commit the span was read at.
+    pub commit_sha: SharedText,
+}
+
+impl PartialEq<EvidenceRef> for FactSpan {
+    fn eq(&self, other: &EvidenceRef) -> bool {
+        self.repo == other.repo
+            && self.path == other.path
+            && self.byte_start == other.byte_start
+            && self.byte_end == other.byte_end
+            && self.commit_sha == other.commit_sha
+    }
+}
+
+/// The one shared copy of each repeated string a [`Collector`] holds.
+#[derive(Default)]
+struct Interner(std::collections::HashSet<SharedText>);
+
+impl Interner {
+    fn get(&mut self, text: &str) -> SharedText {
+        if let Some(held) = self.0.get(text) {
+            return held.clone();
+        }
+        let held = SharedText::from(text);
+        self.0.insert(held.clone());
+        held
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -181,7 +298,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl FactRecord {
-    fn of(provenance: &Provenance) -> Self {
+    fn of(provenance: &Provenance, shared: &mut Interner) -> Self {
         Self {
             tier: provenance.tier,
             confidence: provenance.confidence_tier,
@@ -189,8 +306,18 @@ impl FactRecord {
             inferred_weak: false,
             method: provenance.method.clone(),
             evidence_basis: provenance.basis(),
-            extractor_id: provenance.extractor_id.clone(),
-            evidence: provenance.evidence.clone(),
+            extractor_id: shared.get(&provenance.extractor_id),
+            evidence: provenance
+                .evidence
+                .iter()
+                .map(|span| FactSpan {
+                    repo: shared.get(&span.repo),
+                    path: shared.get(&span.path),
+                    byte_start: span.byte_start,
+                    byte_end: span.byte_end,
+                    commit_sha: shared.get(&span.commit_sha),
+                })
+                .collect(),
             cited_by: Vec::new(),
         }
     }
@@ -202,7 +329,12 @@ impl FactRecord {
             && self.confidence == provenance.confidence_tier
             && self.method == provenance.method
             && self.extractor_id == provenance.extractor_id
-            && self.evidence == provenance.evidence
+            && self.evidence.len() == provenance.evidence.len()
+            && self
+                .evidence
+                .iter()
+                .zip(&provenance.evidence)
+                .all(|(a, b)| a == b)
             && self.evidence_basis == provenance.basis()
     }
 }
@@ -323,10 +455,10 @@ fn written(text: &str) -> usize {
     text.bytes().filter(|byte| *byte != b'\r').count()
 }
 
-fn insert_sorted(values: &mut Vec<String>, value: &str) {
+fn insert_sorted(values: &mut Vec<SharedText>, value: &str, shared: &mut Interner) {
     if let Err(at) = values.binary_search_by(|have| have.as_str().cmp(value)) {
         reserve_one(values);
-        values.insert(at, value.into());
+        values.insert(at, shared.get(value));
     }
 }
 
@@ -348,6 +480,7 @@ pub(super) struct Collector {
     /// are exactly the ids the export cites.
     rows: BTreeMap<String, FactIndexRow>,
     lower_bound: usize,
+    shared: Interner,
 }
 
 impl Collector {
@@ -357,6 +490,7 @@ impl Collector {
             id,
             rows: BTreeMap::new(),
             lower_bound: 0,
+            shared: Interner::default(),
         }
     }
 
@@ -423,8 +557,12 @@ impl Collector {
                     })
                 }
             };
-            insert_sorted(&mut row.subject_kinds, &assertion.subject_kind);
-            insert_sorted(&mut row.cited_by, artifact_id);
+            insert_sorted(
+                &mut row.subject_kinds,
+                &assertion.subject_kind,
+                &mut self.shared,
+            );
+            insert_sorted(&mut row.cited_by, artifact_id, &mut self.shared);
             let record = match row.records.iter().position(|r| r.is(provenance)) {
                 Some(at) => &mut row.records[at],
                 None => {
@@ -435,11 +573,12 @@ impl Collector {
                             .map(|e| written(&e.repo) + written(&e.path) + written(&e.commit_sha))
                             .sum::<usize>();
                     reserve_one(&mut row.records);
-                    row.records.push(FactRecord::of(provenance));
+                    row.records
+                        .push(FactRecord::of(provenance, &mut self.shared));
                     row.records.last_mut().expect("record just pushed")
                 }
             };
-            insert_sorted(&mut record.cited_by, artifact_id);
+            insert_sorted(&mut record.cited_by, artifact_id, &mut self.shared);
             self.lower_bound = self.lower_bound.saturating_add(charge);
         }
         Ok(())
@@ -519,7 +658,7 @@ impl fmt::Display for BasisText<'_> {
     }
 }
 
-struct Listed<'a>(&'a [String]);
+struct Listed<'a>(&'a [SharedText]);
 impl fmt::Display for Listed<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, value) in self.0.iter().enumerate() {
@@ -534,7 +673,7 @@ impl fmt::Display for Listed<'_> {
 
 /// The evidence cell of one record, printed as `render::EvidenceText` prints
 /// a provenance's spans (a record holds the spans alone).
-struct Spans<'a>(&'a [EvidenceRef]);
+struct Spans<'a>(&'a [FactSpan]);
 impl fmt::Display for Spans<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.is_empty() {
@@ -1140,7 +1279,7 @@ mod tests {
                     || !index
                         .rows
                         .iter()
-                        .any(|row| row.cited_by.contains(&artifact.id)),
+                        .any(|row| row.cited_by.iter().any(|by| *by == artifact.id)),
                 "{}",
                 artifact.id
             );
@@ -1263,6 +1402,46 @@ mod tests {
         assert_eq!(collector.finish().unwrap().rows.len(), 1);
     }
 
+    // AC-1211 (T-1211): the strings that repeat across rows (subject kind,
+    // citing artifact, extractor, repository, path, commit) are one shared
+    // copy, and the index and its JSON read as owned strings would.
+    #[test]
+    fn repeated_row_strings_are_one_shared_copy() {
+        let mut collector = Collector::new(ExportMode::BestEffort, citation_id);
+        let cited = [
+            assertion("res:a", "Endpoint", confirmed("res:a")),
+            assertion("res:b", "Endpoint", confirmed("res:b")),
+        ];
+        collector
+            .cite("topology", &cited, &[Subject::Node, Subject::Node])
+            .unwrap();
+        let rows: Vec<_> = collector.rows.values().collect();
+        let [a, b] = rows.as_slice() else {
+            panic!("two rows: {rows:?}");
+        };
+        let same = |x: &SharedText, y: &SharedText| std::sync::Arc::ptr_eq(&x.0, &y.0);
+        assert!(same(&a.subject_kinds[0], &b.subject_kinds[0]));
+        assert!(same(&a.cited_by[0], &b.cited_by[0]));
+        assert!(same(&a.records[0].cited_by[0], &b.cited_by[0]));
+        let (ra, rb) = (&a.records[0], &b.records[0]);
+        assert!(same(&ra.extractor_id, &rb.extractor_id));
+        let (sa, sb) = (&ra.evidence[0], &rb.evidence[0]);
+        assert!(same(&sa.repo, &sb.repo) && same(&sa.path, &sb.path));
+        assert!(same(&sa.commit_sha, &sb.commit_sha));
+        assert_eq!(ra.evidence, [span("src/app.ts", 1, 9)]);
+        let index = collector.finish().unwrap();
+        let json = serde_json::to_value(&index).unwrap();
+        let row = &json["rows"][0];
+        assert_eq!(row["cited_by"], serde_json::json!(["topology"]));
+        assert_eq!(row["subject_kinds"], serde_json::json!(["Endpoint"]));
+        assert_eq!(
+            row["records"][0]["evidence"][0],
+            serde_json::to_value(span("src/app.ts", 1, 9)).unwrap()
+        );
+        let read: FactIndex = serde_json::from_value(json).unwrap();
+        assert_eq!(read, index);
+    }
+
     // AC-1206: a row holds no spare room. Most rows have one subject kind,
     // one citing artifact and one record; a second citation grows each by
     // exactly what it adds (#2215).
@@ -1334,7 +1513,8 @@ mod tests {
         assert!(
             row.records[0]
                 .cited_by
-                .contains(&"flow-dossiers".to_owned())
+                .iter()
+                .any(|by| *by == "flow-dossiers")
         );
         let lines: Vec<&str> = content(&bundle, MARKDOWN_ID)
             .lines()
@@ -1481,19 +1661,23 @@ mod tests {
     // prints a provenance's spans.
     #[test]
     fn fact_index_spans_print_as_the_other_artifacts_print_them() {
+        let spans = |provenance: &Provenance| {
+            let record = FactRecord::of(provenance, &mut Interner::default());
+            Spans(&record.evidence).to_string()
+        };
         let mut provenance = confirmed("res:x");
         assert_eq!(
-            Spans(&provenance.evidence).to_string(),
+            spans(&provenance),
             super::super::render::EvidenceText(&provenance).to_string()
         );
         provenance.evidence.push(span("src/other.ts", 3, 4));
         assert_eq!(
-            Spans(&provenance.evidence).to_string(),
+            spans(&provenance),
             super::super::render::EvidenceText(&provenance).to_string()
         );
         provenance.evidence.clear();
         assert_eq!(
-            Spans(&provenance.evidence).to_string(),
+            spans(&provenance),
             super::super::render::EvidenceText(&provenance).to_string()
         );
     }

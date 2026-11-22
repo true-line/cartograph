@@ -2262,7 +2262,7 @@ fn export_carries_a_fact_index_resolving_every_assertion() {
                         .any(|assertion| assertion.subject_id == subject),
                     "{id} states {subject}"
                 );
-                cited.insert((id.clone(), subject.clone()));
+                cited.insert((id.to_string(), subject.clone()));
             }
             assert!(
                 markdown

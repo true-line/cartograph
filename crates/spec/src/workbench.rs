@@ -60,7 +60,7 @@ pub use capabilities::{
 };
 pub use fact_index::{
     FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
-    check_citations, citation_id,
+    FactSpan, SharedText, check_citations, citation_id,
 };
 mod partition;
 mod pipelines;
