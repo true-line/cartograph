@@ -5,7 +5,7 @@ use std::mem::size_of;
 
 /// Logical returned entries and complete derive_at/derive_current peak. Schema
 /// validation is included; append, outer task replay and RSS are not covered.
-pub(crate) fn next_prompt_capacity_replay_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_capacity_replay_workspace() -> Option<(usize, usize)> {
     let calls = usize::try_from(INVESTIGATION_V2_POLICY.limits().model_invocations).ok()?;
     // Entry has a closed scalar/string layout plus its arbitrary proposal Value.
     // read_body admits canonical record bytes before the smaller entry checks.

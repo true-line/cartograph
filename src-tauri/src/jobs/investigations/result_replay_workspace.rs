@@ -5,7 +5,7 @@ use std::mem::size_of;
 
 /// Retained result and peak including the borrowed task. Conservative duplicate
 /// owners are intentional; this is not a tight minimum, native memory or RSS.
-pub(crate) fn next_prompt_result_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_result_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     // Raw result/step rows can fail semantic limits after decoding. Each
     // dynamic element consumes a preflight JSON value; no allocating defaults.
@@ -90,7 +90,7 @@ pub(crate) fn next_prompt_result_workspace() -> Option<(usize, usize)> {
 }
 
 /// Selected saved call plus canonical contract/choices/feedback; no replay cache.
-pub(crate) fn completion_basis_workspace() -> Option<(usize, usize)> {
+pub fn completion_basis_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let extra = sum(&[
         size_of::<admission_journal::AuthenticatedCompletionBasis>(),
