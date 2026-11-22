@@ -19,7 +19,7 @@ use super::{Extraction, FileCx, file_id};
 use core_graph::rules::*;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef};
-use core_redact::{SecretKind, is_sensitive_name, is_token_shaped, recognized_secrets};
+use core_redact::{SecretKind, is_sensitive_name, recognized_secrets, rule_literal_token_shaped};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tree_sitter::Node as TsNode;
 
@@ -959,7 +959,7 @@ fn secret_reasons(value: &str) -> Vec<RedactionReason> {
         .into_iter()
         .map(redaction_reason)
         .collect();
-    if is_token_shaped(value) {
+    if rule_literal_token_shaped(value) {
         reasons.push(RedactionReason::TokenShaped);
     }
     reasons
