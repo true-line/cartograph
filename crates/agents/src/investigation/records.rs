@@ -435,6 +435,8 @@ pub enum InvestigationEventKind {
     ActionRefused,
     ReadUnavailable,
     QueryRefused,
+    /// The firewall withheld an acquired read from a cloud provider (#679).
+    ReadFirewallRefused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
