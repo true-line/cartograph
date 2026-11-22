@@ -6,6 +6,7 @@ import { findPackageJSON } from "node:module";
 import { createInterface } from "node:readline";
 import { HostChannel } from "./host.ts";
 import { parseHostMessage, type RunnerVersions, type SidecarMessage, type StartMessage } from "./protocol.ts";
+import { isSea } from "node:sea";
 
 export const RUNTIME_VERSION = "1";
 
@@ -79,8 +80,8 @@ export async function serve(io: Io, runners: {
 }
 
 // Run from source (`node src/main.ts`). The packaged executable starts from
-// sea-entry.ts instead; there `import.meta` is empty and this never runs.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// sea-entry.ts instead, so this never runs there.
+if (!isSea() && import.meta.url === `file://${process.argv[1]}`) {
   void (async () => {
     const { runPi } = await import("./pi-runner.ts");
     const { runClaude } = await import("./claude-runner.ts");

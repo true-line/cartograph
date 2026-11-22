@@ -37,6 +37,11 @@ export interface StartMessage {
    * whose context window is fixed at server start (`max_model_len`).
    */
   backend?: PiBackend;
+  /**
+   * Claude lane only: the Claude Code executable the Agent SDK drives. The
+   * host checks it against its pinned sha256 and signature first (AC-1424).
+   */
+  claude_executable?: string;
 }
 
 export type PiBackend = "ollama" | "vllm";
@@ -141,6 +146,10 @@ function validateStart(value: Record<string, unknown>): StartMessage {
   const backend = value.backend ?? "ollama";
   if (backend !== "ollama" && backend !== "vllm") throw new Error("start.backend must be ollama or vllm");
   if (value.backend !== undefined && value.lane !== "pi") throw new Error("start.backend applies to the pi lane only");
+  const claudeExecutable = value.claude_executable;
+  if (claudeExecutable !== undefined && (value.lane !== "claude" || typeof claudeExecutable !== "string" || claudeExecutable === "")) {
+    throw new Error("start.claude_executable is a path, on the claude lane only");
+  }
   const maxTurns = value.max_turns;
   if (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 256) {
     throw new Error("start.max_turns must be 1..256");
@@ -160,6 +169,7 @@ function validateStart(value: Record<string, unknown>): StartMessage {
     context_window: typeof value.context_window === "number" ? value.context_window : undefined,
     max_output_tokens: typeof value.max_output_tokens === "number" ? value.max_output_tokens : undefined,
     backend,
+    claude_executable: claudeExecutable as string | undefined,
   };
 }
 
