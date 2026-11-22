@@ -38,6 +38,30 @@ const found = (await call("cartograph_discover", {
 `found.response.next_cursor` is non-null, repeat the same selection with that
 cursor and `context_id: found.context_id`. Do not edit cursor fields.
 
+## Relations of a known node
+
+In a complete session (`caps.relations_access.query_tool_available` is true),
+read a found node's neighborhood: the nodes within `hops` (1 to
+`caps.relations_access.max_neighborhood_hops`) and the edges among them.
+
+```js
+const selection = {
+  scope: { type: "neighborhood", anchor: nodeId, hops: 1 },
+  kind: null, labels: [], max_facts: N, max_bytes: B, cursor: null
+};
+const page = (await call("cartograph_query", {
+  ...identity, request: { context_id: null, request: selection }
+})).structuredContent.context;
+```
+
+`page.response.facts` holds nodes and edges with their tier, confidence and
+evidence references; an edge's `reference` names its source, label and
+destination. Use `kind: "edge"` and exact `labels` such as `["HANDLES"]` to
+narrow it, or `{ type: "node", id: nodeId }` for one node. Continue a non-null
+`page.response.next_cursor` with the same selection and
+`context_id: page.context_id`. A fact the session does not show is absent from
+every page, so an empty neighborhood is not proof that a relation does not exist.
+
 ## Official artifact
 
 ```js
