@@ -1268,6 +1268,9 @@ struct ProducerReads {
     captured_ts_ran: bool,
     /// Symlinks the captured TypeScript selection did not follow (#1229).
     unfollowed_links: Vec<String>,
+    /// Whether the primary capture holds the environment reader's whole
+    /// selection, so that reader reads it and not the checkout (AC-1059).
+    environments_captured: bool,
     /// What the found ADR/RFC reader read and published (#1847).
     adrs: ingest::coverage::ProducerCount,
     /// Found ADR/RFC files over the size bound, in path order (#1847).
@@ -1293,6 +1296,7 @@ impl Default for ProducerReads {
             omitted_receipt_facts_complete: true,
             captured_ts_ran: false,
             unfollowed_links: Vec::new(),
+            environments_captured: false,
             adrs: ingest::coverage::ProducerCount::default(),
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
@@ -2697,8 +2701,34 @@ fn extract_tree_packed(
     // Preflight's findings, which the coverage inventory lists.
     {
         let environment_id = ingest::environments::SourceId { repo, commit };
-        let environment_facts =
-            ingest::environments::extract_dir(root, &environment_id).map_err(|e| e.to_string())?;
+        // A capture that holds the reader's whole selection is read in place
+        // of the checkout (AC-1059); the checkout is only listed.
+        let environment_facts = match primary {
+            Some(capture) if reads.environments_captured => {
+                let captured: Vec<String> = capture
+                    .manifest()
+                    .files
+                    .iter()
+                    .filter(|entry| ingest::environments::is_environment_file(&entry.path))
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                ingest::environments::extract_from_capture(
+                    root,
+                    &captured,
+                    &|path| {
+                        capture
+                            .file(path)
+                            .map(|file| file.bytes().to_vec())
+                            .map_err(|_| {
+                                std::io::Error::other("captured environment file is unavailable")
+                            })
+                    },
+                    &environment_id,
+                )
+            }
+            _ => ingest::environments::extract_dir(root, &environment_id),
+        }
+        .map_err(|e| e.to_string())?;
         layers.environments = LayerSummary {
             files: environment_facts.files,
             nodes: distinct_node_count(&environment_facts.nodes),
@@ -5691,6 +5721,7 @@ fn run_ingest<R: tauri::Runtime>(
     let mut receipts = Vec::new();
     let mut reads = ProducerReads {
         unfollowed_links: primary.unfollowed.clone(),
+        environments_captured: primary.environments_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6158,6 +6189,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     let mut receipts = Vec::new();
     let mut reads = ProducerReads {
         unfollowed_links: primary.unfollowed.clone(),
+        environments_captured: primary.environments_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6491,6 +6523,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         let mut receipts = Vec::new();
         let mut reads = ProducerReads {
             unfollowed_links: primary.unfollowed.clone(),
+            environments_captured: primary.environments_captured,
             ..ProducerReads::default()
         };
         let (extraction, facts, repo_layers, repo_delta) = {

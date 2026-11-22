@@ -3579,6 +3579,89 @@ fn a_capture_without_pipelines_never_reads_the_checkouts() {
     );
 }
 
+// AC-1059: the environment reader's selection joins the capture, and with
+// the capture the reader reads the retained bytes: a Compose file edited or
+// created in the checkout afterwards changes nothing. Without the flag that
+// says the selection was retained, the checkout is read.
+#[test]
+fn environments_are_read_from_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx:1.27\n",
+    )
+    .unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.environments_captured);
+    let capture = input.capture.as_ref().unwrap();
+    assert!(
+        capture
+            .manifest()
+            .files
+            .iter()
+            .any(|entry| entry.path == "compose.yaml")
+    );
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: busybox:1\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("late")).unwrap();
+    std::fs::write(
+        root.join("late/compose.yaml"),
+        "services:\n  late:\n    image: late:1\n",
+    )
+    .unwrap();
+    let extract = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                environments_captured: captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0
+    };
+    let images = |extraction: &adapters_lang_ts::Extraction| -> Vec<String> {
+        extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Workload")
+            .filter_map(|node| node.props["image"].as_str().map(str::to_string))
+            .collect()
+    };
+    assert_eq!(images(&extract(true)), ["nginx:1.27"]);
+    let mut checkout = images(&extract(false));
+    checkout.sort();
+    assert_eq!(checkout, ["busybox:1", "late:1"]);
+}
+
 // AC-1055: the Python observed-infrastructure pass reads the same captured
 // bytes as the Python lane, so a checkout edit after capture changes neither.
 #[test]

@@ -2045,6 +2045,7 @@ impl PrimarySourceStore {
             return Ok(PrimaryInput {
                 capture: None,
                 unfollowed: Vec::new(),
+                environments_captured: false,
                 _guard: None,
             });
         }
@@ -2095,6 +2096,14 @@ impl PrimarySourceStore {
         if ingest::coverage::wants(layers, ingest::coverage::INFRA_LAYERS) {
             lanes.extend(iac::tf_paths(root).unwrap_or_default());
         }
+        // The environment reader's selection (AC-1059) joins it for every
+        // layer selection, under the same fallback; the reader reads the
+        // capture only when its selection was listed and retained.
+        let environments = ingest::environments::environment_paths(root).ok();
+        if let Some(paths) = &environments {
+            lanes.extend(paths.iter().cloned());
+        }
+        let no_lanes = lanes.is_empty();
         // Workflows and Dockerfiles (AC-1057) are read for every layer
         // selection, so they are retained with the TS/JS selection itself,
         // even when the lanes fall back: a capture always holds the pipeline
@@ -2116,6 +2125,7 @@ impl PrimarySourceStore {
                 capture_paths(&paths).ok()
             })
             .flatten();
+        let environments_captured = environments.is_some() && (no_lanes || combined.is_some());
         let capture = match combined {
             Some(capture) => capture,
             None => capture_paths(&base).map_err(|_| match commit {
@@ -2126,6 +2136,7 @@ impl PrimarySourceStore {
         Ok(PrimaryInput {
             capture: Some(capture),
             unfollowed: selection.unfollowed,
+            environments_captured,
             _guard: Some(guard),
         })
     }
@@ -2268,6 +2279,9 @@ pub struct PrimaryInput {
     pub capture: Option<Capture>,
     /// Symlinks the capture did not follow, reported in coverage (#1229).
     pub unfollowed: Vec<String>,
+    /// Whether the capture holds the environment reader's whole selection
+    /// (AC-1059); when it does not, that reader reads the checkout.
+    pub environments_captured: bool,
     _guard: Option<RetentionGuard>,
 }
 
