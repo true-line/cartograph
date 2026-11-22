@@ -107,6 +107,9 @@ fn active_plugins(
     )
     .map_err(discovery_error)?;
     let settings = state.settings.lock().map_err(|_| ReadError::Storage)?;
+    // The same sandbox bounds as recovery (AC-1803), so the coverage basis
+    // this scope compares against matches the one recovery recorded.
+    let sandbox = crate::plugin_limits(&settings).map_err(|_| ReadError::Storage)?;
     let mut active = Vec::new();
     let mut corpus_remaining = limits.max_corpus_bytes.get();
     let mut metadata_remaining = limits.max_metadata_bytes.get();
@@ -156,6 +159,7 @@ fn active_plugins(
             cells,
             languages,
             gate_key,
+            limits: sandbox,
         });
     }
     Ok(active)

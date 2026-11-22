@@ -70,7 +70,7 @@ pub struct PluginExtraction {
 
 /// Resource bounds enforced on every plugin call. Exceeding any of them
 /// fails the call closed with no partial facts (AC-0070).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginLimits {
     /// Fuel units (roughly, executed wasm instructions) allowed per call.
     pub max_fuel: u64,
