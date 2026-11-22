@@ -68,6 +68,12 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
             .unwrap()
             .contains("When the section lists capability areas")
     );
+    // §1.1 is an overview of what it summarises, not a listing (#2319).
+    assert!(
+        guidance("1.1")
+            .unwrap()
+            .contains("not a capability-by-capability listing")
+    );
     assert_eq!(guidance("9.9"), None);
     let schema: serde_json::Value =
         serde_json::from_str(action.payload.response_schema.as_deref().unwrap()).unwrap();
