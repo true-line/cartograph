@@ -70,10 +70,13 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
         overview.contains("only by citing its rule")
             && overview.contains("a count only when a cited fact shows it")
     );
+    // AC-1327 (T-1327): §1.1 is a short overview in domain terms (#2446).
+    let purpose = guidance("1.1").unwrap();
+    assert!(purpose.contains("six to ten claims, one per capability area or group of users"));
+    assert!(purpose.contains("never name a route, URL path, HTTP method, port, callable or file"));
     assert!(
-        guidance("1.1")
-            .unwrap()
-            .contains("as its cited capabilities and rules show it")
+        purpose.contains("not use the words endpoint or route")
+            && purpose.contains("a count only when a cited fact shows it")
     );
     // A stated route rests on a cited fact that shows it (#2328).
     assert!(SYSTEM.contains("a route you state must be one a fact you cite shows"));

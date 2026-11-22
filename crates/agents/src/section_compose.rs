@@ -77,9 +77,13 @@ const GUIDANCE: &[(&str, &str)] = &[
         "1.1",
         "State the system's purpose and scope from the sections it summarises: what the \
          system is for, who uses it, its main capability areas and what lies outside it. \
-         Write a short overview, not a capability-by-capability listing, and never name \
-         a route, callable or file. Say what an area does only as its cited capabilities \
-         and rules show it.",
+         Write a short overview of six to ten claims, one per capability area or group of \
+         users, not a capability-by-capability listing. Ground each claim in the \
+         capabilities or actors it summarises and cite them. Describe operations in \
+         domain terms: never name a route, URL path, HTTP method, port, callable or file, \
+         and do not use the words endpoint or route. Give a count only when a cited \
+         fact shows it. Leave individual conditions, messages and status codes to the \
+         later sections.",
     ),
     (
         "1.2",
