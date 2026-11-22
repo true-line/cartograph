@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BAND_LABELS,
   buildAtlasScene,
+  displayClusterKey,
   excludeBoundaryPlaceholders,
   isBrowserStorage,
   isServiceWorkerCode,
@@ -466,10 +467,12 @@ export interface AtlasCanvasProps {
   onSelectEdge?: (edge: GraphEdge) => void;
   /** The active layer drives the header scope chip (`Atlas · <layer>`). */
   onLayerChange?: (label: string) => void;
+  /** Repository names for cluster and group labels (#1601); keys stay exact. */
+  repoLabel?: (repo: string) => string;
 }
 
 /** Unified read-only graph with layer and confidence projections (US-0010). */
-export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }: AtlasCanvasProps) {
+export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange, repoLabel }: AtlasCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onSelectRef = useRef(onSelect);
   const onSelectEdgeRef = useRef(onSelectEdge);
@@ -495,7 +498,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
     [layered, focusStack],
   );
   // Deterministic banded scene (#159): same snapshot → same positions.
-  const scene = useMemo(() => buildAtlasScene(visible, expanded), [visible, expanded]);
+  const scene = useMemo(() => buildAtlasScene(visible, expanded, repoLabel), [visible, expanded, repoLabel]);
   const matches = useMemo(
     () => searchAtlasEntities(withoutPlaceholders, query),
     [withoutPlaceholders, query],
@@ -833,7 +836,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
                   })
                 }
               >
-                ▾ {BAND_LABELS[group.band]} · {group.key}
+                ▾ {BAND_LABELS[group.band]} · {displayClusterKey(group.key, repoLabel)}
               </button>
             ))}
           </div>
@@ -850,7 +853,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
                 type="button"
                 onClick={() => setExpanded((open) => new Set([...open, group.id]))}
               >
-                ▸ {BAND_LABELS[group.band]} · {group.key} · {group.clusters.length} clusters
+                ▸ {BAND_LABELS[group.band]} · {displayClusterKey(group.key, repoLabel)} · {group.clusters.length} clusters
               </button>
             ))}
           </div>
@@ -867,7 +870,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
                 type="button"
                 onClick={() => setExpanded((open) => new Set([...open, cluster.id]))}
               >
-                ▸ {BAND_LABELS[cluster.band]} · {cluster.key} · {cluster.members.length}
+                ▸ {BAND_LABELS[cluster.band]} · {displayClusterKey(cluster.key, repoLabel)} · {cluster.members.length}
               </button>
             ))}
           </div>
