@@ -4,6 +4,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_pool;
 mod area_briefing;
 mod area_expert;
 #[cfg(test)]
@@ -5098,7 +5099,7 @@ async fn run_escalation(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<agents::StagedProposal, String> {
-    let (running, execution) = start_job(&state, &format!("escalate:{gap_id}:{mode}"))?;
+    let (running, execution) = agent_pool::start_job(&state, &format!("escalate:{gap_id}:{mode}"))?;
     emit_job(&app, &running);
     let fail = |error: String| -> String {
         report_failure(&app, &state, &execution, &error);
@@ -5207,7 +5208,7 @@ async fn run_class_escalation(
         return Err("no gap instances to escalate".to_string());
     }
     let (running, execution) =
-        start_job(&state, &format!("escalate-class:{}:{mode}", gap_ids.len()))?;
+        agent_pool::start_job(&state, &format!("escalate-class:{}:{mode}", gap_ids.len()))?;
     emit_job(&app, &running);
     let fail = |error: String| -> String {
         report_failure(&app, &state, &execution, &error);
@@ -8433,6 +8434,8 @@ fn main() {
             clear_finished_jobs,
             list_jobs,
             list_job_usage,
+            agent_pool::get_agent_pool_controls,
+            agent_pool::set_agent_pool_controls,
             list_evals,
             proposals::record_agent_decision,
             proposals::list_staged_proposals,
