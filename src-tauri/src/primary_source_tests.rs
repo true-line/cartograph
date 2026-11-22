@@ -525,6 +525,36 @@ fn primary_source_pipeline_reads_original_bytes_after_restart_and_source_deletio
 }
 
 #[test]
+fn primary_source_reingest_of_unchanged_bytes_parses_nothing_and_matches_a_cold_run() {
+    // AC-1517: the captured lane reuses the attested parse of unchanged
+    // bytes; its facts and receipts equal a cold run's, and changed bytes
+    // parse again.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let work = |parsed: &Parsed| (parsed.delta.recomputed_files, parsed.delta.reused_files);
+    let cold = parse(&state, &source, || {});
+    assert_eq!(work(&cold), (1, 0));
+    let warm = parse(&state, &source, || {});
+    assert_eq!(work(&warm), (0, 1));
+    assert_eq!(warm.extraction.nodes, cold.extraction.nodes);
+    assert_eq!(warm.extraction.edges, cold.extraction.edges);
+    assert_eq!(warm.receipts, cold.receipts);
+    std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
+    let changed = parse(&state, &source, || {});
+    assert_eq!(work(&changed), (1, 0));
+    assert_ne!(changed.receipts, cold.receipts);
+    state.extraction_caches.lock().unwrap().repos.clear();
+    let fresh = parse(&state, &source, || {});
+    assert_eq!(work(&fresh), (1, 0));
+    assert_eq!(changed.extraction.nodes, fresh.extraction.nodes);
+    assert_eq!(changed.receipts, fresh.receipts);
+}
+
+#[test]
 fn primary_source_equal_facts_publish_distinct_current_receipts() {
     // AC-0151, AC-0152: a complete fact/graph digest cannot select a raw capture;
     // the ordinary no-change reconciliation still replaces current receipts.

@@ -84,7 +84,11 @@ rooted capture reader independently confines acquisition. A changing external
 filesystem can change the acquired byte set; the parser consumes exactly the set
 retained, not a claimed atomic filesystem snapshot.
 
-The participating branch bypasses the TS parse cache. Existing ordinary adapter
+The participating branch bypasses the ordinary TS parse cache. *Amended by
+ADR-0087 (AC-1517):* it reuses only its own attested parse of a file whose
+retained bytes, path, source, repository, registry set and producer contract
+are unchanged, and mints that file's receipts afresh over the current capture.
+Existing ordinary adapter
 entry points remain available for preflight/test callers without claiming retained
 evidence. Directory enrichment still runs after captured per-file parsing and
 remains outside input closure; before graph publication keep only receipts whose

@@ -1798,11 +1798,12 @@ fn extract_tree_packed(
         let (mut extraction, mut facts, stats) = if let Some(capture) = primary {
             // The captured walk hands its facts back packed (#1237).
             let (extraction, facts, produced, stats) =
-                adapters_lang_ts::captured::extract_captured_dir_packed(
+                adapters_lang_ts::captured::extract_captured_dir_packed_cached(
                     root,
                     &ts_id,
                     capture,
                     registries,
+                    &mut cache.ts_captured,
                     &mut ts_progress,
                 )
                 .map_err(|e| e.to_string())?;

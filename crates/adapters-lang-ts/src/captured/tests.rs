@@ -1789,3 +1789,140 @@ export function run() {
         assert!(!single.iter().any(completed));
     }
 }
+
+// AC-1517: an unchanged capture parses nothing and equals a cold walk, at
+// the same commit or a later one; a one-byte change parses only that file;
+// a file gone from the capture is counted and dropped from the cache.
+#[test]
+fn attested_parses_are_reused_only_for_unchanged_bytes_and_equal_a_cold_walk() {
+    let directory = tempfile::tempdir().unwrap();
+    let files = [
+        (
+            "src/checkout.ts",
+            "import { price } from './price';\nexport function checkout(ready: boolean) { if (!ready) throw new Error('not ready'); return price(2); }\n",
+        ),
+        (
+            "src/price.ts",
+            "export function price(quantity: number) { if (quantity < 1) return 0; return quantity * 3; }\n",
+        ),
+        (
+            "src/view.tsx",
+            "export function View() { return <div>{1}</div>; }\n",
+        ),
+    ];
+    let paths: Vec<String> = files.iter().map(|(path, _)| path.to_string()).collect();
+    for (path, body) in files {
+        let file = directory.path().join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, body).unwrap();
+    }
+    let first_commit = "1111111111111111111111111111111111111111";
+    let later_commit = "2222222222222222222222222222222222222222";
+    let at = |commit: &'static str| SourceId { repo: REPO, commit };
+    let walk = |capture: &Capture, commit: &'static str, cache: &mut CapturedCache| {
+        let (_, facts, receipts, stats) = extract_captured_dir_packed_cached(
+            directory.path(),
+            &at(commit),
+            capture,
+            Registries::builtin(),
+            cache,
+            &mut |_| {},
+        )
+        .unwrap();
+        (facts.into_facts().unwrap(), receipts, stats)
+    };
+    let cold = |capture: &Capture, commit: &'static str| {
+        walk(capture, commit, &mut CapturedCache::default())
+    };
+    let counts = |stats: &IncrementalStats| {
+        (
+            stats.recomputed_files,
+            stats.reused_files,
+            stats.deleted_files,
+        )
+    };
+
+    let first = capture(directory.path(), &paths);
+    let mut cache = CapturedCache::default();
+    let (facts, receipts, stats) = walk(&first, first_commit, &mut cache);
+    assert_eq!(counts(&stats), (3, 0, 0));
+    assert_eq!(cache.len(), 3);
+    assert!(!receipts.is_empty());
+
+    // The same capture again: nothing parsed, everything equal.
+    let (again, again_receipts, stats) = walk(&first, first_commit, &mut cache);
+    assert_eq!(counts(&stats), (0, 3, 0));
+    assert_eq!((again, again_receipts), (facts, receipts));
+
+    // Unchanged bytes at a later commit equal a cold walk at that commit.
+    let later = capture(directory.path(), &paths);
+    let (warm, warm_receipts, stats) = walk(&later, later_commit, &mut cache);
+    assert_eq!(counts(&stats), (0, 3, 0));
+    let (cold_facts, cold_receipts, _) = cold(&later, later_commit);
+    assert!(
+        cold_facts
+            .0
+            .iter()
+            .any(|node| node.props.to_string().contains(later_commit))
+    );
+    assert_eq!((warm, warm_receipts), (cold_facts, cold_receipts));
+
+    // One changed byte parses exactly that file.
+    fs::write(
+        directory.path().join("src/price.ts"),
+        files[1].1.replace("* 3", "* 4"),
+    )
+    .unwrap();
+    let changed = capture(directory.path(), &paths);
+    let (warm, warm_receipts, stats) = walk(&changed, later_commit, &mut cache);
+    assert_eq!(counts(&stats), (1, 2, 0));
+    let (cold_facts, cold_receipts, _) = cold(&changed, later_commit);
+    assert_eq!((warm, warm_receipts), (cold_facts, cold_receipts));
+
+    // A file left out of the capture is counted and leaves the cache.
+    let fewer = capture(directory.path(), &paths[..2]);
+    let (_, _, stats) = walk(&fewer, later_commit, &mut cache);
+    assert_eq!(counts(&stats), (0, 2, 1));
+    assert_eq!(cache.len(), 2);
+
+    // A walk whose directory completion fails, here because its live
+    // configuration root cannot be read, leaves no cached parse.
+    assert!(
+        extract_captured_dir_packed_cached(
+            &directory.path().join("missing"),
+            &at(later_commit),
+            &fewer,
+            Registries::builtin(),
+            &mut cache,
+            &mut |_| {},
+        )
+        .is_err()
+    );
+    assert!(cache.is_empty());
+}
+
+// AC-1517: an attestation names everything the parse read; any difference
+// parses again, and the cached parse never vouches for other bytes.
+#[test]
+fn attestations_differ_for_any_changed_producer_input() {
+    let (directory, first) = fixture(b"export const a = 1;\n", "a.ts");
+    let base = Attestation::of(first.file("a.ts").unwrap(), REPO, "registries-1");
+    assert_eq!(base.producer, PRODUCER_CONTRACT);
+    assert_eq!(
+        base,
+        Attestation::of(first.file("a.ts").unwrap(), REPO, "registries-1")
+    );
+    assert_ne!(
+        base,
+        Attestation::of(first.file("a.ts").unwrap(), REPO, "registries-2")
+    );
+    assert_ne!(
+        base,
+        Attestation::of(first.file("a.ts").unwrap(), "local/other", "registries-1")
+    );
+    fs::write(directory.path().join("a.ts"), b"export const a = 2;\n").unwrap();
+    let second = capture(directory.path(), &["a.ts".into()]);
+    let other = Attestation::of(second.file("a.ts").unwrap(), REPO, "registries-1");
+    assert_eq!(other.byte_len, base.byte_len);
+    assert_ne!(other, base);
+}

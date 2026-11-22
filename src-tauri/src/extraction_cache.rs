@@ -4,6 +4,8 @@
 #[derive(Default)]
 pub struct RepoExtractionCache {
     pub ts: adapters_lang_ts::IncrementalCache,
+    /// Attested parses of the captured TS lane (ADR-0087).
+    pub ts_captured: adapters_lang_ts::captured::CapturedCache,
     pub python: adapters_lang_python::IncrementalCache,
     pub go: adapters_lang_go::IncrementalCache,
     pub rust: adapters_lang_rust::IncrementalCache,

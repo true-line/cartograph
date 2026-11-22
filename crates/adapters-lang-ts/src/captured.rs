@@ -97,6 +97,186 @@ pub(super) struct DirectFacts {
     pub(super) supporting: BTreeMap<String, Node>,
 }
 
+impl DirectFacts {
+    /// Name `commit` in every recorded fact's evidence, as
+    /// [`super::retarget_commit`] does for the file's extraction.
+    fn retarget(&mut self, commit: &str) {
+        for node in self
+            .owners
+            .values_mut()
+            .chain(self.declarations.values_mut())
+            .chain(self.locals.values_mut())
+            .chain(self.supporting.values_mut())
+        {
+            super::retarget_props_commit(&mut node.props, commit);
+        }
+        for (node, edge) in &mut self.rules {
+            super::retarget_props_commit(&mut node.props, commit);
+            super::retarget_props_commit(&mut edge.props, commit);
+        }
+    }
+}
+
+/// Producer contract an attested parse is bound to (ADR-0087). The crate
+/// version names the binary's parser and grammar pins; the suffix changes
+/// whenever what one file's parse records changes without a release.
+const PRODUCER_CONTRACT: &str = concat!(
+    "adapters-lang-ts@",
+    env!("CARGO_PKG_VERSION"),
+    "/captured-parse@1"
+);
+
+/// What one captured file's parse was made from (ADR-0087): the producer
+/// contract, the registry set, the registered source and repository, and
+/// the exact retained bytes by path, digest and length. A parse is reused
+/// only for an equal attestation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Attestation {
+    producer: &'static str,
+    registries: String,
+    source: String,
+    repo: String,
+    path: String,
+    digest: String,
+    byte_len: u64,
+}
+
+impl Attestation {
+    fn of(file: &CapturedFile, repo: &str, registries: &str) -> Self {
+        let reference = file.reference();
+        Self {
+            producer: PRODUCER_CONTRACT,
+            registries: registries.to_owned(),
+            source: reference.source_id.as_str().to_owned(),
+            repo: repo.to_owned(),
+            path: reference.path.clone(),
+            digest: reference.digest.clone(),
+            byte_len: reference.byte_len,
+        }
+    }
+}
+
+/// One file's parse as the producer made it, packed (#725). Only this
+/// module builds one, from its own parse of a retained buffer; nothing
+/// decodes one from outside.
+#[derive(Debug, Clone)]
+struct AttestedParse {
+    attestation: Attestation,
+    /// The commit the parse's evidence names.
+    commit: String,
+    /// The extraction with its facts moved to `facts`.
+    extraction: Extraction,
+    facts: FactStore,
+    direct: PackedDirect,
+}
+
+/// [`DirectFacts`] packed in order, each map's keys beside its facts.
+#[derive(Debug, Clone)]
+struct PackedDirect {
+    keys: [Vec<String>; 4],
+    maps: [FactStore; 4],
+    rules: FactStore,
+}
+
+impl AttestedParse {
+    fn pack(
+        attestation: Attestation,
+        commit: &str,
+        extraction: &Extraction,
+        direct: DirectFacts,
+    ) -> Result<Self, CapturedError> {
+        let mut shell = extraction.clone();
+        let facts = FactStore::from_facts(
+            std::mem::take(&mut shell.nodes),
+            std::mem::take(&mut shell.edges),
+        )
+        .map_err(ExtractError::from)?;
+        let pack = |map: BTreeMap<String, Node>| {
+            let (keys, nodes): (Vec<String>, Vec<Node>) = map.into_iter().unzip();
+            FactStore::from_facts(nodes, Vec::new())
+                .map(|store| (keys, store))
+                .map_err(ExtractError::from)
+        };
+        let (owners, owner_facts) = pack(direct.owners)?;
+        let (declarations, declaration_facts) = pack(direct.declarations)?;
+        let (locals, local_facts) = pack(direct.locals)?;
+        let (supporting, supporting_facts) = pack(direct.supporting)?;
+        let (rule_nodes, rule_edges) = direct.rules.into_iter().unzip();
+        Ok(Self {
+            attestation,
+            commit: commit.to_owned(),
+            extraction: shell,
+            facts,
+            direct: PackedDirect {
+                keys: [owners, declarations, locals, supporting],
+                maps: [
+                    owner_facts,
+                    declaration_facts,
+                    local_facts,
+                    supporting_facts,
+                ],
+                rules: FactStore::from_facts(rule_nodes, rule_edges).map_err(ExtractError::from)?,
+            },
+        })
+    }
+
+    /// The parse decoded, its evidence naming `commit`.
+    fn unpack(&self, commit: &str) -> Result<(Extraction, DirectFacts), CapturedError> {
+        let mut extraction = self.extraction.clone();
+        (extraction.nodes, extraction.edges) = self
+            .facts
+            .clone()
+            .into_facts()
+            .map_err(ExtractError::from)?;
+        let mut maps = Vec::with_capacity(4);
+        for (keys, store) in self.direct.keys.iter().zip(&self.direct.maps) {
+            let (nodes, _) = store.clone().into_facts().map_err(ExtractError::from)?;
+            maps.push(keys.iter().cloned().zip(nodes).collect::<BTreeMap<_, _>>());
+        }
+        let (rule_nodes, rule_edges) = self
+            .direct
+            .rules
+            .clone()
+            .into_facts()
+            .map_err(ExtractError::from)?;
+        let mut maps = maps.into_iter();
+        let mut direct = DirectFacts {
+            owners: maps.next().unwrap_or_default(),
+            declarations: maps.next().unwrap_or_default(),
+            locals: maps.next().unwrap_or_default(),
+            supporting: maps.next().unwrap_or_default(),
+            rules: rule_nodes.into_iter().zip(rule_edges).collect(),
+        };
+        if self.commit != commit {
+            super::retarget_commit(&mut extraction, commit).map_err(ExtractError::from)?;
+            direct.retarget(commit);
+        }
+        Ok((extraction, direct))
+    }
+}
+
+/// Attested per-file parses of the captured TS lane (ADR-0087, #438), kept
+/// by the host between ingests of one repository. A file is parsed again
+/// unless its retained bytes, path, source, repository, registry set and
+/// producer contract all equal those of the cached parse; its receipts are
+/// always minted afresh over the current capture.
+#[derive(Debug, Default)]
+pub struct CapturedCache {
+    files: BTreeMap<String, AttestedParse>,
+}
+
+impl CapturedCache {
+    /// Files holding an attested parse.
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// True when no file holds an attested parse.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 fn supported(path: &str) -> bool {
     super::SOURCE_EXTENSIONS
         .iter()
@@ -401,10 +581,33 @@ fn extract_file_with_measurements(
     file_declarations: ReceiptBudget,
     measure_source: bool,
 ) -> Result<(Extraction, FileReceipts), CapturedError> {
+    let (extraction, direct) = parse_file(file, id, registries)?;
+    let receipts = mint_file(
+        file,
+        id,
+        &extraction,
+        &direct,
+        file_declarations,
+        measure_source,
+    );
+    Ok((extraction, receipts))
+}
+
+/// Refuse a retained file the TS lane cannot parse as itself.
+fn admit_file(file: &CapturedFile, id: &SourceId) -> Result<(), CapturedError> {
     if !supported(&file.reference().path) || !valid_path(&file.reference().path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
     }
-    receipt::validate_identity(file.reference(), id.repo)?;
+    receipt::validate_identity(file.reference(), id.repo)
+}
+
+/// Parse exactly this retained buffer, recording its direct facts.
+fn parse_file(
+    file: &CapturedFile,
+    id: &SourceId,
+    registries: &Registries,
+) -> Result<(Extraction, DirectFacts), CapturedError> {
+    admit_file(file, id)?;
     let mut direct = DirectFacts::default();
     let extraction = super::extract_source_recording(
         file.bytes(),
@@ -413,6 +616,18 @@ fn extract_file_with_measurements(
         registries,
         Some(&mut direct),
     )?;
+    Ok((extraction, direct))
+}
+
+/// Mint one file's receipts over its retained buffer from its parse.
+fn mint_file(
+    file: &CapturedFile,
+    id: &SourceId,
+    extraction: &Extraction,
+    direct: &DirectFacts,
+    file_declarations: ReceiptBudget,
+    measure_source: bool,
+) -> FileReceipts {
     // Every receipt of this file shares one header.
     let mut header = None;
     let mut mint = |receipt: Result<Receipt, CapturedError>| {
@@ -472,8 +687,8 @@ fn extract_file_with_measurements(
         }
     }
     let mut rules: Vec<_> = receipts.into_values().collect();
-    retain_matching(&mut rules, &extraction);
-    let matching = matcher(&extraction);
+    retain_matching(&mut rules, extraction);
+    let matching = matcher(extraction);
     declarations.retain(|receipt| matching(receipt));
     drop(matching);
     // A gap task also reads the file's File node, its TestCase facts and the
@@ -500,15 +715,12 @@ fn extract_file_with_measurements(
             completed.push(receipt);
         }
     }
-    Ok((
-        extraction,
-        FileReceipts {
-            rules,
-            declarations,
-            completed,
-            omitted_declarations,
-        },
-    ))
+    FileReceipts {
+        rules,
+        declarations,
+        completed,
+        omitted_declarations,
+    }
 }
 
 /// Parse the selected immutable membership, bypassing the ordinary parse cache,
@@ -572,6 +784,40 @@ pub fn extract_captured_dir_packed(
         id,
         capture,
         registries,
+        None,
+        on_file,
+        DirectoryReceiptPolicy {
+            budget: ReceiptBudget {
+                bytes: MAX_EXTRACTION_RECEIPT_BYTES,
+                receipts: MAX_EXTRACTION_RECEIPTS,
+            },
+            file_declarations: FILE_DECLARATIONS,
+            measure_source: true,
+        },
+    )
+}
+
+/// [`extract_captured_dir_packed`] reusing the attested parse of each file
+/// whose retained bytes and producer inputs are unchanged since `cache` was
+/// filled (ADR-0087, #438). Reused files are not parsed; their receipts
+/// are minted afresh over this capture, so facts, receipts and omissions
+/// equal a cold walk's. The statistics count reused, parsed and deleted
+/// files, and `cache` ends holding exactly this walk's parses. A failed
+/// walk leaves it empty.
+pub fn extract_captured_dir_packed_cached(
+    root: &Path,
+    id: &SourceId,
+    capture: &Capture,
+    registries: &Registries,
+    cache: &mut CapturedCache,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<PackedCapturedExtraction, CapturedError> {
+    extract_captured_dir_packed_with_policy(
+        root,
+        id,
+        capture,
+        registries,
+        Some(cache),
         on_file,
         DirectoryReceiptPolicy {
             budget: ReceiptBudget {
@@ -663,8 +909,9 @@ fn extract_captured_dir_with_policy(
     on_file: &mut dyn FnMut(&str),
     policy: DirectoryReceiptPolicy,
 ) -> Result<(Extraction, Vec<MintedReceipt>, IncrementalStats), CapturedError> {
-    let (mut extraction, facts, receipts, stats) =
-        extract_captured_dir_packed_with_policy(root, id, capture, registries, on_file, policy)?;
+    let (mut extraction, facts, receipts, stats) = extract_captured_dir_packed_with_policy(
+        root, id, capture, registries, None, on_file, policy,
+    )?;
     (extraction.nodes, extraction.edges) = facts.into_facts().map_err(ExtractError::from)?;
     Ok((extraction, receipts, stats))
 }
@@ -674,6 +921,8 @@ fn extract_captured_dir_packed_with_policy(
     id: &SourceId,
     capture: &Capture,
     registries: &Registries,
+    // Absent, nothing is reused or retained.
+    mut cache: Option<&mut CapturedCache>,
     on_file: &mut dyn FnMut(&str),
     policy: DirectoryReceiptPolicy,
 ) -> Result<PackedCapturedExtraction, CapturedError> {
@@ -711,19 +960,84 @@ fn extract_captured_dir_packed_with_policy(
     let mut staged_completed = Charge::default();
     let mut omitted_rules = Vec::new();
     let mut stats = IncrementalStats::default();
+    // The cache is taken whole, so a failed walk leaves nothing behind.
+    // Workers read a file's previous parse; its merge then moves it out, so
+    // the walk holds about one parse per file, never two whole caches.
+    let retain = cache.is_some();
+    let previous: BTreeMap<String, std::sync::Mutex<Option<AttestedParse>>> = cache
+        .as_deref_mut()
+        .map(|cache| std::mem::take(&mut cache.files))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(path, parse)| (path, std::sync::Mutex::new(Some(parse))))
+        .collect();
+    let active: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    stats.deleted_files = previous
+        .keys()
+        .filter(|path| !active.contains(path.as_str()))
+        .count() as u64;
+    let registry_identity = registries.identity();
+    let mut next = BTreeMap::new();
     source_walk::parallel::map_ordered(
         &paths,
         |path| {
-            extract_file_with_measurements(
-                capture.file(path)?,
+            let file = capture.file(path)?;
+            admit_file(file, id)?;
+            let attestation = Attestation::of(file, id.repo, &registry_identity);
+            let slot = previous
+                .get(path)
+                .map(|slot| slot.lock().unwrap_or_else(|p| p.into_inner()));
+            let prior = slot
+                .as_deref()
+                .and_then(Option::as_ref)
+                .filter(|prior| prior.attestation == attestation);
+            // `keep` is whether a reused parse was made at this commit.
+            let (extraction, direct, keep) = match prior {
+                Some(prior) => {
+                    let (extraction, direct) = prior.unpack(id.commit)?;
+                    (extraction, direct, Some(prior.commit == id.commit))
+                }
+                None => {
+                    let (extraction, direct) = parse_file(file, id, registries)?;
+                    (extraction, direct, None)
+                }
+            };
+            drop(slot);
+            let receipts = mint_file(
+                file,
                 id,
-                registries,
+                &extraction,
+                &direct,
                 file_declarations,
                 measure_source,
-            )
+            );
+            // A parse reused at its own commit is moved on as it is; any
+            // other is packed afresh for the next walk.
+            let attested = if retain && keep != Some(true) {
+                Some(AttestedParse::pack(
+                    attestation,
+                    id.commit,
+                    &extraction,
+                    direct,
+                )?)
+            } else {
+                None
+            };
+            Ok::<_, CapturedError>((extraction, receipts, attested, keep.is_some()))
         },
-        |path, (mut facts, file_receipts)| {
+        |path, (mut facts, file_receipts, attested, reused)| {
             on_file(path);
+            let prior = previous
+                .get(path)
+                .and_then(|slot| slot.lock().unwrap_or_else(|p| p.into_inner()).take());
+            if retain && let Some(parse) = attested.or(prior.filter(|_| reused)) {
+                next.insert(path.to_owned(), parse);
+            }
+            if reused {
+                stats.reused_files += 1;
+            } else {
+                stats.recomputed_files += 1;
+            }
             // Rule receipts are admitted greedily in manifest order (#722). One
             // that does not fit is omitted by fact key, never retained, so a
             // large repository degrades to named uncitable facts instead of
@@ -776,10 +1090,10 @@ fn extract_captured_dir_packed_with_policy(
                 .map_err(ExtractError::from)?,
             );
             super::append_extraction(&mut extraction, facts);
-            stats.recomputed_files += 1;
             Ok(())
         },
     )?;
+    drop(previous);
     super::complete_directory(&mut extraction, &mut store, root, id)?;
     let matching = packed_matcher(&store);
     receipts.retain(|receipt| matching(receipt));
@@ -830,6 +1144,10 @@ fn extract_captured_dir_packed_with_policy(
         }
     }
     drop(matching);
+    // Installed only once every fallible step has succeeded.
+    if let Some(cache) = cache {
+        cache.files = next;
+    }
     Ok((extraction, store, receipts, stats))
 }
 
