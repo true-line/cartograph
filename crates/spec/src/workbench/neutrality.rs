@@ -224,6 +224,103 @@ impl SourceIdentifiers {
     }
 }
 
+/// The text each cited fact shows a reader, for checking the route
+/// literals a statement spells out against the facts it cites (#2328): a
+/// node's id, label and props without its provenance, or an edge's ends,
+/// label and props.
+#[derive(Debug, Default)]
+pub struct CitedText {
+    by_citation: BTreeMap<String, String>,
+}
+
+impl CitedText {
+    /// Index the text of each fact of `nodes`, `edges` and the derived
+    /// `overlay` nodes that `cited` names.
+    pub fn of(nodes: &[Node], edges: &[Edge], overlay: &[Node], cited: &BTreeSet<String>) -> Self {
+        let mut by_citation = BTreeMap::new();
+        if cited.is_empty() {
+            return Self { by_citation };
+        }
+        let shown = |props: &serde_json::Value| {
+            let mut props = props.clone();
+            if let Some(map) = props.as_object_mut() {
+                map.remove("prov");
+            }
+            props.to_string()
+        };
+        for node in nodes.iter().chain(overlay) {
+            let id = citation_id(&FactKey::Node {
+                id: node.id.clone(),
+            });
+            if cited.contains(&id) {
+                let text = format!("{} {} {}", node.id, node.label, shown(&node.props));
+                by_citation.insert(id, text);
+            }
+        }
+        for edge in edges {
+            let id = citation_id(&FactKey::Edge {
+                source: edge.src.clone(),
+                label: edge.label.clone(),
+                destination: edge.dst.clone(),
+            });
+            if cited.contains(&id) {
+                let text = format!(
+                    "{} {} {} {}",
+                    edge.src,
+                    edge.label,
+                    edge.dst,
+                    shown(&edge.props)
+                );
+                by_citation.insert(id, text);
+            }
+        }
+        Self { by_citation }
+    }
+
+    /// The first route literal `statement` spells out that no fact of
+    /// `citations` shows, if any.
+    pub fn uncited_route<'a>(&self, statement: &'a str, citations: &[String]) -> Option<&'a str> {
+        route_literals(statement).into_iter().find(|route| {
+            !citations
+                .iter()
+                .filter_map(|id| self.by_citation.get(id))
+                .any(|text| contains_route(text, route))
+        })
+    }
+}
+
+/// The route literals `statement` spells out: each whitespace-separated
+/// word that, without surrounding quotes, brackets and punctuation, starts
+/// with `/` followed by a letter, a digit or `<`/`{`/`:`.
+pub fn route_literals(statement: &str) -> Vec<&str> {
+    const TRIM: &[char] = &[
+        '"', '\'', '`', '(', ')', '[', ']', ',', '.', ';', ':', '!', '?',
+    ];
+    statement
+        .split_whitespace()
+        .map(|word| word.trim_matches(TRIM))
+        .filter(|word| {
+            word.strip_prefix('/')
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '<' | '{' | ':'))
+        })
+        .collect()
+}
+
+/// Whether `text` holds `route` as a whole route: not inside a longer path
+/// segment, and not followed by more of the path.
+fn contains_route(text: &str, route: &str) -> bool {
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '<' | '{' | '.');
+    // A parameter (`:id`) or a wildcard (`*`) continues a route too.
+    let more = |c: char| part(c) || matches!(c, ':' | '*');
+    text.match_indices(route).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before = !text[..start].chars().next_back().is_some_and(part);
+        let after = !text[end..].chars().next().is_some_and(more);
+        before && after
+    })
+}
+
 fn contains_token(text: &str, token: &str) -> bool {
     text.match_indices(token).any(|(start, matched)| {
         let end = start + matched.len();
@@ -428,5 +525,69 @@ mod tests {
         ] {
             assert_eq!(projected_code_token(clean), None, "{clean}");
         }
+    }
+
+    /// AC-1314 (T-1314): a route a statement spells out must be shown by a
+    /// fact it cites, as a whole route (#2328).
+    #[test]
+    fn a_route_literal_must_be_shown_by_a_cited_fact() {
+        assert_eq!(
+            route_literals("Clients call `GET /api/aliases`, then (/api/aliases/<int:id>)."),
+            ["/api/aliases", "/api/aliases/<int:id>"]
+        );
+        assert!(route_literals("Answers 4/5 and/or a / b.").is_empty());
+        let endpoint = Node {
+            id: "endpoint:GET /api/aliases".into(),
+            label: "Endpoint".into(),
+            props: json!({"path": "/api/aliases", "prov": prov("app/api/admin/users.py", "e")}),
+        };
+        let capability = Node {
+            id: "cap:alias".into(),
+            label: "Capability".into(),
+            props: json!({"title": "Manage alias (API)"}),
+        };
+        let ids = |node: &Node| {
+            citation_id(&FactKey::Node {
+                id: node.id.clone(),
+            })
+        };
+        let (e, c) = (ids(&endpoint), ids(&capability));
+        let cited: BTreeSet<String> = [e.clone(), c.clone()].into();
+        let (e, c) = (vec![e], vec![c]);
+        let text = CitedText::of(&[endpoint], &[], &[capability], &cited);
+        let claim = "Users list aliases through GET /api/aliases.";
+        assert_eq!(text.uncited_route(claim, &e), None);
+        // A capability title does not show the route.
+        assert_eq!(text.uncited_route(claim, &c), Some("/api/aliases"));
+        // A longer route, a path segment of a provenance file, or a route the
+        // fact holds only as a prefix is not shown.
+        assert_eq!(
+            text.uncited_route("It serves /api/aliases/<int:id>.", &e),
+            Some("/api/aliases/<int:id>")
+        );
+        assert_eq!(
+            text.uncited_route("It lives under /api/admin.", &e),
+            Some("/api/admin")
+        );
+        assert_eq!(text.uncited_route("It is /api.", &e), Some("/api"));
+        // An Express-style parameter continues the route (#2328).
+        let users = Node {
+            id: "endpoint:GET /users/:id".into(),
+            label: "Endpoint".into(),
+            props: json!({"path": "/users/:id"}),
+        };
+        let u = vec![ids(&users)];
+        let text = CitedText::of(&[users], &[], &[], &u.iter().cloned().collect());
+        assert_eq!(text.uncited_route("It lists /users.", &u), Some("/users"));
+        assert_eq!(text.uncited_route("It reads /users/:id.", &u), None);
+        // A route right after an id's colon still counts.
+        let bare = Node {
+            id: "endpoint:/health".into(),
+            label: "Endpoint".into(),
+            props: json!({}),
+        };
+        let h = vec![ids(&bare)];
+        let text = CitedText::of(&[bare], &[], &[], &h.iter().cloned().collect());
+        assert_eq!(text.uncited_route("It answers /health.", &h), None);
     }
 }

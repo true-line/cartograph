@@ -328,3 +328,46 @@ fn a_gated_composition_runs_on_section_1_5_and_a_local_provider_only() {
         Err("gated_composition_local_only".into())
     );
 }
+
+/// AC-1314 (T-1314): a claim naming a route that no fact it cites shows is
+/// left out at staging (#2328).
+#[test]
+fn a_claim_naming_a_route_its_citations_do_not_show_is_not_staged() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders at /api/orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let provider = Scripted {
+        reply: json!({"claims": [
+            {"statement": "Shoppers place orders through POST /api/orders.",
+             "claim_kind": "implemented_behavior", "citation_ids": [id("cap:orders")]},
+            {"statement": "Shoppers confirm a checkout through POST /api/checkout.",
+             "claim_kind": "implemented_behavior", "citation_ids": [id("cap:checkout")]},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
+    let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
+    assert_eq!((outcome.claims, outcome.left_out), (1, 1));
+    let store = state.drafts.lock().unwrap();
+    let stored = store.for_job(job.id()).unwrap().unwrap();
+    assert_eq!(
+        stored.draft.claims[0].statement,
+        "Shoppers place orders through POST /api/orders."
+    );
+}

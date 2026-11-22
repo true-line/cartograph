@@ -189,6 +189,7 @@ export const COMPOSE_REFUSAL: Record<string, string> = {
   reply_not_the_schema: 'The model did not reply with the composition schema. Nothing was staged.',
   no_admissible_claim: 'No claim in the reply kept the citation and statement rules.',
   statement_names_source: 'Every claim named a source file or code symbol, so none was staged.',
+  route_not_cited: 'Every claim named a route that none of its cited facts shows, so none was staged.',
   graph_changed: 'The graph changed while the section was being composed. Compose it again.',
   no_claim_admitted: 'No drafted claim passed the gates, so nothing was staged.',
   gated_composition_section_unsupported: 'Only section 1.5 is drafted through the gated workflow.',
