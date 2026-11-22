@@ -8657,6 +8657,8 @@ fn main() {
             context::recorded_coverage,
             read_evidence,
             primary_source::describe_captured_source,
+            primary_source::describe_observed_source,
+            primary_source::read_observed_source,
             mcp_reads::commands::mcp_reads_status,
             mcp_reads::commands::mcp_reads_owner_status,
             mcp_reads::commands::mcp_task_client_create,
@@ -14600,6 +14602,81 @@ export function App() {
         assert_ne!(superseding, first_input);
         assert!(preview.input_capture_ids.contains(&superseding[0]));
         assert!(!preview.capture_ids.contains(&superseding[0]));
+    }
+
+    #[test]
+    fn observed_bindings_describe_and_read_back_their_input_span() {
+        // AC-1049 (ADR-0079, #385): a fact's observed binding describes the
+        // input identity, its registered source and owning repo, and reads
+        // its cited span back from the retained input capture; a primary
+        // read never accepts the observed receipt, and a superseded observed
+        // receipt is no longer readable.
+        use tauri::Manager;
+        let state_with = |url: &str| {
+            format!(
+                r#"{{"format_version":"1.0","values":{{"root_module":{{"resources":[
+            {{"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{{"url":"{url}"}},"sensitive_values":{{}}}}]}}}}}}"#
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        std::fs::create_dir_all(system.join("infra")).unwrap();
+        std::fs::write(
+            system.join("infra/main.tf"),
+            "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            system.join("state.json"),
+            state_with("https://sqs.example/a"),
+        )
+        .unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+            .unwrap();
+        let source = state.sources.lock().unwrap().list().unwrap().remove(0);
+        let fact = core_graph::FactKey::Node {
+            id: format!("res:{}@aws_sqs_queue.jobs", source.repo_key),
+        };
+        let observed = super::primary_source::describe_observed(&state, &fact).unwrap();
+        assert_eq!(observed.source_id, format!("input/{}", source.source_id));
+        assert_eq!(observed.registered_source_id, source.source_id);
+        assert_eq!(observed.repo_key, source.repo_key);
+        assert_eq!(observed.scope, "observed_input_only");
+        assert_eq!(observed.ranges.len(), 1);
+        assert_eq!(observed.ranges[0].path, "state.json");
+        let text =
+            super::primary_source::read_observed(&state, &fact, &observed.receipt_id, 0).unwrap();
+        // The span is the one the observation evidence records: the
+        // resource's address in the captured state.
+        assert_eq!(text.text, "\"aws_sqs_queue.jobs\"");
+        assert_eq!(text.path, "state.json");
+        assert!(super::primary_source::read_observed(&state, &fact, "receipt:other", 0).is_err());
+        assert!(super::primary_source::read(&state, &fact, &observed.receipt_id, 0).is_err());
+
+        std::fs::write(
+            system.join("state.json"),
+            state_with("https://sqs.example/b"),
+        )
+        .unwrap();
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle).unwrap();
+        assert!(
+            super::primary_source::read_observed(&state, &fact, &observed.receipt_id, 0).is_err()
+        );
+        let current = super::primary_source::describe_observed(&state, &fact).unwrap();
+        assert_ne!(current.receipt_id, observed.receipt_id);
+        let text =
+            super::primary_source::read_observed(&state, &fact, &current.receipt_id, 0).unwrap();
+        assert_eq!(text.text, "\"aws_sqs_queue.jobs\"");
     }
 
     #[test]
