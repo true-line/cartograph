@@ -50,6 +50,7 @@ pub(super) fn ledger() -> InvestigationInputLedger {
     let digest = format!("node-v1:{}", "a".repeat(64));
     InvestigationInputLedger {
         coverage_reads: vec![],
+        artifact_reads: vec![],
         schema_version: 1,
         coverage: None,
         graph_snapshot_id: format!("context-v1:{}", "b".repeat(64)),
