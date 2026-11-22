@@ -365,6 +365,14 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
 2. **Cross-producer fixtures** (tests only, plus fixes they expose). The
    three fixtures of decision 4, run against today's TS producer.
    *Tests:* as listed there.
+   *As built (AC-1068):* the EOL/filter and linked-worktree fixtures are in
+   `src-tauri/src/primary_source_tests.rs` and pass against today's TS
+   producer with no fix needed. The filter fixture checks the filter never
+   runs (its marker file is never written) and that `compare_captured` on the
+   checkout span against the Git-object recapture gives `changed` with
+   `span_bytes_differ`. The manifest-local fixture is already covered by
+   AC-1041 under ADR-0080 (declared inputs captured as `input/<source id>`,
+   never the repository commit), so it is not repeated here.
 3. **Host reconciliation** (`src-tauri` proposals and task_evidence, UI
    history). `reconcile_staged`, the append-only table, the derived state and
    the DTO field. *Tests:* edit, delete or move the cited span between
