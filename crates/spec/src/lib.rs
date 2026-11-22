@@ -21,7 +21,8 @@ pub use documents::{
 };
 mod graph_basis;
 pub use graph_basis::{
-    GraphBasis, SourceRevision, edge_fact_line, graph_content_hash, hash_fact_lines, node_fact_line,
+    FactLines, GraphBasis, SourceRevision, edge_fact_line, graph_content_hash, hash_fact_lines,
+    node_fact_line,
 };
 mod knowledge;
 pub use knowledge::{

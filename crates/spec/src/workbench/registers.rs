@@ -79,18 +79,22 @@ struct Candidate<'a> {
     subject: fact_index::Subject,
 }
 impl Candidate<'_> {
-    fn owned(&self) -> SpecAssertion {
+    /// The owned assertion and its fact key, moving the decoded provenance
+    /// instead of copying it, so a register's rows and its assertions never hold two
+    /// copies of every row's provenance at once (#2215).
+    fn into_owned(self) -> (SpecAssertion, fact_index::Subject) {
         #[cfg(test)]
         OWNED_OUTPUTS.with(|n| n.set(n.get() + 1));
-        SpecAssertion {
+        let assertion = SpecAssertion {
             id: self.id.to_string(),
             subject_id: self.subject_id.to_string(),
             subject_kind: self.subject_kind.to_string(),
             summary: self.summary.to_string(),
-            provenance: self.provenance.clone(),
+            provenance: self.provenance,
             edge_label: self.edge_label.map(String::from),
             omission: self.omission.as_deref().cloned(),
-        }
+        };
+        (assertion, self.subject)
     }
 }
 fn candidate_provenance(props: &serde_json::Value, identity: &Text<'_>) -> Provenance {
@@ -533,7 +537,7 @@ pub(super) fn matrix_selected(
         None
     };
     let (assertions, subjects) = if markdown.is_some() {
-        rows.iter().map(|(_, a)| (a.owned(), a.subject)).unzip()
+        rows.into_iter().map(|(_, a)| a.into_owned()).unzip()
     } else {
         (Vec::new(), Vec::new())
     };
@@ -951,7 +955,7 @@ pub(super) fn gap_selected(
         None
     };
     let (assertions, subjects) = if markdown.is_some() {
-        rows.iter().map(|a| (a.owned(), a.subject)).unzip()
+        rows.into_iter().map(Candidate::into_owned).unzip()
     } else {
         (Vec::new(), Vec::new())
     };
