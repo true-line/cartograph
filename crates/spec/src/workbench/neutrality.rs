@@ -436,9 +436,14 @@ const STOPWORDS: &str = "\
     they this those through to too under until up upon us very via was we were what when \
     where which while who whom why will with within without would you your";
 
-/// The stemmed, lower-case words of `text`: split on every character that
-/// is not a letter or digit, and where camelCase or digits begin.
+/// The stemmed, lower-case words of `text` ([`pieces`]).
 fn words(text: &str) -> Vec<String> {
+    pieces(text).iter().map(|piece| stem(piece)).collect()
+}
+
+/// The lower-case words of `text`: split on every character that is not a
+/// letter or digit, and where camelCase or digits begin.
+fn pieces(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for piece in text.split(|c: char| !c.is_alphanumeric()) {
         let mut word = String::new();
@@ -448,13 +453,13 @@ fn words(text: &str) -> Vec<String> {
                 (p.is_lowercase() && c.is_uppercase()) || (p.is_ascii_digit() != c.is_ascii_digit())
             });
             if boundary && !word.is_empty() {
-                out.push(stem(&std::mem::take(&mut word)));
+                out.push(std::mem::take(&mut word));
             }
             word.extend(c.to_lowercase());
             previous = Some(c);
         }
         if !word.is_empty() {
-            out.push(stem(&word));
+            out.push(word);
         }
     }
     out
@@ -492,10 +497,19 @@ fn stem(word: &str) -> String {
     }
 }
 
-/// The distinct content terms of a claim, stemmed: its words of at least
-/// three letters, without citation ids, section references, function words
-/// or frame words.
+/// The distinct content terms of a claim, stemmed: its words ([`pieces`],
+/// so `idToken` is `id` and `token`) of at least three letters, without
+/// citation ids, section references, function words or frame words. The
+/// filters apply to each word and to its stem, so `systems` is a frame word
+/// too.
 fn claim_terms(statement: &str) -> Vec<String> {
+    let listed = |list: &str, word: &str| list.split_whitespace().any(|entry| entry == word);
+    let frame = |word: &str| {
+        listed(FRAME_WORDS, word)
+            || FRAME_WORDS
+                .split_whitespace()
+                .any(|entry| stem(entry) == word)
+    };
     let mut seen = BTreeSet::new();
     statement
         .split_whitespace()
@@ -503,19 +517,14 @@ fn claim_terms(statement: &str) -> Vec<String> {
             let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '§');
             !(token.starts_with("F-") || token.starts_with('§'))
         })
-        .flat_map(|token| {
-            token
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|word| {
-                    let lower = word.to_lowercase();
-                    word.chars().filter(|c| c.is_alphabetic()).count() >= 3
-                        && !STOPWORDS.split_whitespace().any(|stop| stop == lower)
-                        && !FRAME_WORDS.split_whitespace().any(|frame| frame == lower)
-                })
-                .flat_map(words)
-                .collect::<Vec<_>>()
+        .flat_map(pieces)
+        .filter(|word| {
+            word.chars().filter(|c| c.is_alphabetic()).count() >= 3
+                && !listed(STOPWORDS, word)
+                && !frame(word)
         })
-        .filter(|term| term.chars().any(char::is_alphabetic) && seen.insert(term.clone()))
+        .map(|word| stem(&word))
+        .filter(|term| !frame(term) && seen.insert(term.clone()))
         .collect()
 }
 
@@ -1115,6 +1124,12 @@ mod tests {
         assert!(!text.endpoint_claim_uncited("Users post their settings.", v));
         assert!(!same_term("sen", "sender"));
         assert_eq!(words("blockedContacts v2"), ["block", "contact", "v", "2"]);
+        // Filters apply after splitting and stemming: `systems` is a frame
+        // word and `idToken` gives no two-letter term.
+        assert_eq!(
+            claim_terms("Systems refresh an idToken (F-1)."),
+            ["refresh", "token"]
+        );
     }
 
     /// AC-1317 (T-1317): a figure a statement states must be shown by a fact
