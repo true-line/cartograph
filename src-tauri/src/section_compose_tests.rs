@@ -490,3 +490,19 @@ fn a_claim_asserting_more_than_its_facts_show_is_left_out() {
         "Shoppers place orders for themselves."
     );
 }
+
+#[test]
+fn a_system_composition_tries_each_excerpt_listed_then_unlisted() {
+    // AC-1322 (T-1322, #2399): rules come before the listed ids.
+    assert_eq!(
+        attempts(2),
+        vec![
+            (Some(0), true),
+            (Some(0), false),
+            (Some(1), true),
+            (Some(1), false),
+            (None, true),
+        ]
+    );
+    assert_eq!(attempts(0), vec![(None, true)]);
+}

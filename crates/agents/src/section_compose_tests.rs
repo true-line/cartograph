@@ -186,3 +186,46 @@ fn a_reply_that_is_not_the_schema_or_keeps_no_claim_is_refused() {
         Err(ComposeRefusal::NoClaims)
     );
 }
+
+#[test]
+fn an_unlisted_schema_drops_the_id_list_and_decode_still_checks_ids() {
+    // AC-1322 (T-1322, #2399).
+    let address = address();
+    let facts: Vec<ComposeFact> = (1..=40).map(fact).collect();
+    let input = ComposeInput {
+        address: &address,
+        title: "Business rules",
+        section: "## 1.5 Business rules (P+A)\n\nrows\n",
+        facts: &facts,
+        groups: &[],
+    };
+    let listed = action(&input, "compose:1".into());
+    let unlisted = action_unlisted(&input, "compose:1".into());
+    // The same request but for the schema.
+    assert_eq!(listed.payload.prompt, unlisted.payload.prompt);
+    assert_eq!(listed.payload.system, unlisted.payload.system);
+    let schema = unlisted.payload.response_schema.as_deref().unwrap();
+    assert!(!schema.contains(&id(1)));
+    assert!(schema.len() + 40 * id(1).len() < listed.payload.response_schema.unwrap().len());
+    let schema: serde_json::Value = serde_json::from_str(schema).unwrap();
+    let claim = &schema["properties"]["claims"]["items"];
+    assert_eq!(
+        claim["properties"]["citation_ids"]["items"],
+        serde_json::json!({"type": "string"})
+    );
+    assert_eq!(
+        claim["required"],
+        serde_json::json!(["statement", "claim_kind", "citation_ids"])
+    );
+    // An id the schema no longer excludes is still left out.
+    let citable: BTreeSet<String> = facts.iter().map(|f| f.citation_id.clone()).collect();
+    let text = reply(serde_json::json!([
+        {"statement": "Orders over the limit are refused with 400.",
+         "claim_kind": "implemented_behavior", "citation_ids": [id(1)]},
+        {"statement": "Cites an id that is not citable.",
+         "claim_kind": "implemented_behavior", "citation_ids": ["F-not-an-id"]},
+    ]));
+    let composed = decode(&address, &text, &citable).unwrap();
+    assert_eq!(composed.finish.claims.len(), 1);
+    assert_eq!(composed.reasons["citation_not_citable"], 1);
+}

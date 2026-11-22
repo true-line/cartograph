@@ -151,15 +151,20 @@ pub(crate) fn prepare(
             .values()
             .input_bytes
             .saturating_sub(INPUT_MARGIN_BYTES);
-        for rules in &compiled.excerpts {
-            let text = format!("{}{rules}", compiled.text);
-            let candidate = prepared(&compiled, compiled.address.clone(), None, &text)?;
-            if payload_bytes(&candidate.action) <= ceiling {
+        // Each excerpt with the citation schema listing the citable ids,
+        // then with one that does not (#2399): the prompt prints every id
+        // already, so the rules come before the list.
+        for (rules, listed) in attempts(compiled.excerpts.len()) {
+            let text = match rules {
+                Some(at) => format!("{}{}", compiled.text, compiled.excerpts[at]),
+                None => compiled.text.clone(),
+            };
+            let candidate = prepared(&compiled, compiled.address.clone(), None, &text, listed)?;
+            if rules.is_none() || payload_bytes(&candidate.action) <= ceiling {
                 return Ok(candidate);
             }
         }
-        let text = compiled.text.clone();
-        return prepared(&compiled, compiled.address.clone(), None, &text);
+        unreachable!("the attempts end with no excerpt");
     }
     // An area scope (#2083): the area's block of a section arranged by area.
     if !spec::AREA_SECTIONS.contains(&compiled.address.section.as_str()) {
@@ -179,7 +184,19 @@ pub(crate) fn prepare(
         compiled.address.clone(),
         Some(name.to_owned()),
         &text,
+        true,
     )
+}
+
+/// The order a system composition tries its `excerpts` rule excerpts in,
+/// as (excerpt index, citation ids listed): each excerpt, longest first,
+/// with the ids listed and then not (#2399), and last no excerpt with the
+/// ids listed, which is sent whatever its size.
+fn attempts(excerpts: usize) -> Vec<(Option<usize>, bool)> {
+    (0..excerpts)
+        .flat_map(|at| [(Some(at), true), (Some(at), false)])
+        .chain([(None, true)])
+        .collect()
 }
 
 /// Room kept under the input ceiling for what the call adds around the
@@ -322,6 +339,7 @@ fn prepared(
     address: SectionAddress,
     area: Option<String>,
     text: &str,
+    listed: bool,
 ) -> Result<Prepared, String> {
     let (nodes, edges) = (&compiled.nodes, &compiled.edges);
     let derived: Vec<_> = compiled
@@ -357,19 +375,22 @@ fn prepared(
             rests_on: group.rests_on.clone(),
         })
         .collect();
-    let action = section_compose::action(
-        &ComposeInput {
-            address: &address,
-            title: compiled.title,
-            section: text,
-            facts: &facts,
-            groups: &groups,
-        },
-        format!(
-            "section-compose:{}:{}:{}",
-            address.document, address.section, address.scope
-        ),
+    let input = ComposeInput {
+        address: &address,
+        title: compiled.title,
+        section: text,
+        facts: &facts,
+        groups: &groups,
+    };
+    let action_id = format!(
+        "section-compose:{}:{}:{}",
+        address.document, address.section, address.scope
     );
+    let action = if listed {
+        section_compose::action(&input, action_id)
+    } else {
+        section_compose::action_unlisted(&input, action_id)
+    };
     Ok(Prepared {
         address,
         action,
@@ -934,7 +955,7 @@ pub(crate) fn compose_gated_by_area(
             scope: scope.clone(),
             ..compiled.address.clone()
         };
-        let outcome = match prepared(&compiled, address, area.clone(), &text) {
+        let outcome = match prepared(&compiled, address, area.clone(), &text, true) {
             Ok(prepared) => compose_gated(state, provider, &prepared, check, job_id),
             // The rest of an arranged section may print no fact at all.
             Err(reason) if reason == "no_citable_fact" && !whole => continue,
