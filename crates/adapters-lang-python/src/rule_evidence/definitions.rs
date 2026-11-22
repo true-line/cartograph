@@ -1,7 +1,8 @@
-//! What a condition's local name was assigned (AC-1034): a name the
-//! function binds once, by a plain `name = value` statement that runs
-//! before the condition in a block enclosing it, is a Binding, and its
-//! initializer is recorded as written. Nothing here evaluates or
+//! What a condition's local name was assigned (AC-1034, AC-1040): a name
+//! whose value at the condition is set by a plain `name = value` statement
+//! that runs before it in a block enclosing it, with no other binding of
+//! the name able to run in between, is a Binding, and its initializer is
+//! recorded as written. Nothing here evaluates or
 //! substitutes a value.
 
 use super::{FileCx, RuleBuilder, Scope, capture, source};
@@ -9,10 +10,18 @@ use core_graph::rules::*;
 use std::collections::BTreeMap;
 use tree_sitter::Node as TsNode;
 
-/// The one `name = value` assignment that binds `name` for `usage`, or
-/// `None` when the name is a parameter, is bound more than once or in
-/// another way, or its assignment does not run before `usage` in a block
-/// enclosing it.
+/// The `name = value` assignment whose value `usage` reads, or `None` when
+/// the name is a parameter or declared `global`/`nonlocal`, or no plain
+/// assignment runs before `usage` in a block enclosing it, or another
+/// binding of the name could run between that assignment and `usage`.
+///
+/// The assignment is the last such one before `usage` (AC-1034; any number
+/// of bindings since AC-1040). A binding before it is overwritten by it. One
+/// between it and `usage` is admitted only in an earlier clause of an `if`
+/// statement whose later clause holds `usage`, which cannot both run, or as
+/// the target of the assignment `usage` is the value of. One after `usage`
+/// is admitted only when no loop between the assignment's block and
+/// `usage` can carry it back.
 pub(super) fn sole_assignment<'tree>(
     name: &str,
     usage: TsNode<'tree>,
@@ -21,11 +30,42 @@ pub(super) fn sole_assignment<'tree>(
     if scope.parameters.contains_key(name) {
         return None;
     }
-    let [site] = scope.bindings.get(name)?.as_slice() else {
+    let sites = scope.bindings.get(name)?;
+    if sites.iter().any(|site| {
+        site.parent()
+            .is_some_and(|p| matches!(p.kind(), "global_statement" | "nonlocal_statement"))
+    }) {
         return None;
-    };
+    }
+    let (site, assignment, block) = sites
+        .iter()
+        .filter_map(|site| plain(*site, usage).map(|(a, b)| (*site, a, b)))
+        .max_by_key(|(site, ..)| site.start_byte())?;
+    if within_loop(usage, block) {
+        return None;
+    }
+    let killed = assignment.parent()?.start_byte();
+    for other in sites.iter().filter(|other| other.id() != site.id()) {
+        if other.end_byte() <= killed || other.start_byte() >= usage.end_byte() {
+            continue;
+        }
+        if target_of(*other, usage) || exclusive(*other, usage) {
+            continue;
+        }
+        return None;
+    }
+    Some(assignment)
+}
+
+/// The plain assignment `site` is the target of, with the block holding
+/// its statement, when that statement ends before `usage` and the block
+/// encloses `usage`.
+fn plain<'tree>(
+    site: TsNode<'tree>,
+    usage: TsNode<'tree>,
+) -> Option<(TsNode<'tree>, TsNode<'tree>)> {
     let assignment = site.parent().filter(|p| p.kind() == "assignment")?;
-    if assignment.child_by_field_name("left") != Some(*site) {
+    if assignment.child_by_field_name("left") != Some(site) {
         return None;
     }
     let value = assignment.child_by_field_name("right")?;
@@ -46,7 +86,75 @@ pub(super) fn sole_assignment<'tree>(
     {
         return None;
     }
-    Some(assignment)
+    Some((assignment, block))
+}
+
+/// Whether a loop between `block` and `usage` could run a later binding
+/// before `usage` again.
+fn within_loop(usage: TsNode<'_>, block: TsNode<'_>) -> bool {
+    let mut node = usage.parent();
+    while let Some(n) = node {
+        if n.id() == block.id() {
+            return false;
+        }
+        if matches!(n.kind(), "for_statement" | "while_statement") {
+            return true;
+        }
+        node = n.parent();
+    }
+    false
+}
+
+/// Whether `site` is the target of the assignment whose value holds `usage`
+/// (`x = f(x)`): the value is read before the name is bound.
+fn target_of(site: TsNode<'_>, usage: TsNode<'_>) -> bool {
+    let Some(assignment) = site.parent().filter(|p| p.kind() == "assignment") else {
+        return false;
+    };
+    assignment.child_by_field_name("left") == Some(site)
+        && assignment.child_by_field_name("right").is_some_and(|v| {
+            v.start_byte() <= usage.start_byte() && usage.end_byte() <= v.end_byte()
+        })
+}
+
+/// Whether `site` lies in the body of an earlier clause of an `if`
+/// statement whose later `elif` or `else` clause holds `usage`.
+fn exclusive(site: TsNode<'_>, usage: TsNode<'_>) -> bool {
+    let mut node = site.parent();
+    while let Some(n) = node {
+        if n.kind() == "if_statement"
+            && n.start_byte() <= usage.start_byte()
+            && usage.end_byte() <= n.end_byte()
+        {
+            let mut cursor = n.walk();
+            let clauses: Vec<_> = n.children(&mut cursor).collect();
+            let clause = |x: TsNode<'_>| {
+                clauses
+                    .iter()
+                    .position(|c| c.start_byte() <= x.start_byte() && x.end_byte() <= c.end_byte())
+                    .map(|i| (i, clauses[i]))
+            };
+            let (Some((at, own)), Some((used, later))) = (clause(site), clause(usage)) else {
+                return false;
+            };
+            if at >= used || !matches!(later.kind(), "elif_clause" | "else_clause") {
+                return false;
+            }
+            // The binding must be in a clause's body, not an `elif` test.
+            let body = match own.kind() {
+                "block" => Some(own),
+                "elif_clause" | "else_clause" => own
+                    .child_by_field_name("consequence")
+                    .or_else(|| own.child_by_field_name("body")),
+                _ => None,
+            };
+            return body.is_some_and(|b| {
+                b.start_byte() <= site.start_byte() && site.end_byte() <= b.end_byte()
+            });
+        }
+        node = n.parent();
+    }
+    false
 }
 
 pub(super) fn binding_id(cx: &FileCx<'_>, declaration: TsNode<'_>) -> String {
@@ -331,6 +439,68 @@ fn expression<'tree>(
                 callee,
                 arguments,
                 dependency: dependency(arena, DependencyResolution::Unresolved { gap_id }),
+            }
+        }
+        "subscript" => {
+            // `suffixes[0]`: one index, read as written.
+            let mut cursor = node.walk();
+            let indices: Vec<_> = node
+                .children_by_field_name("subscript", &mut cursor)
+                .collect();
+            let [index] = indices[..] else {
+                return None;
+            };
+            let object = expression(
+                builder,
+                scope,
+                node.child_by_field_name("value")?,
+                depth + 1,
+                arena,
+            )?;
+            let property = expression(builder, scope, index, depth + 1, arena)?;
+            let gap_id = builder.gap(RuleGapReason::RuntimeValueUnknown, node);
+            DefinitionExpressionKind::Member {
+                object,
+                property,
+                computed: true,
+                optional: false,
+                dependency: dependency(arena, DependencyResolution::Unresolved { gap_id }),
+            }
+        }
+        "binary_operator" => {
+            let operator = match cx.text(&node.child_by_field_name("operator")?) {
+                "+" => BinaryOperator::Add,
+                "-" => BinaryOperator::Subtract,
+                "*" => BinaryOperator::Multiply,
+                "/" => BinaryOperator::Divide,
+                "%" => BinaryOperator::Remainder,
+                "**" => BinaryOperator::Exponent,
+                "<<" => BinaryOperator::LeftShift,
+                ">>" => BinaryOperator::RightShift,
+                "&" => BinaryOperator::BitwiseAnd,
+                "|" => BinaryOperator::BitwiseOr,
+                "^" => BinaryOperator::BitwiseXor,
+                // `//` and `@` have no closed category.
+                _ => return None,
+            };
+            let left = expression(
+                builder,
+                scope,
+                node.child_by_field_name("left")?,
+                depth + 1,
+                arena,
+            )?;
+            let right = expression(
+                builder,
+                scope,
+                node.child_by_field_name("right")?,
+                depth + 1,
+                arena,
+            )?;
+            DefinitionExpressionKind::Binary {
+                operator,
+                left,
+                right,
             }
         }
         "parenthesized_expression" => {

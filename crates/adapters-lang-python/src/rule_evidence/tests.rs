@@ -705,8 +705,8 @@ def must_pay(user):
 fn a_condition_local_assigned_once_carries_its_initializer() {
     // AC-1034 (T-1034): a condition's name bound once by `name = value`
     // before the condition is a Binding with its initializer recorded, and
-    // a name that initializer reads is followed the same way. A name bound
-    // twice, or assigned after the condition, stays unresolved.
+    // a name that initializer reads is followed the same way. A name
+    // assigned only after the condition stays unresolved.
     let code = r#"
 from flask import request, g
 
@@ -723,12 +723,10 @@ def several():
     except (ValueError, TypeError):
         return "bad", 400
 
-def twice(data):
-    suffix = data.get("s")
-    suffix = suffix.strip()
+def late():
     if not suffix:
         return "no suffix", 400
-    late = 1
+    suffix = 1
     return None
 "#;
     let out = recover(code);
@@ -768,15 +766,14 @@ def twice(data):
             .any(|d| d.role == DependencyRole::Condition
                 && matches!(d.resolution, DependencyResolution::Binding { .. }))
     );
-    let (_, twice) = all
+    let (_, late) = all
         .iter()
-        .find(|(_, r)| r.owner_id.ends_with("twice"))
+        .find(|(_, r)| r.owner_id.ends_with("late"))
         .unwrap();
-    twice.validate().unwrap();
-    assert!(twice.local_definitions.as_ref().unwrap().is_empty());
+    late.validate().unwrap();
+    assert!(late.local_definitions.as_ref().unwrap().is_empty());
     assert!(
-        twice
-            .dependencies
+        late.dependencies
             .iter()
             .all(|d| d.role != DependencyRole::Condition
                 || matches!(d.resolution, DependencyResolution::Unresolved { .. }))
@@ -790,4 +787,97 @@ def twice(data):
     for (_, rule) in &all {
         rule.validate().unwrap();
     }
+}
+
+#[test]
+fn a_condition_local_takes_the_assignment_that_reaches_it() {
+    // AC-1040 (T-1040): a name bound more than once takes the last plain
+    // assignment before the condition in an enclosing block. A binding in
+    // an earlier `if` clause cannot run before a later clause's condition,
+    // and `x = f(x)` reads the earlier value; a binding that could run in
+    // between, or come round again in a loop, leaves it unresolved. An
+    // index and a sum are kept as written.
+    let code = r#"
+def suggest(user, hostname):
+    alias = None
+    if hostname:
+        prefix = hostname.split(".")
+        prefix = convert_to_id(prefix)
+        suggested = prefix + suffixes[0].suffix
+        alias = Alias.get_by(email=suggested)
+        if alias and not alias.user_id == user.id:
+            alias = None
+        elif alias and alias.user_id == user.id:
+            return alias
+        elif not alias:
+            return create(suggested)
+    return None
+
+def branch(flag):
+    value = load()
+    if flag:
+        value = None
+    if not value:
+        return "missing", 404
+
+def looped(items):
+    value = load()
+    for item in items:
+        if not value:
+            return "missing", 404
+        value = item
+"#;
+    let out = recover(code);
+    let all = rules(&out);
+    for (_, rule) in &all {
+        rule.validate().unwrap();
+    }
+    let initializers = |owner: &str, effect: &str| -> Vec<String> {
+        let (_, rule) = all
+            .iter()
+            .find(|(_, r)| r.owner_id.ends_with(owner) && value(r).1.contains(effect))
+            .unwrap_or_else(|| panic!("{owner} {effect}"));
+        rule.local_definitions
+            .iter()
+            .flatten()
+            .map(|d| d.initializer.display.as_str().to_owned())
+            .collect()
+    };
+    for effect in ["alias", "create(suggested)"] {
+        let shown = initializers("suggest", effect);
+        assert_eq!(
+            shown,
+            [
+                "Alias.get_by(email=suggested)",
+                "prefix + suffixes[0].suffix",
+                "convert_to_id(prefix)",
+                "hostname.split(\".\")",
+            ],
+            "{effect}"
+        );
+    }
+    assert!(initializers("branch", "missing").is_empty());
+    assert!(initializers("looped", "missing").is_empty());
+    let (_, created) = all
+        .iter()
+        .find(|(_, r)| value(r).1.contains("create(suggested)"))
+        .unwrap();
+    let kinds: Vec<_> = created
+        .local_definitions
+        .iter()
+        .flatten()
+        .flat_map(|d| d.expression.nodes.iter().map(|n| &n.kind))
+        .collect();
+    assert!(kinds.iter().any(|k| matches!(
+        k,
+        DefinitionExpressionKind::Binary {
+            operator: BinaryOperator::Add,
+            ..
+        }
+    )));
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, DefinitionExpressionKind::Member { computed: true, .. }))
+    );
 }
