@@ -117,13 +117,13 @@ describe('chatSessions', () => {
     revision: 1, cancel_requested: false, invocation_pending: false, actions: { can_cancel: false, can_follow_up: true },
     graph_snapshot_id: null, last_event_sequence: 1, has_result: true, created_at: updated, updated_at: updated, ...extra,
   }) as unknown as InvestigationSummary;
-  it('groups turns, marks active and open sessions, and lists active ones first', () => {
+  it('groups turns, marks active sessions and those open in a pane by conversation, and lists active ones first', () => {
     const sessions = chatSessions([
       turn('a1', 'c-a', 'completed', '2026-11-21T10:01:00Z'),
       turn('a2', 'c-a', 'completed', '2026-11-21T10:05:00Z'),
       turn('b1', 'c-b', 'running', '2026-11-21T10:02:00Z'),
       turn('c1', 'c-c', 'completed', '2026-11-21T10:09:00Z', { invocation_pending: true }),
-    ], ['a1']);
+    ], ['c-a', 'c-elsewhere']);
     expect(sessions.map((session) => [session.conversation_id, session.turns, session.active, session.open, session.latest.investigation_id]))
       .toEqual([['c-c', 1, true, false, 'c1'], ['c-b', 1, true, false, 'b1'], ['c-a', 2, false, true, 'a2']]);
     expect(chatSessionLine(sessions[2])).toBe('2 turns · latest completed · local · updated 2026-11-21T10:05:00Z');

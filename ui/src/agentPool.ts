@@ -207,26 +207,27 @@ export interface ChatSession {
   turns: number;
   /** Some turn is queued, running or still has an invocation pending. */
   active: boolean;
-  /** Some turn is open in an Agent chats pane. */
+  /** The conversation is open in an Agent chats pane, whichever of its
+   *  turns the pane shows (it may be outside the loaded page). */
   open: boolean;
 }
 
 /** Group the loaded task history into chat sessions: active ones first,
  *  then by the newest turn's update time. Only the loaded page is read. */
-export function chatSessions(history: readonly InvestigationSummary[], openTasks: readonly string[]): ChatSession[] {
-  const open = new Set(openTasks);
+export function chatSessions(history: readonly InvestigationSummary[], openConversations: readonly string[]): ChatSession[] {
+  const open = new Set(openConversations);
   const byConversation = new Map<string, ChatSession>();
   for (const turn of history) {
     const session = byConversation.get(turn.conversation_id);
     const isActive = investigationIsActive(turn);
-    const isOpen = open.has(turn.investigation_id);
     if (!session) {
-      byConversation.set(turn.conversation_id, { conversation_id: turn.conversation_id, latest: turn, turns: 1, active: isActive, open: isOpen });
+      byConversation.set(turn.conversation_id, {
+        conversation_id: turn.conversation_id, latest: turn, turns: 1, active: isActive, open: open.has(turn.conversation_id),
+      });
       continue;
     }
     session.turns += 1;
     session.active ||= isActive;
-    session.open ||= isOpen;
     if (turn.updated_at > session.latest.updated_at) session.latest = turn;
   }
   return [...byConversation.values()].sort((a, b) =>

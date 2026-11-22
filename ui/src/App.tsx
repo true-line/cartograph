@@ -872,7 +872,7 @@ export default function App() {
             localServerError={localServerError}
             onCheckLocalServer={backend === 'up' ? checkLocalServer : undefined}
             chats={investigations.historyError || (investigations.historyLoading && investigations.history.length === 0)
-              ? null : chatSessions(investigations.history, chatDocks.map((item) => item.chat.task_id))}
+              ? null : chatSessions(investigations.history, chatDocks.map((item) => item.turn.conversation_id))}
             onOpenChat={(id) => useAgentChatDockStore.getState().open(id)}
             awaitingCuration={stagedError || (stagedLoading && stagedProposals.length === 0) ? null : awaitingCuration(stagedProposals)}
             onOpenJobs={() => navigate('jobs')}
