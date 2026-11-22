@@ -90,9 +90,9 @@ an ordered result step, AC-1309) and `journey-candidate@2` (ADR-0084,
 AC-1310: paths go on past an observed write, and the best path through each
 screen the shortest path skips is kept as an alternative). Scored by the
 same [`score.py`](score.py) against the unchanged key. The report is in
-[`scores.json`](scores.json). The scorer read 112 candidates: the 25
-earlier ones, which keep their steps, goals and results, 13 new goals
-reached only past a write, and 74 alternatives. The best candidate is
+[`scores.json`](scores.json). The scorer read 120 candidates: the 25
+earlier ones, which keep their steps, goals and results, 21 new goals
+reached only past a write, and 74 alternatives. No goal is cut by a budget. The best candidate is
 `Main → POST /api/v2/alias/custom/new → NewAliasResult (via /login,
 /api-key-setting)`, an alternative of the shortest custom-alias path.
 
