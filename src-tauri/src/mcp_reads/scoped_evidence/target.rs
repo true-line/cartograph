@@ -70,14 +70,32 @@ impl ScopedEvidenceTarget {
         admit(self, MAX_TARGET_BYTES)?;
         let file = &self.captured.file;
         let path = &self.source.path;
+        // An observed target names the source's input identity and cites an
+        // observed receipt; a primary target names the source (ADR-0079).
+        let observed = self.binding_role() == BindingRole::Observed;
         let source_id = self
             .registered_source_id
+            .strip_prefix(crate::observation_inputs::INPUT_REPO_PREFIX)
+            .unwrap_or(&self.registered_source_id)
             .strip_prefix("src_")
             .is_some_and(|s| {
                 s.len() == 32
                     && s.bytes()
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             });
+        let primary_receipt = prefixed(&self.receipt_id, "ts-primary-v1:")
+            || prefixed(&self.receipt_id, "ts-primary-v2:")
+            || prefixed(&self.receipt_id, "ts-primary-v3:")
+            || prefixed(&self.receipt_id, "py-primary-v1:")
+            || prefixed(&self.receipt_id, "go-primary-v1:")
+            || prefixed(&self.receipt_id, "java-primary-v1:")
+            || prefixed(&self.receipt_id, "rs-primary-v1:")
+            || prefixed(&self.receipt_id, "kt-primary-v1:");
+        let receipt_kind = if observed {
+            prefixed(&self.receipt_id, "obs-input-v1:")
+        } else {
+            primary_receipt
+        };
         let digest_prefix = match self.fact {
             TaskFactKey::Node { .. } => "node-v1:",
             _ => "edge-v1:",
@@ -95,14 +113,7 @@ impl ScopedEvidenceTarget {
             || !fact_valid(&self.fact)
             || !prefixed(&self.fact_digest, digest_prefix)
             || !source_id
-            || !(prefixed(&self.receipt_id, "ts-primary-v1:")
-                || prefixed(&self.receipt_id, "ts-primary-v2:")
-                || prefixed(&self.receipt_id, "ts-primary-v3:")
-                || prefixed(&self.receipt_id, "py-primary-v1:")
-                || prefixed(&self.receipt_id, "go-primary-v1:")
-                || prefixed(&self.receipt_id, "java-primary-v1:")
-                || prefixed(&self.receipt_id, "rs-primary-v1:")
-                || prefixed(&self.receipt_id, "kt-primary-v1:"))
+            || !receipt_kind
             || self.receipt_inventory_index >= 1024
             || self.index >= 1024
             || !text(&self.source.repo, 256)
@@ -127,6 +138,17 @@ impl ScopedEvidenceTarget {
             return Err(ReadError::InvalidRequest);
         }
         Ok(())
+    }
+    /// The binding role this target cites, implied by its owner identity.
+    pub(crate) fn binding_role(&self) -> BindingRole {
+        if self
+            .registered_source_id
+            .starts_with(crate::observation_inputs::INPUT_REPO_PREFIX)
+        {
+            BindingRole::Observed
+        } else {
+            BindingRole::Primary
+        }
     }
     pub(super) fn content_id(&self) -> Result<String, ReadError> {
         admit(self, MAX_TARGET_BYTES)?;

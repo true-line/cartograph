@@ -6,6 +6,7 @@ use crate::{
 };
 use adapters_lang_ts::captured::Receipt;
 use agents::{TaskCaptureFileRef, TaskCaptureSpanRef, TaskFactKey};
+use core_graph::BindingRole;
 use core_graph::source::{FactSourceSelection, FactSourceState, OmissionLookup, SourceBinding};
 use serde::Serialize;
 use std::io::{self, Write};
@@ -43,18 +44,28 @@ fn retained(error: PinnedReadError) -> ReadError {
         PinnedReadError::Operational => ReadError::Storage,
     }
 }
+/// The scope label of a role's evidence: a declaration's retained primary
+/// source, or a captured observation input (ADR-0079).
+fn scope_of(role: BindingRole) -> &'static str {
+    match role {
+        BindingRole::Primary => "primary_source_only",
+        BindingRole::Observed => "observed_input_only",
+    }
+}
 fn selected(
     state: &AppState,
     proof: &ScopedEvidenceProof,
+    role: BindingRole,
 ) -> Result<FactSourceSelection, ReadError> {
     let selected = state
         .graph
         .lock()
         .map_err(|_| ReadError::Storage)?
-        .read_selected_facts_at_revision(
+        .read_selected_facts_at_revision_as(
             std::slice::from_ref(proof.fact()),
             proof.revision(),
             proof.graph_limits(),
+            role,
         )
         .map_err(|error| match error {
             core_graph::GraphError::Generation(core_graph::GenerationError::Changed) => {
@@ -192,6 +203,7 @@ fn descriptor(
 fn resolve(
     state: &AppState,
     proof: &ScopedEvidenceProof,
+    role: BindingRole,
     expected_target: Option<&ScopedEvidenceTarget>,
     ordinal: usize,
     revalidate: impl FnOnce() -> Result<(), ReadError>,
@@ -199,7 +211,7 @@ fn resolve(
     if ordinal >= 1024 {
         return Err(ReadError::InvalidRequest);
     }
-    let selection = selected(state, proof)?;
+    let selection = selected(state, proof, role)?;
     if matches!(selection.state, FactSourceState::Absent { .. }) {
         if expected_target.is_some() {
             return Err(ReadError::StaleBasis);
@@ -216,7 +228,7 @@ fn resolve(
                 .primary_sources
                 .task_guard(&source.source_id)
                 .map_err(retained)?;
-            let checked = selected(state, proof)?;
+            let checked = selected(state, proof, role)?;
             if checked != selection {
                 return Err(ReadError::StaleBasis);
             }
@@ -254,7 +266,7 @@ fn resolve(
         .primary_sources
         .task_guard(&source.source_id)
         .map_err(retained)?;
-    let checked = binding(selected(state, proof)?, proof)?;
+    let checked = binding(selected(state, proof, role)?, proof)?;
     if checked != preliminary {
         return Err(ReadError::StaleBasis);
     }
@@ -274,16 +286,19 @@ fn resolve(
         return Err(ReadError::StaleBasis);
     }
     revalidate()?;
+    let owner = match role {
+        BindingRole::Primary => source.source_id.clone(),
+        BindingRole::Observed => crate::observation_inputs::input_source_id(&source.source_id),
+    };
     if expected_target.is_some_and(|target| {
-        target.fact_digest != checked.emitted_fact_digest
-            || target.registered_source_id != source.source_id
+        target.fact_digest != checked.emitted_fact_digest || target.registered_source_id != owner
     }) {
         return Err(ReadError::StaleBasis);
     }
     let unavailable = |receipt: Option<&Receipt>| -> Result<ReadError, ReadError> {
         if state
             .primary_sources
-            .task_binding_forgotten(&guard, &checked, receipt)
+            .task_binding_forgotten_as(&guard, role, &checked, receipt)
             .map_err(retained)?
         {
             Ok(ReadError::EvidenceForgotten)
@@ -291,8 +306,9 @@ fn resolve(
             Ok(ReadError::EvidenceUnavailable)
         }
     };
-    let receipt = match state.primary_sources.task_receipt(
+    let receipt = match state.primary_sources.task_receipt_as(
         &guard,
+        role,
         &checked.fact,
         &checked.emitted_fact_digest,
         &checked.repo_key,
@@ -317,6 +333,7 @@ fn resolve(
 pub(crate) fn describe(
     state: &AppState,
     proof: &ScopedEvidenceProof,
+    role: BindingRole,
     ordinal: usize,
     max_response_bytes: usize,
     revalidate: impl FnOnce() -> Result<(), ReadError>,
@@ -324,14 +341,14 @@ pub(crate) fn describe(
     if max_response_bytes == 0 {
         return Err(ReadError::Limit);
     }
-    let (target, _guard, receipt) = resolve(state, proof, None, ordinal, revalidate)?;
+    let (target, _guard, receipt) = resolve(state, proof, role, None, ordinal, revalidate)?;
     let total_ranges = receipt.ranges().len();
     let response = ScopedEvidenceDescription {
         basis_id: proof.basis_id().into(),
         target,
         total_ranges,
         next_ordinal: ordinal.checked_add(1).filter(|next| *next < total_ranges),
-        scope: "primary_source_only",
+        scope: scope_of(role),
         input_closure: "input_closure_not_established",
     };
     admit(&response, max_response_bytes)?;
@@ -346,6 +363,7 @@ pub(crate) fn read(
     revalidate: impl FnOnce() -> Result<(), ReadError>,
 ) -> Result<ScopedEvidenceSpan, ReadError> {
     target.validate()?;
+    let role = target.binding_role();
     if target.basis_id != proof.basis_id()
         || &target.revision != proof.revision()
         || crate::task_evidence::graph_fact(&target.fact) != *proof.fact()
@@ -378,7 +396,7 @@ pub(crate) fn read(
         &View {
             basis_id: proof.basis_id(),
             target,
-            scope: "primary_source_only",
+            scope: scope_of(role),
             input_closure: "input_closure_not_established",
             redaction: super::evidence::EvidenceRedaction::UNREAD,
             text: "",
@@ -398,6 +416,7 @@ pub(crate) fn read(
     let (actual, guard, receipt) = resolve(
         state,
         proof,
+        role,
         Some(target),
         target.receipt_inventory_index as usize,
         revalidate,
@@ -422,7 +441,7 @@ pub(crate) fn read(
     let response = ScopedEvidenceSpan {
         basis_id: proof.basis_id().into(),
         target: actual,
-        scope: "primary_source_only",
+        scope: scope_of(role),
         input_closure: "input_closure_not_established",
         redaction,
         text,

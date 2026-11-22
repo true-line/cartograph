@@ -844,7 +844,7 @@ pub(crate) fn selection_omission(
     // means a primary receipt is held for this fact, so an omission row left
     // by an earlier publication (possibly another repository's) never reads
     // as Omitted beside it.
-    let omission = match load_selection_binding(connection, fact)? {
+    let omission = match load_selection_binding(connection, BindingRole::Primary, fact)? {
         SelectionBinding::Absent => load_omission(connection, fact)?,
         SelectionBinding::Invalid | SelectionBinding::Present(_) => None,
     };
@@ -963,12 +963,14 @@ pub(crate) enum SelectionBinding {
 
 pub(crate) fn load_selection_binding(
     connection: &Connection,
+    role: BindingRole,
     fact: &FactKey,
 ) -> Result<SelectionBinding, GraphError> {
+    let (nodes, edges) = role.tables();
     let table_and_key = match fact {
-        FactKey::Node { .. } => "source_node_bindings WHERE node_id = ?1",
+        FactKey::Node { .. } => format!("{nodes} WHERE node_id = ?1"),
         FactKey::Edge { .. } => {
-            "source_edge_bindings WHERE source = ?1 AND label = ?2 AND destination = ?3"
+            format!("{edges} WHERE source = ?1 AND label = ?2 AND destination = ?3")
         }
     };
     // Guard the serialized byte lengths in SQL before returning any body. BLOB
@@ -1211,7 +1213,7 @@ impl SqliteGraphStore {
             let fact_digest = snapshot_digest(graph, fact)?;
             let omission =
                 selection_omission(&self.conn, fact, fact_digest.as_deref(), complete_coverage)?;
-            let binding = load_selection_binding(&self.conn, fact)?;
+            let binding = load_selection_binding(&self.conn, BindingRole::Primary, fact)?;
             #[cfg(any(test, feature = "test-support"))]
             {
                 let after_lookup = self.source_binding_after_lookup.borrow_mut().take();

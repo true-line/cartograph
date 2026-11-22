@@ -124,7 +124,15 @@ impl Fixture {
         })
     }
     fn describe(&self) -> ScopedEvidenceDescription {
-        describe(&self.state, &self.proof(), 0, 64 * 1024, || self.check()).unwrap()
+        describe(
+            &self.state,
+            &self.proof(),
+            BindingRole::Primary,
+            0,
+            64 * 1024,
+            || self.check(),
+        )
+        .unwrap()
     }
 }
 fn limits() -> EvidenceLimits {
@@ -268,7 +276,14 @@ fn scoped_evidence_missing_invalid_receipt_and_binding_are_distinct_without_abse
         )
         .unwrap();
     assert!(matches!(
-        describe(&f.state, &f.proof(), 0, 64 * 1024, || f.check()),
+        describe(
+            &f.state,
+            &f.proof(),
+            BindingRole::Primary,
+            0,
+            64 * 1024,
+            || f.check()
+        ),
         Err(ReadError::EvidenceUnavailable)
     ));
     // No capture/source/path heuristic turns this missing receipt into omitted.
@@ -287,7 +302,14 @@ fn scoped_evidence_missing_invalid_receipt_and_binding_are_distinct_without_abse
         .unwrap();
     f.session = Fixture::session(&f.state, &f.scopes);
     assert!(matches!(
-        describe(&f.state, &f.proof(), 0, 64 * 1024, || f.check()),
+        describe(
+            &f.state,
+            &f.proof(),
+            BindingRole::Primary,
+            0,
+            64 * 1024,
+            || f.check()
+        ),
         Err(ReadError::EvidenceInvalid)
     ));
 }
@@ -298,7 +320,7 @@ fn scoped_evidence_post_guard_qualification_check_rejects_before_receipt_access(
     let proof = f.proof();
     let called = AtomicBool::new(false);
     assert!(matches!(
-        describe(&f.state, &proof, 0, 64 * 1024, || {
+        describe(&f.state, &proof, BindingRole::Primary, 0, 64 * 1024, || {
             called.store(true, Ordering::SeqCst);
             let mut changed = f.scopes.clone();
             changed[0].config_hash.push_str("-changed");
@@ -313,9 +335,14 @@ fn scoped_evidence_post_guard_qualification_check_rejects_before_receipt_access(
     ));
     assert!(called.load(Ordering::SeqCst));
     assert!(matches!(
-        describe(&f.state, &proof, 1024, 64 * 1024, || panic!(
-            "invalid ordinal acquired evidence"
-        )),
+        describe(
+            &f.state,
+            &proof,
+            BindingRole::Primary,
+            1024,
+            64 * 1024,
+            || panic!("invalid ordinal acquired evidence")
+        ),
         Err(ReadError::InvalidRequest)
     ));
 }
@@ -373,7 +400,9 @@ fn scoped_evidence_exact_reclaimed_receipt_is_forgotten_not_unknown_or_forged() 
     )
     .unwrap();
     assert_eq!(
-        describe(&f.state, &proof, 0, 65536, || f.check()).unwrap_err(),
+        describe(&f.state, &proof, BindingRole::Primary, 0, 65536, || f
+            .check())
+        .unwrap_err(),
         ReadError::EvidenceForgotten
     );
     assert_eq!(
@@ -404,7 +433,9 @@ fn scoped_evidence_exact_reclaimed_receipt_is_forgotten_not_unknown_or_forged() 
     )
     .unwrap();
     assert_eq!(
-        describe(&f.state, &proof, 0, 65536, || f.check()).unwrap_err(),
+        describe(&f.state, &proof, BindingRole::Primary, 0, 65536, || f
+            .check())
+        .unwrap_err(),
         ReadError::EvidenceInvalid
     );
 }
@@ -421,7 +452,9 @@ fn scoped_forgotten_status_storage_failure_and_graph_drift_do_not_become_absence
     let db = rusqlite::Connection::open(f.private.join("retained-source/receipts.sqlite")).unwrap();
     db.execute_batch("DROP TABLE receipt_reclaims").unwrap();
     assert_eq!(
-        describe(&f.state, &proof, 0, 65536, || f.check()).unwrap_err(),
+        describe(&f.state, &proof, BindingRole::Primary, 0, 65536, || f
+            .check())
+        .unwrap_err(),
         ReadError::Storage
     );
     f.state
@@ -541,7 +574,8 @@ fn scoped_real_store_capacity_omission_is_guarded_and_stale_safe() {
             scope: &mut scope,
         })
     };
-    let describe = || super::describe(&state, &proof, 0, 65536, check).unwrap_err();
+    let describe =
+        || super::describe(&state, &proof, BindingRole::Primary, 0, 65536, check).unwrap_err();
     assert_eq!(
         describe(),
         ReadError::EvidenceOmitted(ReceiptOmissionKind::StoreCapacity)
@@ -559,7 +593,10 @@ fn scoped_real_store_capacity_omission_is_guarded_and_stale_safe() {
     assert_eq!(describe(), ReadError::Storage);
     drop(lock);
     assert_eq!(
-        super::describe(&state, &proof, 0, 65536, || Err(ReadError::StaleBasis)).unwrap_err(),
+        super::describe(&state, &proof, BindingRole::Primary, 0, 65536, || Err(
+            ReadError::StaleBasis
+        ))
+        .unwrap_err(),
         ReadError::StaleBasis
     );
     // Test-only metadata changes retain the real producer's exact fact digest.
@@ -630,4 +667,94 @@ fn scoped_real_store_capacity_omission_is_guarded_and_stale_safe() {
         })
         .unwrap();
     assert_eq!(describe(), ReadError::StaleBasis);
+}
+
+#[test]
+fn observed_kind_reads_the_input_span_only_in_its_own_role() {
+    // AC-1051 (ADR-0079, #385): scoped evidence of kind
+    // `retained_observed_input` resolves the fact's observed binding, names
+    // the source's input identity and reads the cited span of the captured
+    // state; the primary kind finds no declaration for the same fact, and a
+    // target relabelled as the source's own is refused.
+    let dir = tempfile::tempdir().unwrap();
+    let system = dir.path().join("system");
+    std::fs::create_dir_all(system.join("infra")).unwrap();
+    std::fs::write(
+        system.join("infra/main.tf"),
+        "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        system.join("state.json"),
+        r#"{"format_version":"1.0","values":{"root_module":{"resources":[
+            {"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{"url":"https://sqs.example/a"},"sensitive_values":{}}]}}}"#,
+    )
+    .unwrap();
+    let manifest = system.join("cartograph.system.toml");
+    std::fs::write(
+        &manifest,
+        "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\n",
+    )
+    .unwrap();
+    let app = crate::tests::preflight_test_app(dir.path());
+    crate::add_system_blocking(
+        manifest.to_string_lossy().into_owned(),
+        app.handle().clone(),
+    )
+    .unwrap();
+    let state: &AppState = tauri::Manager::state::<AppState>(app.handle()).inner();
+    let source = state.sources.lock().unwrap().list().unwrap().remove(0);
+    let key = FactKey::Node {
+        id: format!("res:{}@aws_sqs_queue.jobs", source.repo_key),
+    };
+    let scopes = vec![ScopedRepo {
+        repo_key: source.repo_key.clone(),
+        registered_source_id: Some(source.source_id.clone()),
+        config_hash: "fixture-config".into(),
+        layer_hints: None,
+    }];
+    let session = Fixture::session(state, &scopes);
+    let mut scope = || Ok(scopes.clone());
+    let proof = session
+        .authorize_evidence(
+            &mut ScopedReadContext {
+                graph: &state.graph,
+                decisions: &state.decisions,
+                scope: &mut scope,
+            },
+            session.basis_id(),
+            &key,
+        )
+        .unwrap();
+    let check = || {
+        let mut scope = || Ok(scopes.clone());
+        session.check_current(&mut ScopedReadContext {
+            graph: &state.graph,
+            decisions: &state.decisions,
+            scope: &mut scope,
+        })
+    };
+    let described = describe(state, &proof, BindingRole::Observed, 0, 65536, check).unwrap();
+    assert_eq!(described.scope, "observed_input_only");
+    assert_eq!(described.total_ranges, 1);
+    assert_eq!(
+        described.target.registered_source_id,
+        format!("input/{}", source.source_id)
+    );
+    assert!(described.target.receipt_id.starts_with("obs-input-v1:"));
+    assert_eq!(described.target.binding_role(), BindingRole::Observed);
+    assert_eq!(described.target.source.path, "state.json");
+    assert!(matches!(
+        describe(state, &proof, BindingRole::Primary, 0, 65536, check),
+        Err(ReadError::EvidenceUnavailable)
+    ));
+    let span = read(state, &proof, &described.target, limits(), check).unwrap();
+    assert_eq!(span.scope, "observed_input_only");
+    assert_eq!(span.text, "\"aws_sqs_queue.jobs\"");
+    let mut relabelled = described.target.clone();
+    relabelled.registered_source_id = source.source_id.clone();
+    relabelled.captured.file.source_id = source.source_id.clone();
+    relabelled.target_id = relabelled.content_id().unwrap();
+    assert!(read(state, &proof, &relabelled, limits(), check).is_err());
 }

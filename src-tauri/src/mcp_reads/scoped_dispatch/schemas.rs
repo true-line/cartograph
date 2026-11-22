@@ -97,17 +97,18 @@ pub(in crate::mcp_reads) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits
         ReadTool::Evidence => {
             let mut describe = session();
             describe["mode"] = json!({"const":"describe"});
-            describe["kind"] = json!({"const":"retained_primary_source"});
+            describe["kind"] =
+                json!({"enum":["retained_primary_source","retained_observed_input"]});
             describe["fact"] = fact();
             describe["ordinal"] = json!({"type":"integer","minimum":0,"maximum":adapters_lang_ts::captured::MAX_RECEIPT_RANGES-1});
             describe["max_bytes"] = json!({"type":"integer","minimum":1});
             let mut read = session();
             read["mode"] = json!({"const":"read"});
-            read["kind"] = json!({"const":"retained_primary_source"});
+            read["kind"] = json!({"enum":["retained_primary_source","retained_observed_input"]});
             read["target"] = target();
             read["max_bytes"] = json!({"type":"integer","minimum":1});
             (
-                "Describe or read an exact retained primary span using a scoped target; read text has secrets redacted (see `redaction`); no full-input-closure, checkout fallback or omission inference.",
+                "Describe or read an exact retained span using a scoped target: `retained_primary_source` is the fact's declaring source, `retained_observed_input` the captured state, export or trace that observed it (never a declaration); read text has secrets redacted (see `redaction`); no full-input-closure, checkout fallback or omission inference.",
                 json!({"oneOf":[object(describe,&["session_id","session_basis_id","mode","kind","fact","ordinal","max_bytes"]),object(read,&["session_id","session_basis_id","mode","kind","target","max_bytes"])]}),
             )
         }

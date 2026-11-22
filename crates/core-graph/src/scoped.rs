@@ -439,6 +439,23 @@ impl SqliteGraphStore {
         expected: &StoreRevision,
         limits: SnapshotReadLimits,
     ) -> Result<SelectedFacts, GraphError> {
+        self.read_selected_facts_at_revision_as(
+            keys,
+            expected,
+            limits,
+            source::BindingRole::Primary,
+        )
+    }
+
+    /// [`Self::read_selected_facts_at_revision`] with each selection's state
+    /// taken from the bindings of `role` (ADR-0079).
+    pub fn read_selected_facts_at_revision_as(
+        &self,
+        keys: &[FactKey],
+        expected: &StoreRevision,
+        limits: SnapshotReadLimits,
+        role: source::BindingRole,
+    ) -> Result<SelectedFacts, GraphError> {
         validate_request(limits, Some(expected), false, &[])?;
         if keys.len() > source::MAX_SOURCE_SELECTION_KEYS || keys.len() > limits.max_rows {
             return Err(SnapshotBoundsError::RowLimit.into());
@@ -509,13 +526,18 @@ impl SqliteGraphStore {
                 Kind::Node => n.first().map(source::node_digest).transpose()?,
                 Kind::Edge => e.first().map(source::edge_digest).transpose()?,
             };
-            let binding = source::load_selection_binding(&transaction, fact)?;
-            let omission = source::selection_omission(
-                &transaction,
-                fact,
-                digest.as_deref(),
-                complete_coverage,
-            )?;
+            let binding = source::load_selection_binding(&transaction, role, fact)?;
+            // Omission rows record primary receipts only; an observed
+            // selection never reads them, and no observed omission is recorded.
+            let omission = match role {
+                source::BindingRole::Primary => source::selection_omission(
+                    &transaction,
+                    fact,
+                    digest.as_deref(),
+                    complete_coverage,
+                )?,
+                source::BindingRole::Observed => source::OmissionLookup::Unrecorded,
+            };
             #[cfg(any(test, feature = "test-support"))]
             if let Some(after_lookup) = self.source_binding_after_lookup.borrow_mut().take() {
                 after_lookup()?;

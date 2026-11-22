@@ -335,4 +335,6 @@ schema v3); a later recovery that no longer binds it reclaims it
 (AC-1047). The app describes and reads an observed binding on its own,
 admitting only the source's input identity, and shows it as "Observed in"
 beside the declaration, never in its place (AC-1049). Scoped MCP evidence
-does not yet resolve the observed role (AC-1051).
+of kind `retained_observed_input` resolves the observed role at the session's
+revision: its target names the input identity, its scope is
+`observed_input_only`, and the kind and target must agree (AC-1051).

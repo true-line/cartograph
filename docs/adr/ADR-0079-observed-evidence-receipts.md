@@ -60,8 +60,10 @@ also make "verified" mean two different things.
    - The app describes and reads the observed binding through its own
      `describe_observed_source` and `read_observed_source`, beside the
      unchanged primary `describe_captured_source` (AC-1049).
-   - Scoped MCP evidence takes a role, `primary` or `observed`, with `primary`
-     as the default.
+   - Scoped MCP evidence names the role by its existing `kind`:
+     `retained_primary_source` or `retained_observed_input`. An observed
+     target names the input identity, so the target carries its role and must
+     match the kind (AC-1051).
 5. **What "verified" means.** A fact is observed-verified when its observed
    binding resolves and its ranges read back. Curated-context activation keeps
    requiring a primary binding unless it says otherwise. Observed verification
