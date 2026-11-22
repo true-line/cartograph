@@ -2390,7 +2390,7 @@ fn node_noun<'d>(
     match &node.kind {
         K::Identifier { .. } => name(index as u32, later),
         K::Literal => noun(&parse(node.expression.display.as_str())?, cx),
-        K::Parenthesized { value } => node_noun(
+        K::Parenthesized { value } | K::Await { value } => node_noun(
             definitions,
             definition,
             defining,
@@ -2521,6 +2521,13 @@ fn node_noun<'d>(
                             parts.join(" and ")
                         ));
                     }
+                    // `await qb.getMany()`: the records a TypeORM query
+                    // builder selects (AC-1046).
+                    if let Some(query) =
+                        query_noun(definitions, definition, *object, method, cx, depth + 1)
+                    {
+                        return Some(query);
+                    }
                     // Any other method's result (`cache.get(k)`) is not said.
                     return None;
                 }
@@ -2540,6 +2547,243 @@ fn node_noun<'d>(
         }
         _ => None,
     }
+}
+
+/// The records a TypeORM query builder selects, read off its recorded call
+/// chain (AC-1046): `getRepository(ctx, ProductVariant)
+/// .createQueryBuilder('variant').leftJoin('variant.product', 'product')
+/// .where('variant.deletedAt IS NULL').andWhere('product.deletedAt IS NULL')
+/// .andWhere('variant.id IN (:...variantIds)', { variantIds }).getMany()` is
+/// "the product variants that are not deleted and whose product is not
+/// deleted, among the variant ids". The builder may be a local name
+/// recorded in the same rule. Any step or condition outside these shapes
+/// says nothing.
+fn query_noun(
+    definitions: &[core_graph::rules::LocalDefinition],
+    definition: &core_graph::rules::LocalDefinition,
+    receiver: u32,
+    terminal: &str,
+    cx: &Context<'_>,
+    depth: usize,
+) -> Option<String> {
+    use core_graph::rules::{
+        DefinitionExpressionKind as K, DependencyResolution, KnownLiteral, LiteralEvidence,
+    };
+    let count = match terminal {
+        "getMany" => false,
+        "getCount" => true,
+        _ => return None,
+    };
+    // Steps from the terminal back to the repository, as (method, string
+    // arguments).
+    let mut steps: Vec<(String, Vec<String>)> = Vec::new();
+    let mut definition = definition;
+    let mut at = receiver;
+    let mut hops = 0;
+    let entity = loop {
+        hops += 1;
+        if hops > 16 || depth > 6 {
+            return None;
+        }
+        let node = definition.expression.nodes.get(at as usize)?;
+        match &node.kind {
+            // A builder held in a local name: follow its recorded initializer.
+            K::Identifier { dependency } => {
+                let DependencyResolution::Binding { binding_id, .. } = &definition
+                    .dependencies
+                    .get(*dependency as usize)?
+                    .resolution
+                else {
+                    return None;
+                };
+                definition = definitions.iter().find(|d| &d.binding_id == binding_id)?;
+                at = definition.expression.root;
+            }
+            K::Await { value } | K::Parenthesized { value } => at = *value,
+            K::Call {
+                callee, arguments, ..
+            } => {
+                let nodes = &definition.expression.nodes;
+                let K::Member {
+                    object,
+                    property,
+                    computed: false,
+                    optional: false,
+                    ..
+                } = nodes.get(*callee as usize)?.kind
+                else {
+                    return None;
+                };
+                let method = nodes.get(property as usize)?.expression.display.as_str();
+                if method == "getRepository" {
+                    // `getRepository(ctx, Entity)` or `getRepository(Entity)`.
+                    let last = nodes.get(*arguments.last()? as usize)?;
+                    let name = last.expression.display.as_str();
+                    if !matches!(last.kind, K::Identifier { .. })
+                        || !is_class(name)
+                        || !name.chars().all(|c| c.is_ascii_alphanumeric())
+                        || arguments.len() > 2
+                    {
+                        return None;
+                    }
+                    break name.to_owned();
+                }
+                let texts: Vec<String> = arguments
+                    .iter()
+                    .filter_map(|a| match &nodes.get(*a as usize)?.expression.literal {
+                        Some(LiteralEvidence::Known {
+                            value: KnownLiteral::String(text),
+                        }) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                steps.push((method.to_owned(), texts));
+                at = object;
+            }
+            _ => return None,
+        }
+    };
+    steps.reverse();
+    let mut alias: Option<String> = None;
+    let mut joins: Vec<(String, String)> = Vec::new();
+    let mut own: Vec<String> = Vec::new();
+    let mut joined: Vec<String> = Vec::new();
+    let mut among: Vec<String> = Vec::new();
+    for (method, texts) in &steps {
+        match (method.as_str(), &texts[..]) {
+            ("createQueryBuilder", [name]) if alias.is_none() && plain_word(name) => {
+                alias = Some(name.clone());
+            }
+            (
+                "leftJoin" | "innerJoin" | "leftJoinAndSelect" | "innerJoinAndSelect",
+                [path, name],
+            ) => {
+                let (from, relation) = path.split_once('.')?;
+                if Some(from) != alias.as_deref() || !plain_word(relation) || !plain_word(name) {
+                    return None;
+                }
+                joins.push((name.clone(), relation.to_owned()));
+            }
+            ("where" | "andWhere", [condition, ..]) => {
+                let (target, column, test) = query_condition(condition)?;
+                if Some(target.as_str()) == alias.as_deref() {
+                    match test {
+                        QueryTest::Deleted(false) => own.push("that are not deleted".to_owned()),
+                        QueryTest::Deleted(true) => own.push("that are deleted".to_owned()),
+                        QueryTest::Unset => own.push(format!("with no {}", words(&column))),
+                        QueryTest::Set => own.push(format!("with a {}", words(&column))),
+                        QueryTest::Among(param) if column == "id" => {
+                            among.push(noun(&Expr::Ref(vec![param]), cx)?);
+                        }
+                        QueryTest::Among(param) => own.push(format!(
+                            "whose {} is one of {}",
+                            words(&column),
+                            noun(&Expr::Ref(vec![param]), cx)?
+                        )),
+                        QueryTest::Equals(param) => own.push(format!(
+                            "whose {} is {}",
+                            words(&column),
+                            noun(&Expr::Ref(vec![param]), cx)?
+                        )),
+                    }
+                } else {
+                    let (_, relation) = joins.iter().find(|(name, _)| *name == target)?;
+                    let relation = words(relation);
+                    joined.push(match test {
+                        QueryTest::Deleted(false) => format!("whose {relation} is not deleted"),
+                        QueryTest::Deleted(true) => format!("whose {relation} is deleted"),
+                        QueryTest::Equals(param) => format!(
+                            "whose {relation}'s {} is {}",
+                            words(&column),
+                            noun(&Expr::Ref(vec![param]), cx)?
+                        ),
+                        _ => return None,
+                    });
+                }
+            }
+            _ => return None,
+        }
+    }
+    alias.as_ref()?;
+    let entity = words(&entity);
+    let plural = if entity.ends_with('s') || entity.ends_with('x') || entity.ends_with("ch") {
+        format!("{entity}es")
+    } else if let Some(stem) = entity.strip_suffix('y')
+        && !stem.ends_with(['a', 'e', 'o', 'u'])
+    {
+        format!("{stem}ies")
+    } else {
+        format!("{entity}s")
+    };
+    let mut said = format!("the {plural}");
+    own.extend(joined);
+    if !own.is_empty() {
+        said = format!("{said} {}", own.join(" and "));
+    }
+    for set in among {
+        said = format!("{said}, among {set}");
+    }
+    Some(if count {
+        format!(
+            "the number of {}",
+            said.strip_prefix("the ").unwrap_or(&said)
+        )
+    } else {
+        said
+    })
+}
+
+/// A query-builder alias, relation or column: letters, digits and `_`.
+fn plain_word(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One query-builder condition's test (AC-1046).
+enum QueryTest {
+    /// `x.deletedAt IS NULL` (`false`) or `IS NOT NULL` (`true`).
+    Deleted(bool),
+    /// `x.col IS NULL`.
+    Unset,
+    /// `x.col IS NOT NULL`.
+    Set,
+    /// `x.col IN (:...param)`.
+    Among(String),
+    /// `x.col = :param`.
+    Equals(String),
+}
+
+/// A single-predicate query-builder condition as (alias, column, test);
+/// `None` for any other shape, including `AND`/`OR` within one string.
+fn query_condition(condition: &str) -> Option<(String, String, QueryTest)> {
+    let tokens: Vec<&str> = condition.split_whitespace().collect();
+    let (left, rest) = tokens.split_first()?;
+    let (alias, column) = left.split_once('.')?;
+    if !plain_word(alias) || !plain_word(column) {
+        return None;
+    }
+    let deleted = column == "deletedAt";
+    let test = match rest {
+        ["IS", "NULL"] if deleted => QueryTest::Deleted(false),
+        ["IS", "NOT", "NULL"] if deleted => QueryTest::Deleted(true),
+        ["IS", "NULL"] => QueryTest::Unset,
+        ["IS", "NOT", "NULL"] => QueryTest::Set,
+        ["IN", list] => {
+            let param = list.strip_prefix("(:...")?.strip_suffix(')')?;
+            if !plain_word(param) {
+                return None;
+            }
+            QueryTest::Among(param.to_owned())
+        }
+        ["=", param] => {
+            let param = param.strip_prefix(':')?;
+            if !plain_word(param) {
+                return None;
+            }
+            QueryTest::Equals(param.to_owned())
+        }
+        _ => return None,
+    };
+    Some((alias.to_owned(), column.to_owned(), test))
 }
 
 /// A local name queued to be stated: its spelling, its noun and its
