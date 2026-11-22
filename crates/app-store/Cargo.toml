@@ -30,6 +30,7 @@ rusqlite = { workspace = true, features = ["backup"] }
 semantic = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+source-capture = { workspace = true }
 thiserror = { workspace = true }
 # Test fixtures the app's tests share (test-support only).
 tempfile = { version = "3", optional = true }
