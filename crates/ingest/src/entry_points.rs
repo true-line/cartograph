@@ -178,15 +178,23 @@ pub fn is_entry_point_file(rel: &str) -> bool {
         || android::candidate(rel)
 }
 
-/// The files [`extract_dir`] may open under `root`, in path order: a source
-/// capture retains them (AC-1061).
+/// The files [`extract_dir`] may open or cite under `root`, in path order: a
+/// source capture retains them (AC-1061).
 pub fn entry_point_paths(root: &Path) -> std::io::Result<Vec<String>> {
-    crate::captured_walk::selected(root, is_entry_point_file)
+    crate::captured_walk::selected(root, is_entry_point_file, || {
+        let id = SourceId {
+            repo: "selection",
+            commit: "",
+        };
+        let none = BTreeSet::new();
+        let out = extract_dir(root, &id, &none, &none)?;
+        Ok((out.nodes, out.edges))
+    })
 }
 
-/// [`extract_dir`] over a source capture (AC-1061, #385): `captured` is the
-/// capture's [`is_entry_point_file`] selection and `read` its bytes. The
-/// checkout is listed for its directories and other files, and never read.
+/// [`extract_dir`] over a source capture (AC-1061, #385): `captured` is
+/// every path the capture holds and `read` its bytes. The checkout is
+/// neither listed nor read.
 pub fn extract_from_capture(
     root: &Path,
     captured: &[String],
@@ -195,11 +203,10 @@ pub fn extract_from_capture(
     symbols: &BTreeSet<String>,
     scheduled: &BTreeSet<String>,
 ) -> std::io::Result<EntryPointExtraction> {
-    let walked = crate::captured_walk::listing(root, captured, is_entry_point_file)?;
+    let walked = crate::captured_walk::listing(root, captured);
     let text = |rel: &str| {
-        is_entry_point_file(rel)
-            .then(|| read(rel).ok())
-            .flatten()
+        read(rel)
+            .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
     };
     Ok(extract_walked(&walked, &text, id, symbols, scheduled))

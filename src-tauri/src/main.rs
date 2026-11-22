@@ -2605,19 +2605,18 @@ fn extract_tree_packed(
         // A capture that holds the readers' whole selections is read in
         // place of the checkout (AC-1061); the checkout is only listed.
         let captured_starts = primary.filter(|_| reads.starts_captured);
-        let captured_paths = |selects: fn(&str) -> bool| -> Vec<String> {
-            captured_starts
-                .map(|capture| {
-                    capture
-                        .manifest()
-                        .files
-                        .iter()
-                        .filter(|entry| selects(&entry.path))
-                        .map(|entry| entry.path.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        // The readers list the capture's own paths, so whether a file a
+        // declaration names exists is the snapshot's answer.
+        let captured_paths: Vec<String> = captured_starts
+            .map(|capture| {
+                capture
+                    .manifest()
+                    .files
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let captured_read = |path: &str| -> std::io::Result<Vec<u8>> {
             captured_starts
                 .ok_or_else(|| std::io::Error::other("no capture"))?
@@ -2628,7 +2627,7 @@ fn extract_tree_packed(
         let schedule_facts = match captured_starts {
             Some(_) => ingest::schedules::extract_from_capture(
                 root,
-                &captured_paths(ingest::schedules::is_schedule_file),
+                &captured_paths,
                 &captured_read,
                 &schedule_id,
                 &symbols,
@@ -2666,7 +2665,7 @@ fn extract_tree_packed(
         let entry_facts = match captured_starts {
             Some(_) => ingest::entry_points::extract_from_capture(
                 root,
-                &captured_paths(ingest::entry_points::is_entry_point_file),
+                &captured_paths,
                 &captured_read,
                 &schedule_id,
                 &symbols,
