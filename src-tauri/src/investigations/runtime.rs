@@ -1,4 +1,4 @@
-use super::{HostError, context::bounded_json};
+use crate::investigation_host::{HostError, bounded_json};
 use agents::investigation::*;
 use llm::LlmProvider;
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ type LocalProviderKey = (String, Option<u32>, u16);
 /// App-lifetime clients and transient worker payloads. Durable task state and
 /// deduplication belong exclusively to JobStore's coordinator tables.
 #[derive(Default)]
-pub(crate) struct InvestigationRuntime {
+pub struct InvestigationRuntime {
     providers: Mutex<BTreeMap<InvestigationProviderMode, Arc<dyn LlmProvider>>>,
     /// Local providers for a configured completion model (#1643) and context
     /// window (#1653), by both.
@@ -21,8 +21,8 @@ pub(crate) struct InvestigationRuntime {
 }
 
 impl InvestigationRuntime {
-    #[cfg(test)]
-    pub(super) fn set_test_provider(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_provider(
         &self,
         mode: InvestigationProviderMode,
         provider: Arc<dyn LlmProvider>,
@@ -32,13 +32,13 @@ impl InvestigationRuntime {
 
     /// Drop the cached cloud client so the next start builds one with the
     /// key that is current now (#1763). Running tasks keep the client they hold.
-    pub(crate) fn forget_cloud_provider(&self) {
+    pub fn forget_cloud_provider(&self) {
         if let Ok(mut providers) = self.providers.lock() {
             providers.remove(&InvestigationProviderMode::Cloud);
         }
     }
 
-    pub(super) fn provider(
+    pub fn provider(
         &self,
         mode: InvestigationProviderMode,
     ) -> Result<Arc<dyn LlmProvider>, HostError> {
@@ -72,7 +72,7 @@ impl InvestigationRuntime {
     /// from the shipped default, otherwise the mode's default provider.
     /// Construction makes no network call; a model that is not installed, or
     /// a port with no Ollama, fails at its first request and is reported.
-    pub(super) fn provider_for_start(
+    pub fn provider_for_start(
         &self,
         mode: InvestigationProviderMode,
         local_model: Option<&str>,
@@ -120,7 +120,7 @@ impl InvestigationRuntime {
 
     /// The provider a new desktop start would use, as the catalog shows it:
     /// the configured local model (#1643) when one is saved.
-    pub(super) fn descriptor_for_start(
+    pub fn descriptor_for_start(
         &self,
         mode: InvestigationProviderMode,
         local_model: Option<&str>,
@@ -148,7 +148,7 @@ impl InvestigationRuntime {
             })
     }
 
-    pub(super) fn insert(&self, id: &str) -> Result<Arc<LiveTask>, HostError> {
+    pub fn insert(&self, id: &str) -> Result<Arc<LiveTask>, HostError> {
         let mut live = self.live.lock().map_err(|_| HostError::Operational)?;
         if live.contains_key(id) || live.len() >= crate::jobs::investigations::MAX_LIVE_TASKS {
             return Err(HostError::Operational);
@@ -158,7 +158,7 @@ impl InvestigationRuntime {
         Ok(task)
     }
 
-    pub(super) fn get(&self, id: &str) -> Result<Option<Arc<LiveTask>>, HostError> {
+    pub fn get(&self, id: &str) -> Result<Option<Arc<LiveTask>>, HostError> {
         Ok(self
             .live
             .lock()
@@ -167,20 +167,20 @@ impl InvestigationRuntime {
             .cloned())
     }
 
-    pub(super) fn remove(&self, id: &str) {
+    pub fn remove(&self, id: &str) {
         if let Ok(mut live) = self.live.lock() {
             live.remove(id);
         }
     }
 
-    pub(crate) fn wake(&self, id: &str) {
+    pub fn wake(&self, id: &str) {
         if let Ok(Some(task)) = self.get(id) {
             task.wake();
         }
     }
 }
 
-pub(super) fn descriptor(
+pub fn descriptor(
     provider: &dyn LlmProvider,
     mode: InvestigationProviderMode,
 ) -> Result<InvestigationProvider, HostError> {
@@ -205,14 +205,14 @@ pub(super) fn descriptor(
 }
 
 #[derive(Default)]
-pub(super) struct LiveTask {
+pub struct LiveTask {
     pub pending: Mutex<Option<InvestigationConsent>>,
     generation: Mutex<u64>,
     changed: Condvar,
 }
 
 impl LiveTask {
-    pub(super) fn wake(&self) {
+    pub fn wake(&self) {
         if let Ok(mut generation) = self.generation.lock() {
             *generation = generation.wrapping_add(1);
             self.changed.notify_all();
@@ -220,7 +220,7 @@ impl LiveTask {
     }
     /// The durable state is rechecked at most one second later even if a
     /// notification races entry or originated in another app process.
-    pub(super) fn wait(&self, remaining: Duration) -> Result<(), HostError> {
+    pub fn wait(&self, remaining: Duration) -> Result<(), HostError> {
         let generation = self.generation.lock().map_err(|_| HostError::Operational)?;
         let _guard = self
             .changed
@@ -236,46 +236,46 @@ const DEFAULT_WALL_LIMIT: Duration = Duration::from_secs(3600);
 const DEFAULT_ACTIVE_LIMIT: Duration = Duration::from_secs(600);
 const DEFAULT_CONSENT_WAIT_LIMIT: Duration = Duration::from_secs(900);
 
-pub(super) struct RunClock {
+pub struct RunClock {
     started: Instant,
     consent_waiting: Duration,
     active_limit: Duration,
     wall_limit: Duration,
     consent_wait_limit: Duration,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     active_elapsed_override: Option<Duration>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     expire_at_invocation: Option<u32>,
 }
 
 impl RunClock {
-    pub(super) fn new(started: Instant) -> Self {
+    pub fn new(started: Instant) -> Self {
         Self {
             started,
             consent_waiting: Duration::ZERO,
             active_limit: DEFAULT_ACTIVE_LIMIT,
             wall_limit: DEFAULT_WALL_LIMIT,
             consent_wait_limit: DEFAULT_CONSENT_WAIT_LIMIT,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             active_elapsed_override: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             expire_at_invocation: None,
         }
     }
     /// Apply the task's saved time limits, so the stored `limits` are the one
     /// source of truth for when a run ends (AC-0562, AC-0710).
-    pub(super) fn apply_saved_limits(&mut self, limits: &InvestigationLimits) {
+    pub fn apply_saved_limits(&mut self, limits: &InvestigationLimits) {
         self.active_limit = Duration::from_secs(limits.active_seconds);
         self.wall_limit = Duration::from_secs(limits.wall_seconds);
         self.consent_wait_limit = Duration::from_secs(limits.consent_wait_seconds);
     }
     /// The longest one consent wait may last: the saved consent budget,
     /// never past the wall-clock cap.
-    pub(super) fn consent_wait_remaining(&self) -> Duration {
+    pub fn consent_wait_remaining(&self) -> Duration {
         self.remaining_wall().min(self.consent_wait_limit)
     }
-    #[cfg(test)]
-    pub(super) fn frozen_active(started: Instant) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn frozen_active(started: Instant) -> Self {
         Self {
             started,
             consent_waiting: Duration::ZERO,
@@ -286,24 +286,24 @@ impl RunClock {
             expire_at_invocation: None,
         }
     }
-    #[cfg(test)]
-    pub(super) fn expiring_at_invocation(invocation: u32) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expiring_at_invocation(invocation: u32) -> Self {
         let mut clock = Self::frozen_active(Instant::now());
         clock.expire_at_invocation = Some(invocation);
         clock
     }
-    #[cfg(test)]
-    pub(super) fn invocation_committed(&mut self, invocation: u32) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn invocation_committed(&mut self, invocation: u32) {
         if self.expire_at_invocation == Some(invocation) {
             self.active_elapsed_override = Some(self.active_limit + Duration::from_millis(1));
         }
     }
     fn active_milliseconds_at(&self, now: Instant) -> u64 {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let elapsed = self
             .active_elapsed_override
             .unwrap_or_else(|| now.saturating_duration_since(self.started));
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let elapsed = now.saturating_duration_since(self.started);
         elapsed
             .saturating_sub(self.consent_waiting)
@@ -311,20 +311,20 @@ impl RunClock {
             .try_into()
             .unwrap_or(u64::MAX)
     }
-    pub(super) fn active_milliseconds(&self) -> u64 {
+    pub fn active_milliseconds(&self) -> u64 {
         self.active_milliseconds_at(Instant::now())
     }
-    pub(super) fn record_wait(&mut self, elapsed: Duration) {
+    pub fn record_wait(&mut self, elapsed: Duration) {
         self.consent_waiting = self.consent_waiting.saturating_add(elapsed);
     }
     fn remaining_wall_at(&self, now: Instant) -> Duration {
         self.wall_limit
             .saturating_sub(now.saturating_duration_since(self.started))
     }
-    pub(super) fn remaining_wall(&self) -> Duration {
+    pub fn remaining_wall(&self) -> Duration {
         self.remaining_wall_at(Instant::now())
     }
-    pub(super) fn deadline(&self) -> Result<Instant, HostError> {
+    pub fn deadline(&self) -> Result<Instant, HostError> {
         let remaining = self.remaining_deadline_at(Instant::now())?;
         Instant::now()
             .checked_add(remaining)

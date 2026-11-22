@@ -29,7 +29,7 @@ const MAX_KEY_BYTES: usize = 512;
 /// A provider whose key the app can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum ProviderId {
+pub enum ProviderId {
     Anthropic,
     /// Hosted OpenAI, the GPT side of the frontier track (#1709).
     #[serde(rename = "openai")]
@@ -37,17 +37,17 @@ pub(crate) enum ProviderId {
 }
 
 impl ProviderId {
-    pub(crate) const ALL: &'static [Self] = &[Self::Anthropic, Self::OpenAi];
+    pub const ALL: &'static [Self] = &[Self::Anthropic, Self::OpenAi];
 
     /// Stable id: the account name in the credential store and the wire id.
-    pub(crate) fn id(self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic",
             Self::OpenAi => "OpenAI",
@@ -55,14 +55,14 @@ impl ProviderId {
     }
 
     /// The environment variable that overrides the stored key.
-    pub(crate) fn env_var(self) -> &'static str {
+    pub fn env_var(self) -> &'static str {
         match self {
             Self::Anthropic => "ANTHROPIC_API_KEY",
             Self::OpenAi => "OPENAI_API_KEY",
         }
     }
 
-    pub(crate) fn parse(id: &str) -> Result<Self, String> {
+    pub fn parse(id: &str) -> Result<Self, String> {
         Self::ALL
             .iter()
             .copied()
@@ -74,7 +74,7 @@ impl ProviderId {
 /// Where the key in use comes from. Never the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum KeySource {
+pub enum KeySource {
     /// The environment variable is set; it overrides any stored key.
     Environment,
     /// A key saved in the OS credential store.
@@ -85,7 +85,7 @@ pub(crate) enum KeySource {
 
 /// What the Settings surface shows for one provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct KeyStatus {
+pub struct KeyStatus {
     pub provider: &'static str,
     pub label: &'static str,
     pub env_var: &'static str,
@@ -101,7 +101,7 @@ pub(crate) struct KeyStatus {
 
 /// The credential store, reduced to what this module needs. Errors are
 /// messages for the user and must never contain a key.
-pub(crate) trait SecretStore: Send + Sync {
+pub trait SecretStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>, String>;
     fn set(&self, account: &str, secret: &str) -> Result<(), String>;
     fn delete(&self, account: &str) -> Result<(), String>;
@@ -109,7 +109,7 @@ pub(crate) trait SecretStore: Send + Sync {
 
 /// The login Keychain on macOS and the Credential Manager on Windows. Other
 /// platforms have no store wired; only the environment variable works there.
-pub(crate) struct OsCredentialStore;
+pub struct OsCredentialStore;
 
 #[cfg(any(target_os = "macos", windows))]
 impl OsCredentialStore {
@@ -173,11 +173,11 @@ impl SecretStore for OsCredentialStore {
 }
 
 /// An in-memory store for tests. Never used in a shipped path.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
-pub(crate) struct MemoryStore(Mutex<std::collections::BTreeMap<String, String>>);
+pub struct MemoryStore(Mutex<std::collections::BTreeMap<String, String>>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SecretStore for MemoryStore {
     fn get(&self, account: &str) -> Result<Option<String>, String> {
         Ok(self.0.lock().unwrap().get(account).cloned())
@@ -198,7 +198,7 @@ impl SecretStore for MemoryStore {
 /// process environment.
 type Env = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-pub(crate) struct ProviderCredentials {
+pub struct ProviderCredentials {
     store: Box<dyn SecretStore>,
     env: Env,
     /// Serializes save and remove so a status read between them is coherent.
@@ -206,7 +206,7 @@ pub(crate) struct ProviderCredentials {
 }
 
 impl ProviderCredentials {
-    pub(crate) fn new(store: Box<dyn SecretStore>, env: Env) -> Self {
+    pub fn new(store: Box<dyn SecretStore>, env: Env) -> Self {
         Self {
             store,
             env,
@@ -215,7 +215,7 @@ impl ProviderCredentials {
     }
 
     /// The OS credential store and the process environment.
-    pub(crate) fn system() -> Self {
+    pub fn system() -> Self {
         Self::new(
             Box::new(OsCredentialStore),
             Box::new(|name| std::env::var(name).ok()),
@@ -230,14 +230,14 @@ impl ProviderCredentials {
 
     /// The key a cloud call uses now: the environment variable if set, else
     /// the stored key, else none. Only provider construction may call this.
-    pub(crate) fn resolve(&self, provider: ProviderId) -> Result<Option<String>, String> {
+    pub fn resolve(&self, provider: ProviderId) -> Result<Option<String>, String> {
         if let Some(key) = self.env_key(provider) {
             return Ok(Some(key));
         }
         self.store.get(provider.id())
     }
 
-    pub(crate) fn status(&self, provider: ProviderId) -> KeyStatus {
+    pub fn status(&self, provider: ProviderId) -> KeyStatus {
         let (stored, store_error) = match self.store.get(provider.id()) {
             Ok(secret) => (secret.is_some(), None),
             Err(error) => (false, Some(error)),
@@ -259,7 +259,7 @@ impl ProviderCredentials {
         }
     }
 
-    pub(crate) fn statuses(&self) -> Vec<KeyStatus> {
+    pub fn statuses(&self) -> Vec<KeyStatus> {
         ProviderId::ALL
             .iter()
             .map(|provider| self.status(*provider))
@@ -269,7 +269,7 @@ impl ProviderCredentials {
     /// Save or replace the stored key. The key is trimmed; it must be one
     /// line of printable ASCII with no spaces, which every supported
     /// provider's keys are.
-    pub(crate) fn save(&self, provider: ProviderId, key: &str) -> Result<KeyStatus, String> {
+    pub fn save(&self, provider: ProviderId, key: &str) -> Result<KeyStatus, String> {
         let key = key.trim();
         if key.is_empty() {
             return Err("Enter a key.".into());
@@ -286,7 +286,7 @@ impl ProviderCredentials {
     }
 
     /// Remove the stored key. Removing an absent key succeeds.
-    pub(crate) fn remove(&self, provider: ProviderId) -> Result<KeyStatus, String> {
+    pub fn remove(&self, provider: ProviderId) -> Result<KeyStatus, String> {
         let _guard = self.write.lock().map_err(|_| "credential store busy")?;
         self.store.delete(provider.id())?;
         Ok(self.status(provider))
@@ -294,13 +294,13 @@ impl ProviderCredentials {
 }
 
 /// The process-wide credentials: OS store plus process environment.
-pub(crate) fn system() -> &'static ProviderCredentials {
+pub fn system() -> &'static ProviderCredentials {
     static SYSTEM: OnceLock<ProviderCredentials> = OnceLock::new();
     SYSTEM.get_or_init(ProviderCredentials::system)
 }
 
-#[cfg(test)]
-pub(crate) fn for_test(env_key: Option<&str>) -> ProviderCredentials {
+#[cfg(any(test, feature = "test-support"))]
+pub fn for_test(env_key: Option<&str>) -> ProviderCredentials {
     let env_key = env_key.map(str::to_owned);
     ProviderCredentials::new(
         Box::new(MemoryStore::default()),

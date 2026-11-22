@@ -55,13 +55,7 @@ mcp-wire = { path = "../crates/mcp-wire" }
 mcp-local = { path = "../crates/mcp-local" }
 tokio = { version = "1.53.3", features = ["sync"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# Provider keys live in the login Keychain (#1763, ADR-0057).
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
-
 [target.'cfg(windows)'.dependencies]
-# Provider keys live in the Windows Credential Manager (#1763, ADR-0057).
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 # Handle-based filesystem capability checks for durable execution storage.
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
