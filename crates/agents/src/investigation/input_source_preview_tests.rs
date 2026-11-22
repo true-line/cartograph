@@ -1854,3 +1854,110 @@ mod bounded_tests;
 
 #[path = "visible_schema_tests.rs"]
 mod visible_schema_tests;
+
+// AC-1413 / #679: a firewall-refused acquired read stays in the ledger, is
+// withheld from the payload, and seals as a distinct `firewall_refused` source.
+#[test]
+fn withheld_refused_read_reaches_no_payload_and_seals_distinctly() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let role = SpecialistId::DomainAnalystV10;
+    let text = "refused-private-text-7f3a";
+    let (mut fixture, raw, target, prototype) = source_fixture(role, text);
+    let mut evidence = vec![];
+    acquire_source(&mut fixture, &target, &prototype, &mut evidence, text);
+    let id = evidence[0].id.clone();
+    let prepare_with = |evidence: &[AgentEvidence], withheld: &BTreeSet<String>| {
+        InvestigationInput::prepare_v9_withholding_with_policy(
+            &fixture.request.question,
+            role,
+            fixture.ledger.clone(),
+            &[&raw],
+            evidence,
+            &[],
+            &usage(CompletionCallMode::Choice),
+            &fixture.basis,
+            &fixture.request,
+            &fixture.metadata,
+            &[],
+            CompletionCallMode::Choice,
+            0,
+            None,
+            policy,
+            withheld,
+        )
+    };
+    let withheld = BTreeSet::from([id.clone()]);
+    let input = prepare_with(&[], &withheld).unwrap();
+    let payload = &input.action("current:1".into()).unwrap().payload;
+    assert!(payload.spans.is_empty());
+    assert!(!payload.prompt.contains(text));
+    let prompt: Value = serde_json::from_str(&payload.prompt).unwrap();
+    assert_eq!(prompt["withheld_sources"].as_array().unwrap().len(), 1);
+    assert_eq!(prompt["withheld_sources"][0]["outcome"], "firewall_refused");
+    assert_eq!(prompt["withheld_sources"][0]["handle"]["citation_id"], id);
+    assert!(
+        prompt["citations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|handle| handle["citation_id"] != id)
+    );
+    let disclosure = input
+        .seal_disclosure_with_policy(&prepare(&input), policy)
+        .unwrap()
+        .unwrap();
+    let source = disclosure
+        .sources
+        .iter()
+        .find(|source| source.citation_id == id)
+        .unwrap();
+    assert_eq!(
+        source.representation,
+        DisclosureRepresentation::FirewallRefused
+    );
+    assert!(source.disclosed_text_hash.is_none() && !source.redacted);
+    // A later read can still be measured on the withholding input.
+    input
+        .measure_unread_source_v9_with_policy(
+            &target,
+            &profile(),
+            &CompletionLimits::default(),
+            "next:2",
+            policy,
+        )
+        .unwrap();
+
+    // Only an acquired source citation without supplied text can be withheld.
+    assert!(prepare_with(&[], &BTreeSet::new()).is_err());
+    assert!(prepare_with(&evidence, &withheld).is_err());
+    assert!(prepare_with(&[], &BTreeSet::from(["evidence-9".to_string()])).is_err());
+
+    // No withholding keeps the legacy prompt identity.
+    let legacy = build_source(&fixture, &raw, &evidence, role, CompletionCallMode::Choice);
+    let empty = prepare_with(&evidence, &BTreeSet::new()).unwrap();
+    let legacy_payload = legacy.action("current:1".into()).unwrap().payload;
+    assert_eq!(
+        legacy_payload,
+        empty.action("current:1".into()).unwrap().payload
+    );
+    assert!(!legacy_payload.prompt.contains("withheld_sources"));
+}
+
+#[test]
+fn withheld_sources_parser_accepts_only_closed_unique_entries() {
+    let entry = |id: &str| json!({"handle": {"citation_id": id}, "outcome": "firewall_refused"});
+    assert!(withheld_source_ids(&json!({})).unwrap().is_empty());
+    assert_eq!(
+        withheld_source_ids(&json!({"withheld_sources": [entry("a"), entry("b")]})).unwrap(),
+        BTreeSet::from(["a", "b"])
+    );
+    for bad in [
+        json!({"withheld_sources": []}),
+        json!({"withheld_sources": [entry("a"), entry("a")]}),
+        json!({"withheld_sources": [{"handle": {"citation_id": "a"}, "outcome": "redacted"}]}),
+        json!({"withheld_sources": [{"handle": {"citation_id": "a"}, "outcome": "firewall_refused", "text": "x"}]}),
+        json!({"withheld_sources": [{"outcome": "firewall_refused", "handle": {}}]}),
+    ] {
+        assert!(withheld_source_ids(&bad).is_err(), "{bad}");
+    }
+}
