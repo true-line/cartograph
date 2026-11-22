@@ -28,10 +28,6 @@ pub(super) struct TaskPlan {
 
 fn request(node: &Node, candidate: bool) -> Result<EvidenceRequest, String> {
     let provenance = spec::provenance(&node.props, &node.id);
-    let name = node.props["name"]
-        .as_str()
-        .or_else(|| node.props["path"].as_str())
-        .unwrap_or(&node.id);
     Ok(EvidenceRequest {
         fact: FactKey::from_node(node),
         fact_digest: node_digest(node).map_err(|_| "Task fact is invalid.")?,
@@ -39,7 +35,11 @@ fn request(node: &Node, candidate: bool) -> Result<EvidenceRequest, String> {
         candidate: candidate.then(|| AgentCandidate {
             node_id: node.id.clone(),
             label: node.label.clone(),
-            summary: format!("{}: {name}", node.label),
+            summary: agents::reconciliation::candidate_summary_v1(
+                &node.label,
+                &node.props,
+                &node.id,
+            ),
             evidence_ids: Vec::new(),
         }),
     })
