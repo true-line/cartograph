@@ -251,8 +251,15 @@ fn compile(
     )?;
     // An overview section is read up to its per-capability detail (#1991);
     // a summary section reads the sections it summarises (#2319).
-    let text = spec::composition_source(&artifact.content, &address.section)
+    let mut text = spec::composition_source(&artifact.content, &address.section)
         .ok_or("section_not_compiled")?;
+    // A system overview also reads the rules its capabilities enforce, so
+    // what it says a capability does can cite them (#2375).
+    if address.scope == spec::SYSTEM_SCOPE
+        && let Some(rules) = spec::rule_excerpt(&artifact.content, &address.section)
+    {
+        text.push_str(&rules);
+    }
     Ok(Compiled {
         address,
         title,

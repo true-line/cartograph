@@ -78,7 +78,8 @@ const GUIDANCE: &[(&str, &str)] = &[
         "State the system's purpose and scope from the sections it summarises: what the \
          system is for, who uses it, its main capability areas and what lies outside it. \
          Write a short overview, not a capability-by-capability listing, and never name \
-         a route, callable or file.",
+         a route, callable or file. Say what an area does only as its cited capabilities \
+         and rules show it.",
     ),
     (
         "1.2",
@@ -92,9 +93,11 @@ const GUIDANCE: &[(&str, &str)] = &[
          area whose name is weak or misleading. Otherwise group the capabilities into \
          areas yourself. For each area state its purpose, who uses it (an end user, an \
          API client, an administrator, a developer, an external provider) and the outcome \
-         it delivers, including notable conditions and limits. A route is evidence, not \
-         content: this section cites capabilities, which show no route, so never state \
-         or enumerate routes, URL paths, methods or versions.",
+         it delivers, including notable conditions and limits. Ground each area in the \
+         facts behind its capabilities: the Endpoint facts each capability groups and \
+         the rules listed under the section. State an operation, route or method only \
+         by citing its Endpoint fact, and a condition or limit only by citing its rule; \
+         do not enumerate routes.",
     ),
     (
         "1.4",

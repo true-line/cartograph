@@ -61,10 +61,17 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
         .find("<guidance>\nThis section lists rules as code")
         .unwrap();
     assert!(guide < prompt.find("<section>").unwrap());
+    // 1.3 is grounded in the endpoints and rules behind its capabilities
+    // (#2375).
+    let overview = guidance("1.3").unwrap();
+    assert!(overview.contains("only by citing its Endpoint fact"));
     assert!(
-        guidance("1.3")
+        overview.contains("by citing its rule") && overview.contains("do not enumerate routes")
+    );
+    assert!(
+        guidance("1.1")
             .unwrap()
-            .contains("never state or enumerate routes")
+            .contains("as its cited capabilities and rules show it")
     );
     // A stated route rests on a cited fact that shows it (#2328).
     assert!(SYSTEM.contains("a route you state must be one a fact you cite shows"));
