@@ -1361,7 +1361,7 @@ jobs:
 // after capture changes nothing.
 #[test]
 fn captured_schedule_files_are_read_instead_of_the_checkout() {
-    let crontab = "*/5 * * * * python /code/cron.py -j stats\n@daily python jobs/cleanup.py\n";
+    let crontab = "*/5 * * * * python /code/cron.py -j stats\n@daily python jobs/cleanup.py\n0 4 * * * /code/run.sh\n";
     let cronjob = "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: t\nspec:\n  schedule: \"0 * * * *\"\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n            - name: t\n              command: [\"python\", \"/code/cron.py\"]\n";
     let dir = tempfile::tempdir().unwrap();
     let write = |files: &[(&str, &str)]| {
@@ -1377,6 +1377,7 @@ fn captured_schedule_files_are_read_instead_of_the_checkout() {
         ("k8s/cron.yaml", cronjob),
         ("cron.py", ""),
         ("jobs/cleanup.py", ""),
+        ("run.sh", "#!/bin/sh\n"),
         ("README.md", "notes\n"),
     ]);
     let id = SourceId {
@@ -1395,7 +1396,8 @@ fn captured_schedule_files_are_read_instead_of_the_checkout() {
             "cron.py",
             "deploy/crontab",
             "jobs/cleanup.py",
-            "k8s/cron.yaml"
+            "k8s/cron.yaml",
+            "run.sh"
         ]
     );
     let captured: BTreeMap<String, Vec<u8>> = paths
@@ -1410,6 +1412,8 @@ fn captured_schedule_files_are_read_instead_of_the_checkout() {
         ("etc/cron.d/late", "0 2 * * * root python cron.py\n"),
     ]);
     std::fs::remove_file(dir.path().join("jobs/cleanup.py")).unwrap();
+    // A target no selector names: its presence is the capture's.
+    std::fs::remove_file(dir.path().join("run.sh")).unwrap();
     let read = |rel: &str| {
         captured
             .get(rel)

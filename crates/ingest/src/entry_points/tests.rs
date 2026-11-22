@@ -1225,7 +1225,8 @@ fn captured_start_files_are_read_instead_of_the_checkout() {
         ("events/__init__.py", ""),
         ("events/event_source.py", EVENT_SOURCE),
         ("event_listener.py", LISTENER),
-        ("Procfile", "worker: python worker.py\n"),
+        ("Procfile", "worker: python worker.py\nserve: ./bin/serve\n"),
+        ("bin/serve", "#!/bin/sh\n"),
         ("worker.py", "print('x')\n"),
         (
             "tools/package.json",
@@ -1246,6 +1247,7 @@ fn captured_start_files_are_read_instead_of_the_checkout() {
     let paths = entry_point_paths(dir.path()).unwrap();
     assert!(paths.contains(&"Procfile".to_string()));
     assert!(paths.contains(&"tools/package.json".to_string()));
+    assert!(paths.contains(&"bin/serve".to_string()), "{paths:?}");
     assert!(!paths.contains(&"README.md".to_string()));
     let captured: BTreeMap<String, Vec<u8>> = paths
         .iter()
@@ -1260,6 +1262,8 @@ fn captured_start_files_are_read_instead_of_the_checkout() {
         ("tools/bin/cli.js", "console.log('no shebang')\n"),
     ]);
     std::fs::remove_file(dir.path().join("events/event_source.py")).unwrap();
+    // A target no selector names: its presence is the capture's.
+    std::fs::remove_file(dir.path().join("bin/serve")).unwrap();
     let read = |rel: &str| {
         captured
             .get(rel)

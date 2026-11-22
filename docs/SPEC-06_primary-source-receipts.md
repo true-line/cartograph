@@ -339,13 +339,14 @@ checkout, and environment facts carry no receipt.
 ## Captured schedule and entry-point reads (AC-1061, #385)
 
 The schedule reader's selection (`schedules::is_schedule_file`) and the
-entry-point reader's (`entry_points::is_entry_point_file`) join the lanes'
+entry-point reader's (`entry_points::is_entry_point_file`), with every file
+their facts over the checkout cite, join the lanes'
 capture for every layer selection with the environment selection when the
 whole set fits (otherwise the lanes are retained without them), and the capture
 records whether both were listed and retained (`starts_captured`). When they
 were, both readers read only the retained bytes, including the modules a job
-or start follows, and the checkout is listed only for its directories and
-other files; otherwise, and with no capture, they read the checkout. Their
+or start follows, and list only the capture's own paths, so whether a file a
+declaration names exists is decided by the snapshot; otherwise, and with no capture, they read the checkout. Their
 facts carry no receipt.
 
 ## Directory-built lane facts (AC-1037, #385)
