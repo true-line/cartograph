@@ -1,8 +1,9 @@
 //! Cartograph desktop shell (M0): boots the webview, owns the graph store and
 //! the durable job spine, and exposes the first Tauri commands.
+//!
+//! The application is this library; the `app` executable
+//! (`src/bin/app.rs`) only calls [`run`] (#1227, ADR-0088).
 
-// Prevents an extra console window on Windows in release builds.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // A one-group test build (build.rs, #1924) leaves the other group's tests out,
 // so helpers only they use are unused there; the full build still lints them.
 #![cfg_attr(
@@ -8630,7 +8631,10 @@ fn open_app_state(data_dir: &std::path::Path) -> Result<AppState, Box<dyn std::e
     })
 }
 
-fn main() {
+/// Start the desktop application: build the Tauri app, manage its state
+/// and run the event loop until the last window closes. The `app`
+/// executable calls this and nothing else (#1227).
+pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             install_help_menu(app)?;

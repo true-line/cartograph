@@ -810,7 +810,7 @@ jobs:
           SHARDS: ${{ matrix.shards }}
           SHARD_TIMES_FILE: ${{ runner.temp }}/app-test-times-${{ matrix.group }}-${{ matrix.shard }}.json
           SHARD_LIST_FILE: ${{ runner.temp }}/app-test-list-${{ matrix.group }}-${{ matrix.shard }}.json
-        run: node scripts/rust-test-shard.mjs "$SHARD/$SHARDS" --group "$GROUP" -- -p app --bin app
+        run: node scripts/rust-test-shard.mjs "$SHARD/$SHARDS" --group "$GROUP" -- -p app --lib
 
       - name: Keep the shard's test times
         if: ${{ !cancelled() }}
@@ -1004,7 +1004,7 @@ jobs:
         if: steps.restore.outputs.cache-hit != 'true'
         env:
           APP_TEST_GROUP: ${{ matrix.group }}
-        run: cargo test -p app --bin app --no-run
+        run: cargo test -p app --lib --no-run
 
       # One entry an hour, so frequent merges do not crowd the other lanes'
       # caches out: once this hour's entry exists, later merges skip the build.

@@ -14,7 +14,7 @@
 // the shard instead of passing silently.
 //
 // Usage: rust-test-shard.mjs <index>/<count> [--group <name>] -- <cargo test target arguments>
-//   e.g. rust-test-shard.mjs 2/4 --group core -- -p app --bin app
+//   e.g. rust-test-shard.mjs 2/4 --group core -- -p app --lib
 //
 // With --group, the app binary is built with APP_TEST_GROUP=<name>, which
 // leaves the other group's test modules out (src-tauri/build.rs), and the

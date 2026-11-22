@@ -164,7 +164,7 @@ jobs:
           set -o pipefail
           failed=0
           for shard in 1 2 3 4; do
-            node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --bin app 2>&1 | tee -a "$RUNNER_TEMP/app.log" || failed=1
+            node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --lib 2>&1 | tee -a "$RUNNER_TEMP/app.log" || failed=1
           done
           exit "$failed"
 
@@ -190,7 +190,7 @@ jobs:
           CARTOGRAPH_DETERMINISM_COMMIT: ${{ env.DETERMINISM_COMMIT }}
         run: |
           set -o pipefail
-          cargo test --locked -p app --bin app -- --ignored --exact \
+          cargo test --locked -p app --lib -- --ignored --exact \
             registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash --nocapture \
             2>&1 | tee "$RUNNER_TEMP/determinism.log"
 
