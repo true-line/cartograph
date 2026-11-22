@@ -1218,15 +1218,24 @@ impl Emit<'_> {
 
 /// Join every file's Flask-Admin facts into endpoints and Gaps. Runs before
 /// the router join consumes the receiver definitions.
-pub(crate) fn resolve(out: &mut Extraction, repo: &str, root: &Path, commit: &str) {
+pub(crate) fn resolve(
+    out: &mut Extraction,
+    repo: &str,
+    root: &Path,
+    commit: &str,
+    max_lock_bytes: u64,
+) {
     let facts = std::mem::take(&mut out.flask_admin);
     if facts.sites.is_empty() && facts.views.is_empty() {
         return;
     }
-    let pins = library::pins(root, repo, commit);
+    let pins = library::pins(root, repo, commit, max_lock_bytes);
     // Conditions of the login proof that do not depend on the view.
     let patched = |name: &str| out.patched_guards.iter().any(|patched| patched == name);
-    let global = match (&pins, &library::login_pins(root, repo, commit)) {
+    let global = match (
+        &pins,
+        &library::login_pins(root, repo, commit, max_lock_bytes),
+    ) {
         _ if patched(auth_guards::CURRENT_USER) => Err("flask_login_current_user_replaced".into()),
         _ if patched(auth_guards::ABORT) || patched(auth_guards::RESPONSE) => {
             Err("flask_response_helper_replaced".into())

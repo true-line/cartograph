@@ -21,10 +21,10 @@ use super::{
 use std::path::{Component, Path};
 use tree_sitter::Parser;
 
-/// Revision files read at most; more leaves the replay a Gap.
-const MAX_REVISIONS: usize = 4096;
-/// Bytes read at most from `alembic.ini` or one revision file.
-const MAX_FILE_BYTES: u64 = 1 << 20;
+/// Revision files read at most by default; more leaves the replay a Gap.
+pub(crate) const MAX_REVISIONS: usize = 4096;
+/// Bytes read at most by default from `alembic.ini` or one revision file.
+pub(crate) const MAX_FILE_BYTES: u64 = 1 << 20;
 
 /// Alembic operations that never change which tables or columns exist.
 const SHAPELESS_OPS: &[&str] = &[
@@ -119,6 +119,8 @@ pub(crate) fn extract(
     root: &Path,
     id: &SourceId<'_>,
     out: &mut Extraction,
+    max_revisions: usize,
+    max_file_bytes: u64,
 ) -> Result<(), ExtractError> {
     let ini = root.join("alembic.ini");
     let Ok(meta) = std::fs::symlink_metadata(&ini) else {
@@ -136,7 +138,7 @@ pub(crate) fn extract(
             reason: reason.into(),
             evidence: whole("alembic.ini"),
         };
-        if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+        if !meta.is_file() || meta.len() > max_file_bytes {
             return Err(inconclusive(
                 "alembic.ini is not a regular file within the size limit",
             ));
@@ -147,8 +149,8 @@ pub(crate) fn extract(
         .map_err(|_| inconclusive("alembic.ini is not UTF-8"))?;
         let location = script_location(&text)
             .ok_or_else(|| inconclusive("alembic.ini names no literal relative script_location"))?;
-        let revisions =
-            read_revisions(root, id, &location).map_err(|reason| inconclusive(&reason))?;
+        let revisions = read_revisions(root, id, &location, max_revisions, max_file_bytes)
+            .map_err(|reason| inconclusive(&reason))?;
         let (order, ancestors) = order(revisions, id)?;
         let at = |revision: &Revision| whole(&revision.path);
         let mut schema = Schema::default();
@@ -222,7 +224,13 @@ fn script_location(ini: &str) -> Option<String> {
 
 /// Every `<location>/versions/*.py`, parsed, with its literal `revision` and
 /// `down_revision`. Symlinks anywhere on the way are refused.
-fn read_revisions(root: &Path, id: &SourceId<'_>, location: &str) -> Result<Vec<Revision>, String> {
+fn read_revisions(
+    root: &Path,
+    id: &SourceId<'_>,
+    location: &str,
+    max_revisions: usize,
+    max_file_bytes: u64,
+) -> Result<Vec<Revision>, String> {
     let mut dir = root.to_path_buf();
     for segment in Path::new(location).join("versions").components() {
         dir.push(segment);
@@ -249,15 +257,15 @@ fn read_revisions(root: &Path, id: &SourceId<'_>, location: &str) -> Result<Vec<
             .map_err(|_| format!("{location}/versions/{name} is unreadable"))?
             .is_symlink()
             || !meta.is_file()
-            || meta.len() > MAX_FILE_BYTES
+            || meta.len() > max_file_bytes
         {
             return Err(format!(
                 "{location}/versions/{name} is not a regular file within the size limit"
             ));
         }
         names.push(name);
-        if names.len() > MAX_REVISIONS {
-            return Err(format!("more than {MAX_REVISIONS} revision files"));
+        if names.len() > max_revisions {
+            return Err(format!("more than {max_revisions} revision files"));
         }
     }
     names.sort();

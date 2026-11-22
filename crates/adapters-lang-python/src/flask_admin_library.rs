@@ -51,8 +51,9 @@ pub(crate) fn handler(model: bool, method: &str) -> String {
 /// placeholder closure classifies these as external.
 pub(crate) const LIBRARY_SYMBOLS: &str = "sym:pypi/flask-admin@";
 
-/// Lockfiles larger than this are not read.
-const MAX_LOCK_BYTES: u64 = 8 << 20;
+/// Lockfiles larger than this are not read, unless a project raises the
+/// bound (AC-1805).
+pub(crate) const MAX_LOCK_BYTES: u64 = 8 << 20;
 
 /// What the repository's pins allow.
 #[derive(Debug, Clone, Default)]
@@ -67,24 +68,36 @@ pub(crate) enum Pins {
 }
 
 /// Read every root lockfile's `flask-admin` pins.
-pub(crate) fn pins(root: &Path, repo: &str, commit: &str) -> Pins {
-    package_pins(root, repo, commit, "flask-admin", |version| {
-        RELEASES.contains(&version)
-    })
+pub(crate) fn pins(root: &Path, repo: &str, commit: &str, max_lock_bytes: u64) -> Pins {
+    package_pins(
+        root,
+        repo,
+        commit,
+        "flask-admin",
+        max_lock_bytes,
+        |version| RELEASES.contains(&version),
+    )
 }
 
 /// Read every root lockfile's `flask-login` pins: 0.3 made
 /// `is_authenticated` a property, false for `AnonymousUserMixin`, and it
 /// still is through 0.6.
-pub(crate) fn login_pins(root: &Path, repo: &str, commit: &str) -> Pins {
-    package_pins(root, repo, commit, "flask-login", |version| {
-        let mut parts = version.split('.');
-        parts.next() == Some("0")
-            && parts
-                .next()
-                .is_some_and(|minor| matches!(minor, "3" | "4" | "5" | "6"))
-            && parts.all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-    })
+pub(crate) fn login_pins(root: &Path, repo: &str, commit: &str, max_lock_bytes: u64) -> Pins {
+    package_pins(
+        root,
+        repo,
+        commit,
+        "flask-login",
+        max_lock_bytes,
+        |version| {
+            let mut parts = version.split('.');
+            parts.next() == Some("0")
+                && parts
+                    .next()
+                    .is_some_and(|minor| matches!(minor, "3" | "4" | "5" | "6"))
+                && parts.all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        },
+    )
 }
 
 /// Every root lockfile's exact pins of `package`, each a release `checked`
@@ -94,6 +107,7 @@ fn package_pins(
     repo: &str,
     commit: &str,
     package: &str,
+    max_lock_bytes: u64,
     checked: impl Fn(&str) -> bool,
 ) -> Pins {
     let prefix = package.replace('-', "_");
@@ -116,7 +130,7 @@ fn package_pins(
         // not UTF-8) may pin anything, so it refuses rather than being skipped.
         let text = std::fs::symlink_metadata(&path)
             .ok()
-            .filter(|meta| meta.is_file() && meta.len() <= MAX_LOCK_BYTES)
+            .filter(|meta| meta.is_file() && meta.len() <= max_lock_bytes)
             .and_then(|_| std::fs::read_to_string(&path).ok());
         let Some(text) = text else {
             return Pins::Unchecked(format!("{prefix}_lockfile_not_inspected:{name}"));
@@ -318,6 +332,29 @@ fn requirement_pins(text: &str, package: &str) -> Vec<(Option<String>, usize, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-1805 (#1653): the lockfile bound is the project's. A lockfile past
+    // it may pin anything, so the pins are unchecked; under the default the
+    // same file is read.
+    #[test]
+    fn the_lockfile_bound_decides_which_lockfiles_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = "flask-admin==1.5.8\n";
+        std::fs::write(dir.path().join("requirements.txt"), requirements).unwrap();
+        assert!(matches!(
+            pins(dir.path(), "local/app", "workdir", MAX_LOCK_BYTES),
+            Pins::Checked(_)
+        ));
+        let tight = requirements.len() as u64 - 1;
+        assert!(matches!(
+            pins(dir.path(), "local/app", "workdir", tight),
+            Pins::Unchecked(reason) if reason == "flask_admin_lockfile_not_inspected:requirements.txt"
+        ));
+        assert!(matches!(
+            login_pins(dir.path(), "local/app", "workdir", tight),
+            Pins::Unchecked(reason) if reason == "flask_login_lockfile_not_inspected:requirements.txt"
+        ));
+    }
 
     #[test]
     fn package_tables_and_requirements_yield_exact_pins_only() {

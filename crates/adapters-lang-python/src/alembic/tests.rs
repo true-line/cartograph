@@ -573,6 +573,82 @@ fn alembic_replay_fails_closed() {
     );
 }
 
+// AC-1805 (#1653): the project's Alembic bounds decide what is replayed.
+// More revision files than allowed, or a file past the size bound, leaves the
+// replay a gap naming why; the defaults replay the same history, and bounds
+// past the hard ceilings are refused.
+#[test]
+fn alembic_replay_follows_the_projects_bounds() {
+    use super::super::{IncrementalCache, PythonLimits, extract_dir_incremental_within};
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = vec![
+        (
+            "alembic.ini".to_string(),
+            "[alembic]\nscript_location = migrations\n".to_string(),
+        ),
+        ("app/models.py".into(), MODELS.into()),
+    ];
+    files.extend(history());
+    for (path, body) in &files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let run = |limits| {
+        let (out, _) = extract_dir_incremental_within(
+            dir.path(),
+            &SourceId {
+                repo: REPO,
+                commit: "workdir",
+            },
+            &mut IncrementalCache::default(),
+            &mut |_| {},
+            limits,
+        )
+        .unwrap();
+        gaps(&out.nodes)
+    };
+    assert_eq!(run(PythonLimits::default()), Vec::<String>::new());
+    let few = PythonLimits::within(4, 1 << 20, 8 << 20).unwrap();
+    assert_eq!(
+        run(few),
+        ["Alembic history not replayed: more than 4 revision files"]
+    );
+    let small = PythonLimits::within(4096, 16, 8 << 20).unwrap();
+    assert_eq!(
+        run(small),
+        ["Alembic history not replayed: alembic.ini is not a regular file within the size limit"]
+    );
+    assert_eq!(
+        PythonLimits::within(4096, 1 << 20, 8 << 20),
+        Some(PythonLimits::default())
+    );
+    assert!(PythonLimits::within(0, 1 << 20, 8 << 20).is_none());
+    assert!(
+        PythonLimits::within(
+            PythonLimits::HARD_MAX_ALEMBIC_REVISIONS + 1,
+            1 << 20,
+            8 << 20
+        )
+        .is_none()
+    );
+    assert!(
+        PythonLimits::within(4096, PythonLimits::HARD_MAX_ALEMBIC_FILE_BYTES + 1, 8 << 20)
+            .is_none()
+    );
+    assert!(
+        PythonLimits::within(4096, 1 << 20, PythonLimits::HARD_MAX_LOCKFILE_BYTES + 1).is_none()
+    );
+    assert!(
+        PythonLimits::within(
+            PythonLimits::HARD_MAX_ALEMBIC_REVISIONS,
+            PythonLimits::HARD_MAX_ALEMBIC_FILE_BYTES,
+            PythonLimits::HARD_MAX_LOCKFILE_BYTES
+        )
+        .is_some()
+    );
+}
+
 // AC-0338: a symlink on the way to the revisions is refused. (T-0338)
 #[cfg(unix)]
 #[test]
