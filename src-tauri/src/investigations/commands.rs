@@ -187,6 +187,22 @@ pub(crate) async fn list_agents(
     .await
 }
 
+/// The roster's read-only pipeline agents (Flow Tracer, Contract Matcher,
+/// IaC Grapher) with the work each is part of in flight (#256, AC-1808).
+/// None is dispatchable.
+#[tauri::command]
+pub(crate) async fn list_pipeline_agents(
+    app: tauri::AppHandle,
+) -> Result<Vec<agents::pipeline_roster::PipelineAgentStatus>, String> {
+    crate::off_ui_thread(move || {
+        let state = app.state::<AppState>();
+        let agents = agents::pipeline_roster::pipeline_roster().map_err(|e| e.to_string())?;
+        let active = crate::pipeline_activity::active_by_pass(&state)?;
+        Ok(agents::pipeline_roster::pipeline_status(agents, active))
+    })
+    .await
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 pub(crate) enum InvestigationStartError {
