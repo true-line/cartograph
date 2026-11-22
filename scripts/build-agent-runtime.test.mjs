@@ -139,6 +139,8 @@ test('the repository pins exact Node and Pi versions and packages the sidecar on
   assert.ok(overlay.bundle.externalBin.includes('../target/agent-runtime/cartograph-agent'));
   const scripts = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).scripts;
   assert.match(scripts['package:macos:compile'], /node scripts\/build-agent-runtime\.mjs universal-apple-darwin/u);
+  // CI captures the printed path with $(...), so tools must not write to stdout.
+  assert.match(readFileSync(path.join(ROOT, 'scripts/build-agent-runtime.mjs'), 'utf8'), /stdio: \['ignore', 2, 2\]/u);
   const workflow = readFileSync(path.join(ROOT, '.github/workflows/package.yml'), 'utf8');
   assert.match(workflow, /node scripts\/build-agent-runtime\.mjs universal-apple-darwin\n[\s\S]*node scripts\/generate-notices\.mjs --with-agent-runtime/u, 'the sidecar is built before the shipped notices are generated');
   assert.match(workflow, /agent="\$app\/Contents\/MacOS\/cartograph-agent"[\s\S]*lipo "\$agent" -verify_arch arm64[\s\S]*lipo "\$agent" -verify_arch x86_64[\s\S]*codesign --verify --strict --verbose=2 "\$agent"[\s\S]*"type":"ready"/u);

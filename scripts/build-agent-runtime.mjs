@@ -78,7 +78,9 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
   const work = path.join(root, 'target', 'agent-runtime');
   const output = path.join(work, `cartograph-agent-${target}`);
   const temporary = `${output}.tmp`;
-  const options = { cwd: root, env, stdio: 'inherit' };
+  // Tool output goes to stderr: stdout carries only the built path, which
+  // callers capture with command substitution.
+  const options = { cwd: root, env, stdio: ['ignore', 2, 2] };
   mkdirSync(path.join(work, 'cache'), { recursive: true });
   rmSync(output, { force: true });
   rmSync(temporary, { force: true });

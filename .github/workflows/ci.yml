@@ -170,11 +170,21 @@ jobs:
       # lockfile, then built the way the app ships it (one Node single
       # executable from the pinned, checksum-verified Node) and the same
       # process tests run against that executable.
+      - name: Install locked agent runtime dependencies
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked agent runtime dependencies
+          executable: npm
+          arguments-json: '["ci", "--ignore-scripts", "--no-audit", "--no-fund"]'
+          working-directory: agent-runtime
+          timeout-seconds: '300'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
       - name: Agent runtime typecheck and tests
         working-directory: agent-runtime
         run: |
           set -euo pipefail
-          npm ci --ignore-scripts --no-audit --no-fund
           npm run typecheck
           npm test
 
