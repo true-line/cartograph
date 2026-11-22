@@ -14,9 +14,50 @@ fn available_specialists() -> Vec<SpecialistId> {
     offered_specialists()
 }
 
+#[cfg(test)]
+thread_local! {
+    static RETIRED_STARTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: run `f` on this thread with retired versions startable, so the
+/// tests of a retired version's own worker behaviour keep running (AC-1062).
+/// Production builds have no such switch; every other test sees the gate.
+#[cfg(test)]
+pub(crate) fn with_retired_starts<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RETIRED_STARTS.with(|flag| flag.set(self.0));
+        }
+    }
+    let _reset = Reset(RETIRED_STARTS.with(|flag| flag.replace(true)));
+    f()
+}
+
+/// Test-only: run `f` with the real gate, inside a retired-start scope.
+#[cfg(test)]
+pub(crate) fn without_retired_starts<T>(f: impl FnOnce() -> T) -> T {
+    let was = RETIRED_STARTS.with(|flag| flag.replace(false));
+    let result = f();
+    RETIRED_STARTS.with(|flag| flag.set(was));
+    result
+}
+
+#[cfg(test)]
+fn retired_starts_allowed() -> bool {
+    RETIRED_STARTS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn retired_starts_allowed() -> bool {
+    false
+}
+
 /// The one availability refusal every start path uses (ADR-0071 decision 2).
 fn offered_for_start(id: SpecialistId) -> Result<(), InvestigationStartError> {
-    if available_specialists().contains(&id) {
+    if available_specialists().contains(&id)
+        || (retired_starts_allowed() && id.availability() == Availability::Retired)
+    {
         Ok(())
     } else {
         Err(rejected(
@@ -873,8 +914,9 @@ mod staged_tests {
     #[test]
     fn v7_catalog_requires_completion_contract_and_rejects_legacy_start() {
         for id in ["domain-analyst@7", "evidence-auditor@7"] {
+            // Retired by AC-1062: no longer offered, but every decode below is unchanged.
             assert!(
-                available_specialists()
+                !available_specialists()
                     .iter()
                     .any(|specialist| serde_json::to_value(specialist).unwrap() == id)
             );
@@ -1044,11 +1086,8 @@ mod policy_catalog_tests {
             );
         }
         if InvestigationPolicy::for_profile("investigation-v2").is_some() {
-            // The versions the client's own list had stopped short of.
+            // The offered expanded analysts (@21-@23 are retired, AC-1062).
             for id in [
-                SpecialistId::DomainAnalystV21,
-                SpecialistId::DomainAnalystV22,
-                SpecialistId::DomainAnalystV23,
                 SpecialistId::DomainAnalystV27,
                 SpecialistId::DomainAnalystV28,
                 SpecialistId::DomainAnalystV29,
@@ -1196,20 +1235,10 @@ mod policy_catalog_tests {
                 .any(|p| p.limits.profile == "investigation-v2"),
             InvestigationPolicy::for_profile("investigation-v2").is_some()
         );
-        assert_eq!(
-            available_specialists().contains(&SpecialistId::DomainAnalystV10),
-            InvestigationPolicy::for_profile("investigation-v2").is_some()
-        );
+        // AC-1062: of the expanded family, only the current versions and the
+        // named exceptions are offered.
         for role in [
-            SpecialistId::DomainAnalystV11,
-            SpecialistId::DomainAnalystV12,
-            SpecialistId::EvidenceAuditorV11,
-            SpecialistId::DomainAnalystV18,
-            SpecialistId::DomainAnalystV19,
-            SpecialistId::DomainAnalystV20,
-            SpecialistId::DomainAnalystV21,
-            SpecialistId::DomainAnalystV22,
-            SpecialistId::DomainAnalystV23,
+            SpecialistId::EvidenceAuditorV14,
             SpecialistId::DomainAnalystV27,
             SpecialistId::DomainAnalystV28,
             SpecialistId::DomainAnalystV29,
@@ -1232,16 +1261,16 @@ mod policy_catalog_tests {
             .iter()
             .find(|choice| choice.limits.profile == "investigation-v2");
 
-        assert!(available_specialists().contains(&SpecialistId::SpecWriterV1));
+        assert!(available_specialists().contains(&SpecialistId::SpecWriterV2));
         assert_eq!(standard.request_schema_version, 4);
         assert!(
             standard
                 .specialist_ids
-                .contains(&SpecialistId::SpecWriterV1)
+                .contains(&SpecialistId::SpecWriterV2)
         );
         assert!(expanded.is_none_or(|choice| {
             choice.request_schema_version != 4
-                && !choice.specialist_ids.contains(&SpecialistId::SpecWriterV1)
+                && !choice.specialist_ids.contains(&SpecialistId::SpecWriterV2)
         }));
     }
 
@@ -1255,16 +1284,16 @@ mod policy_catalog_tests {
         let expanded = choices
             .iter()
             .find(|choice| choice.limits.profile == "investigation-v2");
-        assert!(available_specialists().contains(&SpecialistId::GapTriagerV1));
+        assert!(available_specialists().contains(&SpecialistId::GapTriagerV2));
         assert_eq!(standard.request_schema_version, 4);
         assert!(
             standard
                 .specialist_ids
-                .contains(&SpecialistId::GapTriagerV1)
+                .contains(&SpecialistId::GapTriagerV2)
         );
         assert!(
             expanded.is_none_or(|choice| choice.request_schema_version != 4
-                && !choice.specialist_ids.contains(&SpecialistId::GapTriagerV1))
+                && !choice.specialist_ids.contains(&SpecialistId::GapTriagerV2))
         );
     }
 }

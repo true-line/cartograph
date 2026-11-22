@@ -1303,7 +1303,10 @@ pub(in crate::investigations) fn with_public_start_fixture_then<T>(
         request.specialist_id = "domain-analyst@10".into();
         request.request_nonce = "public-command-activation-fixture".into();
     }
-    let result = test(fixture.base.app.handle(), request, &fixture.base.app_data);
+    // These tests exercise a retired version's own behaviour (AC-1062).
+    let result = crate::investigations::commands::with_retired_starts(|| {
+        test(fixture.base.app.handle(), request, &fixture.base.app_data)
+    });
     let app_data = fixture.base.app_data.clone();
     // Keep the disposable directory while dropping the fixture owner. Tauri and
     // detached workers may still retain managed state; this is not a worker join.
