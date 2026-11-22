@@ -117,6 +117,8 @@ export interface IngestSummary {
     tf: LayerSummary;
     java: LayerSummary;
     kotlin: LayerSummary;
+    /** Compiled JVM classes shipped without source (AC-1215). */
+    jvm_classes?: LayerSummary;
     webext: LayerSummary;
     /** Config-file evidence: Tool nodes + DEFINED_IN proofs (#215). */
     tools: LayerSummary;

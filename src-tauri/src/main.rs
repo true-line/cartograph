@@ -310,6 +310,8 @@ struct LayerBreakdown {
     rust: LayerSummary,
     java: LayerSummary,
     kotlin: LayerSummary,
+    /// Compiled JVM classes shipped without their source (AC-1215).
+    jvm_classes: LayerSummary,
     tf: LayerSummary,
     webext: LayerSummary,
     tools: LayerSummary,
@@ -332,6 +334,7 @@ impl LayerBreakdown {
         self.rust.add(other.rust);
         self.java.add(other.java);
         self.kotlin.add(other.kotlin);
+        self.jvm_classes.add(other.jvm_classes);
         self.tf.add(other.tf);
         self.webext.add(other.webext);
         self.tools.add(other.tools);
@@ -349,6 +352,7 @@ impl LayerBreakdown {
             + self.rust.files
             + self.java.files
             + self.kotlin.files
+            + self.jvm_classes.files
             + self.tf.files
     }
 }
@@ -1398,6 +1402,10 @@ fn repo_coverage(
             ("t0.adapter-rust", count(&layers.rust)),
             ("t0.adapter-java", count(&layers.java)),
             ("t0.adapter-kotlin", count(&layers.kotlin)),
+            (
+                adapters_artifact_jvm::EXTRACTOR_ID,
+                count(&layers.jvm_classes),
+            ),
             ("t0.iac-terraform", count(&layers.tf)),
             (
                 ingest::toolchain::TOOLCHAIN_EXTRACTOR_ID,
@@ -2299,6 +2307,20 @@ fn extract_tree_packed(
         facts.extend(kotlin.nodes, kotlin.edges).map_err(pack_err)?;
         extraction.fetch_sites.extend(kotlin.fetch_sites);
         extraction.event_sites.extend(kotlin.event_sites);
+
+        // Compiled classes the checkout ships without their Java or Kotlin
+        // source, each fact citing the class file's bytes (AC-1215).
+        let jvm_id = adapters_artifact_jvm::SourceId { repo, commit };
+        let jvm = adapters_artifact_jvm::extract_dir(root, &jvm_id, &mut |path: &str| {
+            on_file(&format!("Reading compiled JVM classes — {path}"))
+        })
+        .map_err(|error| error.to_string())?;
+        layers.jvm_classes = LayerSummary {
+            files: jvm.nodes.iter().filter(|node| node.label == "File").count() as u64,
+            nodes: distinct_node_count(&jvm.nodes),
+            edges: distinct_edge_count(&jvm.edges),
+        };
+        facts.extend(jvm.nodes, jvm.edges).map_err(pack_err)?;
     }
     if wants_infra {
         let tf_id = iac::SourceId { repo, commit };
@@ -12470,6 +12492,58 @@ export function queueOrder() {
                 .nodes
                 .iter()
                 .all(|node| node.props["language"] != "java")
+        );
+    }
+
+    #[test]
+    fn shipped_jvm_classes_are_their_own_layer() {
+        // AC-1215: compiled classes a checkout ships without source are read
+        // into the graph with artifact evidence and reported as their own
+        // layer; a build-output directory is not read.
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../crates/adapters-artifact-jvm/tests/fixtures/classes/com/acme/pay"
+        );
+        for (from, to) in [
+            ("Ledger.class", "lib/com/acme/pay/Ledger.class"),
+            ("Ledger$Store.class", "lib/com/acme/pay/Ledger$Store.class"),
+            (
+                "Ledger$Audit.class",
+                "build/com/acme/pay/Ledger$Audit.class",
+            ),
+        ] {
+            let path = dir.path().join(to);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::copy(format!("{fixtures}/{from}"), path).unwrap();
+        }
+        let (extraction, summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/jvm-app",
+            "workdir",
+            &["server".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(summary.jvm_classes.files, 2);
+        assert!(summary.jvm_classes.edges > 0);
+        let store = extraction
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id == "sym:local/jvm-app@lib/com/acme/pay/Ledger$Store.class#Ledger.Store"
+            })
+            .expect("shipped class");
+        assert_eq!(store.props["prov"]["extractor_id"], "t0.artifact-jvm");
+        assert_eq!(store.props["prov"]["basis"]["kind"], "artifact");
+        assert!(
+            extraction
+                .nodes
+                .iter()
+                .all(|node| !node.id.contains("@build/"))
         );
     }
 
