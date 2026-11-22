@@ -1,0 +1,27 @@
+[package]
+name = "app-store"
+description = "The app's durable local stores (source registry, findings register, storage paths), split out of the Tauri shell so it compiles and tests on its own (#1924)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Test-only hooks the app's own tests call (checkout access counters,
+# unconditional finding replacement). Enabled only by the app's
+# dev-dependency, so no shipped build carries them.
+test-support = []
+
+[dependencies]
+context-hub = { workspace = true }
+dunce = "1"
+ingest = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
