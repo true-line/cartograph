@@ -204,7 +204,7 @@ pub(super) fn shape<'a>(
     if !raw.is_object() {
         return None;
     }
-    let prov = Provenance::deserialize(&raw["prov"])
+    let prov = Provenance::deserialize(&*crate::stored_prov(raw))
         .ok()
         .filter(|prov| prov.validate().is_ok())?;
     (prov.confidence_tier != ConfidenceTier::InferredWeak || mode == ExportMode::BestEffort)
