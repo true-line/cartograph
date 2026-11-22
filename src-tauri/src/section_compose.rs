@@ -220,21 +220,23 @@ fn capability_ids(facts: &[ComposeFact]) -> BTreeMap<&str, BTreeSet<&str>> {
 }
 
 /// Whether `citations` cite, for each excerpt rule among them, a Capability
-/// fact named like the capability the rule is listed under (#2416). A rule
-/// whose capability no citable fact is named is not checked.
+/// fact named like one of the capabilities the rule is listed under (#2416).
+/// A rule none of whose capabilities a citable fact is named is not checked.
 fn rule_capability_cited(
     citations: &[String],
-    rule_capability: &BTreeMap<String, String>,
+    rule_capability: &BTreeMap<String, BTreeSet<String>>,
     capabilities: &BTreeMap<&str, BTreeSet<&str>>,
 ) -> bool {
     citations.iter().all(|id| {
-        let Some(ids) = rule_capability
+        let ids: BTreeSet<&str> = rule_capability
             .get(id)
-            .and_then(|capability| capabilities.get(capability.as_str()))
-        else {
-            return true;
-        };
-        citations.iter().any(|cited| ids.contains(cited.as_str()))
+            .into_iter()
+            .flatten()
+            .filter_map(|capability| capabilities.get(capability.as_str()))
+            .flatten()
+            .copied()
+            .collect();
+        ids.is_empty() || citations.iter().any(|cited| ids.contains(cited.as_str()))
     })
 }
 
@@ -859,7 +861,13 @@ fn review_action(prepared: &Prepared, claims: &[Claim]) -> CompletionAction {
         .iter()
         .map(|id| {
             let text = match rules.get(id) {
-                Some((capability, rule)) => format!("Rule of capability \"{capability}\": {rule}"),
+                Some((capabilities, rule)) => {
+                    let capabilities: Vec<String> = capabilities
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect();
+                    format!("Rule of capability {}: {rule}", capabilities.join(", "))
+                }
                 None => shown.text(id).unwrap_or_default().to_owned(),
             };
             (id.clone(), text)
