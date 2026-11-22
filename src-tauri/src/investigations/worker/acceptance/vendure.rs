@@ -419,5 +419,8 @@ pub(super) fn read_preparation_artifact(path: &Path, maximum: usize) -> Result<V
     input::read_bounded(path, maximum)
 }
 #[cfg(test)]
+#[path = "vendure/estate.rs"]
+mod estate;
+#[cfg(test)]
 #[path = "vendure/expanded_prepare_tests.rs"]
 mod expanded_prepare_tests;

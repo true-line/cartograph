@@ -87,6 +87,10 @@ pub(in super::super) enum InputPolicy {
     NegativeCases598(super::negative_cases::NegativeCase598),
     #[cfg(test)]
     OfflineFixture,
+    /// #1725 side experiment: a pinned OSS estate closure, bound only by its
+    /// own manifest and proof (no frozen Vendure identity).
+    #[cfg(test)]
+    PinnedEstate,
 }
 struct CodeBinding {
     code_revision: String,
@@ -193,6 +197,8 @@ pub(in super::super) fn reopen_basis<'a>(
         InputPolicy::FrozenVendure => verify_frozen_input(&input)?,
         InputPolicy::NegativeCases598(case) => case.verify(&input)?,
         InputPolicy::OfflineFixture => {}
+        // Bound by the closure's own manifest and proof at preparation (#1725).
+        InputPolicy::PinnedEstate => {}
     }
     expected["graph"]["source_id"]
         .as_str()
