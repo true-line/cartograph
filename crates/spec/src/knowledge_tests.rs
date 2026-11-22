@@ -1794,6 +1794,31 @@ fn product_specification_frames_derived_capabilities_and_caller_roles() {
         roles.contains("| CreateCatalog, CreateProduct | 1 | MUTATION admin.createProduct |"),
         "{roles}"
     );
+    // Each role row prints the citation ids of its Actors, so a composer
+    // can cite who may act (AC-1315, #2326).
+    for fact in &actors {
+        let OverlayItem::Node(node) = &fact.item else {
+            unreachable!()
+        };
+        let id = crate::citation_id(&core_graph::FactKey::Node {
+            id: node.id.clone(),
+        });
+        assert!(roles.contains(&id), "{id} in {roles}");
+    }
+    assert!(
+        roles.contains("| Any of | Operations | Examples | Citation |"),
+        "{roles}"
+    );
+    // A §1.2 composition therefore lists the derived Actors as citable.
+    let derived: Vec<_> = actors
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            OverlayItem::Node(node) => Some((node, &fact.cites)),
+            OverlayItem::Edge(_) => None,
+        })
+        .collect();
+    let picked = crate::composition_facts(&roles, &base.graph.0, &base.graph.1, &derived);
+    assert_eq!(picked.derived.len(), actors.len(), "{roles}");
     // Every derived fact printed is cited, so the fact index resolves it.
     for fact in capabilities.iter().chain(&actors) {
         let OverlayItem::Node(node) = &fact.item else {

@@ -838,7 +838,8 @@ fn derived_frame(
             .flat_map(cited_endpoints)
             .map(|endpoint| (endpoint.id.as_str(), endpoint))
             .collect();
-        let mut roles: BTreeMap<Vec<&str>, Vec<String>> = BTreeMap::new();
+        // Each role's operations and the derived Actors behind it (#2326).
+        let mut roles: BTreeMap<Vec<&str>, (Vec<String>, Vec<String>)> = BTreeMap::new();
         for story in &stories {
             let any_of: Vec<&str> = story.node.props["any_of"]
                 .as_array()
@@ -850,10 +851,13 @@ fn derived_frame(
             let operation = operations
                 .get(endpoint)
                 .map_or_else(|| endpoint.to_owned(), |n| NodeName(n).to_string());
-            let listed = roles.entry(any_of).or_default();
+            let (listed, actors) = roles.entry(any_of).or_default();
             if !listed.contains(&operation) {
                 listed.push(operation);
             }
+            actors.push(citation_id(&FactKey::Node {
+                id: story.node.id.clone(),
+            }));
         }
         writeln!(
             out,
@@ -864,21 +868,28 @@ fn derived_frame(
             roles.len(),
             stories.len()
         )?;
-        out.push_str("| Any of | Operations | Examples |\n|---|---|---|\n")?;
-        for (any_of, operations) in &roles {
+        out.push_str("| Any of | Operations | Examples | Citation |\n|---|---|---|---|\n")?;
+        let and_more = |more: usize| {
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            }
+        };
+        for (any_of, (operations, actors)) in &roles {
             let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
             let more = operations.len() - shown.len();
+            // At most three of the role's Actors, so a composer can cite it.
+            let cited: Vec<&str> = actors.iter().take(3).map(String::as_str).collect();
             writeln!(
                 out,
-                "| {} | {} | {}{} |",
+                "| {} | {} | {}{} | {}{} |",
                 Literal(any_of.join(", ")),
                 operations.len(),
                 Literal(shown.join("; ")),
-                if more > 0 {
-                    format!("; and {more} more")
-                } else {
-                    String::new()
-                }
+                and_more(more),
+                cited.join(", "),
+                and_more(actors.len() - cited.len()),
             )?;
         }
     } else {
