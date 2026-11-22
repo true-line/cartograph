@@ -282,12 +282,14 @@ dependencies = [
 name = "app-store"
 version = "0.73.0"
 dependencies = [
+ "adapters-fw",
  "adapters-lang-go",
  "adapters-lang-java",
  "adapters-lang-kotlin",
  "adapters-lang-python",
  "adapters-lang-rust",
  "adapters-lang-ts",
+ "adapters-plugin-host",
  "agents",
  "cap-fs-ext",
  "cap-std",
@@ -303,6 +305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "source-capture",
+ "spec",
  "tempfile",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
