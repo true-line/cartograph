@@ -325,12 +325,21 @@ pub(super) fn start_access<R: tauri::Runtime>(
     // run's clocks start then, not while it waited.
     let placed = crate::agent_pool::try_place(&state, job_id, Some(mode));
     if matches!(placed, Ok(None)) {
+        // AC-1707: hold the job's lock while waiting, so a restart can tell
+        // that this waiter stopped.
+        let held = match crate::agent_pool::reserve_held(&state, job_id) {
+            Ok(held) => held,
+            Err(error) => {
+                state.investigations.remove(&id);
+                return Err(error.into());
+            }
+        };
         let worker_app = app.clone();
         let worker_id = id.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let state = worker_app.state::<AppState>();
             let claimed = crate::agent_pool::wait_for_place(&state, hold, Some(mode), &|| {})
-                .and_then(|(plan, _hold)| crate::claim_job(&state, &plan));
+                .and_then(|(plan, _hold)| crate::agent_pool::claim_reserved(&state, &plan, held));
             match claimed {
                 Ok((_, execution)) => worker::run(
                     worker_app.clone(),

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 use crate::AppState;
-use crate::job_execution::JobExecution;
+use crate::job_execution::{ExecutionReservation, JobExecution};
 use crate::jobs::{ClaimMode, ClaimPlan, Job, JobStore};
 use agents::investigation::InvestigationProviderMode;
 
@@ -244,6 +244,37 @@ pub(crate) fn wait_for_place(
         }
         std::thread::sleep(HOLD_POLL);
     }
+}
+
+/// AC-1707: reserve the execution lock of held job `id` while it waits, so
+/// startup recovery can prove a waiter stopped (an existing, free lock) and
+/// end its task instead of leaving it queued. Take it outside every mutex;
+/// claim with [`claim_reserved`] using the same reservation.
+pub(crate) fn reserve_held(state: &AppState, id: i64) -> Result<ExecutionReservation, String> {
+    let plan = state
+        .jobs
+        .lock()
+        .map_err(|error| error.to_string())?
+        .claim_plan(id, ClaimMode::StartQueued)
+        .map_err(|error| error.to_string())?;
+    state
+        .job_execution_locks
+        .try_reserve(plan.lock_target())
+        .map_err(|error| error.to_string())
+}
+
+/// Claim `plan` with the lock [`reserve_held`] already holds.
+pub(crate) fn claim_reserved(
+    state: &AppState,
+    plan: &ClaimPlan,
+    reservation: ExecutionReservation,
+) -> Result<(Job, JobExecution), String> {
+    state
+        .jobs
+        .lock()
+        .map_err(|error| error.to_string())?
+        .claim_execution(plan, reservation)
+        .map_err(|error| error.to_string())
 }
 
 /// Start agent work of `kind` as a job. When the controls do not admit it
