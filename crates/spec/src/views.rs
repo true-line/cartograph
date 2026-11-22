@@ -212,7 +212,7 @@ fn deployment_role_for(resource: &Node, edges: &[Edge]) -> Option<DeploymentRole
             .iter()
             .find(|edge| edge.label == "BACKS" && edge.src == resource.id)
             .and_then(|edge| {
-                serde_json::from_value::<Provenance>(edge.props["prov"].clone())
+                serde_json::from_value::<Provenance>(crate::stored_prov(&edge.props).into_owned())
                     .ok()
                     .filter(|prov| prov.validate().is_ok())
             })
@@ -304,11 +304,12 @@ fn bounded_diagram_view(
     let truncated =
         nodes.len() < nodes_total || edges.len() < edges_total || flows.len() < flows_total;
     // A view hands its facts to the Workbench whole, as they were stored: a
-    // compacted rule payload is parsed back to its object (#2215).
-    for node in nodes.iter_mut().filter(|node| node.label == "BusinessRule") {
-        if let std::borrow::Cow::Owned(rule) = core_graph::stored::stored(&node.props["rule"]) {
-            node.props["rule"] = rule;
-        }
+    // compacted `prov` or rule payload is parsed back to its object (#2215).
+    for node in &mut nodes {
+        crate::workbench::restore_stored(&node.label, &mut node.props);
+    }
+    for edge in &mut edges {
+        crate::workbench::restore_stored(&edge.label, &mut edge.props);
     }
 
     SpecDiagramView {
@@ -575,9 +576,9 @@ pub fn try_compile_spec_with_views_supplied_kept<A>(
 ) -> Result<(SpecBundle<A>, SpecViewBundle), crate::FactIndexError> {
     // As every compile under test does, read a compacted base (#2215).
     #[cfg(test)]
-    let compacted = crate::rules::compacted_for_tests(nodes);
+    let compacted = crate::workbench::compacted_for_tests(nodes, edges);
     #[cfg(test)]
-    let nodes = compacted.as_slice();
+    let (nodes, edges) = (compacted.0.as_slice(), compacted.1.as_slice());
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .expect("unbounded ADR derivation");
     let beside = selected::Beside::new(nodes, edges, mode, rejected_hashes, supplied);

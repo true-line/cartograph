@@ -94,7 +94,7 @@ impl Candidate<'_> {
     }
 }
 fn candidate_provenance(props: &serde_json::Value, identity: &Text<'_>) -> Provenance {
-    serde_json::from_value::<Provenance>(props["prov"].clone())
+    serde_json::from_value::<Provenance>(crate::stored_prov(props).into_owned())
         .ok()
         .filter(|p| p.validate().is_ok())
         .unwrap_or_else(|| {

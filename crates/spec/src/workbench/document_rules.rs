@@ -2046,8 +2046,8 @@ function checkQuantity(qty: number) {
     /// handles, over adapter facts.
     fn rows(nodes: &[Node], edges: &[Edge], handler_name: &str) -> (String, usize) {
         // Rendered from a compacted base, as an export renders (#2215).
-        let compacted = crate::rules::compacted_for_tests(nodes);
-        let nodes: Vec<&Node> = compacted.iter().collect();
+        let (nodes, edges) = crate::workbench::compacted_for_tests(nodes, edges);
+        let nodes: Vec<&Node> = nodes.iter().collect();
         let edges: Vec<&Edge> = edges.iter().collect();
         let handler = nodes
             .iter()
