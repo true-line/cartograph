@@ -24,6 +24,12 @@ on:
       - scripts/build-mcp-relay.mjs
       - scripts/agent-runtime-node.json
       - src-tauri/tauri.windows-bundle.conf.json
+      # The installer job's manifests, lockfiles and bundled runtime.
+      - package.json
+      - package-lock.json
+      - ui/package.json
+      - ui/package-lock.json
+      - agent-runtime/**
   workflow_dispatch:
 
 # One run per pull request, and one for main that a newer push queues behind
@@ -191,13 +197,28 @@ jobs:
           key: windows-installer
           cache-bin: "false"
 
-      # npm is a .cmd script on Windows, which pwsh runs directly.
+      # npm is a .cmd script on Windows, which only a shell can start, so the
+      # bounded command runs it through pwsh.
       - name: Install locked root dependencies
-        run: npm ci
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked root dependencies
+          executable: pwsh.exe
+          arguments-json: '["-NoProfile","-Command","npm ci"]'
+          timeout-seconds: '600'
+          attempts: '2'
+          retry-delay-seconds: '5'
 
       - name: Install locked UI dependencies
-        working-directory: ui
-        run: npm ci
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked UI dependencies
+          executable: pwsh.exe
+          arguments-json: '["-NoProfile","-Command","npm ci"]'
+          working-directory: ui
+          timeout-seconds: '600'
+          attempts: '2'
+          retry-delay-seconds: '5'
 
       # No signing input exists in this workflow; the build scripts refuse to
       # run if one is set.

@@ -75,6 +75,11 @@ export function lockedRunners(root = ROOT) {
   return { pi: `pi-agent-core@${pi}`, claude: `claude-agent-sdk@${claude}` };
 }
 
+/** This host's Node release slice: darwin-arm64, linux-x64, win-x64, ... */
+export function hostNodeSlice(platform = process.platform, arch = process.arch) {
+  return `${platform === 'win32' ? 'win' : platform}-${arch}`;
+}
+
 function archiveName(version, slice) {
   const extension = slice.startsWith('linux') ? 'tar.xz' : slice.startsWith('win') ? 'zip' : 'tar.gz';
   return `node-v${version}-${slice}.${extension}`;
@@ -111,7 +116,8 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
   }
   const mac = target.endsWith('apple-darwin');
   const windows = target.endsWith('windows-msvc');
-  const host = hostSlice ?? `${process.platform}-${process.arch}`;
+  // Node names its Windows release slices win-*, not win32-* (#227).
+  const host = hostSlice ?? hostNodeSlice();
   if (!slices.includes(host)) throw new Error(`target ${target} must be built on one of ${slices.join(', ')}`);
   const node = pinnedNode(root);
   const runners = lockedRunners(root);

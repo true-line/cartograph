@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildAgentRuntime, claudeCodeRequirement, lockedRunners, pinnedClaudeCode, pinnedNode, SEA_FUSE, SIGNING_INPUTS } from './build-agent-runtime.mjs';
+import { buildAgentRuntime, claudeCodeRequirement, hostNodeSlice, lockedRunners, pinnedClaudeCode, pinnedNode, SEA_FUSE, SIGNING_INPUTS } from './build-agent-runtime.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const archive = (slice) => `node archive ${slice}`;
@@ -118,6 +118,12 @@ test('windows: the zip archive, node.exe, a CRLF LICENSE and an .exe sidecar (#2
   assert.equal(calls.find((call) => call.includes('NODE_SEA_BLOB')).includes('--macho-segment-name'), false);
   assert.equal(readFileSync(path.join(root, 'target/agent-runtime/NODE-LICENSE'), 'utf8'), 'node\nlicense\n',
     'one pinned sha256 covers the CRLF copy, and the shipped notices carry LF line ends');
+});
+
+test('the host slice follows Node release names, so Windows is win-x64 (#227)', () => {
+  assert.equal(hostNodeSlice('win32', 'x64'), 'win-x64');
+  assert.equal(hostNodeSlice('darwin', 'arm64'), 'darwin-arm64');
+  assert.equal(hostNodeSlice('linux', 'x64'), 'linux-x64');
 });
 
 test('a cached archive that still matches its pin is not downloaded again', (t) => {
