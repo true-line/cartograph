@@ -271,7 +271,7 @@ test('superseded runs cancel every job, so the current head never queues behind 
   // per-PR group; only the evidence step of a manual dispatch may use it.
   const uses = [...workflow.matchAll(/always\(\)/gu)].map(({ index }) => workflow.slice(workflow.lastIndexOf('\n', index) + 1, workflow.indexOf('\n', index)));
   assert.deepEqual(uses, ["        if: always() && matrix.group == 'core' && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance"]);
-  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 14);
+  assert.equal([...workflow.matchAll(/!cancelled\(\) && /gu)].length, 15);
 });
 
 test('Windows ownership tests are required by the same exact-SHA complete-suite policy', () => {
@@ -723,6 +723,8 @@ test('the app crate compiles incrementally from state main saves, and only main 
   for (const contents of [shards, seed]) {
     assert.match(contents, /RUSTC_WORKSPACE_WRAPPER=\$GITHUB_WORKSPACE\/scripts\/rustc-app-incremental\.sh/u);
     assert.match(contents, /SCCACHE_PATH=\$wrapper/u);
+    // A pull request branched before the wrapper checks out no script.
+    assert.match(contents, /if \[ -x scripts\/rustc-app-incremental\.sh \]; then\n.*\n +else\n +echo "RUSTC_WORKSPACE_WRAPPER=\$wrapper" >> "\$GITHUB_ENV"\n +fi\n/u);
     assert.match(contents, /LOCK_HASH: \$\{\{ hashFiles\('rust-toolchain\.toml', 'Cargo\.lock'\) \}\}/u);
     assert.match(contents, /APP_INCREMENTAL_DIR=\$RUNNER_TEMP\/app-incremental/u);
     assert.match(contents, key);
@@ -732,7 +734,7 @@ test('the app crate compiles incrementally from state main saves, and only main 
   // visible to that pull request alone, and six writers a run would evict
   // the other lanes' caches.
   assert.doesNotMatch(shards, /actions\/cache(?:\/save)?@/u);
-  assert.match(seed, /if: github\.event_name == 'push' && needs\.ci-image\.result == 'success'/u);
+  assert.match(seed, /if: "!cancelled\(\) && github\.event_name == 'push' && needs\.ci-image\.result == 'success'"/u);
   assert.match(seed, /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
   assert.match(seed, /run: cargo test -p app --bin app --no-run/u);
   assert.match(seed, /save-if: false/u);
