@@ -1,4 +1,4 @@
-//! Unit tests for `journey-candidate@1` and the `journeys` spec artifact
+//! Unit tests for `journey-candidate@2` and the `journeys` spec artifact
 //! (US-0045, AC-0352, T-0352).
 
 use super::*;
@@ -554,7 +554,7 @@ fn journey_candidates_recover_simplelogin_path_and_render_journeys_artifact() {
     assert_eq!(artifact.format, "markdown");
     assert!(artifact.content.contains(&candidate.label));
     assert!(artifact.content.contains(
-        "Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey"
+        "Interpretation: rule journey-candidate@2, InferredWeak, never a confirmed business journey"
     ));
     assert!(artifact.content.contains(&candidate.id));
     assert!(artifact.content.contains(&candidate.support_fingerprint));
@@ -747,11 +747,24 @@ fn journey_candidates_enforce_ordering_cycle_budget_and_identity_contracts() {
         max_expanded_states: 1,
         max_calls_per_screen: 64,
         max_candidates: 32,
+        max_alternatives: 64,
     };
     assert!(baseline.alternatives_complete);
     assert_eq!(baseline.truncated, None);
-    // One expansion already covers the full graph: `/main` is a goal, not expanded.
-    let exact = &candidates(&node_refs, &edge_refs, &flows, tiny_state_budget)[0];
+    // Under @2 a goal step still expands (ADR-0084), so one expansion no
+    // longer covers the full graph; three do: `/`, `/main` and its result.
+    let cut = &candidates(&node_refs, &edge_refs, &flows, tiny_state_budget)[0];
+    assert!(!cut.alternatives_complete);
+    assert_eq!(cut.truncated, Some(TruncationReason::ExpandedStates));
+    let exact = &candidates(
+        &node_refs,
+        &edge_refs,
+        &flows,
+        JourneyBudget {
+            max_expanded_states: 3,
+            ..tiny_state_budget
+        },
+    )[0];
     assert!(exact.alternatives_complete);
     assert_eq!(exact.truncated, None);
     // Without the observed write, `/main` would expand towards `/new-alias-result/`.
@@ -1924,4 +1937,190 @@ def home():
         call.evidence.as_ref().unwrap().path,
         "templates/auth/login.html"
     );
+}
+
+/// `journey-candidate@2` (ADR-0084, AC-1310, T-1310): a path that crosses an
+/// observed write keeps going, and a path to the same goal through a screen
+/// the primary skips is kept as an alternative of the primary.
+#[test]
+fn journey_candidates_continue_past_writes_and_keep_alternatives_through_skipped_screens() {
+    let repo = "simplelogin/extension";
+    let srv = "simplelogin/app";
+    let (mut nodes, mut edges, mut flows) = simplelogin_fixture(0);
+    let login = "screen:simplelogin/extension@/login";
+    let login_file = "file:simplelogin/extension@src/popup/components/Login.vue";
+    let login_sym = "sym:simplelogin/extension@src/popup/components/Login.vue#Login";
+    let login_ep = "ep:simplelogin/app@POST:/api/auth/login";
+    let login_handler = "sym:simplelogin/app@app/api/views/auth.py#auth_login";
+    let login_path = "src/popup/components/Login.vue";
+    nodes.extend([
+        node(
+            login,
+            "Screen",
+            json!({"route": "/login", "router": "vue-router"}),
+            vec![ev(repo, "src/popup/router/index.js", 150, 180)],
+        ),
+        node(
+            login_file,
+            "File",
+            json!({"path": login_path, "name": "Login.vue"}),
+            vec![ev(repo, login_path, 0, 400)],
+        ),
+        node(
+            login_sym,
+            "Symbol",
+            json!({"name": "Login"}),
+            vec![ev(repo, login_path, 10, 390)],
+        ),
+        node(
+            login_ep,
+            "Endpoint",
+            json!({"method": "POST", "path": "/api/auth/login", "name": "POST /api/auth/login"}),
+            vec![ev(srv, "app/api/views/auth.py", 10, 90)],
+        ),
+        node(
+            login_handler,
+            "Symbol",
+            json!({"name": "auth_login"}),
+            vec![ev(srv, "app/api/views/auth.py", 10, 90)],
+        ),
+        node(
+            "data:simplelogin/app@api_key",
+            "DataEntity",
+            json!({"name": "ApiKey"}),
+            vec![ev(srv, "app/models.py", 200, 260)],
+        ),
+    ]);
+    let nav = |dst: &str, start: u64| {
+        let props = json!({"conditional": false, "sites": [{"path": login_path, "byte_start": start, "byte_end": start + 30, "conditional": false}]});
+        edge(
+            login_sym,
+            dst,
+            "NAVIGATES_TO",
+            props,
+            vec![ev(repo, login_path, start, start + 30)],
+        )
+    };
+    edges.extend([
+        edge(login, login_file, "RENDERS", json!({}), vec![ev(repo, "src/popup/router/index.js", 150, 180)]),
+        edge(login_sym, login_file, "DEFINED_IN", json!({}), vec![ev(repo, login_path, 10, 390)]),
+        edge(
+            "sym:simplelogin/extension@src/popup/components/SplashScreen.vue#SplashScreen",
+            login,
+            "NAVIGATES_TO",
+            json!({"conditional": true, "sites": [{"path": "src/popup/components/SplashScreen.vue", "byte_start": 120, "byte_end": 150, "conditional": true}]}),
+            vec![ev(repo, "src/popup/components/SplashScreen.vue", 120, 150)],
+        ),
+        edge(login_sym, login_ep, "FETCHES", json!({"method": "POST", "straight_line": true}), vec![ev(repo, login_path, 50, 90)]),
+        nav("screen:simplelogin/extension@/main", 200),
+        edge(login_handler, "data:simplelogin/app@api_key", "WRITES", json!({}), vec![ev(srv, "app/api/views/auth.py", 40, 70)]),
+    ]);
+    let mut login_flow = flows[0].clone();
+    login_flow.trigger = login_ep.into();
+    login_flow.trigger_name = "POST /api/auth/login".into();
+    login_flow.hops[0].src = login_ep.into();
+    login_flow.hops[0].dst = login_handler.into();
+    login_flow.hops[0].src_name = "POST /api/auth/login".into();
+    login_flow.hops[0].dst_name = "auth_login".into();
+    flows.push(login_flow);
+    let (node_refs, edge_refs) = refs(&nodes, &edges);
+    let found = candidates(&node_refs, &edge_refs, &flows, JourneyBudget::default());
+
+    let custom = "ep:simplelogin/app@POST:/api/v2/alias/custom/new";
+    fn screens(c: &JourneyCandidate) -> Vec<&str> {
+        c.steps.iter().map(|s| s.screen.as_str()).collect()
+    }
+    let primaries: Vec<_> = found
+        .iter()
+        .filter(|c| c.alternative_of.is_none())
+        .collect();
+    // The @1 primaries are unchanged: the login write, and the shortest custom-alias path.
+    assert_eq!(primaries.len(), 2);
+    let primary = primaries
+        .iter()
+        .find(|c| c.goal.endpoint == custom)
+        .unwrap();
+    assert_eq!(
+        screens(primary)[..2],
+        [
+            "screen:simplelogin/extension@/",
+            "screen:simplelogin/extension@/main"
+        ]
+    );
+    assert_eq!(primary.alternatives, 1);
+    assert!(primaries.iter().any(|c| c.goal.endpoint == login_ep));
+    // The path through the login write is kept, tied to its primary.
+    let alternatives: Vec<_> = found
+        .iter()
+        .filter(|c| c.alternative_of.is_some())
+        .collect();
+    assert_eq!(alternatives.len(), 1);
+    let alt = alternatives[0];
+    assert_eq!(alt.alternative_of.as_deref(), Some(primary.id.as_str()));
+    assert_eq!(alt.goal.endpoint, custom);
+    assert_eq!(
+        screens(alt)[..3],
+        [
+            "screen:simplelogin/extension@/",
+            login,
+            "screen:simplelogin/extension@/main"
+        ]
+    );
+    assert_ne!(alt.id, primary.id);
+
+    // Rendered: the alternative names the screen it adds and its primary.
+    let rendered = compile_spec(
+        &nodes,
+        &edges,
+        &flows,
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    );
+    let journeys = rendered
+        .artifacts
+        .iter()
+        .find(|a| a.id == "journeys")
+        .unwrap();
+    assert!(
+        journeys.content.contains("NewAliasResult (via `/login`)\n"),
+        "{}",
+        journeys.content
+    );
+    assert!(journeys.content.contains(&format!(
+        "- Alternative of: {} (`{}`)",
+        primary.label, primary.id
+    )));
+
+    // A rejected primary still leaves its alternative named as one.
+    let rejected = BTreeSet::from([primary.provenance.content_hash.clone()]);
+    let curated = compile_spec(&nodes, &edges, &flows, ExportMode::BestEffort, &rejected);
+    let curated = curated
+        .artifacts
+        .iter()
+        .find(|a| a.id == "journeys")
+        .unwrap();
+    assert!(!curated.content.contains(&format!("- Id: `{}`", primary.id)));
+    assert!(curated.content.contains("NewAliasResult (via `/login`)\n"));
+    assert!(curated.content.contains(&format!(
+        "- Alternative of: {} (`{}`)",
+        primary.label, primary.id
+    )));
+
+    // An alternatives cut marks every candidate the entry keeps, primaries too.
+    let no_alternatives = JourneyBudget {
+        max_alternatives: 0,
+        ..JourneyBudget::default()
+    };
+    let cut = candidates(&node_refs, &edge_refs, &flows, no_alternatives);
+    assert!(cut.iter().all(|c| c.alternative_of.is_none()));
+    assert_eq!(cut.len(), 2);
+    for c in &cut {
+        assert_eq!(
+            c.truncated,
+            Some(TruncationReason::Alternatives),
+            "{}",
+            c.label
+        );
+        assert!(!c.alternatives_complete);
+    }
 }

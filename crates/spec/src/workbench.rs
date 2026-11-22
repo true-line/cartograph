@@ -1142,11 +1142,11 @@ mod tests {
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "44eabfb6dea221d40c7f9c4ba7b3adb98655cbf724f594fb86a43889db9a6649",
+                "7ac28564762e59509484c1b6d454e1b81cccdb55312f11ace27496d809dadedb",
             ),
             (
                 ExportMode::BestEffort,
-                "cb8eb8bca5c5790b172fa07e9e0c1fd2561e8e7c8deb88239b93e17f872ba33c",
+                "e22cbb0e52c6ccdb269fc203f961a9a7095f4cf612bf3569832acd749710bf71",
             ),
         ] {
             let bytes = serde_json::to_vec(&graph_artifacts(compile_spec(
@@ -1176,6 +1176,8 @@ mod tests {
             // (#1746), the coverage artifacts (#1786) and the fact index
             // (#1785) are appended after these and hashed apart, so the
             // frozen bytes still prove the graph artifacts are unchanged.
+            // journey-candidate@2 (ADR-0084) changes only the rule version
+            // the journeys artifact prints; with version "1" these bytes match.
             assert_eq!(blake3::hash(&bytes).to_hex().as_str(), expected, "{mode:?}");
         }
     }
@@ -3154,14 +3156,15 @@ mod tests {
         // The test-arrangements (#946) and journeys artifacts extend the bundle;
         // verified-only journeys state that they withhold InferredWeak candidates.
         // security.md states its coverage limit (#1820), which changes its bytes.
+        // journey-candidate@2 (ADR-0084) changes only the printed rule version.
         for (mode, expected) in [
             (
                 ExportMode::VerifiedOnly,
-                "b29f43b99f7ba96d3fbf76fbaa78a478c3d21ed393930c905305d991d4026610",
+                "41fc16928d61831b0972dd1b8f27f75c7d8e570ca0ee2dd0650b57ee9b04b33f",
             ),
             (
                 ExportMode::BestEffort,
-                "160c4f667290b2a1429411afea07a38ad2fd6088df3a994cb7e8ed7099269bde",
+                "9e0436fe375c8ea639476f64953b3dcb9db023020eff89270b224a3e2d366faf",
             ),
         ] {
             let full =

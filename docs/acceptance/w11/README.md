@@ -82,6 +82,43 @@ A missing required step makes the result partial. It is reported with the
 step it misses, never silently dropped. A step public help states but the
 run cannot find stays a named miss, not proof the code lacks it.
 
+## Result: after #2261 (2026-11-22)
+
+Run: the same showcase manifest and pinned revisions, recovered by
+Cartograph with #2268 (a navigation in a branch on the goal call's result is
+an ordered result step, AC-1309) and `journey-candidate@2` (ADR-0084,
+AC-1310: paths go on past an observed write, and the best path through each
+screen the shortest path skips is kept as an alternative). Scored by the
+same [`score.py`](score.py) against the unchanged key. The report is in
+[`scores.json`](scores.json). The scorer read 120 candidates: the 25
+earlier ones, which keep their steps, goals and results, 21 new goals
+reached only past a write, and 74 alternatives. No goal is cut by a budget. The best candidate is
+`Main → POST /api/v2/alias/custom/new → NewAliasResult (via /login,
+/api-key-setting)`, an alternative of the shortest custom-alias path.
+
+| Step | Expected | Found | |
+|---|---|---|---|
+| J1 | API key setup screen | `/api-key-setting`, after `/login` | found |
+| J1a | `GET /api/user_info` | on `/api-key-setting` | optional, found |
+| J2 | Main screen | `/main` | found |
+| J3 | `GET /api/v5/alias/options` or `v4` | `GET /api/v4/alias/options` on `/main` | found |
+| J4 | `GET /api/v2/mailboxes` | `GET /api/mailboxes` on `/main` | optional, missing |
+| J5 | custom alias, v3 or v2 | `POST /api/v2/alias/custom/new`, the goal | found |
+| J5a | `POST /api/alias/random/new` | on `/main`; the goal of a separate candidate | optional, found |
+| J6 | New alias screen | `/new-alias-result/`, the ordered result step | found |
+
+| Measure | Result | Pass |
+|---|---|---|
+| Required steps | 5 / 5 | yes |
+| Order | J1, J2, J3, J5, J6 in order | yes |
+| Alternate path | J5a is not this journey's goal | yes |
+| Endpoints | 4 / 4 matched calls link to the server endpoint | yes |
+
+**The result is complete and passes.** Extra calls on the path, reported by
+name: `GET /api/mailboxes`, `POST /api/aliases/<int:alias_id>/toggle`,
+`POST /api/api_key`, `POST /api/auth/login`, `POST /api/auth/mfa` and
+`POST /api/v2/aliases`. W10a on the same run still passes every measure.
+
 ## Result: rescore after amendment 1 (2026-11-22)
 
 Run: the showcase manifest (`docs/showcases/simplelogin.md`, gap 1) at

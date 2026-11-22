@@ -1737,7 +1737,7 @@ pub(super) fn tests(
     finish(content, assertions)
 }
 
-/// Bounded path-router and key-router journey candidates (`journey-candidate@1`).
+/// Bounded path-router and key-router journey candidates (`journey-candidate@2`).
 pub(super) fn journeys(
     nodes: &[&Node],
     edges: &[&Edge],
@@ -1754,8 +1754,9 @@ pub(super) fn journeys(
     );
     let candidates: Vec<_> = search
         .candidates
-        .into_iter()
+        .iter()
         .filter(|c| super::included(&c.provenance, mode, rejected))
+        .cloned()
         .collect();
     let mut assertions = Assertions::new(&budget);
     for candidate in &candidates {
@@ -1785,8 +1786,10 @@ pub(super) fn journeys(
         content.push_str("\n")?;
     }
     if candidates.is_empty() {
-        content.push_str(
-            "Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n\n",
+        writeln!(
+            content,
+            "Interpretation: rule journey-candidate@{}, InferredWeak, never a confirmed business journey\n",
+            crate::rules::journey::JOURNEY_RULE_VERSION
         )?;
         content.push_str(if mode == ExportMode::BestEffort {
             "No journey candidates recovered.\n"
@@ -1799,15 +1802,40 @@ pub(super) fn journeys(
         if i > 0 {
             content.push_str("\n")?;
         }
-        writeln!(content, "## {}\n", Safe(&candidate.label))?;
+        // An alternative (ADR-0084) names the screens its goal's shortest
+        // path skips, so two journeys to one goal never share a heading.
+        // From the unfiltered search, so an alternative whose primary was
+        // rejected or withheld still names it and is never shown as a primary.
+        let primary = candidate
+            .alternative_of
+            .as_ref()
+            .and_then(|id| search.candidates.iter().find(|c| &c.id == id));
+        match primary {
+            Some(primary) => {
+                let via: Vec<String> = candidate
+                    .steps
+                    .iter()
+                    .filter(|step| !primary.steps.iter().any(|p| p.screen == step.screen))
+                    .map(|step| names.screen(&step.screen))
+                    .collect();
+                writeln!(
+                    content,
+                    "## {} (via {})\n",
+                    Safe(&candidate.label),
+                    Safe(via.join(", "))
+                )?;
+            }
+            None => writeln!(content, "## {}\n", Safe(&candidate.label))?,
+        }
         writeln!(content, "{}\n", Safe(names.path(candidate)))?;
         writeln!(
             content,
             "- Id: `{}`\n- Support fingerprint: `{}`\n- Entry: {}\n\
-             - Interpretation: rule journey-candidate@1, InferredWeak, never a confirmed business journey\n",
+             - Interpretation: rule journey-candidate@{}, InferredWeak, never a confirmed business journey\n",
             Safe(&candidate.id),
             Safe(&candidate.support_fingerprint),
-            Safe(names.screen(&candidate.entry))
+            Safe(names.screen(&candidate.entry)),
+            crate::rules::journey::JOURNEY_RULE_VERSION
         )?;
         content.push_str("### Steps\n\n| # | Screen | Navigation | Client calls | Unresolved |\n|---|---|---|---|---|\n")?;
         for (idx, step) in candidate.steps.iter().enumerate() {
@@ -1998,6 +2026,14 @@ pub(super) fn journeys(
             candidate.alternatives,
             candidate.alternatives_complete
         )?;
+        if let Some(primary) = primary {
+            writeln!(
+                content,
+                "- Alternative of: {} (`{}`)",
+                Safe(&primary.label),
+                Safe(&primary.id)
+            )?;
+        }
     }
     finish(content, assertions)
 }

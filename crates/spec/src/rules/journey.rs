@@ -1,4 +1,4 @@
-//! Path-router journey candidate recovery under rule `journey-candidate@1`
+//! Path-router journey candidate recovery under rule `journey-candidate@2`
 //! (US-0045, AC-0352, ADR-0050).
 //!
 //! This module is pure: it reads borrowed graph slices (`&[&Node]`, `&[&Edge]`)
@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// Named T2 rule producing journey candidates from path-router screens.
 pub const JOURNEY_RULE: &str = "journey-candidate";
 
-/// Rule version for `journey-candidate@1`.
-pub const JOURNEY_RULE_VERSION: &str = "1";
+/// Rule version for `journey-candidate@2` (ADR-0084).
+pub const JOURNEY_RULE_VERSION: &str = "2";
 
 /// Recorded limitation for [`AssumptionKind::EntryCallback`].
 pub const ENTRY_CALLBACK_LIMITATION: &str = "invocation not proven";
@@ -32,13 +32,15 @@ pub const HILT_DISPATCH_LIMITATION: &str =
 
 const EXTRACTOR: &str = "spec.journey";
 
-/// Search bounds for `journey-candidate@1`.
+/// Search bounds for `journey-candidate@2`.
 ///
-/// The default budget values are part of the `journey-candidate@1` contract:
+/// The default budget values are part of the `journey-candidate@2` contract
+/// (ADR-0084):
 /// - `max_screens = 6`
-/// - `max_expanded_states = 256`
+/// - `max_expanded_states = 4096` (256 under `@1`)
 /// - `max_calls_per_screen = 64`
-/// - `max_candidates = 32`
+/// - `max_candidates = 64` (32 under `@1`)
+/// - `max_alternatives = 64`
 ///
 /// The active budget is hashed into every candidate's `id` digest input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,15 +53,19 @@ pub struct JourneyBudget {
     pub max_calls_per_screen: usize,
     /// Maximum number of retained candidates per entry screen.
     pub max_candidates: usize,
+    /// Maximum number of retained alternative candidates per entry screen
+    /// (ADR-0084): paths through screens their goal's shortest path skips.
+    pub max_alternatives: usize,
 }
 
 impl Default for JourneyBudget {
     fn default() -> Self {
         Self {
             max_screens: 6,
-            max_expanded_states: 256,
+            max_expanded_states: 4096,
             max_calls_per_screen: 64,
-            max_candidates: 32,
+            max_candidates: 64,
+            max_alternatives: 64,
         }
     }
 }
@@ -120,6 +126,8 @@ pub enum TruncationReason {
     ExpandedStates,
     /// Retained candidates for the entry hit `max_candidates`.
     Candidates,
+    /// Retained alternative candidates for the entry hit `max_alternatives`.
+    Alternatives,
     /// A path at `max_screens` still had an unvisited outgoing navigation.
     MaxScreens,
 }
@@ -131,6 +139,7 @@ impl TruncationReason {
             Self::CallsPerScreen => "calls_per_screen",
             Self::ExpandedStates => "expanded_states",
             Self::Candidates => "candidates",
+            Self::Alternatives => "alternatives",
             Self::MaxScreens => "max_screens",
         }
     }
@@ -346,7 +355,7 @@ pub struct JourneyGoal {
     pub writes: Vec<WriteFact>,
 }
 
-/// One bounded, rule-derived T2 journey candidate (`journey-candidate@1`).
+/// One bounded, rule-derived T2 journey candidate (`journey-candidate@2`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JourneyCandidate {
     /// Stable path identity: `journey:{repo}@journey-candidate:{digest}`.
@@ -377,6 +386,10 @@ pub struct JourneyCandidate {
     pub alternatives: usize,
     /// False when a budget bound stopped the search before all simple paths were explored.
     pub alternatives_complete: bool,
+    /// For an alternative candidate (ADR-0084), the `id` of the shortest
+    /// candidate for the same `(entry, goal)`; `None` for that candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative_of: Option<String>,
     /// Fact-derived display label, e.g. `Main → POST /api/v2/alias/custom/new → NewAliasResult`.
     pub label: String,
     /// Recorded reachability assumptions (`entry_callback` and `startup`), sorted and deduplicated.
@@ -386,7 +399,7 @@ pub struct JourneyCandidate {
     pub provenance: Provenance,
 }
 
-/// Per-entry search diagnostics for `journey-candidate@1`.
+/// Per-entry search diagnostics for `journey-candidate@2`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntrySearchSummary {
     /// Entry `Screen` node id.
@@ -1293,7 +1306,7 @@ fn record_writes<'a>(
     entry.dedup_by(|a, b| a.0 == b.0);
 }
 
-/// Recover bounded T2 journey candidates (`journey-candidate@1`) from entry
+/// Recover bounded T2 journey candidates (`journey-candidate@2`) from entry
 /// screens (`Screen` nodes with `props.route == "/"` or `props.initial == true`).
 ///
 /// Output order is deterministic: sorted by entry screen repo and id, then by
@@ -1307,7 +1320,7 @@ pub fn candidates(
     search(nodes, edges, flows, budget).candidates
 }
 
-/// Run the bounded `journey-candidate@1` search across all entry screens (`Screen`
+/// Run the bounded `journey-candidate@2` search across all entry screens (`Screen`
 /// nodes with `props.route == "/"` or `props.initial == true`), returning both the
 /// recovered [`JourneyCandidate`] values and per-entry [`EntrySearchSummary`] rows.
 pub fn search(
@@ -1522,6 +1535,9 @@ struct RawCandidate<'a> {
     writes: Vec<(WriteFact, ConfidenceTier)>,
     earlier_assumed_goals: Vec<AssumedGoal>,
     calls_truncated: bool,
+    /// Whether the path crosses a screen with an observed-write goal before
+    /// its goal screen (ADR-0084).
+    crossed_write: bool,
 }
 
 type ObservedGoal<'a> = (StepCall, &'a Edge, Vec<(WriteFact, ConfidenceTier)>);
@@ -1602,9 +1618,17 @@ fn search_entry<'a>(
         earlier_assumed: Vec<AssumedGoal>,
         first_assumed_prefix: Option<(Vec<PathNode<'b>>, StepCall, &'b Edge, bool)>,
         calls_truncated: bool,
+        crossed_write: bool,
+        /// A write step whose goals were already scored, queued to expand.
+        scored: bool,
     }
 
+    // Two queues (ADR-0084): every path that crosses no observed write is
+    // searched first, in the same order and with the same budget use as
+    // `journey-candidate@1`; write steps and the paths past them wait in
+    // `deferred` and spend only the budget left after that.
     let mut queue: VecDeque<QueueState<'a>> = VecDeque::new();
+    let mut deferred: VecDeque<QueueState<'a>> = VecDeque::new();
     queue.push_back(QueueState {
         path: vec![PathNode {
             screen: entry.id.clone(),
@@ -1615,6 +1639,8 @@ fn search_entry<'a>(
         earlier_assumed: Vec::new(),
         first_assumed_prefix: None,
         calls_truncated: false,
+        crossed_write: false,
+        scored: false,
     });
 
     let mut expanded_states = 0usize;
@@ -1631,7 +1657,7 @@ fn search_entry<'a>(
         (RawCandidate<'a>, bool),
     > = BTreeMap::new();
 
-    while let Some(state) = queue.pop_front() {
+    while let Some(state) = queue.pop_front().or_else(|| deferred.pop_front()) {
         let current_screen = state
             .path
             .last()
@@ -1649,9 +1675,11 @@ fn search_entry<'a>(
         let (observed, step_assumed, first_step_assumed) =
             step_goal_classification(current_screen, closure, writes_by_endpoint);
 
-        // The first step with an observed write ends the path, with one
-        // candidate per observed goal it fetches.
-        if !observed.is_empty() {
+        // A step with an observed write yields one candidate per observed
+        // goal it fetches. Under `journey-candidate@2` the path goes on to
+        // other goals past it (ADR-0084); the step's own goals end there.
+        let write_step = !observed.is_empty();
+        if write_step && !state.scored {
             if let Some((prefix_path, assumed_call, _, _)) = &state.first_assumed_prefix {
                 let key = prefix_key(prefix_path, &assumed_call.endpoint);
                 if let Some(entry) = assumed_prefixes.get_mut(&key) {
@@ -1669,14 +1697,22 @@ fn search_entry<'a>(
                     writes,
                     earlier_assumed_goals: earlier,
                     calls_truncated,
+                    crossed_write: state.crossed_write,
                 });
             }
+            deferred.push_back(QueueState {
+                scored: true,
+                ..state
+            });
             continue;
         }
 
         let mut next_earlier = state.earlier_assumed.clone();
         next_earlier.extend(step_assumed);
 
+        // A write step's method-assumed calls stay earlier goals of its
+        // observed candidates, never assumed candidates of their own.
+        let first_step_assumed = first_step_assumed.filter(|_| !write_step);
         let next_first_assumed = match state.first_assumed_prefix {
             Some(existing) => Some(existing),
             None => first_step_assumed.map(|(call, edge)| {
@@ -1691,6 +1727,7 @@ fn search_entry<'a>(
                             writes: Vec::new(),
                             earlier_assumed_goals: Vec::new(),
                             calls_truncated,
+                            crossed_write: state.crossed_write,
                         },
                         false,
                     )
@@ -1744,12 +1781,20 @@ fn search_entry<'a>(
                 nav_edge: Some(nav.edge),
                 nav_assumption: nav.assumption.clone(),
             });
-            queue.push_back(QueueState {
+            let crossed_write = state.crossed_write || write_step;
+            let next = QueueState {
                 path: next_path,
                 earlier_assumed: next_earlier.clone(),
                 first_assumed_prefix: next_first_assumed.clone(),
                 calls_truncated,
-            });
+                crossed_write,
+                scored: false,
+            };
+            if crossed_write {
+                deferred.push_back(next);
+            } else {
+                queue.push_back(next);
+            }
         }
     }
 
@@ -1760,27 +1805,42 @@ fn search_entry<'a>(
         }
     }
 
-    // Group by goal endpoint (entry is fixed): keep shortest path, ties broken by step screen ids then navs.
-    let mut by_goal: BTreeMap<String, (RawCandidate<'a>, usize)> = BTreeMap::new();
+    // Group by goal endpoint (entry is fixed). The shortest path wins, ties
+    // broken by step screen ids then navs; a path that crosses an earlier
+    // observed-write screen ranks after every path that does not, so the
+    // goal's `journey-candidate@1` path still wins where it exists.
+    let mut by_goal: BTreeMap<String, Vec<RawCandidate<'a>>> = BTreeMap::new();
     for raw in raw_all {
-        let endpoint = raw.goal_call.endpoint.clone();
-        match by_goal.get_mut(&endpoint) {
-            None => {
-                by_goal.insert(endpoint, (raw, 0));
-            }
-            Some((best, alternatives)) => {
-                *alternatives += 1;
-                if path_order_key(&raw.path) < path_order_key(&best.path) {
-                    *best = raw;
+        by_goal
+            .entry(raw.goal_call.endpoint.clone())
+            .or_default()
+            .push(raw);
+    }
+    // Each goal: its shortest path, the other paths' count, and (ADR-0084)
+    // its alternatives: in rank order, every path through a screen that no
+    // better-ranked kept path of the goal passes through. That is the best
+    // path through each screen the shortest one skips, each kept once.
+    let mut ordered_goals: Vec<(RawCandidate<'a>, usize, Vec<RawCandidate<'a>>)> = by_goal
+        .into_values()
+        .map(|mut raws| {
+            raws.sort_by(|a, b| rank(a).cmp(&rank(b)));
+            let count = raws.len() - 1;
+            let mut raws = raws.into_iter();
+            let best = raws.next().expect("a goal has at least one path");
+            let mut covered: BTreeSet<String> =
+                best.path.iter().map(|p| p.screen.clone()).collect();
+            let mut alternatives = Vec::new();
+            for raw in raws {
+                if raw.path.iter().any(|p| !covered.contains(&p.screen)) {
+                    covered.extend(raw.path.iter().map(|p| p.screen.clone()));
+                    alternatives.push(raw);
                 }
             }
-        }
-    }
-
-    let mut ordered_goals: Vec<(RawCandidate<'a>, usize)> = by_goal.into_values().collect();
-    ordered_goals.sort_by(|(a, _), (b, _)| {
-        (path_order_key(&a.path), &a.goal_call.endpoint)
-            .cmp(&(path_order_key(&b.path), &b.goal_call.endpoint))
+            (best, count, alternatives)
+        })
+        .collect();
+    ordered_goals.sort_by(|(a, _, _), (b, _, _)| {
+        (rank(a), &a.goal_call.endpoint).cmp(&(rank(b), &b.goal_call.endpoint))
     });
 
     let candidates_truncated = ordered_goals.len() > budget.max_candidates;
@@ -1799,24 +1859,53 @@ fn search_entry<'a>(
     } else {
         None
     };
-    let mut finalized: Vec<JourneyCandidate> = ordered_goals
-        .into_iter()
-        .map(|(raw, alternatives)| {
-            finalize_candidate(
-                entry,
-                raw,
-                alternatives,
-                search_cut,
-                candidates_truncated,
-                by_id,
-                closures,
-                renders_by_screen,
-                flows_by_endpoint,
-                test_refs,
-                budget,
-            )
-        })
-        .collect();
+    let finalize = |raw: RawCandidate<'a>, alternatives: usize, retained_cut| {
+        finalize_candidate(
+            entry,
+            raw,
+            alternatives,
+            search_cut,
+            retained_cut,
+            by_id,
+            closures,
+            renders_by_screen,
+            flows_by_endpoint,
+            test_refs,
+            budget,
+        )
+    };
+    // Either retention cut applies to every candidate the entry keeps, so
+    // both are known before any candidate is finalized.
+    let alternatives_truncated = ordered_goals
+        .iter()
+        .map(|(_, _, alts)| alts.len())
+        .sum::<usize>()
+        > budget.max_alternatives;
+    if alternatives_truncated && first_truncated.is_none() {
+        first_truncated = Some(TruncationReason::Alternatives);
+    }
+    let retained_cut = if candidates_truncated {
+        Some(TruncationReason::Candidates)
+    } else {
+        alternatives_truncated.then_some(TruncationReason::Alternatives)
+    };
+    let mut finalized: Vec<JourneyCandidate> = Vec::new();
+    // Alternatives of the retained goals, best-ranked first across goals.
+    let mut alternatives: Vec<(String, usize, RawCandidate<'a>)> = Vec::new();
+    for (raw, count, alts) in ordered_goals {
+        let primary = finalize(raw, count, retained_cut);
+        alternatives.extend(alts.into_iter().map(|alt| (primary.id.clone(), count, alt)));
+        finalized.push(primary);
+    }
+    alternatives.sort_by(|(_, _, a), (_, _, b)| {
+        (rank(a), &a.goal_call.endpoint).cmp(&(rank(b), &b.goal_call.endpoint))
+    });
+    alternatives.truncate(budget.max_alternatives);
+    for (primary, count, raw) in alternatives {
+        let mut candidate = finalize(raw, count, retained_cut);
+        candidate.alternative_of = Some(primary);
+        finalized.push(candidate);
+    }
 
     finalized.sort_by(|a, b| (&a.id, &a.goal.endpoint).cmp(&(&b.id, &b.goal.endpoint)));
     if first_truncated.is_none() {
@@ -1845,6 +1934,15 @@ fn search_entry<'a>(
         unread_callbacks,
     };
     (finalized, summary)
+}
+
+/// A goal's paths in `journey-candidate@2` order (ADR-0084): one that
+/// crosses no earlier observed-write screen first, then [`path_order_key`].
+#[expect(clippy::type_complexity)]
+fn rank<'r>(
+    raw: &'r RawCandidate<'_>,
+) -> (bool, (usize, usize, Vec<&'r str>, Vec<(&'r str, &'r str)>)) {
+    (raw.crossed_write, path_order_key(&raw.path))
 }
 
 fn prefix_key(
@@ -1883,7 +1981,8 @@ fn finalize_candidate<'a>(
     raw: RawCandidate<'a>,
     alternatives: usize,
     search_cut: Option<TruncationReason>,
-    candidates_truncated: bool,
+    // `Candidates` or `Alternatives` when that retention bound cut the entry.
+    retained_cut: Option<TruncationReason>,
     by_id: &BTreeMap<&'a str, &'a Node>,
     closures: &BTreeMap<&'a str, ScreenClosure<'a>>,
     renders_by_screen: &BTreeMap<&'a str, Vec<&'a Node>>,
@@ -2053,13 +2152,11 @@ fn finalize_candidate<'a>(
 
     let truncated = if any_calls_truncated {
         Some(TruncationReason::CallsPerScreen)
-    } else if candidates_truncated {
-        Some(TruncationReason::Candidates)
     } else {
-        search_cut
+        retained_cut.or(search_cut)
     };
     let alternatives_complete =
-        search_cut.is_none() && !any_calls_truncated && !candidates_truncated;
+        search_cut.is_none() && !any_calls_truncated && retained_cut.is_none();
 
     let endpoint_flows = flows_by_endpoint
         .get(raw.goal_call.endpoint.as_str())
@@ -2203,6 +2300,7 @@ fn finalize_candidate<'a>(
         truncated,
         alternatives,
         alternatives_complete,
+        alternative_of: None,
         label,
         assumptions,
         provenance: prov,
