@@ -419,6 +419,55 @@ fn a_capacity_gap_is_disclosed_inside_the_patch() {
     ] {
         assert!(merged(body).is_err());
     }
+    // A full finish must withdraw an unflagged limitation to make room.
+    let mut full = first.clone();
+    let InvestigationAction::Finish { limitations, .. } = &mut full.action else {
+        panic!()
+    };
+    *limitations = (0..MAX_LIMITATIONS)
+        .map(|index| format!("Scope note {index}."))
+        .collect();
+    let mut full_record = record.clone();
+    full_record.finish_hash = full.fingerprint().unwrap();
+    full_record.refusal_id = full_record.content_id().unwrap();
+    let full_saved = PatchBasis::from_refusal_for(&full_record, 3, true).unwrap();
+    let crowded = |body: serde_json::Value| {
+        VolatileFinish::capture(full.clone(), full_saved.clone())
+            .unwrap()
+            .merge(&body.to_string(), &full_saved)
+    };
+    assert_eq!(
+        crowded(json!({"type":"finish_patch","disclosures":{name.clone():"Not read."}})).err(),
+        Some(PatchRejection::InvalidShape)
+    );
+    let roomy = crowded(json!({"type":"finish_patch",
+        "limitations":{"7":{"withdraw":true}},"disclosures":{name.clone():"Not read."}}))
+    .unwrap();
+    let InvestigationAction::Finish { limitations, .. } = &roomy.finish.action else {
+        panic!()
+    };
+    assert_eq!(limitations.len(), MAX_LIMITATIONS);
+    assert_eq!(limitations[7], format!("{name}: Not read."));
+    assert_eq!(
+        crowded(json!({"type":"finish_patch",
+            "limitations":{"7":{"replace":"Other."}},"disclosures":{name.clone():"Not read."}}))
+        .err(),
+        Some(PatchRejection::InvalidIndex)
+    );
+    // Gaps sharing a 12-char name cannot be told apart: whole answer.
+    let mut twins = record.clone();
+    let mut other = gap.clone();
+    other.replace_range(63.., "f");
+    twins.feedback.unmet.push(FeedbackEntry {
+        obligation_id: other,
+        kind: "source".into(),
+        reason: RefusalReason::ExcludedByCapacity,
+    });
+    twins.refusal_id = twins.content_id().unwrap();
+    assert_eq!(
+        PatchBasis::from_refusal_for(&twins, 3, true).err(),
+        Some(PatchRejection::UnsupportedRefusal)
+    );
     // Any other unmet reason still needs a whole answer.
     record.feedback.unmet[0].reason = RefusalReason::NotAttempted;
     record.refusal_id = record.content_id().unwrap();

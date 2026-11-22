@@ -92,6 +92,10 @@ impl PatchBasis {
         } else {
             return Err(PatchRejection::UnsupportedRefusal);
         };
+        if !distinct_names(&capacity_gaps) {
+            // Gaps the 12-char name cannot tell apart need a whole answer.
+            return Err(PatchRejection::UnsupportedRefusal);
+        }
         if record.refusal_count != 1
             || record.refusal_id
                 != record
@@ -245,14 +249,25 @@ impl PatchBasis {
             );
             required.push(json!("findings"));
         }
-        if !self.flagged_limitations.is_empty() {
+        if !self.flagged_limitations.is_empty() || !self.capacity_gaps.is_empty() {
             let keys = self
                 .flagged_limitations
                 .iter()
                 .map(usize::to_string)
                 .collect();
-            properties.insert("limitations".into(), rows(keys, text.clone()));
-            required.push(json!("limitations"));
+            let mut group = rows(keys, text.clone());
+            if !self.capacity_gaps.is_empty() {
+                // Optional: withdraw an unflagged limitation to make room.
+                for index in (0..MAX_LIMITATIONS)
+                    .filter(|index| self.flagged_limitations.binary_search(index).is_err())
+                {
+                    group["properties"][index.to_string()] = withdraw.clone();
+                }
+            }
+            properties.insert("limitations".into(), group);
+            if !self.flagged_limitations.is_empty() {
+                required.push(json!("limitations"));
+            }
         }
         if !self.capacity_gaps.is_empty() {
             let mut disclosure = text;
@@ -293,6 +308,7 @@ impl PatchBasis {
             || self.capacity_gaps.len() > MAX_LIMITATIONS
             || self.capacity_gaps.iter().any(|id| !crate::source_basis::hash(id))
             || self.capacity_gaps.windows(2).any(|pair| pair[0] >= pair[1])
+            || !distinct_names(&self.capacity_gaps)
             || self.flagged_indices.iter().any(|index| *index >= self.finding_count)
             || self.flagged_indices.windows(2).any(|pair| pair[0] >= pair[1])
             || self.flagged_limitations.iter().any(|index| *index >= MAX_LIMITATIONS)
@@ -458,7 +474,13 @@ impl VolatileFinish {
             } else {
                 &mut edits
             };
-            if flagged.binary_search(&index).is_err()
+            // With capacity gaps an unflagged limitation may be withdrawn to
+            // make room for the disclosures.
+            let room = limitation
+                && !saved.capacity_gaps.is_empty()
+                && index < MAX_LIMITATIONS
+                && matches!(edit, Edit::WithdrawLimitation { withdraw: true, .. });
+            if (flagged.binary_search(&index).is_err() && !room)
                 || matches!(
                     &edit,
                     Edit::Withdraw {
@@ -497,6 +519,9 @@ impl VolatileFinish {
             *limitations = kept;
         }
         limitations.extend(disclosures);
+        if limitations.len() > MAX_LIMITATIONS {
+            return Err(PatchRejection::InvalidShape);
+        }
         let mut counts = PatchCounts {
             finding_count: 0,
             flagged_count: saved.flagged_indices.len(),
@@ -599,6 +624,15 @@ fn whole_finish_edits(
     Ok((edits, disclosures))
 }
 
+/// Each gap must have its own 12-char name, or its disclosure is ambiguous.
+fn distinct_names(gaps: &[String]) -> bool {
+    gaps.iter()
+        .map(|id| capacity_name(id))
+        .collect::<BTreeSet<_>>()
+        .len()
+        == gaps.len()
+}
+
 /// The @29 row form: every flagged finding and limitation is replaced or
 /// withdrawn, and every capacity gap gets a disclosure the host prefixes with
 /// its name. Exactly the saved keys; stringified nested objects are read.
@@ -622,10 +656,12 @@ fn row_edits(
     if !saved.flagged_indices.is_empty() {
         expected.push("findings");
     }
-    if !saved.flagged_limitations.is_empty() {
+    // With gaps, limitations may also withdraw unflagged rows to make room.
+    let room = !saved.capacity_gaps.is_empty();
+    if !saved.flagged_limitations.is_empty() || (room && top.contains_key("limitations")) {
         expected.push("limitations");
     }
-    if !saved.capacity_gaps.is_empty() {
+    if room {
         expected.push("disclosures");
     }
     if original["type"] != "finish_patch"
@@ -634,31 +670,46 @@ fn row_edits(
     {
         return Err(PatchRejection::InvalidShape);
     }
-    let rows = |name: &str, flagged: &[usize]| -> Result<Vec<(usize, Value)>, PatchRejection> {
-        if flagged.is_empty() {
+    let rows = |name: &str,
+                flagged: &[usize],
+                room: bool|
+     -> Result<Vec<(usize, Value)>, PatchRejection> {
+        if !top.contains_key(name) {
             return Ok(Vec::new());
         }
         let map = object(&original[name])?;
-        if map.len() != flagged.len() {
+        let mut out = Vec::new();
+        for (key, row) in &map {
+            let index: usize = key.parse().map_err(|_| PatchRejection::InvalidIndex)?;
+            if key != &index.to_string() {
+                return Err(PatchRejection::InvalidIndex);
+            }
+            let row = object(row)?;
+            let flagged = flagged.binary_search(&index).is_ok();
+            out.push(match (row.len(), row.get("replace"), row.get("withdraw")) {
+                (1, Some(replace), None) if flagged => (index, replace.clone()),
+                (1, None, Some(Value::Bool(true)))
+                    if flagged || (room && index < MAX_LIMITATIONS) =>
+                {
+                    (index, Value::Null)
+                }
+                (1, Some(_), None) | (1, None, Some(Value::Bool(true))) => {
+                    return Err(PatchRejection::InvalidIndex);
+                }
+                _ => return Err(PatchRejection::InvalidShape),
+            });
+        }
+        if flagged
+            .iter()
+            .any(|index| !map.contains_key(&index.to_string()))
+        {
             return Err(PatchRejection::InvalidIndex);
         }
-        flagged
-            .iter()
-            .map(|index| {
-                let row = object(
-                    map.get(&index.to_string())
-                        .ok_or(PatchRejection::InvalidIndex)?,
-                )?;
-                match (row.len(), row.get("replace"), row.get("withdraw")) {
-                    (1, Some(replace), None) => Ok((*index, replace.clone())),
-                    (1, None, Some(Value::Bool(true))) => Ok((*index, Value::Null)),
-                    _ => Err(PatchRejection::InvalidShape),
-                }
-            })
-            .collect()
+        out.sort_by_key(|(index, _)| *index);
+        Ok(out)
     };
     let mut edits = Vec::new();
-    for (index, replace) in rows("findings", &saved.flagged_indices)? {
+    for (index, replace) in rows("findings", &saved.flagged_indices, false)? {
         edits.push(if replace.is_null() {
             Edit::Withdraw {
                 finding_index: index,
@@ -678,7 +729,7 @@ fn row_edits(
             }
         });
     }
-    for (index, replace) in rows("limitations", &saved.flagged_limitations)? {
+    for (index, replace) in rows("limitations", &saved.flagged_limitations, room)? {
         edits.push(match replace {
             Value::Null => Edit::WithdrawLimitation {
                 limitation_index: index,
