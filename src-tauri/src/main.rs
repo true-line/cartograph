@@ -4788,10 +4788,11 @@ fn reset_run_limits(state: State<'_, AppState>) -> Result<settings::RunLimits, S
     store.reset_run_limits().map_err(|e| e.to_string())
 }
 
-/// Installed Ollama models on this Mac, for Configure → Run Limits (#1643).
-fn installed_local_models() -> Result<Vec<llm::catalog::LocalModel>, String> {
+/// Installed Ollama models on this Mac, for Configure → Run Limits (#1643),
+/// from the Ollama on the saved loopback port (#1653).
+fn installed_local_models(port: u16) -> Result<Vec<llm::catalog::LocalModel>, String> {
     llm::OllamaProvider::with_models(
-        llm::OllamaProvider::DEFAULT_URL,
+        &llm::OllamaProvider::loopback_url(port),
         llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
         llm::OllamaProvider::DEFAULT_COMPLETION_MODEL,
         llm::bounded::CONNECT_TIMEOUT,
@@ -4802,11 +4803,42 @@ fn installed_local_models() -> Result<Vec<llm::catalog::LocalModel>, String> {
     })
 }
 
+/// The saved loopback Ollama port, or the default when none is saved (#1653).
+fn saved_ollama_port(state: &AppState) -> Result<u16, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    Ok(store
+        .local_ollama_port()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(llm::OllamaProvider::DEFAULT_PORT))
+}
+
 #[tauri::command]
-async fn list_local_models() -> Result<Vec<llm::catalog::LocalModel>, String> {
-    tauri::async_runtime::spawn_blocking(installed_local_models)
+async fn list_local_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<llm::catalog::LocalModel>, String> {
+    let port = saved_ollama_port(&state)?;
+    tauri::async_runtime::spawn_blocking(move || installed_local_models(port))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// The loopback port Ollama listens on for new desktop investigations, or
+/// `None` for the default 11434 (#1653).
+#[tauri::command]
+fn get_local_ollama_port(state: State<'_, AppState>) -> Result<Option<u16>, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.local_ollama_port().map_err(|e| e.to_string())
+}
+
+/// Save the loopback Ollama port, or `None` for the default (#1653). Only the
+/// port is configurable; the host is always 127.0.0.1.
+#[tauri::command]
+fn set_local_ollama_port(
+    port: Option<u16>,
+    state: State<'_, AppState>,
+) -> Result<Option<u16>, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.set_local_ollama_port(port).map_err(|e| e.to_string())
 }
 
 /// The local completion model for new desktop investigations (#1643).
@@ -4827,7 +4859,8 @@ async fn set_local_model(
         return Err(settings::SettingsError::InvalidLocalModel.to_string());
     }
     if model != llm::OllamaProvider::DEFAULT_COMPLETION_MODEL {
-        let installed = tauri::async_runtime::spawn_blocking(installed_local_models)
+        let port = saved_ollama_port(&state)?;
+        let installed = tauri::async_runtime::spawn_blocking(move || installed_local_models(port))
             .await
             .map_err(|e| e.to_string())??;
         if !installed.iter().any(|entry| entry.name == model) {
@@ -8554,6 +8587,8 @@ fn main() {
             reset_local_model,
             get_local_context_window,
             set_local_context_window,
+            get_local_ollama_port,
+            set_local_ollama_port,
             provider_key_status,
             knowledge_phase::knowledge_phase_status,
             set_provider_key,
