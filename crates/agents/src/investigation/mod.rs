@@ -8,6 +8,7 @@
 pub mod acquisition_choices;
 mod admission;
 pub mod admitted_action;
+mod artifact_reads;
 mod capabilities;
 pub mod claim_diagnostics;
 mod completion;
@@ -62,6 +63,7 @@ mod validation_workspace;
 mod withholding;
 mod withholding_witness;
 
+pub use artifact_reads::*;
 pub use capabilities::*;
 pub use completion::*;
 pub use coverage::*;

@@ -119,6 +119,8 @@ pub enum InvestigationTool {
     QueryContext,
     ReadEvidence,
     ReadCoverageInventory,
+    /// A compiled-artifact page (ADR-0089).
+    ReadArtifact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
