@@ -5,12 +5,14 @@ fn pi(version: &str) -> RunRuntime {
     RunRuntime {
         lane: "pi".into(),
         runtime: "cartograph-agent".into(),
-        version: version.into(),
+        version: "1".into(),
+        runner: format!("pi-agent-core@{version}"),
     }
 }
 
-// AC-1423: a run on the tool-calling runtime names the harness, runtime and
-// version beside the saved provider id and model; the first record stands
+// AC-1423: a run on the tool-calling runtime names its lane, the runtime and
+// its version, and the installed runner (pi-agent-core@x) beside the saved
+// provider id and model; the first record stands
 // and reopen reads it back unchanged. A bounded-loop run names none.
 #[test]
 fn a_tool_calling_run_names_its_runtime_and_reopen_keeps_it() {
@@ -39,7 +41,10 @@ fn a_tool_calling_run_names_its_runtime_and_reopen_keeps_it() {
             lane: "codex".into(),
             ..pi("0.1.0")
         },
-        pi(""),
+        RunRuntime {
+            runner: String::new(),
+            ..pi("0.1.0")
+        },
         pi("0.1.0 beta"),
         pi(&"9".repeat(65)),
     ] {
@@ -69,7 +74,8 @@ fn a_tool_calling_run_names_its_runtime_and_reopen_keeps_it() {
     let json = serde_json::to_value(&read).unwrap();
     assert_eq!(
         json["runtime"],
-        serde_json::json!({"lane": "pi", "runtime": "cartograph-agent", "version": "0.1.0"})
+        serde_json::json!({"lane": "pi", "runtime": "cartograph-agent", "version": "1",
+            "runner": "pi-agent-core@0.1.0"})
     );
     assert_eq!(json["provider"]["provider_id"], detail.provider.provider_id);
     assert_eq!(json["provider"]["model"], detail.provider.model);
@@ -78,8 +84,9 @@ fn a_tool_calling_run_names_its_runtime_and_reopen_keeps_it() {
     assert!(plain.get("runtime").is_none());
 
     // The saved row is immutable.
-    let tamper = reopened
-        .conn
-        .execute("UPDATE run_runtime_records SET version='9'", []);
+    let tamper = reopened.conn.execute(
+        "UPDATE run_runtime_records SET runner='pi-agent-core@9'",
+        [],
+    );
     assert!(tamper.is_err());
 }

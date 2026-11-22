@@ -157,6 +157,7 @@ impl RunProvider {
             lane: "pi".into(),
             runtime: identity.runtime,
             version: identity.version,
+            runner: identity.runner,
         })
     }
 }

@@ -1,8 +1,9 @@
 //! ADR-0085 (AC-1423): the tool-calling runtime a run executed on.
 //!
 //! The saved task already names the provider id and model. A run on the
-//! tool-calling runtime also records which harness drove it and the name
-//! and version the runtime reported when it started, in one immutable row
+//! tool-calling runtime also records its lane, the name and version the
+//! runtime reported when it started and the harness package that drove the
+//! loop with its installed version, in one immutable row
 //! per task. A bounded-loop run has no row. The row is an app-only read
 //! extension: it is not part of the hashed task, its ledger or its result.
 use super::*;
@@ -21,6 +22,9 @@ pub struct RunRuntime {
     pub runtime: String,
     /// The runtime's self-reported version.
     pub version: String,
+    /// The harness package that drove the loop and its installed version,
+    /// such as `pi-agent-core@0.73.1`.
+    pub runner: String,
 }
 
 impl RunRuntime {
@@ -35,6 +39,7 @@ impl RunRuntime {
         if !matches!(self.lane.as_str(), "pi" | "claude")
             || !field(&self.runtime)
             || !field(&self.version)
+            || !field(&self.runner)
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -44,7 +49,7 @@ impl RunRuntime {
 
 fn schema() -> Vec<String> {
     let mut statements = vec![format!(
-        "CREATE TABLE {TABLE} (task_id TEXT PRIMARY KEY NOT NULL, lane TEXT NOT NULL CHECK(lane IN ('pi','claude')), runtime TEXT NOT NULL CHECK(length(runtime) BETWEEN 1 AND {MAX_FIELD_BYTES}), version TEXT NOT NULL CHECK(length(version) BETWEEN 1 AND {MAX_FIELD_BYTES})) STRICT"
+        "CREATE TABLE {TABLE} (task_id TEXT PRIMARY KEY NOT NULL, lane TEXT NOT NULL CHECK(lane IN ('pi','claude')), runtime TEXT NOT NULL CHECK(length(runtime) BETWEEN 1 AND {MAX_FIELD_BYTES}), version TEXT NOT NULL CHECK(length(version) BETWEEN 1 AND {MAX_FIELD_BYTES}), runner TEXT NOT NULL CHECK(length(runner) BETWEEN 1 AND {MAX_FIELD_BYTES})) STRICT"
     )];
     for verb in ["UPDATE", "DELETE"] {
         statements.push(format!(
@@ -79,13 +84,14 @@ fn load(connection: &Connection, id: &str) -> Result<Option<RunRuntime>, Investi
     }
     let row = connection
         .query_row(
-            &format!("SELECT lane, runtime, version FROM {TABLE} WHERE task_id=?1"),
+            &format!("SELECT lane, runtime, version, runner FROM {TABLE} WHERE task_id=?1"),
             [id],
             |row| {
                 Ok(RunRuntime {
                     lane: row.get(0)?,
                     runtime: row.get(1)?,
                     version: row.get(2)?,
+                    runner: row.get(3)?,
                 })
             },
         )
@@ -125,8 +131,14 @@ impl JobStore {
             }
         }
         one(tx.execute(
-            &format!("INSERT INTO {TABLE} VALUES (?1,?2,?3,?4)"),
-            params![id, runtime.lane, runtime.runtime, runtime.version],
+            &format!("INSERT INTO {TABLE} VALUES (?1,?2,?3,?4,?5)"),
+            params![
+                id,
+                runtime.lane,
+                runtime.runtime,
+                runtime.version,
+                runtime.runner
+            ],
         )?)?;
         tx.commit()?;
         Ok(())
