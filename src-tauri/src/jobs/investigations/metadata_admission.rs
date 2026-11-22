@@ -6,13 +6,13 @@ use serde_json::Value;
 
 #[path = "metadata_continuation.rs"]
 mod metadata_continuation;
-pub(crate) use metadata_continuation::MetadataContinuationRead;
+pub use metadata_continuation::MetadataContinuationRead;
 #[cfg(unix)]
 pub(super) use metadata_continuation::MetadataContinuationSnapshot;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use metadata_continuation::tests::fixture::Proposal as MetadataProposalFixture;
 
-pub(crate) struct MetadataAdmission<'a> {
+pub struct MetadataAdmission<'a> {
     pub response: &'a InvestigationResponseMeta,
     pub original_action: &'a Value,
     pub current: &'a InvestigationInput,
@@ -27,7 +27,7 @@ pub(crate) struct MetadataAdmission<'a> {
 }
 
 impl JobStore {
-    pub(crate) fn admit_next_prompt_metadata(
+    pub fn admit_next_prompt_metadata(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
@@ -58,7 +58,7 @@ impl JobStore {
         }
         let next = publish(&tx, task, input, raw_response, validate_retained)?;
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if FAIL_AFTER_METADATA_COMMIT_ACK.with(|fault| fault.replace(false)) {
             // Test-only lost acknowledgement: the transaction did commit, but
             // the host must not install prepared state on the returned error.
@@ -361,24 +361,24 @@ fn publish(
     completion::refresh_observation(tx, &mut task)?;
     admission_journal::derive_current(tx, &task)?;
     save_next_prompt_task(tx, &task, expected_revision, false)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FAIL_AFTER_METADATA_WRITE.with(|fault| fault.replace(false)) {
         return Err(InvestigationStoreError::Capacity);
     }
     Ok(task)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_AFTER_METADATA_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_AFTER_METADATA_COMMIT_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn lose_next_commit_ack() {
     FAIL_AFTER_METADATA_COMMIT_ACK.with(|fault| fault.set(true));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "metadata_admission_tests.rs"]
 mod tests;
