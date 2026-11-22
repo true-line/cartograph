@@ -282,9 +282,33 @@ interop still reads `.java` files from the checkout, outside closure; facts
 the directory join derives (unresolved-call gaps, modules, navigation
 screens) carry no receipt.
 
+## Terraform lane (AC-1053, #385)
+
+When infrastructure is recovered, a source's `.tf` files (the Terraform
+adapter's own confined, `.gitignore`-honouring walk) join the same capture as
+the other lanes', under the same fallback. With a capture, the Terraform pass
+reads each captured file's retained bytes. Each fact whose primary provenance
+lies wholly in one captured `.tf` file gets a receipt under its own contract,
+taken from the final facts after local module expansion:
+
+- prefix `tf-primary-v1:`;
+- producer `t0.adapter-iac/direct-lexical-v1`;
+- grammar `terraform`, with `hcl-edit@0.9.8` (pinned exactly) as both grammar
+  and parser package;
+- the v3 shape with provenance ranges only.
+
+Per-file minting, the survivor check and budget admission are the same as for
+the other lanes.
+
+Some reads stay outside closure. Local module directories are listed in the
+checkout. A module file outside the capture is read from the checkout and
+carries no receipt. Observed state that later rewrites a resource drops that
+resource's receipt at the publication check. The captured lane keeps no parse
+cache between runs.
+
 ## Directory-built lane facts (AC-1037, #385)
 
-The Python, Go, Java, Rust and Kotlin lanes mint their receipts from each
+The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each
 lane's final facts, after directory resolution, rather than from each file's
 own extraction. A fact whose every primary evidence entry cites one captured
 lane file is minted against that file under the lane's contract, whether the
