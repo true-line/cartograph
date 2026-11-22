@@ -85,7 +85,7 @@ fn reason_description(reason: &str) -> &'static str {
         "runtime_value_unknown" => {
             "The value of this runtime input or member read has not been established."
         }
-        _ => "Source-rule interpretation remains incomplete.",
+        other => RuleGapReason::describe_key(other),
     }
 }
 

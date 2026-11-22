@@ -81,7 +81,7 @@ fn reason_description(reason: &str) -> &'static str {
         "unsupported_rule_syntax" => {
             "Incomplete source syntax prevented supported rule analysis; remaining file analysis was omitted."
         }
-        _ => "Source-rule interpretation remains incomplete.",
+        other => RuleGapReason::describe_key(other),
     }
 }
 

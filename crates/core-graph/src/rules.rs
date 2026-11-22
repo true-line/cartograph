@@ -404,6 +404,83 @@ pub enum RuleGapReason {
     ConsumerSemanticsUnknown,
 }
 
+impl RuleGapReason {
+    /// The language-neutral cause a gap register prints for this reason. An
+    /// adapter may word a reason in its own language first; every other
+    /// reason falls back here, so no reason an adapter emits reads as the
+    /// generic "remains incomplete" line (#1774).
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::LocalDefinitionUnsupported => {
+                "The initializer contains source forms outside supported structural capture."
+            }
+            Self::DefinitionLimit => {
+                "A local-definition capture limit was reached; initializer evidence remains incomplete."
+            }
+            Self::RuntimeValueUnknown => {
+                "The value of this runtime input or member read has not been established."
+            }
+            Self::DefinitionOrderUnproven => {
+                "Declaration initialization before this original read was not established."
+            }
+            Self::DefinitionScopeUnsupported => {
+                "Initializer recovery crosses an unsupported callable or control-flow boundary."
+            }
+            Self::DefinitionBindingUnsupported => {
+                "This binding is not a stable, directly initialized local."
+            }
+            Self::UnsupportedRuleSyntax => {
+                "Incomplete source syntax prevented supported rule analysis; remaining file analysis was omitted."
+            }
+            Self::AnalysisLimit => {
+                "A source-rule capture limit was reached; additional analysis remains incomplete."
+            }
+            Self::ExecutionPredicateUnknown => {
+                "The complete execution predicate has not been established."
+            }
+            Self::UnresolvedBinding => {
+                "A value prerequisite lacks a stable scope-proven declaration."
+            }
+            Self::DependencyLimit => {
+                "The dependency observation limit was reached; additional prerequisites remain unanalyzed."
+            }
+            Self::EvalSourceMappingUnknown => {
+                "Decoded eval offsets cannot yet be cited as original expression spans."
+            }
+            Self::UnresolvedCall => {
+                "A call prerequisite lacks a proven target or behavioral interpretation."
+            }
+            Self::PrecedingExit => {
+                "An earlier exit is present; its effect on reachability has not been analyzed."
+            }
+            Self::Mutation => {
+                "Mutation is present in the callable; value changes have not been interpreted."
+            }
+            Self::LoopDependency => {
+                "Loop or accumulator behavior in the callable has not been interpreted."
+            }
+            Self::SwitchControl => {
+                "Branching control flow in the callable has not been interpreted."
+            }
+            Self::ExceptionControl => {
+                "Exception or error handling in the callable has not been interpreted."
+            }
+            Self::RedactedExpression => "An expression was withheld or incompletely captured.",
+            Self::ConsumerSemanticsUnknown => {
+                "The caller's interpretation of this local exit is unknown."
+            }
+        }
+    }
+
+    /// [`Self::description`] for a stored reason key; an unknown key keeps
+    /// the generic line.
+    pub fn describe_key(key: &str) -> &'static str {
+        serde_json::from_value::<Self>(serde_json::Value::String(key.into()))
+            .map(Self::description)
+            .unwrap_or("Source-rule interpretation remains incomplete.")
+    }
+}
+
 /// Shape-validation failure without incorporating arbitrary source text.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RuleValidationError {
@@ -735,6 +812,51 @@ pub fn go_http_status(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1774: every stored reason key has its own cause line; only an unknown
+    // key prints the generic one.
+    #[test]
+    fn every_rule_gap_reason_key_has_its_own_description() {
+        for key in [
+            "local_definition_unsupported",
+            "definition_limit",
+            "runtime_value_unknown",
+            "definition_order_unproven",
+            "definition_scope_unsupported",
+            "definition_binding_unsupported",
+            "unsupported_rule_syntax",
+            "analysis_limit",
+            "execution_predicate_unknown",
+            "unresolved_binding",
+            "dependency_limit",
+            "eval_source_mapping_unknown",
+            "unresolved_call",
+            "preceding_exit",
+            "mutation",
+            "loop_dependency",
+            "switch_control",
+            "exception_control",
+            "redacted_expression",
+            "consumer_semantics_unknown",
+        ] {
+            let reason: RuleGapReason =
+                serde_json::from_value(serde_json::Value::String(key.into())).unwrap();
+            assert_eq!(
+                RuleGapReason::describe_key(key),
+                reason.description(),
+                "{key}"
+            );
+            assert_ne!(
+                reason.description(),
+                "Source-rule interpretation remains incomplete.",
+                "{key}"
+            );
+        }
+        assert_eq!(
+            RuleGapReason::describe_key("not_a_reason"),
+            "Source-rule interpretation remains incomplete."
+        );
+    }
 
     fn source(start: u64, end: u64) -> EvidenceRef {
         EvidenceRef {
