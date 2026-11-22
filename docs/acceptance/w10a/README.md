@@ -56,5 +56,6 @@ Score one exported run of the showcase manifest at the commit above.
 Every link must also cite the call's line. A miss is reported with its call
 line and the reason, never silently dropped.
 
-The pass thresholds are a proposal until the owner freezes them with a
-one-line go. Agreement from a reviewing agent does not freeze them.
+The pass thresholds were frozen by the owner's one-line go on 2026-11-22.
+Any later change to a threshold or a label needs a new go and is recorded
+here with the reason.

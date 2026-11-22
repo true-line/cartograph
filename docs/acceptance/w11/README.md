@@ -22,9 +22,10 @@ Keep this directory outside every model input. Recovery never reads it.
 
 ## Status
 
-The expected set is a proposal until the owner freezes it with a one-line
-go. Agreement from a reviewing agent does not freeze it. No run has been
-scored. #2169 is done only when a scored run and its table are committed
+The expected set and the pass column below were frozen by the owner's
+one-line go on 2026-11-22. Any later change to a step, a label or a pass
+value needs a new go and is recorded here with the reason. No run has
+been scored yet. #2169 is done only when a scored run and its table are committed
 here, whatever the result.
 
 ## Expected journey
@@ -56,7 +57,7 @@ J5 matches either custom-alias version in `endpoint_any`, because public
 help does not say which one the pinned extension calls. The score records
 the version found.
 
-| Measure | Definition | Pass (proposal) |
+| Measure | Definition | Pass |
 |---|---|---|
 | Required steps | required steps present in one candidate journey | 5 / 5 |
 | Order | required steps in the order above | yes |
