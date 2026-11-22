@@ -11,10 +11,14 @@
 //! null, 2)`.
 
 use std::io::{BufWriter, Write};
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
+use serde::Serializer;
+#[cfg(test)]
 use serde::ser::SerializeMap;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::SpecArtifactPreview;
@@ -45,6 +49,7 @@ pub(crate) struct ExpectedSpecBundle {
     curated_basis: Option<spec::CuratedBasis>,
 }
 
+#[cfg(test)]
 /// The complete bundle file: the preview's fields with every artifact in
 /// full, in the wire shape `read_spec_artifact` returns.
 #[derive(Debug)]
@@ -70,6 +75,7 @@ fn stale_artifact_message(file_name: &str) -> String {
 const STALE_BUNDLE_MESSAGE: &str =
     "The spec changed since this preview was compiled. Refresh the Spec Workbench and try again.";
 
+#[cfg(test)]
 /// The full bundle, if it is the selection the preview stands for: same
 /// artifacts in the same order with the same id, schema and content
 /// identity, and the same counts and bases. Anything else is refused, as a
@@ -114,6 +120,7 @@ pub(crate) fn matching_bundle_file(
     })
 }
 
+#[cfg(test)]
 /// The file's top level, in the key order `{ ...bundle, artifacts, files }`
 /// gives: the preview's own keys, then `files`.
 #[derive(Serialize)]
@@ -131,6 +138,7 @@ struct BundleFileView<'a> {
     files: FilesByName<'a>,
 }
 
+#[cfg(test)]
 /// `Object.fromEntries(artifacts.map(a => [a.file_name, a.content]))`: a
 /// repeated name keeps its first position and its last content, and names
 /// that are array indices come first in ascending order, as in a JS object.
@@ -143,6 +151,7 @@ fn is_array_index(key: &str) -> Option<u32> {
     (n != u32::MAX && n.to_string() == key).then_some(n)
 }
 
+#[cfg(test)]
 impl Serialize for FilesByName<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut entries: Vec<(&str, &str)> = Vec::with_capacity(self.0.len());
@@ -172,6 +181,7 @@ impl Serialize for FilesByName<'_> {
     }
 }
 
+#[cfg(test)]
 /// Stream `file` as 2-space pretty JSON into `out`. Nothing is built as one
 /// string: the serializer writes through a buffer.
 pub(crate) fn write_bundle_json(file: &SpecBundleFile, out: impl Write) -> std::io::Result<()> {
@@ -191,16 +201,246 @@ pub(crate) fn write_bundle_json(file: &SpecBundleFile, out: impl Write) -> std::
     writer.flush()
 }
 
+/// Copies `out` and writes `indent` after every newline, so a value
+/// serialized pretty on its own lands at the depth it has in the file.
+/// JSON text has no raw newline inside a string, so only layout newlines
+/// are indented.
+struct Indented<'a, W: Write> {
+    out: &'a mut W,
+    indent: &'static [u8],
+}
+
+impl<W: Write> Write for Indented<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut rest = bytes;
+        while let Some(at) = rest.iter().position(|byte| *byte == b'\n') {
+            self.out.write_all(&rest[..=at])?;
+            self.out.write_all(self.indent)?;
+            rest = &rest[at + 1..];
+        }
+        self.out.write_all(rest)?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+
+/// `value` as 2-space pretty JSON at `indent` depth.
+fn pretty_at<W: Write>(
+    out: &mut W,
+    indent: &'static [u8],
+    value: &impl Serialize,
+) -> std::io::Result<()> {
+    serde_json::to_writer_pretty(Indented { out, indent }, value).map_err(std::io::Error::other)
+}
+
+/// The bundle file written as its artifacts compile (#2215): each artifact is
+/// checked against the preview, written into the file's `artifacts` and its
+/// content kept on disk for `files`, then dropped, so the full bundle is
+/// never held at once. The finished file is byte for byte
+/// [`write_bundle_json`] of [`matching_bundle_file`].
+pub(crate) struct BundleFileStream<'a> {
+    expected: &'a ExpectedSpecBundle,
+    body: BufWriter<std::fs::File>,
+    contents: BufWriter<std::fs::File>,
+    /// Each artifact's file name and the span of its JSON-encoded content
+    /// in `contents`.
+    names: Vec<(String, u64, u64)>,
+    spooled: u64,
+    failure: Option<String>,
+}
+
+impl<'a> BundleFileStream<'a> {
+    /// A stream for the preview `expected`, spooled in the temp directory.
+    pub(crate) fn new(expected: &'a ExpectedSpecBundle) -> Result<Self, String> {
+        let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
+        let mut body = BufWriter::with_capacity(1 << 16, tempfile::tempfile().map_err(fail)?);
+        let contents = BufWriter::with_capacity(1 << 16, tempfile::tempfile().map_err(fail)?);
+        body.write_all(b"{\n  \"mode\": ")
+            .and_then(|()| serde_json::to_writer(&mut body, &expected.mode).map_err(Into::into))
+            .and_then(|()| body.write_all(b",\n  \"artifacts\": ["))
+            .map_err(fail)?;
+        Ok(Self {
+            expected,
+            body,
+            contents,
+            names: Vec::new(),
+            spooled: 0,
+            failure: None,
+        })
+    }
+
+    /// Check one compiled artifact against the preview and write it. After a
+    /// refusal or a write failure the rest are dropped unwritten.
+    pub(crate) fn push(&mut self, artifact: spec::SpecArtifact) {
+        if self.failure.is_some() {
+            return;
+        }
+        let index = self.names.len();
+        let Some(preview) = self.expected.artifacts.get(index) else {
+            self.failure = Some(STALE_BUNDLE_MESSAGE.to_string());
+            return;
+        };
+        if artifact.id != preview.id
+            || artifact.schema != preview.schema
+            || artifact.content_id != preview.content_id
+        {
+            self.failure = Some(stale_artifact_message(&preview.file_name));
+            return;
+        }
+        if let Err(err) = self.write(crate::full_artifact_preview(artifact), index) {
+            self.failure = Some(format!("Failed to write export file: {err}"));
+        }
+    }
+
+    fn write(&mut self, artifact: SpecArtifactPreview, index: usize) -> std::io::Result<()> {
+        self.body
+            .write_all(if index == 0 { b"\n    " } else { b",\n    " })?;
+        pretty_at(&mut self.body, b"    ", &artifact)?;
+        let mut encoded = Counted(&mut self.contents, 0);
+        serde_json::to_writer(&mut encoded, &artifact.content)?;
+        let len = encoded.1;
+        self.names.push((artifact.file_name, self.spooled, len));
+        self.spooled += len;
+        Ok(())
+    }
+
+    /// Check the bundle's counts and bases against the preview and finish
+    /// the file, returned rewound to its start.
+    pub(crate) fn finish(mut self, bundle: &spec::SpecBundle<()>) -> Result<std::fs::File, String> {
+        if let Some(failure) = self.failure.take() {
+            return Err(failure);
+        }
+        let expected = self.expected;
+        if bundle.mode != expected.mode
+            || self.names.len() != expected.artifacts.len()
+            || bundle.assertion_count != expected.assertion_count
+            || bundle.gap_count != expected.gap_count
+            || bundle.drift_count != expected.drift_count
+            || bundle.security_count != expected.security_count
+            || bundle.graph_basis != expected.graph_basis
+            || bundle.curated_basis != expected.curated_basis
+        {
+            return Err(STALE_BUNDLE_MESSAGE.to_string());
+        }
+        self.finish_file(bundle)
+            .map_err(|err| format!("Failed to write export file: {err}"))
+    }
+
+    fn finish_file(self, bundle: &spec::SpecBundle<()>) -> std::io::Result<std::fs::File> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Self {
+            mut body,
+            contents,
+            names,
+            ..
+        } = self;
+        body.write_all(if names.is_empty() { b"]" } else { b"\n  ]" })?;
+        for (key, count) in [
+            ("assertion_count", bundle.assertion_count),
+            ("gap_count", bundle.gap_count),
+            ("drift_count", bundle.drift_count),
+            ("security_count", bundle.security_count),
+        ] {
+            write!(body, ",\n  \"{key}\": {count}")?;
+        }
+        if let Some(basis) = &bundle.graph_basis {
+            body.write_all(b",\n  \"graph_basis\": ")?;
+            pretty_at(&mut body, b"  ", basis)?;
+        }
+        if let Some(basis) = &bundle.curated_basis {
+            body.write_all(b",\n  \"curated_basis\": ")?;
+            pretty_at(&mut body, b"  ", basis)?;
+        }
+        body.write_all(b",\n  \"files\": ")?;
+        let mut contents = contents.into_inner().map_err(|err| err.into_error())?;
+        let order = files_order(&names);
+        if order.is_empty() {
+            body.write_all(b"{}")?;
+        } else {
+            body.write_all(b"{")?;
+            for (i, (name, start, len)) in order.into_iter().enumerate() {
+                body.write_all(if i == 0 { b"\n    " } else { b",\n    " })?;
+                serde_json::to_writer(&mut body, name)?;
+                body.write_all(b": ")?;
+                contents.seek(SeekFrom::Start(start))?;
+                std::io::copy(&mut (&mut contents).take(len), &mut body)?;
+            }
+            body.write_all(b"\n  }")?;
+        }
+        body.write_all(b"\n}")?;
+        let mut file = body.into_inner().map_err(|err| err.into_error())?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+}
+
+/// Counts the bytes written through it.
+struct Counted<'a, W: Write>(&'a mut W, u64);
+
+impl<W: Write> Write for Counted<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(bytes)?;
+        self.1 += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// The `files` entries in [`FilesByName`] order: a repeated name keeps its
+/// first position and its last content, and array-index names come first in
+/// ascending order.
+fn files_order(names: &[(String, u64, u64)]) -> Vec<(&str, u64, u64)> {
+    let mut entries: Vec<(&str, u64, u64)> = Vec::with_capacity(names.len());
+    for (name, start, len) in names {
+        match entries.iter_mut().find(|(key, _, _)| *key == name.as_str()) {
+            Some(entry) => (entry.1, entry.2) = (*start, *len),
+            None => entries.push((name, *start, *len)),
+        }
+    }
+    let mut indexed: Vec<(u32, (&str, u64, u64))> = entries
+        .iter()
+        .filter_map(|entry| is_array_index(entry.0).map(|n| (n, *entry)))
+        .collect();
+    indexed.sort_by_key(|(n, _)| *n);
+    indexed
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .chain(
+            entries
+                .into_iter()
+                .filter(|(key, _, _)| is_array_index(key).is_none()),
+        )
+        .collect()
+}
+
+#[cfg(test)]
 /// Write the bundle file to `path` with the same atomic replace as every
 /// other export (#729).
 pub(crate) fn write_bundle_file(path: &Path, file: &SpecBundleFile) -> Result<(), String> {
     write_export_with(path, |out| write_bundle_json(file, out))
 }
 
-/// Compile the full bundle for the preview the Workbench shows, refuse it if
-/// it is no longer that selection, then ask where to save it and stream it
-/// there. Returns `Ok(false)` when the save panel is cancelled. The full
-/// bundle never crosses IPC (#1582, AC-0740).
+/// The bundle file for the preview `expected`, written to a temp file as
+/// `compile` hands over each artifact, refused as [`matching_bundle_file`]
+/// refuses a changed selection.
+pub(crate) fn stream_bundle_file(
+    expected: &ExpectedSpecBundle,
+    compile: impl FnOnce(&mut dyn FnMut(spec::SpecArtifact)) -> Result<spec::SpecBundle<()>, String>,
+) -> Result<std::fs::File, String> {
+    let mut stream = BundleFileStream::new(expected)?;
+    let bundle = compile(&mut |artifact| stream.push(artifact))?;
+    stream.finish(&bundle)
+}
+
+/// Compile the full bundle for the preview the Workbench shows, one artifact
+/// at a time into a temp file (#2215), refuse it if it is no longer that
+/// selection, then ask where to save it and copy it there. Returns
+/// `Ok(false)` when the save panel is cancelled. The full bundle never
+/// crosses IPC (#1582, AC-0740).
 #[tauri::command]
 pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
     suggested_name: String,
@@ -209,8 +449,9 @@ pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
 ) -> Result<bool, String> {
     let file = crate::off_ui_thread(move || {
         let state = app.state::<crate::AppState>();
-        let bundle = crate::compile_spec_bundle(crate::export_inputs(&state)?, expected.mode)?;
-        matching_bundle_file(&expected, bundle)
+        stream_bundle_file(&expected, |push| {
+            crate::compile_spec_bundle_kept(crate::export_inputs(&state)?, expected.mode, push)
+        })
     })
     .await?;
     let Some(handle) = rfd::AsyncFileDialog::new()
@@ -221,9 +462,12 @@ pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
         return Ok(false);
     };
     let path = handle.path().to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || write_bundle_file(&path, &file))
-        .await
-        .map_err(|_| "Failed to write export file: worker failed".to_string())??;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut file = file;
+        write_export_with(&path, |out| std::io::copy(&mut file, out).map(drop))
+    })
+    .await
+    .map_err(|_| "Failed to write export file: worker failed".to_string())??;
     Ok(true)
 }
 
@@ -300,6 +544,94 @@ mod tests {
         let target = dir.path().join("cartograph-spec-best-effort.json");
         write_bundle_file(&target, &fixture_file()).expect("writes");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), EXPECTED);
+    }
+
+    /// The file [`stream_bundle_file`] writes for `bundle`, read back.
+    fn streamed(preview: &ExpectedSpecBundle, bundle: spec::SpecBundle) -> Result<String, String> {
+        let mut file = stream_bundle_file(preview, |push| {
+            let spec::SpecBundle {
+                mode,
+                artifacts,
+                assertion_count,
+                gap_count,
+                drift_count,
+                security_count,
+                graph_basis,
+                curated_basis,
+            } = bundle;
+            Ok(spec::SpecBundle {
+                mode,
+                artifacts: artifacts.into_iter().map(push).collect(),
+                assertion_count,
+                gap_count,
+                drift_count,
+                security_count,
+                graph_basis,
+                curated_basis,
+            })
+        })?;
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut file, &mut text).unwrap();
+        Ok(text)
+    }
+
+    // AC-1212 (T-1212): the file written one artifact at a time is byte for
+    // byte the file of the complete bundle, with or without bases, with
+    // repeated and array-index file names, and refused alike.
+    #[test]
+    fn a_bundle_streamed_per_artifact_is_the_complete_bundle_file() {
+        let (preview, bundle) = fixture_bundle();
+        assert_eq!(streamed(&preview, bundle).unwrap(), EXPECTED);
+
+        type Change = fn(&mut ExpectedSpecBundle, &mut spec::SpecBundle);
+        let variants: [Change; 2] = [
+            |preview, bundle| {
+                (preview.graph_basis, bundle.graph_basis) = (None, None);
+                (preview.curated_basis, bundle.curated_basis) = (None, None);
+            },
+            |_, bundle| {
+                let names = ["7", "README.md", "0", "README.md"];
+                for (artifact, name) in bundle.artifacts.iter_mut().zip(names) {
+                    artifact.file_name = name.into();
+                }
+            },
+        ];
+        for change in &variants {
+            let (mut preview, mut bundle) = fixture_bundle();
+            change(&mut preview, &mut bundle);
+            let mut complete = Vec::new();
+            let file = matching_bundle_file(&preview, bundle.clone()).unwrap();
+            write_bundle_json(&file, &mut complete).unwrap();
+            assert_eq!(
+                streamed(&preview, bundle).unwrap(),
+                String::from_utf8(complete).unwrap()
+            );
+        }
+
+        let (preview, mut bundle) = fixture_bundle();
+        bundle.artifacts[1].content_id = "changed".into();
+        let name = preview.artifacts[1].file_name.clone();
+        assert_eq!(
+            streamed(&preview, bundle).unwrap_err(),
+            stale_artifact_message(&name)
+        );
+        for change in [
+            (|bundle: &mut spec::SpecBundle| drop(bundle.artifacts.pop()))
+                as fn(&mut spec::SpecBundle),
+            |bundle| bundle.gap_count += 1,
+            |bundle| bundle.graph_basis = None,
+            |bundle| {
+                let extra = bundle.artifacts[0].clone();
+                bundle.artifacts.push(extra);
+            },
+        ] {
+            let (preview, mut bundle) = fixture_bundle();
+            change(&mut bundle);
+            assert_eq!(
+                streamed(&preview, bundle).unwrap_err(),
+                STALE_BUNDLE_MESSAGE
+            );
+        }
     }
 
     // AC-0740: the fixture covers every artifact field, so a field the
