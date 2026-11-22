@@ -226,7 +226,7 @@ fn cursors_bind_snapshot_and_normalized_selection() {
             Err(ContextError::CursorSelectionMismatch)
         ));
     }
-    let node_a_selection = Selection {
+    let node_a_selection = FactSelection {
         scope: QueryScope::Node { id: "a".into() },
         kind: None,
         labels: BTreeSet::new(),
