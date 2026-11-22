@@ -49,10 +49,15 @@ impl InvestigationRuntime {
         // Constructors make no HTTP/model calls. Reuse their blocking runtimes
         // for the application lifetime, including after a bounded request ends.
         let provider: Arc<dyn LlmProvider> = Arc::from(
-            crate::egress::escalation_provider(match mode {
-                InvestigationProviderMode::Local => "local",
-                InvestigationProviderMode::Cloud => "cloud",
-            })
+            // The default port: a saved port gets its own provider in
+            // `provider_for_start` (#1653).
+            crate::egress::escalation_provider(
+                match mode {
+                    InvestigationProviderMode::Local => "local",
+                    InvestigationProviderMode::Cloud => "cloud",
+                },
+                llm::OllamaProvider::DEFAULT_PORT,
+            )
             .map_err(|_| HostError::Operational)?,
         );
         provider

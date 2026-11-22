@@ -302,6 +302,18 @@ pub fn local_model_name(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b":._/+-".contains(&b))
 }
 
+/// The saved loopback Ollama port, or the default when none is saved (#1653).
+/// Every local model path (investigations, composition, area experts,
+/// escalation, the knowledge phase and the lane probe) reaches Ollama here.
+pub(crate) fn saved_ollama_port(settings: &std::sync::Mutex<SettingsStore>) -> Result<u16, String> {
+    Ok(settings
+        .lock()
+        .map_err(|e| e.to_string())?
+        .local_ollama_port()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(llm::OllamaProvider::DEFAULT_PORT))
+}
+
 /// Store for tier settings and the egress log, on the state spine.
 pub struct SettingsStore {
     conn: Connection,

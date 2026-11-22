@@ -152,10 +152,10 @@ pub(crate) fn local_lane_status_from(installed: Option<&[LocalModel]>) -> LocalL
     }
 }
 
-/// Probe the local server on its loopback address.
-pub(crate) fn probe_local_lane() -> LocalLaneStatus {
+/// Probe the local server on its loopback address at the saved `port` (#1653).
+pub(crate) fn probe_local_lane(port: u16) -> LocalLaneStatus {
     let installed = llm::OllamaProvider::with_models(
-        llm::OllamaProvider::DEFAULT_URL,
+        &llm::OllamaProvider::loopback_url(port),
         llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
         llm::OllamaProvider::DEFAULT_COMPLETION_MODEL,
         CHECK_TIMEOUT,
@@ -310,6 +310,34 @@ mod tests {
         assert!(error.contains("nothing was sent"));
         assert!(!error.contains(KEY));
         assert!(closed.accept().is_err(), "no connection was attempted");
+    }
+
+    // AC-1416 / #1653: the lane probe asks the Ollama on the saved port, not
+    // the default one; once nothing listens there it reports it stopped.
+    #[test]
+    fn the_local_lane_probe_uses_the_saved_port() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, llm::OllamaProvider::DEFAULT_PORT);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let n = stream.read(&mut request).unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..n]).starts_with("GET /api/tags HTTP/1.1\r\n")
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{{\"models\":[]}}"
+            )
+            .unwrap();
+        });
+        let running = probe_local_lane(port);
+        server.join().unwrap();
+        assert!(running.reachable);
+        assert_eq!(running.start_command, None);
+        assert!(!probe_local_lane(port).reachable);
     }
 
     // AC-0590: the local lane names the server command when it does not
