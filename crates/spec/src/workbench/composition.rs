@@ -127,7 +127,7 @@ const SUMMARY_SECTIONS: &[(&str, &[&str])] = &[("1.1", &["1.2", "1.3"])];
 /// What a composer reads for section `number` of the compiled `document`:
 /// the section's [`composition_text`], or, for a section that summarises
 /// others, its heading line followed by each summarised section's
-/// composition text. `None` when the section is not compiled.
+/// [`summary_text`]. `None` when the section is not compiled.
 pub fn composition_source(document: &str, number: &str) -> Option<String> {
     let own = section_text(document, number)?;
     let Some((_, summarised)) = SUMMARY_SECTIONS.iter().find(|(n, _)| *n == number) else {
@@ -137,13 +137,52 @@ pub fn composition_source(document: &str, number: &str) -> Option<String> {
     let mut text = format!("{heading}\n\nThis section summarises the sections below.\n\n");
     for source in *summarised {
         if let Some(found) = section_text(document, source) {
-            text.push_str(&composition_text(found, source).0);
+            text.push_str(&summary_text(found));
             if !text.ends_with('\n') {
                 text.push('\n');
             }
         }
     }
     Some(text)
+}
+
+/// Rows a table of a summarised section keeps (#2335).
+const SUMMARY_ROWS: usize = 24;
+
+/// What a summary reads of a section it summarises (#2335): the section up
+/// to its first `###` heading, with each table cut to [`SUMMARY_ROWS`] rows
+/// and a line counting the rows left out.
+fn summary_text(text: &str) -> String {
+    let text = text.find("\n### ").map_or(text, |at| &text[..=at]);
+    let mut kept = String::new();
+    // Rows seen in the current table, and how many of them are left out.
+    let (mut rows, mut left_out) = (0usize, 0usize);
+    let close = |kept: &mut String, left_out: &mut usize| {
+        if *left_out > 0 {
+            kept.push_str(&format!("({left_out} more rows are left out.)\n"));
+        }
+        *left_out = 0;
+    };
+    for line in text.lines() {
+        if line.starts_with('|') {
+            // The header and its separator are not rows.
+            let separator = line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '));
+            if !separator {
+                rows += 1;
+            }
+            if rows > SUMMARY_ROWS + 1 {
+                left_out += 1;
+                continue;
+            }
+        } else {
+            close(&mut kept, &mut left_out);
+            rows = 0;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    close(&mut kept, &mut left_out);
+    kept
 }
 
 /// Every `F-` citation id `text` prints.

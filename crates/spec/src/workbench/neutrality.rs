@@ -231,6 +231,9 @@ impl SourceIdentifiers {
 #[derive(Debug, Default)]
 pub struct CitedText {
     by_citation: BTreeMap<String, String>,
+    /// Every route any fact of the graph shows, for telling a route
+    /// fragment (`custom/new`) from prose such as `and/or` (#2335).
+    routes: BTreeSet<String>,
 }
 
 impl CitedText {
@@ -239,8 +242,9 @@ impl CitedText {
     pub fn of(nodes: &[Node], edges: &[Edge], overlay: &[Node], cited: &BTreeSet<String>) -> Self {
         let mut by_citation = BTreeMap::new();
         if cited.is_empty() {
-            return Self { by_citation };
+            return Self::default();
         }
+        let mut routes = BTreeSet::new();
         let shown = |props: &serde_json::Value| {
             let mut props = props.clone();
             if let Some(map) = props.as_object_mut() {
@@ -256,6 +260,8 @@ impl CitedText {
                 let text = format!("{} {} {}", node.id, node.label, shown(&node.props));
                 by_citation.insert(id, text);
             }
+            routes.extend(route_literals(&node.id).into_iter().map(str::to_owned));
+            routes_in(&node.props, &mut routes);
         }
         for edge in edges {
             let id = citation_id(&FactKey::Edge {
@@ -273,20 +279,83 @@ impl CitedText {
                 );
                 by_citation.insert(id, text);
             }
+            for end in [&edge.src, &edge.label, &edge.dst] {
+                routes.extend(route_literals(end).into_iter().map(str::to_owned));
+            }
+            routes_in(&edge.props, &mut routes);
         }
-        Self { by_citation }
+        Self {
+            by_citation,
+            routes,
+        }
     }
 
-    /// The first route literal `statement` spells out that no fact of
-    /// `citations` shows, if any.
+    /// The first route `statement` spells out that no fact of `citations`
+    /// shows, if any: a route literal, or a multi-segment fragment of a
+    /// route the graph shows, such as `custom/new` for
+    /// `/api/alias/custom/new` (#2335).
     pub fn uncited_route<'a>(&self, statement: &'a str, citations: &[String]) -> Option<&'a str> {
-        route_literals(statement).into_iter().find(|route| {
-            !citations
-                .iter()
-                .filter_map(|id| self.by_citation.get(id))
-                .any(|text| contains_route(text, route))
-        })
+        let cited = || citations.iter().filter_map(|id| self.by_citation.get(id));
+        route_literals(statement)
+            .into_iter()
+            .find(|route| !cited().any(|text| contains_route(text, route)))
+            .or_else(|| {
+                route_fragments(statement)
+                    .into_iter()
+                    .filter(|fragment| {
+                        self.routes
+                            .iter()
+                            .any(|route| contains_segments(route, fragment))
+                    })
+                    .find(|fragment| !cited().any(|text| contains_segments(text, fragment)))
+            })
     }
+}
+
+/// Collect the route literals in every string of `value`.
+fn routes_in(value: &serde_json::Value, routes: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            routes.extend(route_literals(text).into_iter().map(str::to_owned));
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| routes_in(item, routes)),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .filter(|(key, _)| key.as_str() != "prov")
+            .for_each(|(_, item)| routes_in(item, routes)),
+        _ => {}
+    }
+}
+
+/// The words of `statement` shaped like a route without its leading `/`:
+/// two or more non-empty segments joined by `/`, the first starting with
+/// a letter or a digit.
+fn route_fragments(statement: &str) -> Vec<&str> {
+    const TRIM: &[char] = &[
+        '"', '\'', '`', '(', ')', '[', ']', ',', '.', ';', ':', '!', '?',
+    ];
+    statement
+        .split_whitespace()
+        .map(|word| word.trim_matches(TRIM))
+        .filter(|word| {
+            word.chars().next().is_some_and(char::is_alphanumeric)
+                && word.contains('/')
+                && word.split('/').all(|segment| !segment.is_empty())
+        })
+        .collect()
+}
+
+/// Whether `text` holds `fragment` as whole path segments: starting a
+/// word or after a `/`, and ending the path or before a `/`.
+fn contains_segments(text: &str, fragment: &str) -> bool {
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '<' | '{' | '.');
+    let more = |c: char| part(c) || matches!(c, ':' | '*');
+    text.match_indices(fragment).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before = !text[..start].chars().next_back().is_some_and(part);
+        let after = !text[end..].chars().next().is_some_and(more);
+        before && after
+    })
 }
 
 /// The route literals `statement` spells out: each whitespace-separated
@@ -589,5 +658,69 @@ mod tests {
         let h = vec![ids(&bare)];
         let text = CitedText::of(&[bare], &[], &[], &h.iter().cloned().collect());
         assert_eq!(text.uncited_route("It answers /health.", &h), None);
+    }
+
+    /// AC-1316 (T-1316): a fragment of a route the graph shows, spelled
+    /// without its leading `/`, must be shown by a fact it cites (#2335).
+    #[test]
+    fn a_route_fragment_must_be_shown_by_a_cited_fact() {
+        let endpoint = |route: &str| Node {
+            id: format!("endpoint:POST {route}"),
+            label: "Endpoint".into(),
+            props: json!({"path": route}),
+        };
+        let custom = endpoint("/api/alias/custom/new");
+        let random = endpoint("/api/alias/random/new");
+        let capability = Node {
+            id: "cap:alias".into(),
+            label: "Capability".into(),
+            props: json!({"title": "Create alias"}),
+        };
+        let ids = |node: &Node| {
+            citation_id(&FactKey::Node {
+                id: node.id.clone(),
+            })
+        };
+        let (k, c) = (ids(&custom), ids(&capability));
+        let cited: BTreeSet<String> = [k.clone(), c.clone()].into();
+        let text = CitedText::of(&[custom, random], &[], &[capability], &cited);
+        let claim = "Users create aliases via custom/new or random/new.";
+        // Citing only the capability shows neither fragment.
+        assert_eq!(
+            text.uncited_route(claim, std::slice::from_ref(&c)),
+            Some("custom/new")
+        );
+        // Citing the custom endpoint shows its fragment, not the other one,
+        // which is not cited here.
+        assert_eq!(
+            text.uncited_route(claim, std::slice::from_ref(&k)),
+            Some("random/new")
+        );
+        assert_eq!(
+            text.uncited_route("It accepts alias/custom/new.", std::slice::from_ref(&k)),
+            None
+        );
+        // A fragment must match whole segments of a route.
+        assert_eq!(
+            text.uncited_route("It uses stom/new.", std::slice::from_ref(&c)),
+            None
+        );
+        // A route only an edge shows is indexed too (#2335).
+        let calls = Edge {
+            src: "fn:client".into(),
+            label: "CALLS".into(),
+            dst: "http:POST /api/mailbox/verify".into(),
+            props: json!({}),
+        };
+        let only_edge = CitedText::of(&[], &[calls], &[], &cited);
+        assert_eq!(
+            only_edge.uncited_route("It sends mailbox/verify.", std::slice::from_ref(&c)),
+            Some("mailbox/verify")
+        );
+        // Prose that matches no route of the graph is not a route.
+        assert_eq!(
+            text.uncited_route("It reads and/or writes input/output.", &[c]),
+            None
+        );
     }
 }
