@@ -310,6 +310,13 @@ carries no receipt. Observed state that later rewrites a resource drops that
 resource's receipt at the publication check. The captured lane keeps no parse
 cache between runs.
 
+## Captured pipeline reads (AC-1057, #385)
+
+The pipeline reader's workflows and Dockerfiles join the same capture as the
+lanes' for every layer selection, under the same fallback. With a capture,
+the reader parses their retained bytes. Preflight's unreadable-pipeline
+finding still reads the checkout, and pipeline facts carry no receipt.
+
 ## Directory-built lane facts (AC-1037, #385)
 
 The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each
