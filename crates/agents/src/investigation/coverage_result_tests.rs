@@ -38,6 +38,7 @@ fn ledger(qualified: bool) -> InvestigationInputLedger {
     .unwrap();
     InvestigationInputLedger {
         coverage_reads: vec![],
+        artifact_reads: vec![],
         schema_version: if qualified { 2 } else { 1 },
         coverage: qualified.then_some(proof),
         graph_snapshot_id: snapshot.id().into(),
