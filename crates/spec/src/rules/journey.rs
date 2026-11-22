@@ -37,9 +37,9 @@ const EXTRACTOR: &str = "spec.journey";
 /// The default budget values are part of the `journey-candidate@2` contract
 /// (ADR-0084):
 /// - `max_screens = 6`
-/// - `max_expanded_states = 256`
+/// - `max_expanded_states = 4096` (256 under `@1`)
 /// - `max_calls_per_screen = 64`
-/// - `max_candidates = 32`
+/// - `max_candidates = 64` (32 under `@1`)
 /// - `max_alternatives = 64`
 ///
 /// The active budget is hashed into every candidate's `id` digest input.
@@ -62,9 +62,9 @@ impl Default for JourneyBudget {
     fn default() -> Self {
         Self {
             max_screens: 6,
-            max_expanded_states: 256,
+            max_expanded_states: 4096,
             max_calls_per_screen: 64,
-            max_candidates: 32,
+            max_candidates: 64,
             max_alternatives: 64,
         }
     }
@@ -1874,34 +1874,34 @@ fn search_entry<'a>(
             budget,
         )
     };
+    // Either retention cut applies to every candidate the entry keeps, so
+    // both are known before any candidate is finalized.
+    let alternatives_truncated = ordered_goals
+        .iter()
+        .map(|(_, _, alts)| alts.len())
+        .sum::<usize>()
+        > budget.max_alternatives;
+    if alternatives_truncated && first_truncated.is_none() {
+        first_truncated = Some(TruncationReason::Alternatives);
+    }
+    let retained_cut = if candidates_truncated {
+        Some(TruncationReason::Candidates)
+    } else {
+        alternatives_truncated.then_some(TruncationReason::Alternatives)
+    };
     let mut finalized: Vec<JourneyCandidate> = Vec::new();
     // Alternatives of the retained goals, best-ranked first across goals.
     let mut alternatives: Vec<(String, usize, RawCandidate<'a>)> = Vec::new();
     for (raw, count, alts) in ordered_goals {
-        let primary = finalize(
-            raw,
-            count,
-            candidates_truncated.then_some(TruncationReason::Candidates),
-        );
+        let primary = finalize(raw, count, retained_cut);
         alternatives.extend(alts.into_iter().map(|alt| (primary.id.clone(), count, alt)));
         finalized.push(primary);
     }
     alternatives.sort_by(|(_, _, a), (_, _, b)| {
         (rank(a), &a.goal_call.endpoint).cmp(&(rank(b), &b.goal_call.endpoint))
     });
-    let alternatives_truncated = alternatives.len() > budget.max_alternatives;
-    if alternatives_truncated {
-        alternatives.truncate(budget.max_alternatives);
-        if first_truncated.is_none() {
-            first_truncated = Some(TruncationReason::Alternatives);
-        }
-    }
+    alternatives.truncate(budget.max_alternatives);
     for (primary, count, raw) in alternatives {
-        let retained_cut = if candidates_truncated {
-            Some(TruncationReason::Candidates)
-        } else {
-            alternatives_truncated.then_some(TruncationReason::Alternatives)
-        };
         let mut candidate = finalize(raw, count, retained_cut);
         candidate.alternative_of = Some(primary);
         finalized.push(candidate);

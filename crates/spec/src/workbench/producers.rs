@@ -1754,8 +1754,9 @@ pub(super) fn journeys(
     );
     let candidates: Vec<_> = search
         .candidates
-        .into_iter()
+        .iter()
         .filter(|c| super::included(&c.provenance, mode, rejected))
+        .cloned()
         .collect();
     let mut assertions = Assertions::new(&budget);
     for candidate in &candidates {
@@ -1803,10 +1804,12 @@ pub(super) fn journeys(
         }
         // An alternative (ADR-0084) names the screens its goal's shortest
         // path skips, so two journeys to one goal never share a heading.
+        // From the unfiltered search, so an alternative whose primary was
+        // rejected or withheld still names it and is never shown as a primary.
         let primary = candidate
             .alternative_of
             .as_ref()
-            .and_then(|id| candidates.iter().find(|c| &c.id == id));
+            .and_then(|id| search.candidates.iter().find(|c| &c.id == id));
         match primary {
             Some(primary) => {
                 let via: Vec<String> = candidate

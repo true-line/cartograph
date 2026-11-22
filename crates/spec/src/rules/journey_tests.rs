@@ -2090,4 +2090,37 @@ fn journey_candidates_continue_past_writes_and_keep_alternatives_through_skipped
         "- Alternative of: {} (`{}`)",
         primary.label, primary.id
     )));
+
+    // A rejected primary still leaves its alternative named as one.
+    let rejected = BTreeSet::from([primary.provenance.content_hash.clone()]);
+    let curated = compile_spec(&nodes, &edges, &flows, ExportMode::BestEffort, &rejected);
+    let curated = curated
+        .artifacts
+        .iter()
+        .find(|a| a.id == "journeys")
+        .unwrap();
+    assert!(!curated.content.contains(&format!("- Id: `{}`", primary.id)));
+    assert!(curated.content.contains("NewAliasResult (via `/login`)\n"));
+    assert!(curated.content.contains(&format!(
+        "- Alternative of: {} (`{}`)",
+        primary.label, primary.id
+    )));
+
+    // An alternatives cut marks every candidate the entry keeps, primaries too.
+    let no_alternatives = JourneyBudget {
+        max_alternatives: 0,
+        ..JourneyBudget::default()
+    };
+    let cut = candidates(&node_refs, &edge_refs, &flows, no_alternatives);
+    assert!(cut.iter().all(|c| c.alternative_of.is_none()));
+    assert_eq!(cut.len(), 2);
+    for c in &cut {
+        assert_eq!(
+            c.truncated,
+            Some(TruncationReason::Alternatives),
+            "{}",
+            c.label
+        );
+        assert!(!c.alternatives_complete);
+    }
 }
