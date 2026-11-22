@@ -29,6 +29,8 @@ fn basis(finish: &StagedFinish, indices: Vec<usize>) -> PatchBasis {
         refusal_hash: content_hash(b"saved refusal"),
         finding_count: 3,
         flagged_indices: indices,
+        flagged_limitations: vec![],
+        capacity_gaps: vec![],
     }
 }
 fn merge(patches: serde_json::Value, indices: Vec<usize>) -> Result<MergedFinish, PatchRejection> {
@@ -252,5 +254,230 @@ fn finish_patch_step_becomes_one_native_tool() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&action).unwrap(),
         json!({"type": "finish_patch", "patches": [{"finding_index": 2, "withdraw": true}]})
+    );
+}
+
+fn limitation_refusal(first: &StagedFinish) -> RefusalRecord {
+    let at = |field| ProsePosition { field, sentence: 1 };
+    let mut record = RefusalRecord {
+        schema_version: 1,
+        refusal_id: String::new(),
+        task_id: "task".into(),
+        request_hash: content_hash(b"request"),
+        obligations_hash: content_hash(b"obligations"),
+        step_id: "step".into(),
+        input_ledger_hash: content_hash(b"ledger"),
+        disclosure_hash: content_hash(b"disclosure"),
+        finish_hash: first.fingerprint().unwrap(),
+        outcome: CompletionOutcome::Supported,
+        response_hash: content_hash(b"response"),
+        previous_refusal: None,
+        refusal_count: 1,
+        assessment: vec![],
+        feedback: RefusalFeedback {
+            schema_version: 6,
+            citation_correction: None,
+            unmet: vec![],
+            prose_correction: Some(ProseCorrection::Combined(Box::new(CombinedCorrections {
+                entries: vec![CombinedCorrection::ReplayAt(ReplayLocation {
+                    start: at(ProseField::Limitation { limitation: 0 }),
+                    end: at(ProseField::Limitation { limitation: 0 }),
+                })],
+                omitted: 0,
+            }))),
+        },
+    };
+    record.refusal_id = record.content_id().unwrap();
+    record
+}
+
+// AC-1431 (T-1431): for @29 a correction located in a top-level limitation
+// becomes a patch of that limitation; older roles keep the whole-answer
+// fallback and their exact marker and schema bytes.
+#[test]
+fn a_flagged_top_level_limitation_is_patched_not_rewritten_whole() {
+    let first = finish();
+    let record = limitation_refusal(&first);
+    assert_eq!(
+        PatchBasis::from_refusal(&record, 3).err(),
+        Some(PatchRejection::UnsupportedRefusal)
+    );
+    let saved = PatchBasis::from_refusal_for(&record, 3, true).unwrap();
+    assert!(saved.flagged_indices.is_empty());
+    assert_eq!(saved.flagged_limitations, vec![0]);
+    let legacy = basis(&first, vec![0, 2]);
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("flagged_limitations")
+            .is_none()
+    );
+    let ledger = crate::investigation::tests::ledger();
+    let schema: serde_json::Value =
+        serde_json::from_str(&saved.response_schema(&ledger).unwrap()).unwrap();
+    // Row form: every flagged limitation is a required key.
+    assert_eq!(schema["required"], json!(["type", "limitations"]));
+    assert_eq!(
+        schema["properties"]["limitations"]["required"],
+        json!(["0"])
+    );
+    assert!(schema["properties"].get("patches").is_none());
+    let merged = |rows: serde_json::Value| {
+        let mut body = json!({"type":"finish_patch"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(rows.as_object().unwrap().clone());
+        VolatileFinish::capture(first.clone(), saved.clone())
+            .unwrap()
+            .merge(&body.to_string(), &saved)
+    };
+    let replaced = merged(json!({"limitations":{"0":{"replace":"Rewritten scope."}}})).unwrap();
+    let InvestigationAction::Finish {
+        findings,
+        limitations,
+        ..
+    } = &replaced.finish.action
+    else {
+        panic!()
+    };
+    assert_eq!(limitations, &["Rewritten scope.".to_string()]);
+    assert_eq!(findings.len(), 3);
+    // Withdrawing the only limitation leaves an invalid finish.
+    assert_eq!(
+        merged(json!({"limitations":{"0":{"withdraw":true}}})).err(),
+        Some(PatchRejection::InvalidShape)
+    );
+    // A flagged row may not be skipped or swapped for another.
+    for rows in [
+        json!({"limitations":{}}),
+        json!({"limitations":{"1":{"replace":"Other."}}}),
+    ] {
+        assert_eq!(merged(rows).err(), Some(PatchRejection::InvalidIndex));
+    }
+    for rows in [
+        json!({}),
+        json!({"limitations":{"0":{"withdraw":false}}}),
+        json!({"limitations":{"0":{"replace":"A.","withdraw":true}}}),
+        json!({"limitations":{"0":{"replace":"A."}},"findings":{}}),
+    ] {
+        assert_eq!(merged(rows).err(), Some(PatchRejection::InvalidShape));
+    }
+}
+
+// AC-1430/AC-1431 (T-1430): a @29 refusal whose only unmet entries are
+// capacity exclusions is patchable; the patch must disclose each gap, keyed
+// by its 12-char name, and the host prefixes the disclosure with that name.
+#[test]
+fn a_capacity_gap_is_disclosed_inside_the_patch() {
+    let first = finish();
+    let gap = "e".repeat(64);
+    let mut record = limitation_refusal(&first);
+    record.feedback.prose_correction = None;
+    record.feedback.unmet = vec![FeedbackEntry {
+        obligation_id: gap.clone(),
+        kind: "source".into(),
+        reason: RefusalReason::ExcludedByCapacity,
+    }];
+    record.refusal_id = record.content_id().unwrap();
+    assert_eq!(
+        PatchBasis::from_refusal(&record, 3).err(),
+        Some(PatchRejection::UnsupportedRefusal)
+    );
+    let saved = PatchBasis::from_refusal_for(&record, 3, true).unwrap();
+    assert_eq!(saved.capacity_gaps, vec![gap.clone()]);
+    let name = capacity_name(&gap).to_string();
+    let ledger = crate::investigation::tests::ledger();
+    let schema: serde_json::Value =
+        serde_json::from_str(&saved.response_schema(&ledger).unwrap()).unwrap();
+    assert_eq!(schema["required"], json!(["type", "disclosures"]));
+    assert_eq!(
+        schema["properties"]["disclosures"]["required"],
+        json!([name.clone()])
+    );
+    let merged = |body: serde_json::Value| {
+        VolatileFinish::capture(first.clone(), saved.clone())
+            .unwrap()
+            .merge(&body.to_string(), &saved)
+    };
+    let done =
+        merged(json!({"type":"finish_patch","disclosures":{name.clone():"Not read: capacity."}}))
+            .unwrap();
+    let InvestigationAction::Finish { limitations, .. } = &done.finish.action else {
+        panic!()
+    };
+    assert_eq!(
+        limitations,
+        &[
+            "Only selected evidence was assessed.".to_string(),
+            format!("{name}: Not read: capacity.")
+        ]
+    );
+    for body in [
+        json!({"type":"finish_patch","disclosures":{}}),
+        json!({"type":"finish_patch","disclosures":{name.clone():"  "}}),
+        json!({"type":"finish_patch"}),
+    ] {
+        assert!(merged(body).is_err());
+    }
+    // Any other unmet reason still needs a whole answer.
+    record.feedback.unmet[0].reason = RefusalReason::NotAttempted;
+    record.refusal_id = record.content_id().unwrap();
+    assert_eq!(
+        PatchBasis::from_refusal_for(&record, 3, true).err(),
+        Some(PatchRejection::UnsupportedRefusal)
+    );
+}
+
+// AC-1431 (T-1431): on a @29 patch step a full finish is read as a patch at
+// the flagged indices, so unflagged rows stay as first admitted; without the
+// opt-in, or with a different finding count, it stays InvalidShape.
+#[test]
+fn a_full_finish_on_a_patch_step_is_read_as_the_patch() {
+    let first = finish();
+    let mut saved = basis(&first, vec![1]);
+    saved.flagged_limitations = vec![0];
+    let mut whole = first.clone();
+    let InvestigationAction::Finish {
+        findings,
+        limitations,
+        ..
+    } = &mut whole.action
+    else {
+        panic!()
+    };
+    findings[0].title = "Unflagged edit".into();
+    findings[1].title = "Flagged edit".into();
+    limitations[0] = "Rewritten scope.".into();
+    let mut raw = serde_json::to_value(&whole.action).unwrap();
+    raw["limitations"] = json!(serde_json::to_string(&raw["limitations"]).unwrap());
+    let raw = raw.to_string();
+    let held = || VolatileFinish::capture(first.clone(), saved.clone()).unwrap();
+    assert_eq!(
+        held().merge(&raw, &saved).err(),
+        Some(PatchRejection::InvalidShape)
+    );
+    let merged = held().merge_with(&raw, &saved, true).unwrap();
+    let InvestigationAction::Finish {
+        findings,
+        limitations,
+        ..
+    } = &merged.finish.action
+    else {
+        panic!()
+    };
+    assert_eq!(
+        findings
+            .iter()
+            .map(|f| f.title.as_str())
+            .collect::<Vec<_>>(),
+        ["First", "Flagged edit", "Third"]
+    );
+    assert_eq!(limitations, &["Rewritten scope.".to_string()]);
+    assert_eq!(merged.counts.patched_count, 1);
+    let mut short = serde_json::to_value(&whole.action).unwrap();
+    short["findings"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        held().merge_with(&short.to_string(), &saved, true).err(),
+        Some(PatchRejection::InvalidShape)
     );
 }
