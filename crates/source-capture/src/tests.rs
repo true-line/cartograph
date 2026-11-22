@@ -156,6 +156,28 @@ fn working_capture_rejects_paths_duplicates_and_limits() {
     assert_eq!(exact.file("a").unwrap().bytes(), b"1234");
 }
 
+// AC-1510: the hard maxima admit a full VSCode selection (16,180 TS/JS files,
+// about 234 MiB, measured at 733a998) with room to spare, and stop one past.
+#[test]
+fn working_capture_admits_a_vscode_scale_selection() {
+    assert_eq!(MAX_FILES, 20_480);
+    assert_eq!(MAX_CAPTURE_BYTES, 320 * 1024 * 1024);
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = (0..=MAX_FILES).map(|i| format!("f{i:05}")).collect();
+    for path in &paths {
+        std::fs::write(dir.path().join(path), b"x").unwrap();
+    }
+    let capture = capture_working_tree(
+        dir.path(),
+        &source(),
+        &paths[..MAX_FILES],
+        CaptureLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(capture.file(&paths[MAX_FILES - 1]).unwrap().bytes(), b"x");
+    assert!(capture_working_tree(dir.path(), &source(), &paths, CaptureLimits::default()).is_err());
+}
+
 // AC-0133: final and intermediate symlinks, directories, sockets and FIFOs fail.
 #[cfg(unix)]
 #[test]
