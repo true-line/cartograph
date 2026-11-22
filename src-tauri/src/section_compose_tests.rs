@@ -662,3 +662,129 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
     .unwrap();
     assert_eq!((how, kept.finish.claims.len()), ("review_unavailable", 2));
 }
+
+/// AC-1328 (T-1328, #2449): a local composition whose reply lost two claims
+/// to uncited routes, numbers or endpoints is asked once more with the
+/// correction, and the screened reply keeping more claims goes on; one such
+/// claim, a cloud provider or an unreadable retry keeps the first.
+#[test]
+fn a_reply_losing_claims_to_uncited_figures_is_asked_once_more() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let cites = [id("cap:orders")];
+    let claim = |statement: &str| json!({"statement": statement, "claim_kind": "implemented_behavior", "citation_ids": cites});
+    let first = |uncited: usize| {
+        let mut claims = vec![claim("Shoppers place orders for themselves.")];
+        for n in 0..uncited {
+            claims.push(claim(&format!(
+                "Shoppers place up to {} orders a day.",
+                17 + n
+            )));
+        }
+        let composer = Scripted {
+            reply: json!({ "claims": claims }).to_string(),
+            prompts: Mutex::new(Vec::new()),
+        };
+        compose(
+            &state,
+            &composer,
+            &prepared,
+            None,
+            &|| CallDirective::Continue,
+            None,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let retry = |reply: String| Scripted {
+        reply,
+        prompts: Mutex::new(Vec::new()),
+    };
+    let continue_ = || CallDirective::Continue;
+    let better = json!({"claims": [
+        claim("Shoppers place orders for themselves."),
+        claim("Shoppers place orders for the people they shop for."),
+    ]})
+    .to_string();
+    // Two claims left out for uncited numbers: asked once more, and the
+    // retry keeps two claims to the first's one.
+    let provider = retry(better.clone());
+    let (kept, reason, how) =
+        screen_or_retry(&state, &provider, &prepared, first(2), &continue_, None).unwrap();
+    assert_eq!((reason, how), (None, Some("kept_retry")));
+    assert_eq!(kept.finish.claims.len(), 2);
+    let prompts = provider.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].ends_with(&format!(
+        "<correction>\n{}\n</correction>\n",
+        agents::section_compose::CORRECTION
+    )));
+    drop(prompts);
+    // An unreadable retry keeps the first reply as screened.
+    let provider = retry("not a reply".into());
+    let (kept, _, how) =
+        screen_or_retry(&state, &provider, &prepared, first(2), &continue_, None).unwrap();
+    assert_eq!((how, kept.finish.claims.len()), (Some("kept_first"), 1));
+    assert_eq!(kept.reasons["number_not_cited"], 2);
+    // One such claim is not worth a second call.
+    let provider = retry(better.clone());
+    let (kept, _, how) =
+        screen_or_retry(&state, &provider, &prepared, first(1), &continue_, None).unwrap();
+    assert_eq!((how, kept.finish.claims.len()), (None, 1));
+    assert!(provider.prompts.lock().unwrap().is_empty());
+    // A cloud consent covers one payload: no second call.
+    struct Cloud;
+    impl LlmProvider for Cloud {
+        fn id(&self) -> &str {
+            "cloud"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Cloud
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let (kept, _, how) =
+        screen_or_retry(&state, &Cloud, &prepared, first(2), &continue_, None).unwrap();
+    assert_eq!((how, kept.finish.claims.len()), (None, 1));
+    // A local retry whose call fails keeps the first reply; a cancelled job
+    // still fails.
+    struct Failing;
+    impl LlmProvider for Failing {
+        fn id(&self) -> &str {
+            "local-failing"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Local
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let (kept, _, how) =
+        screen_or_retry(&state, &Failing, &prepared, first(2), &continue_, None).unwrap();
+    assert_eq!((how, kept.finish.claims.len()), (Some("kept_first"), 1));
+    let cancelled = || CallDirective::Cancelled;
+    assert!(screen_or_retry(&state, &Failing, &prepared, first(2), &cancelled, None).is_err());
+}

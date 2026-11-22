@@ -282,3 +282,36 @@ fn a_cut_short_id_naming_one_citable_fact_is_read_as_that_fact() {
         );
     }
 }
+
+/// AC-1328 (T-1328): a composition asked once more is the same request
+/// followed by the correction, under its own action id (#2449).
+#[test]
+fn a_corrected_request_is_the_same_request_and_the_correction() {
+    let address = address();
+    let facts = vec![fact(1)];
+    let first = action(
+        &ComposeInput {
+            address: &address,
+            title: "Business rules",
+            section: "## 1.5 Business rules (P+A)\n\nrows\n",
+            facts: &facts,
+            groups: &[],
+        },
+        "compose:D1:1.3".into(),
+    );
+    let again = corrected(&first);
+    assert_eq!(again.action_id, "compose:D1:1.3:corrected");
+    assert_eq!(again.payload.system, first.payload.system);
+    assert_eq!(again.payload.response_schema, first.payload.response_schema);
+    assert_eq!(
+        again.payload.prompt,
+        format!(
+            "{}\n<correction>\n{CORRECTION}\n</correction>\n",
+            first.payload.prompt
+        )
+    );
+    assert!(
+        CORRECTION.contains("domain terms")
+            && CORRECTION.contains("only when a fact you cite shows it")
+    );
+}

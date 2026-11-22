@@ -84,6 +84,10 @@ pub(crate) struct ComposeOutcome {
     /// `not_reviewed_cloud` (a cloud consent covers one payload).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) review: Option<&'static str>,
+    /// Whether the composer was asked once more (#2449): `kept_first` or
+    /// `kept_retry`, the screened reply that kept more claims.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retry: Option<&'static str>,
 }
 
 impl ComposeOutcome {
@@ -95,6 +99,7 @@ impl ComposeOutcome {
             left_out_reasons: BTreeMap::new(),
             gated: None,
             review: None,
+            retry: None,
         }
     }
 }
@@ -649,6 +654,71 @@ fn screen(prepared: &Prepared, composed: &mut Composed) -> Option<&'static str> 
     None
 }
 
+/// The staging checks whose misses a second sample, told of them, can avoid
+/// (#2449): the request already holds the facts such a claim needs.
+const RETRY_REASONS: [&str; 3] = ["route_not_cited", "number_not_cited", "endpoint_not_cited"];
+
+/// How many claims [`RETRY_REASONS`] must leave out before the composer is
+/// asked once more.
+const RETRY_MIN_LEFT_OUT: usize = 2;
+
+/// [`screen`] `composed`, and on a local provider whose reply lost at least
+/// [`RETRY_MIN_LEFT_OUT`] claims to [`RETRY_REASONS`], ask once more with
+/// [`section_compose::corrected`] and keep the screened reply with more
+/// claims, the first on a tie, an unreadable or failed retry, or one over
+/// the input ceiling (#2449). A cloud consent covers one payload, so a
+/// cloud composition is not asked again.
+/// Returns the reply kept, why it has no claim left, and whether a retry
+/// ran.
+fn screen_or_retry(
+    state: &AppState,
+    provider: &dyn LlmProvider,
+    prepared: &Prepared,
+    mut composed: Composed,
+    check: &dyn Fn() -> CallDirective,
+    job_id: Option<i64>,
+) -> Result<(Composed, Option<&'static str>, Option<&'static str>), String> {
+    let before: usize = RETRY_REASONS
+        .iter()
+        .filter_map(|reason| composed.reasons.get(reason))
+        .sum();
+    let reason = screen(prepared, &mut composed);
+    let avoidable = RETRY_REASONS
+        .iter()
+        .filter_map(|reason| composed.reasons.get(reason))
+        .sum::<usize>()
+        - before;
+    if provider.locality() != Locality::Local || avoidable < RETRY_MIN_LEFT_OUT {
+        return Ok((composed, reason, None));
+    }
+    let action = section_compose::corrected(&prepared.action);
+    // The retry is optional: a request the correction puts over the input
+    // ceiling is not sent, and a failed call keeps the first reply unless
+    // the job was cancelled or lost.
+    let ceiling = limits()?
+        .values()
+        .input_bytes
+        .saturating_sub(INPUT_MARGIN_BYTES);
+    if payload_bytes(&action) > ceiling {
+        return Ok((composed, reason, Some("kept_first")));
+    }
+    let text = match complete(state, provider, &action, None, check, job_id) {
+        Ok(completion) => completion.text,
+        Err(error) if check() != CallDirective::Continue => return Err(error),
+        Err(_) => return Ok((composed, reason, Some("kept_first"))),
+    };
+    let Ok(mut second) = section_compose::decode(&prepared.address, &text, &prepared.citable)
+    else {
+        return Ok((composed, reason, Some("kept_first")));
+    };
+    let second_reason = screen(prepared, &mut second);
+    if second.finish.claims.len() > composed.finish.claims.len() {
+        Ok((second, second_reason, Some("kept_retry")))
+    } else {
+        Ok((composed, reason, Some("kept_first")))
+    }
+}
+
 /// [`stage`] recording `role`, its definition fingerprint, as the author.
 fn stage_as(
     state: &AppState,
@@ -742,6 +812,7 @@ fn stage_as(
             left_out_reasons: reasons,
             gated: None,
             review: None,
+            retry: None,
         }),
         Err(DraftStoreError::Storage(error)) => Err(error.to_string()),
         Err(_) => Ok(ComposeOutcome {
@@ -796,13 +867,22 @@ fn run_blocking(
         &check,
         Some(execution.id()),
     )? {
-        Ok(mut composed) => {
+        Ok(composed) => {
             // The deterministic checks run first, so each claim they refuse
             // keeps its own reason; only what passes them is reviewed.
-            if let Some(reason) = screen(&prepared, &mut composed) {
+            let (composed, reason, retry) = screen_or_retry(
+                state,
+                provider,
+                &prepared,
+                composed,
+                &check,
+                Some(execution.id()),
+            )?;
+            if let Some(reason) = reason {
                 return Ok(ComposeOutcome {
                     left_out: composed.left_out,
                     left_out_reasons: composed.reasons,
+                    retry,
                     ..ComposeOutcome::none(reason)
                 });
             }
@@ -825,6 +905,7 @@ fn run_blocking(
             };
             Ok(ComposeOutcome {
                 review: Some(review),
+                retry,
                 ..outcome
             })
         }
