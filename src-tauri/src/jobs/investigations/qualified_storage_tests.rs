@@ -13,12 +13,13 @@ use serde_json::json;
 use std::time::Duration;
 
 struct Fixture {
-    directory: tempfile::TempDir,
     store: JobStore,
     id: String,
     ledger: InvestigationInputLedger,
     result: InvestigationResult,
     step: PendingInvestigationStep,
+    /// Dropped last: Windows cannot remove it while a store holds files in it (#1307).
+    directory: tempfile::TempDir,
 }
 fn archive() -> InvestigationCoverageArchive {
     let record=CoverageRecord {repo_key:"acme/api".into(),registered_source_id:Some("src:fixture".into()),

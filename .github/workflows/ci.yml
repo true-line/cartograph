@@ -584,9 +584,11 @@ jobs:
         shell: pwsh
         run: '& $env:RUSTC_WORKSPACE_WRAPPER --show-stats'
 
-      # Report what the tests left behind so the leaking holder can be found
-      # (#1307 follow-up). Read-only: runner.temp is emptied after the job.
-      - name: Report leaked test temporary directories
+      # The tests must remove every temporary directory they create (#1307).
+      # A fixture that drops its directory before the store holding state.db
+      # leaks it on Windows, so the job fails on any leak and names what each
+      # left behind. runner.temp is emptied after the job either way.
+      - name: Check that the tests removed their temporary directories
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
@@ -595,6 +597,7 @@ jobs:
           $leaked | Select-Object -First 20 | ForEach-Object {
             "$($_.Name): $((Get-ChildItem -Force -Name -Path $_.FullName) -join ', ')"
           }
+          if ($leaked.Count -gt 0) { throw "The tests left $($leaked.Count) temporary directories behind (#1307)" }
 
   # License compliance + supply-chain gate (#222). This remains a complete-
   # suite lane and retains its stable context.
