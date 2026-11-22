@@ -58,6 +58,12 @@ fn acquired() -> (Fixture, String) {
     (fixture, attempt)
 }
 
+/// A settled acquisition on a cloud task.
+fn acquired_on_cloud() -> (Fixture, String) {
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(true));
+    acquired()
+}
+
 fn witness(fixture: &Fixture, attempt: &str, bytes: &[u8]) -> ReadDenialWitness {
     let source = &fixture.r.source.source;
     let rules = ReadDenyRules::with_project_rules([source.path.clone()]).unwrap();
@@ -101,7 +107,7 @@ fn reload(fixture: &Fixture) -> Result<Vec<completion::AttemptEntry>, Investigat
 // stored.
 #[test]
 fn firewall_refusal_persists_after_acquisition_and_reopens() {
-    let (mut fixture, attempt) = acquired();
+    let (mut fixture, attempt) = acquired_on_cloud();
     let revision = fixture.f.task.ledger_revision;
     let witness = witness(&fixture, &attempt, b"private text");
     let expected = fixture.f.task.detail.summary.revision;
@@ -153,7 +159,7 @@ fn firewall_refusal_persists_after_acquisition_and_reopens() {
 // attempt, event or observation table survives.
 #[test]
 fn failed_refusal_leaves_nothing() {
-    let (mut fixture, attempt) = acquired();
+    let (mut fixture, attempt) = acquired_on_cloud();
     let sequence = fixture.f.task.detail.summary.last_event_sequence;
     let good = witness(&fixture, &attempt, b"private text");
     let stale = fixture.f.task.detail.summary.revision + 1;
@@ -184,7 +190,7 @@ fn failed_refusal_leaves_nothing() {
 // set or a second refusal of the same acquisition is refused unwritten.
 #[test]
 fn mismatched_or_repeated_witnesses_are_refused() {
-    let (mut fixture, attempt) = acquired();
+    let (mut fixture, attempt) = acquired_on_cloud();
     let other_bytes = witness(&fixture, &attempt, b"other text");
     let other_attempt = witness(&fixture, &"0".repeat(64), b"private text");
     let good = witness(&fixture, &attempt, b"private text");
@@ -215,7 +221,7 @@ fn mismatched_or_repeated_witnesses_are_refused() {
 // row's own body hash is recomputed.
 #[test]
 fn altered_or_missing_observation_fails_fresh_readback() {
-    let (mut fixture, attempt) = acquired();
+    let (mut fixture, attempt) = acquired_on_cloud();
     let witness = witness(&fixture, &attempt, b"private text");
     commit(&mut fixture, &[witness]).unwrap();
     assert!(reload(&fixture).is_ok());
@@ -251,6 +257,26 @@ fn altered_or_missing_observation_fails_fresh_readback() {
     for statement in &schema()[1..] {
         conn.execute_batch(statement).unwrap();
     }
+    assert_eq!(
+        reload(&fixture).err(),
+        Some(InvestigationStoreError::Invalid)
+    );
+}
+
+// AC-1410: a task that never egresses to a cloud provider refuses a refusal,
+// even one the firewall built against some cloud provider.
+#[test]
+fn local_task_refuses_a_cloud_refusal_and_its_readback() {
+    let (mut fixture, attempt) = acquired();
+    let witness = witness(&fixture, &attempt, b"private text");
+    assert_eq!(
+        commit(&mut fixture, std::slice::from_ref(&witness)),
+        Err(InvestigationStoreError::Invalid)
+    );
+    assert_eq!(reload(&fixture).unwrap().len(), 1);
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(true));
+    commit(&mut fixture, &[witness]).unwrap();
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(false));
     assert_eq!(
         reload(&fixture).err(),
         Some(InvestigationStoreError::Invalid)

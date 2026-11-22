@@ -104,6 +104,26 @@ impl ReadRefusalObservation {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: treat the Local settled-acquisition fixture as a cloud task,
+    /// so the rest of the refusal contract is exercised before slice 2b adds
+    /// the cloud worker path. The gate itself is tested with it off.
+    pub(in crate::jobs::investigations) static FIXTURE_EGRESSES_TO_CLOUD: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// The firewall refuses only toward a cloud provider, so a refusal on a task
+/// that never egresses to one is not authentic.
+fn egresses_to_cloud(task: &StoredTask) -> bool {
+    #[cfg(test)]
+    if FIXTURE_EGRESSES_TO_CLOUD.with(std::cell::Cell::get) {
+        return true;
+    }
+    task.detail.summary.provider_mode == InvestigationProviderMode::Cloud
+        && task.detail.provider.mode == InvestigationProviderMode::Cloud
+}
+
 fn citation<'a>(
     ledger: &'a InvestigationInputLedger,
     citation_id: &str,
@@ -130,6 +150,9 @@ fn refuse(
         || witnesses.is_empty()
     {
         return Err(InvestigationStoreError::Stale);
+    }
+    if !egresses_to_cloud(task) {
+        return Err(InvestigationStoreError::Invalid);
     }
     let policy = saved_policy(task)?;
     let id = task.detail.summary.investigation_id.clone();
@@ -276,6 +299,7 @@ pub(super) fn verify(
         || event.step_id.as_deref() != Some(entry.record.step_id.as_str())
         || event.tool != Some(InvestigationTool::ReadEvidence)
         || event.summary != REFUSED_MESSAGE
+        || !egresses_to_cloud(task)
         || !present(connection)?
     {
         return Err(InvestigationStoreError::Invalid);
