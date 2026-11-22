@@ -1,12 +1,12 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { expect, fn, userEvent, within } from 'storybook/test';
-import { IngestCard } from './IngestCard';
+import { expect, within } from 'storybook/test';
+import { IngestSummaryDetails } from './IngestSummaryDetails';
 
+// The last ingest's outcome as Workspace shows it (#2170).
 const meta = {
-  title: 'Shell/IngestCard',
-  component: IngestCard,
-  args: { onConnect: fn(), busy: false, summary: null, error: null, canIngest: true },
-} satisfies Meta<typeof IngestCard>;
+  title: 'Shell/IngestSummary',
+  component: IngestSummaryDetails,
+} satisfies Meta<typeof IngestSummaryDetails>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -20,23 +20,6 @@ const EMPTY_LAYERS = {
   kotlin: { files: 0, nodes: 0, edges: 0 },
   webext: { files: 0, nodes: 0, edges: 0 },
   tools: { files: 0, nodes: 0, edges: 0 },
-};
-
-export const Idle: Story = {
-  play: async ({ args, canvasElement }) => {
-    const canvas = within(canvasElement);
-    // The card is the entry into the Connect → Preflight → Recover flow.
-    await userEvent.click(canvas.getByRole('button', { name: 'Connect a target' }));
-    await expect(args.onConnect).toHaveBeenCalled();
-  },
-};
-
-export const Busy: Story = {
-  args: { busy: true },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByRole('button', { name: /recovering/i })).toBeDisabled();
-  },
 };
 
 export const WithSummary: Story = {
@@ -72,6 +55,38 @@ export const WithSummary: Story = {
     );
     // AC-0196: nothing merged, so no merge line.
     await expect(canvas.queryByTestId('merged-summary')).toBeNull();
+  },
+};
+
+// Schedules, pipelines and environments add to the totals, so the breakdown
+// names them whenever the backend reports them.
+export const OptionalLayers: Story = {
+  args: {
+    summary: {
+      job_id: 4,
+      files: 6,
+      nodes: 12,
+      edges: 15,
+      merged: { nodes: 0, edges: 0, node_collisions: 0 },
+      layers: {
+        ...EMPTY_LAYERS,
+        schedules: { files: 1, nodes: 2, edges: 2 },
+        pipelines: { files: 2, nodes: 6, edges: 8 },
+        environments: { files: 1, nodes: 4, edges: 5 },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('schedules-layer-summary').textContent).toBe(
+      '1 files · 2 nodes · 2 edges',
+    );
+    await expect(canvas.getByTestId('pipelines-layer-summary').textContent).toBe(
+      '2 files · 6 nodes · 8 edges',
+    );
+    await expect(canvas.getByTestId('environments-layer-summary').textContent).toBe(
+      '1 files · 4 nodes · 5 edges',
+    );
   },
 };
 
@@ -258,12 +273,4 @@ export const WithClonedRepo: Story = {
     const listed = canvas.getByTestId('cloned-repo');
     await expect(listed.textContent).toBe('acme/shop @ a1b2c3d4e5f6');
   },
-};
-
-export const Failed: Story = {
-  args: { error: 'io: No such file or directory (os error 2)' },
-};
-
-export const NoBackend: Story = {
-  args: { canIngest: false },
 };
