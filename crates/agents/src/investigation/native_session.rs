@@ -32,6 +32,10 @@ use super::native_proxy::{CallLimits, ModelProxy, ProxyBackend, ProxyExchange, P
 /// bounded loop takes one action per step, so only the first call runs.
 pub const EXTRA_CALL: &str = "Only one tool call per turn is run; this call was not run. Read the previous result, then call again if you still need it.";
 
+/// The action type a refused tool call is handed to the worker as. No action
+/// decodes with it, so the worker refuses it as `invalid_action`.
+pub const REFUSED_CALL: &str = "refused_tool_call";
+
 /// Largest sidecar line read.
 const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -306,20 +310,26 @@ impl<L: RuntimeLink> NativeSession<L> {
                 self.start(&system, &prompt, &tools, limits.max_output_tokens, deadline)?;
                 (vec![prompt], Some(reason))
             }
-            BridgeTurn::ToolResult { content } => {
+            BridgeTurn::ToolResult { content, is_error } => {
                 let call_id = self
                     .pending_call
                     .take()
                     .ok_or(not_sent(FailureCode::InvalidInput))?;
                 self.send(
                     &json!({"type": "tool_result", "call_id": call_id, "content": content,
-                    "is_error": false, "terminal": false}),
+                    "is_error": is_error, "terminal": false}),
                 )?;
                 (vec![content], None)
             }
         };
         let exchange = self.serve(&mut authorized, limits, deadline, check, dispatching)?;
         if !(200..300).contains(&exchange.status) {
+            return Err(answered(FailureCode::HttpStatus));
+        }
+        // vLLM reports a failed streamed generation as HTTP 200 carrying one
+        // `error` event; the runtime then ends with no call, which would read
+        // as an empty completion.
+        if provider_error(&exchange.body) {
             return Err(answered(FailureCode::HttpStatus));
         }
         let (response_model, usage) = reported(&exchange.body);
@@ -345,10 +355,20 @@ impl<L: RuntimeLink> NativeSession<L> {
                     self.pending_call = Some(call_id.to_owned());
                     self.bridge
                         .record_model_output(name.len() + arguments.to_string().len());
-                    let text = self
-                        .bridge
-                        .action_text(name, &arguments)
-                        .map_err(|_| answered(FailureCode::InvalidResponse))?;
+                    // A refused call goes to the worker as an action that
+                    // cannot decode, so its host-ledgered invalid_action
+                    // refusal, not this session, decides whether the run
+                    // continues (AC-1420).
+                    let text = match self.bridge.action_text(name, &arguments) {
+                        Ok(text) => text,
+                        Err(refusal) => serde_json::to_string(&json!({
+                            "type": REFUSED_CALL,
+                            "tool": name,
+                            "refusal": refusal.code,
+                            "arguments": arguments,
+                        }))
+                        .map_err(|_| answered(FailureCode::InvalidResponse))?,
+                    };
                     return Ok(StepOutput {
                         text,
                         exchange,
@@ -579,6 +599,17 @@ fn refused(refusal: ProxyRefusal) -> BoundedCallError {
         | ProxyRefusal::OutputTokens
         | ProxyRefusal::Unauthorized => not_sent(FailureCode::InvalidResponse),
     }
+}
+
+/// Whether a response body, plain JSON or server-sent events, carries a
+/// provider `error` object.
+fn provider_error(body: &[u8]) -> bool {
+    String::from_utf8_lossy(body).lines().any(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("data:").map_or(line, str::trim);
+        serde_json::from_str::<Value>(line)
+            .is_ok_and(|event| event.get("error").is_some_and(Value::is_object))
+    })
 }
 
 /// The model id and usage a provider reported in a streamed or whole body:

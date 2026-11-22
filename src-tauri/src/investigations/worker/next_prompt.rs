@@ -25,17 +25,19 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         let action = if is_patch {
             None
         } else {
-            Some(
-                ProgressiveInvestigationAction::decode_resolved_detailed_for_specialist(
-                    &completion.text,
-                    &context.context_id,
-                    &request.intent_hash_with_policy(policy)?,
-                    input.ledger(),
-                    policy,
-                    self.detail.summary.specialist_id,
-                )
-                .map_err(|failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure)))?,
-            )
+            match ProgressiveInvestigationAction::decode_resolved_detailed_for_specialist(
+                &completion.text,
+                &context.context_id,
+                &request.intent_hash_with_policy(policy)?,
+                input.ledger(),
+                policy,
+                self.detail.summary.specialist_id,
+            ) {
+                Ok(action) => Some(action),
+                Err(failure) => {
+                    return self.refuse_invalid_action(completion, mode, step_id, failure);
+                }
+            }
         };
         // This is a decoded acquisition that would consume a tool action.
         // Finish remains admissible at the tool cap; unrelated store failures
@@ -180,6 +182,78 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             );
         }
         self.detail = detail;
+        super::super::emit_changed(self.app, &self.detail);
+        Ok(true)
+    }
+
+    /// @29 (AC-1420): a choice-mode call that does not decode is refused as
+    /// `invalid_action` and goes back to the model, up to
+    /// [`agents::investigation::MAX_INVALID_ACTION_REFUSALS`] times a run; the
+    /// journal enforces the cap, and a call past it stops the run as before.
+    fn refuse_invalid_action(
+        &mut self,
+        completion: &BoundedCompletion,
+        mode: staged_refusal::CompletionCallMode,
+        step_id: &str,
+        failure: agents::investigation::ActionDecodeFailure,
+    ) -> Result<bool, Failure> {
+        let stop = |failure| Failure::Stop(InvestigationStopReason::ActionDecode(failure));
+        if !self.detail.summary.specialist_id.uses_native_tool_runtime()
+            || mode != staged_refusal::CompletionCallMode::Choice
+        {
+            return Err(stop(failure));
+        }
+        let Ok(original @ serde_json::Value::Object(_)) =
+            serde_json::from_str::<serde_json::Value>(&completion.text)
+        else {
+            return Err(stop(failure));
+        };
+        let revision = self.detail.summary.revision;
+        self.check_new_work()?;
+        if self.detail.summary.revision != revision {
+            return Err(InvestigationStoreError::Stale.into());
+        }
+        let response = InvestigationResponseMeta {
+            finish_feedback_witness: None,
+            finish_telemetry: None,
+            step_id: step_id.into(),
+            response_hash: content_hash(completion.text.as_bytes()),
+            action_hash: self.hold_action(bounded_json(&original, 32 * 1024)?),
+            observed_model: completion.response_model.clone(),
+            reported_input_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.input_tokens),
+            reported_output_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.output_tokens),
+            reported_cache_read_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.cache_read_input_tokens),
+            active_milliseconds: self.clock.active_milliseconds(),
+        };
+        let refused = self
+            .state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .refuse_next_prompt(
+                self.execution,
+                self.detail.summary.revision,
+                &response,
+                &original,
+                crate::jobs::investigations::NextPromptRefusalReason::Action(
+                    ActionRefusalReason::InvalidAction,
+                ),
+            );
+        self.detail = match refused {
+            Ok(detail) => detail,
+            // The run already returned its allowance of undecodable calls.
+            Err(InvestigationStoreError::Capacity) => return Err(stop(failure)),
+            Err(error) => return Err(error.into()),
+        };
         super::super::emit_changed(self.app, &self.detail);
         Ok(true)
     }

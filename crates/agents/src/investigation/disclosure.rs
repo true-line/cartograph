@@ -503,6 +503,7 @@ impl InvestigationDisclosure {
 mod admission;
 pub use admission::{
     AcquisitionAdmission, ActionRefusalFeedback, ActionRefusalReason, DisclosedAdmissionState,
+    MAX_INVALID_ACTION_REFUSALS,
 };
 
 /// Pure consistency witness over typed derivation inputs, NOT authentication of

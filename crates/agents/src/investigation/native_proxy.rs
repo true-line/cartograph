@@ -303,6 +303,7 @@ impl ModelProxy {
         if trailing.as_deref() != Some(authorized) {
             return Err(ProxyRefusal::Unauthorized);
         }
+        let body = forced_tool_choice(self.config.backend, request, body, max_request)?;
         if !dispatching(body.len() as u64) {
             return Err(ProxyRefusal::NotRecorded);
         }
@@ -366,6 +367,34 @@ impl ModelProxy {
             body: upstream,
         })
     }
+}
+
+/// An OpenAI-compatible request that offers tools must answer with one: a
+/// model that writes the action as text instead (GLM on vLLM, finish-only
+/// steps) ends the runtime with no call. The host sets `tool_choice` to
+/// `required` unless the runtime chose one (AC-1420).
+fn forced_tool_choice(
+    backend: ProxyBackend,
+    mut request: Value,
+    body: Vec<u8>,
+    max_request: usize,
+) -> Result<Vec<u8>, ProxyRefusal> {
+    let offers_tools = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    if backend != ProxyBackend::OpenAiCompatible
+        || !offers_tools
+        || request.get("tool_choice").is_some()
+    {
+        return Ok(body);
+    }
+    request["tool_choice"] = Value::from("required");
+    // The rewritten body keeps to the same request limit as the received one.
+    serde_json::to_vec(&request)
+        .ok()
+        .filter(|body| body.len() <= max_request)
+        .ok_or(ProxyRefusal::Request)
 }
 
 /// The texts of the messages after the model's last answer, system text

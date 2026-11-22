@@ -598,3 +598,43 @@ fn messages_trailing_texts_are_one_per_block_after_the_last_answer() {
         json!({"messages": [{"role": "user", "content": [{"type": "image", "source": {}}]}]});
     assert_eq!(anthropic_trailing_texts(&image), None);
 }
+
+// AC-1420: GLM on vLLM answered a finish-only step with the finish as text and
+// no tool call, which ends the runtime. A vLLM request that offers tools is
+// forwarded with tool_choice "required"; a runtime's own choice stands, and
+// the other backends' bodies pass through byte for byte.
+#[test]
+fn a_vllm_request_with_tools_must_call_one() {
+    let offered = json!({"model": "glm", "tools": [{"type": "function",
+        "function": {"name": "finish"}}], "messages": []});
+    let forward = |backend, request: &Value| {
+        let body = serde_json::to_vec(request).unwrap();
+        let sent = forced_tool_choice(backend, request.clone(), body.clone(), 1 << 20).unwrap();
+        (body, serde_json::from_slice::<Value>(&sent).unwrap(), sent)
+    };
+    let (_, sent, _) = forward(ProxyBackend::OpenAiCompatible, &offered);
+    assert_eq!(sent["tool_choice"], "required");
+    assert_eq!(sent["tools"], offered["tools"]);
+    let mut chosen = offered.clone();
+    chosen["tool_choice"] = json!("auto");
+    let (body, _, sent) = forward(ProxyBackend::OpenAiCompatible, &chosen);
+    assert_eq!(sent, body, "the runtime's choice stands");
+    let none = json!({"model": "glm", "tools": [], "messages": []});
+    let (body, _, sent) = forward(ProxyBackend::OpenAiCompatible, &none);
+    assert_eq!(sent, body);
+    for backend in [ProxyBackend::Ollama, ProxyBackend::Anthropic] {
+        let (body, _, sent) = forward(backend, &offered);
+        assert_eq!(sent, body);
+    }
+    // The added field may not carry a request past its limit.
+    let body = serde_json::to_vec(&offered).unwrap();
+    assert_eq!(
+        forced_tool_choice(
+            ProxyBackend::OpenAiCompatible,
+            offered.clone(),
+            body.clone(),
+            body.len()
+        ),
+        Err(ProxyRefusal::Request)
+    );
+}

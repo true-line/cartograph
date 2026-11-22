@@ -183,6 +183,12 @@ fn refuse(
             InvestigationEventKind::ActionRefused,
             "This exact read was already acquired; the attempt was charged without executing it again.",
         ),
+        admission_journal::RefusalReason::Action(
+            agents::investigation::ActionRefusalReason::InvalidAction,
+        ) => (
+            InvestigationEventKind::ActionRefused,
+            admission_journal::INVALID_ACTION_SUMMARY,
+        ),
         admission_journal::RefusalReason::Action(_) => (
             InvestigationEventKind::ActionRefused,
             "The proposed acquisition was not offered in this saved call.",

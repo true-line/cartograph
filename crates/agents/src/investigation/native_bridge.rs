@@ -36,6 +36,9 @@ pub enum BridgeTurn {
     ToolResult {
         /// Tool-result text.
         content: String,
+        /// The worker refused the last call as `invalid_action`, so the result
+        /// goes back as a tool error.
+        is_error: bool,
     },
 }
 
@@ -119,7 +122,13 @@ impl BridgeConversation {
         let turn = match (reason, delta) {
             (None, Some(content)) if self.conversation_bytes + content.len() <= budget_bytes => {
                 self.conversation_bytes += content.len();
-                BridgeTurn::ToolResult { content }
+                let is_error = match (&self.previous, &prompt) {
+                    (Some(previous), Some(Value::Object(next))) => {
+                        new_invalid_action(&previous.prompt, next)
+                    }
+                    _ => false,
+                };
+                BridgeTurn::ToolResult { content, is_error }
             }
             (reason, _) => {
                 let user = full_user_message(payload)?;
@@ -160,6 +169,21 @@ impl BridgeConversation {
             .unwrap_or_default();
         action_from_tool_call(self.offered(), name, arguments, context_id)
     }
+}
+
+/// Whether `next` carries `invalid_action` feedback that `previous` did not.
+fn new_invalid_action(previous: &Map<String, Value>, next: &Map<String, Value>) -> bool {
+    let feedback = |prompt: &Map<String, Value>| {
+        prompt
+            .get("turn_progress")
+            .and_then(|progress| progress.get("action_feedback"))
+            .cloned()
+    };
+    let current = feedback(next);
+    current
+        .as_ref()
+        .is_some_and(|value| value["reason"] == "invalid_action")
+        && current != feedback(previous)
 }
 
 /// The user message exactly as the bounded transport renders it.

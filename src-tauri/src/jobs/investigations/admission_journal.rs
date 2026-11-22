@@ -13,6 +13,15 @@ const TABLE: &str = "investigation_admission_refusals";
 const OWNED: &str = "name GLOB 'investigation_admission_*' OR (tbl_name GLOB 'investigation_admission_*' AND name NOT GLOB 'sqlite_*')";
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
 const ROW_ALLOWANCE: usize = 256;
+/// The event summary of an @29 `invalid_action` refusal (AC-1420).
+pub(super) const INVALID_ACTION_SUMMARY: &str = "The proposed action did not decode; it was not run and goes back to the model as a tool error.";
+
+fn invalid_actions(entries: &[Entry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.reason == RefusalReason::Action(ActionRefusalReason::InvalidAction))
+        .count()
+}
 
 pub(super) fn schema() -> Vec<String> {
     let mut sql = vec!["CREATE TABLE investigation_admission_refusals (task_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 64), step_id TEXT NOT NULL, invocation_ordinal INTEGER NOT NULL CHECK(invocation_ordinal BETWEEN 1 AND 64), body BLOB NOT NULL, body_hash TEXT NOT NULL, PRIMARY KEY(task_id,sequence), UNIQUE(task_id,step_id), UNIQUE(task_id,invocation_ordinal)) STRICT".into()];
@@ -395,6 +404,11 @@ fn timeline(
                     }
                     "This exact read was already acquired; the attempt was charged without executing it again." => {
                         ActionRefusalReason::RepeatedRead
+                    }
+                    INVALID_ACTION_SUMMARY
+                        if task.detail.summary.specialist_id.uses_native_tool_runtime() =>
+                    {
+                        ActionRefusalReason::InvalidAction
                     }
                     _ => return Err(InvestigationStoreError::Invalid),
                 };
@@ -824,6 +838,7 @@ fn read_entries(
             .iter()
             .filter(|entry| matches!(entry.reason, RefusalReason::Action(_)))
             .count()
+        || invalid_actions(&entries) > agents::investigation::MAX_INVALID_ACTION_REFUSALS
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -971,6 +986,43 @@ fn validate_proposal(
     Ok(action)
 }
 
+/// An `invalid_action` proposal is a saved choice-call response that still
+/// does not decode under the call's saved ledger and policy.
+fn validate_invalid_proposal(
+    proposal: &Value,
+    response: &InvestigationResponseMeta,
+    ledger: &InvestigationInputLedger,
+    call: &SavedCallBasis,
+    task: &StoredTask,
+) -> Result<(), InvestigationStoreError> {
+    let role = task.detail.summary.specialist_id;
+    let raw = encode(proposal, MAX_ACTION_BYTES)?;
+    let context = ledger
+        .coverage
+        .as_ref()
+        .ok_or(InvestigationStoreError::Invalid)?
+        .context_id
+        .as_str();
+    let decodes = ProgressiveInvestigationAction::decode_resolved_for_specialist(
+        std::str::from_utf8(&raw).map_err(|_| InvestigationStoreError::Invalid)?,
+        context,
+        &call.request_hash,
+        ledger,
+        &super::policy_for_detail(&task.detail)?,
+        role,
+    )
+    .is_ok();
+    if decodes
+        || !proposal.is_object()
+        || !role.uses_native_tool_runtime()
+        || call.mode() != CompletionCallMode::Choice
+        || response.action_hash != core_prov::content_hash(&raw)
+    {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    Ok(())
+}
+
 fn validate_reason(
     task: &StoredTask,
     call: &SavedCallBasis,
@@ -980,6 +1032,9 @@ fn validate_reason(
     reason: RefusalReason,
     history: &completion::SavedMetadataHistory<'_>,
 ) -> Result<(), InvestigationStoreError> {
+    if reason == RefusalReason::Action(ActionRefusalReason::InvalidAction) {
+        return validate_invalid_proposal(proposal, response, ledger, call, task);
+    }
     let action = validate_proposal(
         proposal,
         response,
@@ -1420,6 +1475,12 @@ pub(super) fn append_reason(
     let (pending, _) = transitions::validate_response(tx, task, response)?;
     if pending != core.step {
         return Err(InvestigationStoreError::Invalid);
+    }
+    if reason == RefusalReason::Action(ActionRefusalReason::InvalidAction)
+        && invalid_actions(&entries) >= agents::investigation::MAX_INVALID_ACTION_REFUSALS
+    {
+        // The run already returned its allowance; the caller ends it.
+        return Err(InvestigationStoreError::Capacity);
     }
     validate_reason(
         task,

@@ -66,7 +66,7 @@ fn a_later_step_sends_only_changed_fields_and_new_spans() {
     next["turn_progress"] = json!({"turn": 2});
     next["consumed_budgets"] = json!({"queries": 1});
     let before = bridge.conversation_bytes();
-    let BridgeTurn::ToolResult { content } = bridge
+    let BridgeTurn::ToolResult { content, .. } = bridge
         .next_turn(
             &payload(next, vec![span("s1", "fn a() {}"), span("s2", "fn b() {}")]),
             1 << 20,
@@ -104,7 +104,7 @@ fn removed_fields_and_dropped_spans_are_named() {
         .unwrap();
     let mut next = first_prompt();
     next.as_object_mut().unwrap().remove("limits");
-    let BridgeTurn::ToolResult { content } =
+    let BridgeTurn::ToolResult { content, .. } =
         bridge.next_turn(&payload(next, vec![]), 1 << 20).unwrap()
     else {
         panic!("tool result");
