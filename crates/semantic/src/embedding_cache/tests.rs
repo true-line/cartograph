@@ -691,6 +691,52 @@ fn embedding_cache_working_set_accepts_exact_row_limit_and_rejects_next() {
 }
 
 #[test]
+fn operation_limits_bound_the_working_set_and_never_raise_it() {
+    // AC-1807 / #1653: a lowered row bound admits exactly that many keys and
+    // refuses the next; a lowered byte bound refuses the vectors past it; the
+    // shipped bounds are the default and nothing above them is accepted.
+    assert_eq!(
+        OperationLimits::within(MAX_ROWS, MAX_VECTOR_BYTES),
+        Some(OperationLimits::default())
+    );
+    for (rows, bytes) in [
+        (MAX_ROWS + 1, MAX_VECTOR_BYTES),
+        (MAX_ROWS, MAX_VECTOR_BYTES + 1),
+        (OperationLimits::MIN_ROWS - 1, MAX_VECTOR_BYTES),
+        (MAX_ROWS, OperationLimits::MIN_VECTOR_BYTES - 1),
+    ] {
+        assert_eq!(OperationLimits::within(rows, bytes), None);
+    }
+    let rows = OperationLimits::MIN_ROWS;
+    let limits = OperationLimits::within(rows, MAX_VECTOR_BYTES).unwrap();
+    let (_dir, cache, lease) = setup();
+    let p = Scripted::new();
+    let wrapper = CachedProvider::within(&p, cache.clone(), lease.clone(), limits).unwrap();
+    assert_eq!(wrapper.limits(), limits);
+    {
+        let mut state = wrapper.state.lock().unwrap();
+        for n in 0..rows - 1 {
+            state.vectors.insert(format!("{n:064x}"), (1, vec![1., 1.]));
+        }
+        state.vector_bytes = (rows - 1) * 8;
+    }
+    wrapper.embed(&["final allowed key".into()]).unwrap();
+    assert!(wrapper.embed(&["one key too many".into()]).is_err());
+
+    // Repeated texts count once per input, so they cannot pass the row bound.
+    let repeated = vec!["same text".to_string(); rows + 1];
+    let wrapper = CachedProvider::within(&p, cache.clone(), lease.clone(), limits).unwrap();
+    assert!(wrapper.embed(&repeated).is_err());
+    let wrapper = CachedProvider::within(&p, cache.clone(), lease.clone(), limits).unwrap();
+    assert_eq!(wrapper.embed(&repeated[..rows]).unwrap().len(), rows);
+
+    let bytes = OperationLimits::within(MAX_ROWS, OperationLimits::MIN_VECTOR_BYTES).unwrap();
+    let wrapper = CachedProvider::within(&p, cache, lease, bytes).unwrap();
+    wrapper.state.lock().unwrap().vector_bytes = OperationLimits::MIN_VECTOR_BYTES - 4;
+    assert!(wrapper.embed(&["past the byte bound".into()]).is_err());
+}
+
+#[test]
 fn vscode_scale_plans_are_cached_and_reused_without_calls() {
     // AC-1507: a plan past the old 100k bound is embedded once, persisted
     // whole, and a reopened warm pass makes no embedding call. The whole-VSCode
