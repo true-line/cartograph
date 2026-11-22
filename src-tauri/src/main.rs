@@ -36,6 +36,7 @@ mod name_unique_tests;
 use app_store::observation_inputs;
 mod operator_limits;
 use app_store::paths;
+#[path = "primary_source_commands.rs"]
 mod primary_source;
 #[cfg(test)]
 mod primary_source_tests;

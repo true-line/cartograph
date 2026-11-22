@@ -1,4 +1,6 @@
 //! Retained primary-source evidence; independent of tier and proposal review.
+//! The receipt and capture stores; the app's `primary_source` module adds
+//! the commands that read them through its state (#1924).
 
 use adapters_lang_ts::captured::{self, Citable, Receipt};
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
@@ -10,12 +12,11 @@ use source_capture::{Capture, CaptureLimits, CaptureStore, SourceId, StoreLimits
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::Manager;
 
+#[path = "primary_source/pinned.rs"]
 mod pinned;
-pub(crate) use pinned::PinnedReadError;
+pub use pinned::PinnedReadError;
 
-use crate::AppState;
 use crate::sources::RegisteredSource;
 
 const MAX_RECEIPTS: u64 = 200_000;
@@ -522,7 +523,7 @@ fn rebuild_normalized_receipt(
 /// Summary of the forget operation that reclaimed or marked a receipt.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct TombstoneSummary {
+pub struct TombstoneSummary {
     pub source_id: String,
     pub forgotten_at: String,
     pub receipts_reclaimed: u64,
@@ -533,7 +534,7 @@ pub(crate) struct TombstoneSummary {
 /// Basis and capture validation stay the caller's job.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) enum ReceiptStatus {
+pub enum ReceiptStatus {
     Present,
     CaptureForgotten {
         tombstone: TombstoneSummary,
@@ -565,15 +566,15 @@ impl ReclaimCause {
     }
 }
 
-fn unavailable() -> String {
+pub fn unavailable() -> String {
     "Captured primary source is unavailable; recover this source again or inspect the separately labeled current working tree.".into()
 }
 
-fn storage_error(_: impl std::fmt::Display) -> String {
+pub fn storage_error(_: impl std::fmt::Display) -> String {
     "Retained source storage is unavailable or invalid; no source was substituted.".into()
 }
 
-fn source_id(value: &str) -> Result<SourceId, String> {
+pub fn source_id(value: &str) -> Result<SourceId, String> {
     if value.len() != 36
         || !value.starts_with("src_")
         || !value[4..]
@@ -596,7 +597,7 @@ fn receipt_owner(value: &str) -> Result<SourceId, String> {
 
 /// The capture identity of a registered source's manifest observation
 /// inputs (ADR-0080).
-fn input_id(registered: &str) -> Result<SourceId, String> {
+pub fn input_id(registered: &str) -> Result<SourceId, String> {
     source_id(registered)?;
     SourceId::new(crate::observation_inputs::input_source_id(registered)).map_err(storage_error)
 }
@@ -821,7 +822,7 @@ impl PrivateStorage {
 }
 
 /// A fresh OS handle, never unlinked/replaced as part of retention cleanup.
-pub(crate) struct RetentionGuard {
+pub struct RetentionGuard {
     _file: File,
     source_id: String,
     app_path: PathBuf,
@@ -840,12 +841,12 @@ impl Drop for RetentionGuard {
 /// every Cartograph SQLite store uses the same 5 s (AC-0822, #1653).
 const RECEIPT_STORE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-pub(crate) struct ReceiptStore {
+pub struct ReceiptStore {
     conn: Connection,
     /// Retained receipt count (and reclaim ledger bound) and payload bytes; tests narrow them.
-    pub(crate) capacity: (u64, u64),
-    #[cfg(test)]
-    pub(crate) fail_next_reclaim: bool,
+    pub capacity: (u64, u64),
+    #[cfg(any(test, feature = "test-support"))]
+    pub fail_next_reclaim: bool,
 }
 
 fn require_one(affected: usize) -> Result<(), String> {
@@ -1235,12 +1236,12 @@ fn encode_capture_ids(capture_ids: &[String]) -> Result<(String, i64), String> {
 
 // The caller retains a transaction after receipt_storage validated all lengths.
 fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     STORED_RECEIPT_DECODES.with(|count| count.set(count.get() + 1));
     pinned::stored_receipt(conn, id).map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Full receipt rebuilds and decodes on this thread, so tests can bound
     /// how many stored rows a store operation hydrates (AC-0836).
@@ -1314,7 +1315,7 @@ impl ReceiptStore {
         Ok(Self {
             conn,
             capacity: (MAX_RECEIPTS, MAX_RECEIPT_STORE_BYTES),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_next_reclaim: false,
         })
     }
@@ -1323,7 +1324,7 @@ impl ReceiptStore {
     /// (#722). Integrity failures still reject the whole batch; a receipt that
     /// only lacks room is left out and counted under its file path, and the
     /// ids actually retained (new or already stored) are returned with them.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn persist(
         &mut self,
         capture: &Capture,
@@ -1545,7 +1546,7 @@ impl ReceiptStore {
         Ok(retained)
     }
 
-    fn get(&self, id: &str) -> Result<Receipt, String> {
+    pub fn get(&self, id: &str) -> Result<Receipt, String> {
         if id.is_empty() || id.len() > 256 {
             return Err(unavailable());
         }
@@ -1556,7 +1557,7 @@ impl ReceiptStore {
         Ok(receipt)
     }
 
-    fn ids(&self, source: &str) -> Result<Vec<String>, String> {
+    pub fn ids(&self, source: &str) -> Result<Vec<String>, String> {
         receipt_owner(source)?;
         let tx = self.conn.unchecked_transaction().map_err(storage_error)?;
         receipt_storage(&tx)?;
@@ -1585,7 +1586,7 @@ impl ReceiptStore {
 
     /// Reclaim unpinned receipts for `source` and mark pinned receipts as
     /// capture-forgotten in one atomic transaction (ADR-0046 decision 3).
-    fn reclaim_forgotten(
+    pub fn reclaim_forgotten(
         &mut self,
         source: &RegisteredSource,
         capture_ids: &[String],
@@ -1598,7 +1599,7 @@ impl ReceiptStore {
     /// Reclaim `source` receipts outside `keep` after a later publish stopped
     /// binding them (ADR-0046 decision 5). Kept and capture-forgotten rows are
     /// left untouched; `capture_ids` names the superseding capture.
-    fn reclaim_superseded(
+    pub fn reclaim_superseded(
         &mut self,
         source: &RegisteredSource,
         capture_ids: &[String],
@@ -1614,7 +1615,7 @@ impl ReceiptStore {
         pins: &std::collections::BTreeSet<String>,
         cause: ReclaimCause,
     ) -> Result<u64, String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if std::mem::take(&mut self.fail_next_reclaim) {
             return Err(storage_error("injected reclaim failure"));
         }
@@ -1758,7 +1759,7 @@ impl ReceiptStore {
     /// This is the identity half of ADR-0046 decision 4. Basis and capture
     /// validation stay the caller's job.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn receipt_status(&self, id: &str) -> Result<ReceiptStatus, String> {
+    pub fn receipt_status(&self, id: &str) -> Result<ReceiptStatus, String> {
         let tx = self.conn.unchecked_transaction().map_err(storage_error)?;
         receipt_storage(&tx)?;
         if id.is_empty() || id.len() > 256 {
@@ -1834,8 +1835,8 @@ impl ReceiptStore {
     }
 
     /// The capture ids the tombstone of a reclaimed receipt records.
-    #[cfg(test)]
-    pub(crate) fn tombstone_capture_ids(&self, receipt_id: &str) -> Result<Vec<String>, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tombstone_capture_ids(&self, receipt_id: &str) -> Result<Vec<String>, String> {
         let ids: String = self
             .conn
             .query_row(
@@ -1859,7 +1860,7 @@ type InFlight = std::sync::Arc<Mutex<std::collections::BTreeMap<String, usize>>>
 /// task is dropped after staging, so a supersession reclaim never deletes
 /// evidence a proposal is about to cite. Forget does not consult it: a
 /// forgotten source's tasks still stage their copied content (AC-0177/0178).
-pub(crate) struct InFlightPin {
+pub struct InFlightPin {
     ids: Vec<String>,
     pins: InFlight,
 }
@@ -1880,23 +1881,23 @@ impl Drop for InFlightPin {
     }
 }
 
-pub(crate) struct PrimarySourceStore {
-    captures: Mutex<CaptureStore>,
-    pub(crate) receipts: Mutex<ReceiptStore>,
-    in_flight: InFlight,
+pub struct PrimarySourceStore {
+    pub captures: Mutex<CaptureStore>,
+    pub receipts: Mutex<ReceiptStore>,
+    pub in_flight: InFlight,
     storage: PrivateStorage,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     evidence_accesses: std::sync::atomic::AtomicUsize,
 }
 
 impl PrimarySourceStore {
     /// Bytes cloned into each retention guard; read without allocating a path.
     #[cfg(unix)]
-    pub(crate) fn retained_app_path_bytes(&self) -> usize {
+    pub fn retained_app_path_bytes(&self) -> usize {
         self.storage.app_path.as_os_str().as_encoded_bytes().len()
     }
 
-    pub(crate) fn open(app_data: &Path) -> Result<Self, String> {
+    pub fn open(app_data: &Path) -> Result<Self, String> {
         let storage = PrivateStorage::open(app_data)?;
         let captures = CaptureStore::open(&storage.path("captures.sqlite"), StoreLimits::default())
             .map_err(storage_error)?;
@@ -1907,21 +1908,21 @@ impl PrimarySourceStore {
             receipts: Mutex::new(receipts),
             in_flight: InFlight::default(),
             storage,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             evidence_accesses: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     /// Test observation of retained-source lease attempts, including historical
     /// inspection. It does not count current-checkout reads or successful bytes.
-    #[cfg(test)]
-    pub(crate) fn evidence_access_attempts(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn evidence_access_attempts(&self) -> usize {
         self.evidence_accesses
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Pin `ids` for a prepared task until the returned pin is dropped.
-    pub(crate) fn pin_in_flight(&self, ids: Vec<String>) -> Result<InFlightPin, String> {
+    pub fn pin_in_flight(&self, ids: Vec<String>) -> Result<InFlightPin, String> {
         let mut pins = self.in_flight.lock().map_err(storage_error)?;
         for id in &ids {
             *pins.entry(id.clone()).or_default() += 1;
@@ -1933,13 +1934,13 @@ impl PrimarySourceStore {
     }
 
     /// Hold the exclusive guard a forget takes, so tests can race against it.
-    #[cfg(test)]
-    pub(crate) fn exclusive_guard_for_test(&self, source: &str) -> RetentionGuard {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn exclusive_guard_for_test(&self, source: &str) -> RetentionGuard {
         self.guard(source, true).unwrap()
     }
 
-    fn guard(&self, source: &str, exclusive: bool) -> Result<RetentionGuard, String> {
-        #[cfg(test)]
+    pub fn guard(&self, source: &str, exclusive: bool) -> Result<RetentionGuard, String> {
+        #[cfg(any(test, feature = "test-support"))]
         self.evidence_accesses
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         source_id(source)?;
@@ -1963,7 +1964,7 @@ impl PrimarySourceStore {
     /// Revalidate the retained OS lock handle without acquiring another lock or
     /// reading captured source bytes. The prepared-read path keeps this same
     /// guard alive through its eventual publication acknowledgement.
-    pub(crate) fn verify_task_guard(&self, guard: &RetentionGuard) -> Result<(), PinnedReadError> {
+    pub fn verify_task_guard(&self, guard: &RetentionGuard) -> Result<(), PinnedReadError> {
         if guard.app_path != self.storage.app_path || source_id(&guard.source_id).is_err() {
             return Err(PinnedReadError::Invalid);
         }
@@ -1990,7 +1991,7 @@ impl PrimarySourceStore {
         Ok(())
     }
 
-    pub(crate) fn prepare(
+    pub fn prepare(
         &self,
         source: &RegisteredSource,
         root: &Path,
@@ -2006,7 +2007,7 @@ impl PrimarySourceStore {
     /// change what a citation means. A selected path that is not a regular
     /// blob of that commit, or a missing object, fails the recovery; there is
     /// no fallback to the checkout. Local folders keep a working-tree capture.
-    pub(crate) fn prepare_at(
+    pub fn prepare_at(
         &self,
         source: &RegisteredSource,
         root: &Path,
@@ -2092,7 +2093,7 @@ impl PrimarySourceStore {
     /// within the source's share, less `charged`, what the source's own
     /// receipts of this recovery took; the input is listed and forgotten
     /// with the source.
-    pub(crate) fn persist_input(
+    pub fn persist_input(
         &self,
         source: &RegisteredSource,
         capture: &source_capture::Capture,
@@ -2126,7 +2127,7 @@ impl PrimarySourceStore {
     /// Retain the capture and as many `receipts` as the store has room for
     /// (#722). Callers keep only [`RetainedReceipts::ids`] for bindings, so
     /// no binding cites a receipt the store does not hold.
-    pub(crate) fn persist(
+    pub fn persist(
         &self,
         input: &PrimaryInput,
         source: &RegisteredSource,
@@ -2193,22 +2194,22 @@ fn source_share(capacity: u64, weight: u64, total: u64) -> u64 {
 /// Receipts one recovery actually retained, and those left out for lack of
 /// store capacity, by file path and fact key.
 #[derive(Debug, Default)]
-pub(crate) struct RetainedReceipts {
+pub struct RetainedReceipts {
     ids: std::collections::BTreeSet<String>,
     omitted: std::collections::BTreeMap<String, u64>,
-    pub(crate) omitted_facts: Vec<(FactKey, String)>,
+    pub omitted_facts: Vec<(FactKey, String)>,
     /// The (count, bytes) of the source's share the retained rows took.
     charged: (u64, u64),
 }
 
 impl RetainedReceipts {
     /// What the retained rows took of the source's share.
-    pub(crate) fn charged(&self) -> (u64, u64) {
+    pub fn charged(&self) -> (u64, u64) {
         self.charged
     }
 
     /// Drop every receipt the store did not retain and return the omissions.
-    pub(crate) fn keep_retained(
+    pub fn keep_retained(
         self,
         receipts: &mut Vec<impl Citable>,
     ) -> (
@@ -2220,7 +2221,7 @@ impl RetainedReceipts {
     }
 }
 
-pub(crate) struct PrimaryInput {
+pub struct PrimaryInput {
     pub capture: Option<Capture>,
     /// Symlinks the capture did not follow, reported in coverage (#1229).
     pub unfollowed: Vec<String>,
@@ -2233,7 +2234,7 @@ pub(crate) struct PrimaryInput {
 /// Each named fact is decoded, matched and dropped before the next one, so
 /// the publication never holds every receipted fact as a props tree at once
 /// (AC-1200): on a large repository nearly every fact carries a receipt.
-pub(crate) fn matching_bindings_packed<R: Citable>(
+pub fn matching_bindings_packed<R: Citable>(
     facts: &core_graph::facts::FactStore,
     receipts: &[R],
 ) -> Result<Vec<SourceBinding>, String> {
@@ -2309,7 +2310,7 @@ pub(crate) fn matching_bindings_packed<R: Citable>(
             .map(|&index| facts.edges()[index].unpack())
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
-        let merged = crate::merged_edge_view(&decoded);
+        let merged = crate::edge_merge::merged_edge_view(&decoded);
         let edge = merged.values().next().expect("one key, one merged edge");
         bind(named, &|receipt| receipt.matches_edge(edge));
     }
@@ -2317,8 +2318,8 @@ pub(crate) fn matching_bindings_packed<R: Citable>(
 }
 
 /// The decoded reference [`matching_bindings_packed`] must equal.
-#[cfg(test)]
-pub(crate) fn matching_bindings(
+#[cfg(any(test, feature = "test-support"))]
+pub fn matching_bindings(
     extraction: &adapters_lang_ts::Extraction,
     receipts: &[impl Citable],
 ) -> Vec<SourceBinding> {
@@ -2326,7 +2327,7 @@ pub(crate) fn matching_bindings(
 }
 
 /// [`matching_bindings`] over any producer's nodes and edges.
-pub(crate) fn matching_bindings_in(
+pub fn matching_bindings_in(
     nodes: &[core_graph::Node],
     edges: &[core_graph::Edge],
     receipts: &[impl Citable],
@@ -2337,7 +2338,7 @@ pub(crate) fn matching_bindings_in(
     // so it publishes unbound rather than failing the digest check.
     let nodes: std::collections::BTreeMap<_, _> =
         nodes.iter().map(|node| (&node.id, node)).collect();
-    let edges = crate::merged_edge_view(edges);
+    let edges = crate::edge_merge::merged_edge_view(edges);
     receipts
         .iter()
         .filter(|receipt| match receipt.fact_key() {
@@ -2367,7 +2368,7 @@ pub(crate) fn matching_bindings_in(
 }
 
 #[derive(Serialize)]
-pub(crate) struct CapturedRange {
+pub struct CapturedRange {
     pub index: usize,
     pub path: String,
     pub byte_start: u64,
@@ -2375,7 +2376,7 @@ pub(crate) struct CapturedRange {
 }
 
 #[derive(Serialize)]
-pub(crate) struct CapturedDescription {
+pub struct CapturedDescription {
     pub graph_snapshot_id: String,
     pub fact: FactKey,
     pub receipt_id: String,
@@ -2387,725 +2388,7 @@ pub(crate) struct CapturedDescription {
     pub input_closure: &'static str,
 }
 
-fn bound_receipt(
-    state: &AppState,
-    fact: &FactKey,
-    expected: Option<&str>,
-) -> Result<(Receipt, RetentionGuard), String> {
-    bound_receipt_as(state, fact, expected, core_graph::BindingRole::Primary)
-        .map(|(receipt, guard, _)| (receipt, guard))
-}
-
-/// The receipt a fact's current binding in `role` cites. A primary binding
-/// admits only the registered source's own receipts; an observed binding
-/// admits only that source's input identity (ADR-0079).
-fn bound_receipt_as(
-    state: &AppState,
-    fact: &FactKey,
-    expected: Option<&str>,
-    role: core_graph::BindingRole,
-) -> Result<(Receipt, RetentionGuard, core_graph::source::SourceBinding), String> {
-    let current = |graph: &core_graph::SqliteGraphStore| match role {
-        core_graph::BindingRole::Primary => graph.current_source_binding(fact),
-        core_graph::BindingRole::Observed => graph.current_source_observation(fact),
-    };
-    // Preliminary metadata locates the guard; release all mutexes before the
-    // try-only OS lock, then make the authoritative current-binding check.
-    let preliminary = current(&*state.graph.lock().map_err(storage_error)?)
-        .map_err(storage_error)?
-        .ok_or_else(unavailable)?;
-    let source = state
-        .sources
-        .lock()
-        .map_err(storage_error)?
-        .get_by_repo(&preliminary.repo_key)?
-        .ok_or_else(unavailable)?;
-    let guard = state.primary_sources.guard(&source.source_id, false)?;
-    let binding = current(&*state.graph.lock().map_err(storage_error)?)
-        .map_err(storage_error)?
-        .ok_or_else(unavailable)?;
-    if binding.repo_key != source.repo_key {
-        return Err(unavailable());
-    }
-    if expected.is_some_and(|id| id != binding.receipt_id) {
-        return Err("Captured source selection is stale; select the fact again.".into());
-    }
-    let receipt = state
-        .primary_sources
-        .receipts
-        .lock()
-        .map_err(storage_error)?
-        .get(&binding.receipt_id)?;
-    let (owner, owner_repo) = match role {
-        core_graph::BindingRole::Primary => (source.source_id.clone(), source.repo_key.clone()),
-        core_graph::BindingRole::Observed => {
-            let input = input_id(&source.source_id)?.as_str().to_owned();
-            (input.clone(), input)
-        }
-    };
-    if receipt.source_id().as_str() != owner
-        || receipt.repo_key() != owner_repo
-        || receipt.fact_key() != fact
-        || receipt.fact_digest() != binding.emitted_fact_digest
-    {
-        return Err(unavailable());
-    }
-    Ok((receipt, guard, binding))
-}
-
-pub(crate) fn describe(state: &AppState, fact: &FactKey) -> Result<CapturedDescription, String> {
-    let (receipt, _guard) = bound_receipt(state, fact, None)?;
-    Ok(CapturedDescription {
-        graph_snapshot_id: crate::investigations::inspection::graph_snapshot_for_receipt(
-            state, &receipt,
-        )?,
-        fact: receipt.fact_key().clone(),
-        receipt_id: receipt.id().to_owned(),
-        emitted_fact_digest: receipt.fact_digest().to_owned(),
-        source_id: receipt.source_id().as_str().to_owned(),
-        repo_key: receipt.repo_key().to_owned(),
-        ranges: receipt
-            .ranges()
-            .iter()
-            .enumerate()
-            .map(|(index, range)| CapturedRange {
-                index,
-                path: range.evidence.path.clone(),
-                byte_start: range.evidence.byte_start,
-                byte_end: range.evidence.byte_end,
-            })
-            .collect(),
-        scope: "primary_source_only",
-        input_closure: "input_closure_not_established",
-    })
-}
-
-#[derive(Serialize)]
-pub(crate) struct CapturedText {
-    pub receipt_id: String,
-    pub range_index: usize,
-    pub text: String,
-    pub path: String,
-    pub byte_start: u64,
-    pub byte_end: u64,
-}
-
-pub(crate) fn read(
-    state: &AppState,
-    fact: &FactKey,
-    receipt_id: &str,
-    range_index: usize,
-) -> Result<CapturedText, String> {
-    let (receipt, _guard) = bound_receipt(state, fact, Some(receipt_id))?;
-    text_of(state, &receipt, range_index)
-}
-
-/// Read one cited range back from its retained capture; the caller holds the
-/// source's retention guard.
-fn text_of(
-    state: &AppState,
-    receipt: &Receipt,
-    range_index: usize,
-) -> Result<CapturedText, String> {
-    let range = receipt.ranges().get(range_index).ok_or_else(unavailable)?;
-    let text = state
-        .primary_sources
-        .captures
-        .lock()
-        .map_err(storage_error)?
-        .read_text_span(&range.captured)
-        .map_err(|_| unavailable())?;
-    Ok(CapturedText {
-        receipt_id: receipt.id().to_owned(),
-        range_index,
-        text,
-        path: range.evidence.path.clone(),
-        byte_start: range.evidence.byte_start,
-        byte_end: range.evidence.byte_end,
-    })
-}
-
-/// A fact's observed binding: the exact spans of a captured observation
-/// input (Terraform state, Pulumi export or trace) that observed it. It is
-/// shown and cited beside the declaration, never in its place (ADR-0079).
-#[derive(Serialize)]
-pub(crate) struct ObservedDescription {
-    pub fact: FactKey,
-    pub receipt_id: String,
-    pub emitted_fact_digest: String,
-    /// The input identity, `input/<registered source id>`.
-    pub source_id: String,
-    pub registered_source_id: String,
-    /// The repo that owns the binding.
-    pub repo_key: String,
-    pub ranges: Vec<CapturedRange>,
-    pub scope: &'static str,
-    pub input_closure: &'static str,
-}
-
-pub(crate) fn describe_observed(
-    state: &AppState,
-    fact: &FactKey,
-) -> Result<ObservedDescription, String> {
-    let (receipt, _guard, binding) =
-        bound_receipt_as(state, fact, None, core_graph::BindingRole::Observed)?;
-    let registered_source_id = receipt
-        .source_id()
-        .as_str()
-        .strip_prefix(crate::observation_inputs::INPUT_REPO_PREFIX)
-        .ok_or_else(unavailable)?
-        .to_owned();
-    Ok(ObservedDescription {
-        fact: receipt.fact_key().clone(),
-        receipt_id: receipt.id().to_owned(),
-        emitted_fact_digest: receipt.fact_digest().to_owned(),
-        source_id: receipt.source_id().as_str().to_owned(),
-        registered_source_id,
-        repo_key: binding.repo_key,
-        ranges: receipt
-            .ranges()
-            .iter()
-            .enumerate()
-            .map(|(index, range)| CapturedRange {
-                index,
-                path: range.evidence.path.clone(),
-                byte_start: range.evidence.byte_start,
-                byte_end: range.evidence.byte_end,
-            })
-            .collect(),
-        scope: "observed_input_only",
-        input_closure: "input_closure_not_established",
-    })
-}
-
-pub(crate) fn read_observed(
-    state: &AppState,
-    fact: &FactKey,
-    receipt_id: &str,
-    range_index: usize,
-) -> Result<CapturedText, String> {
-    let (receipt, _guard, _) = bound_receipt_as(
-        state,
-        fact,
-        Some(receipt_id),
-        core_graph::BindingRole::Observed,
-    )?;
-    text_of(state, &receipt, range_index)
-}
-
-#[derive(Serialize)]
-pub(crate) struct RetainedSource {
-    pub source_id: String,
-    pub repo_key: String,
-    pub display_name: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct RetentionPreview {
-    pub source_id: String,
-    pub repo_key: String,
-    pub display_name: String,
-    pub capture_ids: Vec<String>,
-    /// Retained captures of the source's manifest observation inputs
-    /// (ADR-0080), forgotten with it.
-    pub input_capture_ids: Vec<String>,
-    pub captures: usize,
-    pub files: u64,
-    pub bytes: u64,
-    pub receipts: usize,
-    /// Of `receipts`, the observed receipts its observation inputs own
-    /// (ADR-0079), forgotten with it.
-    pub input_receipts: usize,
-    pub current_references: usize,
-    pub historical_references: usize,
-    /// Actual v2 evidence references in immutable staged proposals.
-    pub staged_references: usize,
-    /// Actual investigation/receipt uses, including selected present bindings
-    /// whose original source text has not been requested.
-    pub investigation_references: usize,
-    /// Receipts of this source cited by saved work packets.
-    pub packet_references: usize,
-    pub fingerprint: String,
-}
-
-struct LockedPreview {
-    preview: RetentionPreview,
-    pins: std::collections::BTreeSet<String>,
-    /// This source's receipts, and its inputs', the current graph binds.
-    bound: std::collections::BTreeSet<String>,
-}
-
-fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedPreview, String> {
-    let inventory = state
-        .primary_sources
-        .captures
-        .lock()
-        .map_err(storage_error)?
-        .source_inventory(&source_id(&source.source_id)?)
-        .map_err(storage_error)?;
-    let inputs = state
-        .primary_sources
-        .captures
-        .lock()
-        .map_err(storage_error)?
-        .source_inventory(&input_id(&source.source_id)?)
-        .map_err(storage_error)?;
-    let (receipt_ids, input_receipt_ids) = {
-        let store = state
-            .primary_sources
-            .receipts
-            .lock()
-            .map_err(storage_error)?;
-        (
-            store.ids(&source.source_id)?,
-            store.ids(input_id(&source.source_id)?.as_str())?,
-        )
-    };
-    let (current, observed) = {
-        let graph = state.graph.lock().map_err(storage_error)?;
-        (
-            graph
-                .source_bindings_for_repo(&source.repo_key)
-                .map_err(storage_error)?,
-            // The observed role binds the input's receipts (ADR-0079).
-            graph
-                .source_observations_for_repo(&source.repo_key)
-                .map_err(storage_error)?,
-        )
-    };
-    let current_count = current
-        .iter()
-        .filter(|binding| receipt_ids.binary_search(&binding.receipt_id).is_ok())
-        .count()
-        + observed
-            .iter()
-            .filter(|binding| input_receipt_ids.binary_search(&binding.receipt_id).is_ok())
-            .count();
-    // Bind the complete associations, not only their count: retained receipts
-    // can become current again without changing the capture/receipt inventory.
-    // This records the associations observed at preview/recheck; it does not
-    // freeze independent graph mutations after the recheck.
-    let mut current_bindings: Vec<_> = current
-        .iter()
-        .map(|binding| {
-            (
-                &binding.fact,
-                &binding.repo_key,
-                &binding.receipt_id,
-                &binding.emitted_fact_digest,
-            )
-        })
-        .collect();
-    current_bindings.sort_unstable();
-    let mut current_observations: Vec<_> = observed
-        .iter()
-        .map(|binding| {
-            (
-                &binding.fact,
-                &binding.repo_key,
-                &binding.receipt_id,
-                &binding.emitted_fact_digest,
-            )
-        })
-        .collect();
-    current_observations.sort_unstable();
-    let capture_ids: Vec<_> = inventory
-        .iter()
-        .map(|capture| capture.capture_id.clone())
-        .collect();
-    let input_capture_ids: Vec<_> = inputs
-        .iter()
-        .map(|capture| capture.capture_id.clone())
-        .collect();
-    let staged_references = state
-        .proposals
-        .lock()
-        .map_err(storage_error)?
-        .captured_receipt_references(&source.source_id)
-        .map_err(storage_error)?;
-    // The caller already holds this source's retention guard. Acquisition
-    // publishes its ledger/index under the same shared guard, so an exclusive
-    // forget cannot race a newly admitted reference. Hold no other store mutex
-    // across this short validated JobStore read.
-    let investigation_references = state
-        .jobs
-        .lock()
-        .map_err(storage_error)?
-        .investigation_receipt_references(&source.source_id)
-        .map_err(storage_error)?;
-    let packet_references: Vec<String> = state
-        .work_packets
-        .store
-        .lock()
-        .map_err(storage_error)?
-        .referenced_receipts(
-            &receipt_ids
-                .iter()
-                .chain(&input_receipt_ids)
-                .cloned()
-                .collect::<Vec<_>>(),
-        )
-        .map_err(storage_error)?
-        .into_iter()
-        .collect();
-    let fingerprint = core_prov::content_hash(
-        &serde_json::to_vec(&(
-            "retained-source-preview-v6",
-            &source.source_id,
-            &source.repo_key,
-            &capture_ids,
-            &input_capture_ids,
-            &receipt_ids,
-            &input_receipt_ids,
-            &current_bindings,
-            &current_observations,
-            &staged_references,
-            &investigation_references,
-            &packet_references,
-        ))
-        .map_err(storage_error)?,
-    );
-    let pins = staged_references
-        .iter()
-        .map(|reference| reference.receipt_id.clone())
-        .chain(
-            investigation_references
-                .iter()
-                .map(|reference| reference.receipt_id.clone()),
-        )
-        .chain(packet_references.iter().cloned())
-        .collect();
-    let bound = current
-        .iter()
-        .filter(|binding| receipt_ids.binary_search(&binding.receipt_id).is_ok())
-        .chain(
-            observed
-                .iter()
-                .filter(|binding| input_receipt_ids.binary_search(&binding.receipt_id).is_ok()),
-        )
-        .map(|binding| binding.receipt_id.clone())
-        .collect();
-    Ok(LockedPreview {
-        preview: RetentionPreview {
-            source_id: source.source_id.clone(),
-            repo_key: source.repo_key.clone(),
-            display_name: source.display_name.clone(),
-            captures: inventory.len() + inputs.len(),
-            files: inventory
-                .iter()
-                .chain(&inputs)
-                .map(|capture| capture.file_count)
-                .sum(),
-            bytes: inventory
-                .iter()
-                .chain(&inputs)
-                .map(|capture| capture.byte_len)
-                .sum(),
-            receipts: receipt_ids.len() + input_receipt_ids.len(),
-            input_receipts: input_receipt_ids.len(),
-            current_references: current_count,
-            historical_references: (receipt_ids.len() + input_receipt_ids.len())
-                .saturating_sub(current_count),
-            staged_references: staged_references.len(),
-            investigation_references: investigation_references.len(),
-            packet_references: packet_references.len(),
-            capture_ids,
-            input_capture_ids,
-            fingerprint,
-        },
-        pins,
-        bound,
-    })
-}
-
-fn registered(state: &AppState, id: &str) -> Result<RegisteredSource, String> {
-    source_id(id)?;
-    state
-        .sources
-        .lock()
-        .map_err(storage_error)?
-        .get_by_id(id)?
-        .ok_or_else(unavailable)
-}
-
-pub(crate) fn preview(state: &AppState, id: &str) -> Result<RetentionPreview, String> {
-    let source = registered(state, id)?;
-    let _guard = state.primary_sources.guard(id, false)?;
-    Ok(preview_locked(state, &source)?.preview)
-}
-
-pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u64, String> {
-    let source = registered(state, id)?;
-    let _guard = state.primary_sources.guard(id, true)?;
-    let locked = preview_locked(state, &source)?;
-    if locked.preview.fingerprint != fingerprint {
-        return Err("Retained source changed; refresh the preview before forgetting.".into());
-    }
-    // Serialize cache generation invalidation with preview snapshot and publication.
-    // Rotate before capture deletion; a later failure leaves only safe cold misses.
-    let graph_guard = state.graph.lock().map_err(storage_error)?;
-    graph_guard
-        .invalidate_derived_state()
-        .map_err(storage_error)?;
-    let forgotten = {
-        let mut captures = state
-            .primary_sources
-            .captures
-            .lock()
-            .map_err(storage_error)?;
-        // Inputs first: they carry no receipt, so a failure after them leaves
-        // the source's own captures and receipts intact.
-        let inputs = captures
-            .forget_source(&input_id(id)?, &locked.preview.input_capture_ids)
-            .map_err(storage_error)?;
-        inputs
-            + captures
-                .forget_source(&source_id(id)?, &locked.preview.capture_ids)
-                .map_err(storage_error)?
-    };
-    state
-        .primary_sources
-        .receipts
-        .lock()
-        .map_err(storage_error)?
-        .reclaim_forgotten(&source, &locked.preview.capture_ids, &locked.pins)?;
-    if locked.preview.input_receipts > 0 {
-        let owner = source.owning_as(input_id(id)?.as_str().to_owned());
-        state
-            .primary_sources
-            .receipts
-            .lock()
-            .map_err(storage_error)?
-            .reclaim_forgotten(&owner, &locked.preview.input_capture_ids, &locked.pins)?;
-    }
-    Ok(forgotten)
-}
-
-/// Reclaim receipts of `source` that the just-published graph no longer binds
-/// and nothing pins (ADR-0046 decision 5). The caller must have released its
-/// prepared input first. The reclaim needs the exclusive retention guard, so
-/// no other recovery of this source can be holding fresh, not yet published
-/// receipts, and no task can prepare against it; a busy source is skipped
-/// and settles on its next publish. Receipts a prepared task cites stay
-/// pinned until it has staged ([`InFlightPin`]).
-#[cfg(test)]
-pub(crate) fn reclaim_superseded(
-    state: &AppState,
-    source: &RegisteredSource,
-    capture_id: &str,
-) -> Result<u64, String> {
-    reclaim_superseded_with(state, source, Some(capture_id), None, || {})
-}
-
-/// [`reclaim_superseded`] for a recovery that captured `capture_id` for the
-/// source's code and `input_capture_id` for its observation inputs, either of
-/// which may be absent. Each owner's superseded receipts are tombstoned with
-/// the capture that superseded them (ADR-0079).
-pub(crate) fn reclaim_superseded_by(
-    state: &AppState,
-    source: &RegisteredSource,
-    capture_id: Option<&str>,
-    input_capture_id: Option<&str>,
-) -> Result<u64, String> {
-    reclaim_superseded_with(state, source, capture_id, input_capture_id, || {})
-}
-
-/// [`reclaim_superseded_by`], pausing between its two keep-set snapshots so
-/// tests can stage a task in the handoff.
-pub(crate) fn reclaim_superseded_with(
-    state: &AppState,
-    source: &RegisteredSource,
-    capture_id: Option<&str>,
-    input_capture_id: Option<&str>,
-    between_snapshots: impl FnOnce(),
-) -> Result<u64, String> {
-    let Ok(_guard) = state.primary_sources.guard(&source.source_id, true) else {
-        return Ok(0);
-    };
-    // In-flight pins first, durable pins second (#762 review). The
-    // exclusive guard admits no new preparation, so a pin missing here was
-    // dropped already, after its task staged: the durable snapshot below
-    // then holds that staged pin. Reading them the other way round lets a
-    // task stage after the durable read and drop before the in-flight one.
-    let in_flight = state
-        .primary_sources
-        .in_flight
-        .lock()
-        .map_err(storage_error)?
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    between_snapshots();
-    let locked = preview_locked(state, source)?;
-    let keep = locked
-        .pins
-        .union(&locked.bound)
-        .cloned()
-        .chain(in_flight)
-        .collect();
-    let mut store = state
-        .primary_sources
-        .receipts
-        .lock()
-        .map_err(storage_error)?;
-    let mut reclaimed = 0;
-    if let Some(capture_id) = capture_id {
-        reclaimed += store.reclaim_superseded(source, &[capture_id.to_owned()], &keep)?;
-    }
-    // Observed receipts the published observed role no longer binds are
-    // reclaimed with the input capture that superseded them (ADR-0079,
-    // AC-1047).
-    if let Some(input_capture_id) = input_capture_id
-        && locked.preview.input_receipts > 0
-    {
-        let owner = source.owning_as(input_id(&source.source_id)?.as_str().to_owned());
-        reclaimed += store.reclaim_superseded(&owner, &[input_capture_id.to_owned()], &keep)?;
-    }
-    Ok(reclaimed)
-}
-
-/// The complete digest of the fact the caller selected, which must be the
-/// fact it names.
-fn expected_digest(
-    fact: &FactKey,
-    expected_node: Option<core_graph::Node>,
-    expected_edge: Option<core_graph::Edge>,
-) -> Result<String, String> {
-    match (fact, expected_node, expected_edge) {
-        (FactKey::Node { id }, Some(node), None) if node.id == *id => {
-            core_graph::source::node_digest(&node).map_err(storage_error)
-        }
-        (
-            FactKey::Edge {
-                source,
-                label,
-                destination,
-            },
-            None,
-            Some(edge),
-        ) if edge.src == *source && edge.label == *label && edge.dst == *destination => {
-            core_graph::source::edge_digest(&edge).map_err(storage_error)
-        }
-        _ => Err(unavailable()),
-    }
-}
-
-#[tauri::command]
-pub(crate) async fn describe_captured_source(
-    fact: FactKey,
-    expected_node: Option<core_graph::Node>,
-    expected_edge: Option<core_graph::Edge>,
-    app: tauri::AppHandle,
-) -> Result<CapturedDescription, String> {
-    crate::off_ui_thread(move || {
-        let expected_digest = expected_digest(&fact, expected_node, expected_edge)?;
-        let description = describe(&app.state::<AppState>(), &fact)?;
-        if description.emitted_fact_digest != expected_digest {
-            return Err(
-                "Selected fact changed; refresh the graph before inspecting captured source."
-                    .into(),
-            );
-        }
-        Ok(description)
-    })
-    .await
-}
-
-#[tauri::command]
-pub(crate) async fn read_captured_source(
-    fact: FactKey,
-    receipt_id: String,
-    range_index: usize,
-    app: tauri::AppHandle,
-) -> Result<CapturedText, String> {
-    crate::off_ui_thread(move || read(&app.state::<AppState>(), &fact, &receipt_id, range_index))
-        .await
-}
-
-/// The fact's observed binding, when a captured observation input observed
-/// it (ADR-0079, AC-1049); `None` when it has none.
-#[tauri::command]
-pub(crate) async fn describe_observed_source(
-    fact: FactKey,
-    expected_node: Option<core_graph::Node>,
-    expected_edge: Option<core_graph::Edge>,
-    app: tauri::AppHandle,
-) -> Result<Option<ObservedDescription>, String> {
-    crate::off_ui_thread(move || {
-        let expected_digest = expected_digest(&fact, expected_node, expected_edge)?;
-        let state = app.state::<AppState>();
-        let present = state
-            .graph
-            .lock()
-            .map_err(storage_error)?
-            .current_source_observation(&fact)
-            .map_err(storage_error)?
-            .is_some();
-        if !present {
-            return Ok(None);
-        }
-        let description = describe_observed(&state, &fact)?;
-        if description.emitted_fact_digest != expected_digest {
-            return Err(
-                "Selected fact changed; refresh the graph before inspecting observed source."
-                    .into(),
-            );
-        }
-        Ok(Some(description))
-    })
-    .await
-}
-
-#[tauri::command]
-pub(crate) async fn read_observed_source(
-    fact: FactKey,
-    receipt_id: String,
-    range_index: usize,
-    app: tauri::AppHandle,
-) -> Result<CapturedText, String> {
-    crate::off_ui_thread(move || {
-        read_observed(&app.state::<AppState>(), &fact, &receipt_id, range_index)
-    })
-    .await
-}
-
-#[tauri::command]
-pub(crate) async fn list_retained_sources(
-    app: tauri::AppHandle,
-) -> Result<Vec<RetainedSource>, String> {
-    crate::off_ui_thread(move || {
-        let state = app.state::<AppState>();
-        let sources = state.sources.lock().map_err(storage_error)?.list()?;
-        Ok(sources
-            .into_iter()
-            .map(|source| RetainedSource {
-                source_id: source.source_id,
-                repo_key: source.repo_key,
-                display_name: source.display_name,
-            })
-            .collect())
-    })
-    .await
-}
-
-#[tauri::command]
-pub(crate) async fn preview_forget_source(
-    source_id: String,
-    app: tauri::AppHandle,
-) -> Result<RetentionPreview, String> {
-    crate::off_ui_thread(move || preview(&app.state::<AppState>(), &source_id)).await
-}
-
-#[tauri::command]
-pub(crate) async fn forget_retained_source(
-    source_id: String,
-    fingerprint: String,
-    app: tauri::AppHandle,
-) -> Result<u64, String> {
-    crate::off_ui_thread(move || forget(&app.state::<AppState>(), &source_id, &fingerprint)).await
-}
-
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

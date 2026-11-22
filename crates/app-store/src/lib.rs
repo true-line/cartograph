@@ -27,5 +27,7 @@ pub mod jobs;
 pub mod observation_inputs;
 #[path = "../../../src-tauri/src/paths.rs"]
 pub mod paths;
+#[path = "../../../src-tauri/src/primary_source.rs"]
+pub mod primary_source;
 #[path = "../../../src-tauri/src/sources.rs"]
 pub mod sources;

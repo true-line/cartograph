@@ -16,6 +16,12 @@ workspace = true
 test-support = ["dep:tempfile"]
 
 [dependencies]
+adapters-lang-go = { workspace = true }
+adapters-lang-java = { workspace = true }
+adapters-lang-kotlin = { workspace = true }
+adapters-lang-python = { workspace = true }
+adapters-lang-rust = { workspace = true }
+adapters-lang-ts = { workspace = true }
 agents = { workspace = true }
 cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
