@@ -310,7 +310,7 @@ pub(crate) fn start_job_blocking(
 pub(crate) const HELD_STOPPED: &str =
     "The app stopped before this held agent job started; it was not started.";
 
-/// AC-1709: at startup, end queued host agent jobs whose held waiter
+/// AC-1709: at startup, cancel queued host agent jobs whose held waiter
 /// stopped. Only an existing, free lock proves that; a missing or busy one
 /// leaves the job queued. Investigations have their own pass
 /// (`investigations::recover`). Nothing is re-armed.
@@ -340,7 +340,7 @@ pub(crate) fn recover_held_jobs(
         if let Some(job) = jobs
             .lock()
             .map_err(|error| error.to_string())?
-            .interrupt_held(&plan, reservation, HELD_STOPPED)
+            .cancel_held(&plan, reservation, HELD_STOPPED)
             .map_err(|error| error.to_string())?
         {
             ended.push(job);
@@ -493,10 +493,13 @@ mod tests {
         let ended = recover_held_jobs(&jobs, &locks).unwrap();
         assert_eq!(ended.len(), 1);
         assert_eq!(ended[0].id, held);
-        assert_eq!(ended[0].status, "interrupted");
+        assert_eq!(ended[0].status, "cancelled");
         assert_eq!(ended[0].error.as_deref(), Some(HELD_STOPPED));
         assert_eq!(status(ingest), "queued");
         assert!(recover_held_jobs(&jobs, &locks).unwrap().is_empty());
+        // A terminal row: Clear finished removes it, the queued ingest stays.
+        assert_eq!(jobs.lock().unwrap().clear_finished().unwrap(), 1);
+        assert_eq!(status(ingest), "queued");
     }
 
     // AC-1704 (T-1704): only agent kinds are gated; the mode is the last segment.

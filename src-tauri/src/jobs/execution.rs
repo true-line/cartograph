@@ -360,9 +360,10 @@ impl JobStore {
     }
 
     /// AC-1709: end a queued, never-claimed job whose held waiter stopped,
-    /// proven by `reservation` on its existing lock. Nothing ran, so it is
-    /// interrupted with that reason and never replayed.
-    pub(crate) fn interrupt_held(
+    /// proven by `reservation` on its existing lock. Nothing ran and the
+    /// request that started it is gone, so it is cancelled with that reason:
+    /// a terminal row that clears, never resumed or replayed.
+    pub(crate) fn cancel_held(
         &mut self,
         plan: &ClaimPlan,
         reservation: ExecutionReservation,
@@ -384,7 +385,7 @@ impl JobStore {
             tx.commit()?;
             return Ok(None);
         }
-        one(tx.execute("UPDATE jobs SET status = 'interrupted', error = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1 AND status = 'queued'", params![plan.job.id, reason])?)?;
+        one(tx.execute("UPDATE jobs SET status = 'cancelled', error = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1 AND status = 'queued'", params![plan.job.id, reason])?)?;
         let job = read_job(&tx, plan.job.id)?;
         tx.commit()?;
         Ok(Some(job))
