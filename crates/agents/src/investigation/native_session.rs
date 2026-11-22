@@ -326,6 +326,12 @@ impl<L: RuntimeLink> NativeSession<L> {
         if !(200..300).contains(&exchange.status) {
             return Err(answered(FailureCode::HttpStatus));
         }
+        // vLLM reports a failed streamed generation as HTTP 200 carrying one
+        // `error` event; the runtime then ends with no call, which would read
+        // as an empty completion.
+        if provider_error(&exchange.body) {
+            return Err(answered(FailureCode::HttpStatus));
+        }
         let (response_model, usage) = reported(&exchange.body);
         let link = self.link.as_mut().ok_or(answered(FailureCode::Transport))?;
         loop {
@@ -593,6 +599,17 @@ fn refused(refusal: ProxyRefusal) -> BoundedCallError {
         | ProxyRefusal::OutputTokens
         | ProxyRefusal::Unauthorized => not_sent(FailureCode::InvalidResponse),
     }
+}
+
+/// Whether a response body, plain JSON or server-sent events, carries a
+/// provider `error` object.
+fn provider_error(body: &[u8]) -> bool {
+    String::from_utf8_lossy(body).lines().any(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("data:").map_or(line, str::trim);
+        serde_json::from_str::<Value>(line)
+            .is_ok_and(|event| event.get("error").is_some_and(Value::is_object))
+    })
 }
 
 /// The model id and usage a provider reported in a streamed or whole body:

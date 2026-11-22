@@ -515,3 +515,16 @@ fn a_refused_call_reaches_the_worker_undecodable_and_its_feedback_returns_as_a_t
             .contains("invalid_action")
     );
 }
+
+// AC-1420: vLLM answered a request it could not constrain with HTTP 200 and a
+// single SSE `error` event (d8413d90 smoke); that is a provider error, not an
+// empty completion.
+#[test]
+fn a_streamed_provider_error_is_not_an_empty_completion() {
+    let sse = b"data: {\"error\":{\"message\":\"\",\"type\":\"InternalServerError\",\"code\":500}}\n\ndata: [DONE]\n";
+    assert!(provider_error(sse));
+    assert!(provider_error(br#"{"error":{"message":"bad","code":400}}"#));
+    let ok = b"data: {\"choices\":[{\"delta\":{\"content\":\"error\"}}]}\n\ndata: [DONE]\n";
+    assert!(!provider_error(ok));
+    assert!(!provider_error(br#"{"error":null}"#));
+}

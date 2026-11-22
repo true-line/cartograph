@@ -617,10 +617,14 @@ fn pending_acquisition_choices_become_native_tools() {
             .unwrap_or_default();
         for (field, value) in &arguments {
             let property = &tool.input_schema["properties"][field];
-            assert!(property["enum"].as_array().unwrap().contains(value));
             if value.is_object() {
                 assert_eq!(property["type"], "object", "{field} is typed");
+            } else {
+                assert!(property["enum"].as_array().unwrap().contains(value));
             }
+            // No object- or array-valued enum or const anywhere: vLLM's
+            // constrained decoding cannot compile them.
+            assert!(!has_composite_literals(property), "{field}: {property}");
         }
         let arguments = serde_json::Value::Object(arguments);
         let action = action_from_tool_call(&tools, name, &arguments, &context).unwrap();
@@ -1842,6 +1846,14 @@ fn every_acquisition_schema_converts_to_native_tools() {
         let tools = tool_definitions_from_schema(schema)
             .unwrap_or_else(|error| panic!("{error:?} for {schema}"));
         assert!(!tools.is_empty(), "no tools for {schema}");
+        for tool in tools.iter().filter(|tool| tool.name != "finish") {
+            assert!(
+                !has_composite_literals(&tool.input_schema),
+                "{}: {}",
+                tool.name,
+                tool.input_schema
+            );
+        }
     }
 }
 
@@ -1858,8 +1870,8 @@ fn correlated_choices_stay_coupled_in_one_tool() {
     let tool = &tools[0];
     let exact = tool.input_schema["anyOf"].as_array().unwrap();
     assert_eq!(exact.len(), 2, "both offered combinations are listed");
-    assert_eq!(exact[0]["properties"]["fact"]["const"], "a");
-    assert_eq!(exact[0]["properties"]["index"]["const"], 0);
+    assert_eq!(exact[0]["properties"]["fact"]["enum"][0], "a");
+    assert_eq!(exact[0]["properties"]["index"]["enum"][0], 0);
     assert_eq!(tool.input_schema["properties"]["index"]["type"], "integer");
     for (fact, index) in [("a", 0), ("b", 1)] {
         let arguments = serde_json::json!({"fact": fact, "role": "source", "index": index});
@@ -1876,4 +1888,18 @@ fn correlated_choices_stay_coupled_in_one_tool() {
     let single = serde_json::json!({"anyOf": [{"enum": [read("a", 0), read("a", 1)]}]}).to_string();
     let tools = tool_definitions_from_schema(&single).unwrap();
     assert!(tools[0].input_schema.get("anyOf").is_none());
+}
+
+/// Whether `schema` holds an `enum` or `const` with an object or array value.
+fn has_composite_literals(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            let composite = |v: &serde_json::Value| v.is_object() || v.is_array();
+            (key == "const" && composite(value))
+                || (key == "enum" && value.as_array().is_some_and(|vs| vs.iter().any(composite)))
+                || has_composite_literals(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(has_composite_literals),
+        _ => false,
+    }
 }

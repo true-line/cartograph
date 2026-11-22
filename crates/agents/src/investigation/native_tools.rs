@@ -213,6 +213,9 @@ pub fn tool_definitions_from_schema(
             offered: None,
         });
     }
+    for tool in &mut tools {
+        spell_out_literals(&mut tool.input_schema);
+    }
     Ok(tools)
 }
 
@@ -287,12 +290,7 @@ fn typed_choices(actions: &[Value]) -> Value {
                 values.push(value);
             }
         }
-        let mut property = serde_json::json!({ "enum": values });
-        let kinds: std::collections::BTreeSet<_> = values.iter().map(|v| json_type(v)).collect();
-        if let [kind] = kinds.into_iter().collect::<Vec<_>>()[..] {
-            property["type"] = kind.into();
-        }
-        properties.insert(field.into(), property);
+        properties.insert(field.into(), values_schema(&values));
         if actions.iter().all(|action| action.get(field).is_some()) {
             required.push(field);
         }
@@ -302,7 +300,12 @@ fn typed_choices(actions: &[Value]) -> Value {
     // constrained decoder emits only an offered one.
     let combinations: usize = properties
         .values()
-        .map(|property| property["enum"].as_array().map_or(1, Vec::len))
+        .map(|property| {
+            property["enum"]
+                .as_array()
+                .or_else(|| property["anyOf"].as_array())
+                .map_or(1, Vec::len)
+        })
         .product();
     let mixes =
         actions.len() > 1 && (combinations > actions.len() || required.len() < properties.len());
@@ -313,23 +316,97 @@ fn typed_choices(actions: &[Value]) -> Value {
         "additionalProperties": false,
     });
     if mixes {
-        let exact: Vec<Value> = actions
-            .iter()
-            .map(|action| {
-                let fields = action.as_object().cloned().unwrap_or_default();
-                serde_json::json!({
-                    "properties": fields
-                        .iter()
-                        .map(|(field, value)| (field.clone(), serde_json::json!({ "const": value })))
-                        .collect::<Map<_, _>>(),
-                    "required": fields.keys().collect::<Vec<_>>(),
-                    "additionalProperties": false,
-                })
-            })
-            .collect();
+        let exact: Vec<Value> = actions.iter().map(value_schema).collect();
         schema["anyOf"] = exact.into();
     }
     schema
+}
+
+/// A schema admitting exactly `values`. Scalars are an `enum`; an object or
+/// array value is spelled out field by field, because vLLM's constrained
+/// decoding (`tool_choice: required`) fails on object- or array-valued
+/// `enum` and `const` (HTTP 500, d8413d90 smoke).
+fn values_schema(values: &[&Value]) -> Value {
+    let mut schema = if values
+        .iter()
+        .all(|value| !value.is_object() && !value.is_array())
+    {
+        serde_json::json!({ "enum": values })
+    } else {
+        serde_json::json!({ "anyOf": values.iter().map(|value| value_schema(value)).collect::<Vec<_>>() })
+    };
+    let kinds: std::collections::BTreeSet<_> = values.iter().map(|v| json_type(v)).collect();
+    if let [kind] = kinds.into_iter().collect::<Vec<_>>()[..] {
+        schema["type"] = kind.into();
+    }
+    schema
+}
+
+/// Rewrites every object- or array-valued `enum` or `const` in `schema` as
+/// the equivalent field-by-field schema; see [`values_schema`].
+fn spell_out_literals(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            let composite = |value: &Value| value.is_object() || value.is_array();
+            let literals = match (map.get("enum"), map.get("const")) {
+                (Some(Value::Array(values)), _) if values.iter().any(composite) => {
+                    Some(map.remove("enum"))
+                }
+                (_, Some(value)) if composite(value) => {
+                    Some(map.remove("const").map(|value| Value::Array(vec![value])))
+                }
+                _ => None,
+            };
+            if let Some(Some(Value::Array(values))) = literals {
+                let values: Vec<&Value> = values.iter().collect();
+                let spelled = values_schema(&values);
+                if map.contains_key("anyOf") {
+                    map.insert("allOf".into(), Value::Array(vec![spelled]));
+                } else {
+                    for (key, value) in spelled.as_object().into_iter().flatten() {
+                        map.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
+                }
+            }
+            map.values_mut().for_each(spell_out_literals);
+        }
+        Value::Array(items) => items.iter_mut().for_each(spell_out_literals),
+        _ => {}
+    }
+}
+
+/// A schema admitting exactly `value`, with no object- or array-valued
+/// `enum` or `const`.
+fn value_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => serde_json::json!({
+            "type": "object",
+            "properties": fields
+                .iter()
+                .map(|(field, value)| (field.clone(), value_schema(value)))
+                .collect::<Map<_, _>>(),
+            "required": fields.keys().collect::<Vec<_>>(),
+            "additionalProperties": false,
+        }),
+        Value::Array(items) => {
+            let mut schema = serde_json::json!({
+                "type": "array",
+                "minItems": items.len(),
+                "maxItems": items.len(),
+            });
+            if !items.is_empty() {
+                let mut distinct: Vec<&Value> = Vec::new();
+                for item in items {
+                    if !distinct.contains(&item) {
+                        distinct.push(item);
+                    }
+                }
+                schema["items"] = values_schema(&distinct);
+            }
+            schema
+        }
+        scalar => serde_json::json!({ "enum": [scalar], "type": json_type(scalar) }),
+    }
 }
 
 fn json_type(value: &Value) -> &'static str {
