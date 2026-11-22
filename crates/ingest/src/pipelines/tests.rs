@@ -859,3 +859,51 @@ fn run_mount_from_an_earlier_stage_is_a_stage_relation() {
     assert!(quoted.nodes.is_empty());
     assert_eq!(quoted.unread[0].reason, "a RUN --mount option is quoted");
 }
+
+// AC-1057: supplied bytes give exactly the facts the checkout walk gives for
+// the same contents; the walk's selection is the pipeline files alone, and a
+// supplied path this reader does not parse is ignored. (T-1057)
+#[test]
+fn supplied_sources_match_the_walk_and_replace_the_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &[
+            (WF, WORKFLOW),
+            ("Dockerfile", DOCKERFILE),
+            (".gitlab-ci.yml", GITLAB),
+            ("src/app.ts", "export {};\n"),
+        ],
+    );
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let paths = pipeline_paths(dir.path()).unwrap();
+    assert_eq!(paths, [WF, "Dockerfile"]);
+    let walked = extract_dir(dir.path(), &id).unwrap();
+    // The checkout changes; the supplied bytes are the originals.
+    write(dir.path(), &[("Dockerfile", "FROM scratch\n")]);
+    let supplied = |rel: &str| match rel {
+        WF => Ok(WORKFLOW.as_bytes().to_vec()),
+        "Dockerfile" => Ok(DOCKERFILE.as_bytes().to_vec()),
+        other => Err(std::io::Error::other(format!("not supplied: {other}"))),
+    };
+    let mut with_other = paths.clone();
+    with_other.push("src/app.ts".into());
+    let captured = extract_from_sources(&with_other, &supplied, &id);
+    assert_eq!(captured.files, walked.files);
+    assert_eq!(
+        serde_json::to_string(&captured.nodes).unwrap(),
+        serde_json::to_string(&walked.nodes).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&captured.edges).unwrap(),
+        serde_json::to_string(&walked.edges).unwrap()
+    );
+    // Bytes that are not UTF-8 are unread, as on disk.
+    let invalid = |_: &str| Ok(vec![0xff, 0xfe]);
+    let unread = extract_from_sources(&paths, &invalid, &id);
+    assert_eq!(unread.files, 0);
+    assert_eq!(unread.unread.len(), 2);
+}
