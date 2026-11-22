@@ -126,6 +126,15 @@ fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'sta
         }
         return Ok("request7-specialist13-prompt12-disclosure6-result7");
     }
+    if frozen == "domain-analyst@29" || saved == SpecialistId::DomainAnalystV29 {
+        if frozen != "domain-analyst@29"
+            || saved != SpecialistId::DomainAnalystV29
+            || role != "analyst"
+        {
+            return Err("Tool-calling receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist29-prompt14-disclosure6-result7");
+    }
     if frozen == "domain-analyst@28" || saved == SpecialistId::DomainAnalystV28 {
         if frozen != "domain-analyst@28"
             || saved != SpecialistId::DomainAnalystV28
@@ -664,7 +673,20 @@ mod tests {
             .unwrap(),
             "request7-specialist28-prompt14-disclosure6-result7"
         );
+        // AC-1429 (ADR-0085): @29 has its own receipt family.
+        assert_eq!(
+            receipt_family(
+                "domain-analyst@29",
+                SpecialistId::DomainAnalystV29,
+                "analyst"
+            )
+            .unwrap(),
+            "request7-specialist29-prompt14-disclosure6-result7"
+        );
         for (frozen, saved, role) in [
+            ("domain-analyst@29", "domain-analyst@28", "analyst"),
+            ("domain-analyst@28", "domain-analyst@29", "analyst"),
+            ("domain-analyst@29", "domain-analyst@29", "auditor"),
             ("domain-analyst@28", "domain-analyst@27", "analyst"),
             ("domain-analyst@27", "domain-analyst@28", "analyst"),
             ("domain-analyst@28", "domain-analyst@28", "auditor"),
