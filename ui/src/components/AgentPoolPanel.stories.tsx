@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { AgentPoolPanel } from './AgentPoolPanel';
 import type { Job } from '../store';
+import type { ChatSession } from '../agentPool';
 
 function job(overrides: Partial<Job> & Pick<Job, 'id' | 'kind' | 'status'>): Job {
   return { execution_tracking: 'recorded', created_at: '2026-11-21T10:00:00Z', updated_at: `2026-11-21T10:0${overrides.id}:00Z`, ...overrides };
@@ -119,5 +120,39 @@ export const LocalServerStopped: Story = {
     await expect(canvas.getByTestId('agent-pool-local-server')).toHaveTextContent('The local model server did not answer. Start it with ollama serve.');
     await userEvent.click(canvas.getByRole('button', { name: 'Check local server' }));
     await expect(args.onCheckLocalServer).toHaveBeenCalled();
+  },
+};
+
+// AC-1710 (T-1710): saved chat sessions are listed with their turns and open in Agent chats.
+export const ChatSessions: Story = {
+  args: {
+    chats: [
+      {
+        conversation_id: 'conv-b', turns: 1, active: true, open: false,
+        latest: { investigation_id: 'inv-0004', question: 'Which rules guard refunds?', specialist_id: 'domain-analyst@3', status: 'running', provider_mode: 'local', updated_at: '2026-11-21T10:09:00Z' },
+      },
+      {
+        conversation_id: 'conv-a', turns: 3, active: false, open: true,
+        latest: { investigation_id: 'inv-0003', question: 'Where is billing state kept?', specialist_id: 'domain-analyst@3', status: 'completed', provider_mode: 'cloud', updated_at: '2026-11-21T10:05:00Z' },
+      },
+    ] as unknown as ChatSession[],
+    onOpenChat: fn(),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const chats = canvas.getByRole('region', { name: 'Chat sessions' });
+    await expect(within(chats).getByTestId('agent-pool-chats')).toHaveTextContent('2 sessions in the loaded history, 1 with a turn in progress.');
+    const older = within(chats).getByTestId('agent-pool-chat-conv-a');
+    await expect(older).toHaveTextContent('3 turns · latest completed · cloud · updated 2026-11-21T10:05:00Z');
+    await expect(within(older).getByText('open in a pane')).toBeVisible();
+    await userEvent.click(within(older).getByRole('button', { name: 'Open chat' }));
+    await expect(args.onOpenChat).toHaveBeenCalledWith('inv-0003');
+  },
+};
+
+export const ChatSessionsLoading: Story = {
+  args: { chats: null },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByText('Saved chats have not loaded.')).toBeVisible();
   },
 };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { agentPool, agentWorkOf, awaitingCuration, controlsLine, localServerLine, providerLine, usageLine, usageTotal } from './agentPool';
+import { agentPool, agentWorkOf, awaitingCuration, chatSessionLine, chatSessions, controlsLine, localServerLine, providerLine, usageLine, usageTotal } from './agentPool';
 import type { Job, StagedProposal } from './store';
+import type { InvestigationSummary } from './investigationTypes';
 
 // AC-1701 (T-1701): the agent pool reads only the job kinds the host writes.
 function job(id: number, kind: string, status: string, updated = `2026-11-21T10:0${id}:00Z`, extra: Partial<Job> = {}): Job {
@@ -105,5 +106,27 @@ describe('localServerLine', () => {
       .toBe('The local model server is running; 1 of 2 models is missing (see Settings, Local lane).');
     expect(localServerLine({ reachable: true, start_command: null, models: [model('a', true)] }))
       .toBe('The local model server is running and every model is installed.');
+  });
+});
+
+// AC-1710 (T-1710): chat sessions are the loaded history grouped by conversation.
+describe('chatSessions', () => {
+  const turn = (id: string, conversation: string, status: string, updated: string, extra: Partial<InvestigationSummary> = {}) => ({
+    schema_version: 7, investigation_id: id, conversation_id: conversation, parent_id: null, job_id: 1,
+    specialist_id: 'domain-analyst@3', question: `q ${id}`, scope: { type: 'all' }, provider_mode: 'local', status,
+    revision: 1, cancel_requested: false, invocation_pending: false, actions: { can_cancel: false, can_follow_up: true },
+    graph_snapshot_id: null, last_event_sequence: 1, has_result: true, created_at: updated, updated_at: updated, ...extra,
+  }) as unknown as InvestigationSummary;
+  it('groups turns, marks active and open sessions, and lists active ones first', () => {
+    const sessions = chatSessions([
+      turn('a1', 'c-a', 'completed', '2026-11-21T10:01:00Z'),
+      turn('a2', 'c-a', 'completed', '2026-11-21T10:05:00Z'),
+      turn('b1', 'c-b', 'running', '2026-11-21T10:02:00Z'),
+      turn('c1', 'c-c', 'completed', '2026-11-21T10:09:00Z', { invocation_pending: true }),
+    ], ['a1']);
+    expect(sessions.map((session) => [session.conversation_id, session.turns, session.active, session.open, session.latest.investigation_id]))
+      .toEqual([['c-c', 1, true, false, 'c1'], ['c-b', 1, true, false, 'b1'], ['c-a', 2, false, true, 'a2']]);
+    expect(chatSessionLine(sessions[2])).toBe('2 turns · latest completed · local · updated 2026-11-21T10:05:00Z');
+    expect(chatSessions([], [])).toEqual([]);
   });
 });
