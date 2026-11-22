@@ -6998,8 +6998,19 @@ fn build_reviewed_semantic_preview(
     let (hops, candidates) = semantic::graph_inputs(nodes, edges);
     let mut inputs =
         semantic::embedding_inputs(&hops, &candidates, eval_pairs).map_err(|e| e.to_string())?;
-    if let Some(reviewed) = reviewed {
-        inputs.extend(reviewed.planned_texts()?);
+    // The reviewed texts share the one embedding operation with the live plan.
+    // When the live plan leaves no room for them, independent admission
+    // abstains instead of failing the whole preview (AC-1509).
+    let mut reviewed = reviewed;
+    let mut over_plan = false;
+    if let Some(prepared) = reviewed {
+        let planned = prepared.planned_texts()?;
+        if inputs.len().saturating_add(planned.len()) > semantic::embedding_cache::MAX_ROWS {
+            reviewed = None;
+            over_plan = true;
+        } else {
+            inputs.extend(planned);
+        }
     }
     cached.embed(&inputs).map_err(|e| e.to_string())?;
     cached.seal().map_err(|e| e.to_string())?;
@@ -7021,6 +7032,12 @@ fn build_reviewed_semantic_preview(
                 semantic::evaluation::report::DecisionReason::IncompatibleEvidence,
             ),
         }
+    }
+    if over_plan {
+        mark_independent_abstention(
+            &mut preview,
+            semantic::evaluation::report::DecisionReason::IncompatibleEvidence,
+        );
     }
     preview.embedding_cache = Some(cached.finish().map_err(|e| e.to_string())?);
     Ok::<_, String>(preview)

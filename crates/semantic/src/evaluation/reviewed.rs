@@ -28,6 +28,9 @@ const MAX_TIME: u64 = 9_007_199_254_740_991;
 /// Most live hops, and most live candidates, one admission ranks: the plan
 /// bound the embedding cache admits.
 const LIVE_INPUT_BOUND: usize = crate::embedding_cache::MAX_ROWS;
+/// Most ranked rows one admission stages across its families: VSCode's
+/// ~100k call hops at three neighbours each, with room to spare.
+const LIVE_STAGED_BOUND: usize = 4 * crate::embedding_cache::MAX_ROWS;
 type Result<T> = std::result::Result<T, String>;
 fn hash(s: &str) -> bool {
     s.len() == 64
@@ -389,7 +392,13 @@ impl IndependentReceipt {
         for h in hops.iter().filter(|h| h.is_ann_candidate()) {
             groups.entry(h.family()).or_default().push(h);
         }
-        if groups.len() > 256 {
+        // Ranking keeps `neighbors` rows per hop, so bound the staged rows the
+        // families can produce, not only the inputs.
+        let staged_bound = groups.iter().try_fold(0_usize, |sum, (family, group)| {
+            let neighbors = policy.families.get(family).map_or(3, |p| p.neighbors);
+            sum.checked_add(group.len().checked_mul(neighbors)?)
+        });
+        if groups.len() > 256 || staged_bound.is_none_or(|rows| rows > LIVE_STAGED_BOUND) {
             return LiveAdmission {
                 staged: Vec::new(),
                 admitted: Vec::new(),
@@ -484,14 +493,17 @@ impl IndependentReceipt {
             if let Some(p) = p {
                 // One pass groups the ranked rows by Gap, keeping ranking order,
                 // so choosing stays linear in the staged rows at scale.
-                let mut by_gap: BTreeMap<&str, Vec<SemanticProposal>> = BTreeMap::new();
+                // Choosing reads only a Gap's two leaders, so only those are copied.
+                let mut by_gap: BTreeMap<&str, Vec<&SemanticProposal>> = BTreeMap::new();
                 for r in &local {
-                    by_gap.entry(r.gap_id.as_str()).or_default().push(r.clone());
+                    by_gap.entry(r.gap_id.as_str()).or_default().push(r);
                 }
                 for h in &local_hops {
-                    let rows = by_gap.remove(h.gap_id.as_str()).unwrap_or_default();
+                    let gap_rows = by_gap.remove(h.gap_id.as_str()).unwrap_or_default();
+                    let rows: Vec<SemanticProposal> =
+                        gap_rows.iter().take(2).map(|r| (*r).clone()).collect();
                     match policy::choose(&rows, p) {
-                        PredictionChoice::Ambiguous => ambiguous += rows.len() as u64,
+                        PredictionChoice::Ambiguous => ambiguous += gap_rows.len() as u64,
                         PredictionChoice::Admitted { .. }
                             if reason == DecisionReason::IndependentlyEvaluated =>
                         {
