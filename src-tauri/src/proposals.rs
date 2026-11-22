@@ -88,7 +88,7 @@ pub(crate) fn run_staged_batch<T>(
     outcome
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests {
     use super::*;
     use agents::{AgentBroker, AgentCandidate, AgentEvidence, AgentTask, ProposalStore};
