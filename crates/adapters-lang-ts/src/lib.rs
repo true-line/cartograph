@@ -3653,6 +3653,13 @@ fn complete_pending_calls(
                 let (class, _) = qualified.split_once('.')?;
                 Some(format!("{prefix}#{class}"))
             }))
+            // Barrel resolution enters a module only through its File id.
+            .chain(
+                known_symbols
+                    .iter()
+                    .filter(|id| id.starts_with("file:"))
+                    .cloned(),
+            )
             .collect()
     };
     let place = |class: &str| {
@@ -3664,12 +3671,26 @@ fn complete_pending_calls(
         })
     };
     let bases = heritage::Index::new(bases, place);
+    let direct: BTreeSet<&str> = pending
+        .iter()
+        .filter(|call| call.requires_instance_method)
+        .map(|call| call.resolved_edge.dst.as_str())
+        .collect();
+    let direct_nodes = facts.decode_nodes(|id, _| direct.contains(id))?;
+    // A static member of the same name does not shadow an inherited
+    // instance method, so the walk still runs past it.
+    let statics: BTreeSet<&str> = direct_nodes
+        .iter()
+        .filter(|node| node.props["member_kind"] == "static")
+        .map(|node| node.id.as_str())
+        .collect();
     let inherited: Vec<Option<heritage::Inherited>> = pending
         .iter()
         .map(|call| {
+            let dst = call.resolved_edge.dst.as_str();
             (call.requires_instance_method
                 && !bases.is_empty()
-                && !known_symbols.contains(&call.resolved_edge.dst))
+                && (!known_symbols.contains(dst) || statics.contains(dst)))
             .then(|| {
                 bases
                     .chain(&call.resolved_edge.dst, place, known_symbols)
@@ -3679,17 +3700,22 @@ fn complete_pending_calls(
             .flatten()
         })
         .collect();
-    let targets: BTreeSet<&str> = pending
+    let targets: BTreeSet<&str> = inherited
         .iter()
-        .filter(|call| call.requires_instance_method)
-        .map(|call| call.resolved_edge.dst.as_str())
-        .chain(inherited.iter().flatten().map(|found| found.dst.as_str()))
+        .flatten()
+        .map(|found| found.dst.as_str())
+        .filter(|dst| !direct.contains(dst))
         .collect();
-    let instance_methods: BTreeSet<String> = facts
-        .decode_nodes(|id, _| targets.contains(id))?
-        .into_iter()
+    let inherited_nodes = if targets.is_empty() {
+        Vec::new()
+    } else {
+        facts.decode_nodes(|id, _| targets.contains(id))?
+    };
+    let instance_methods: BTreeSet<String> = direct_nodes
+        .iter()
+        .chain(&inherited_nodes)
         .filter(|node| node.props["instance_dispatch"] == true)
-        .map(|node| node.id)
+        .map(|node| node.id.clone())
         .collect();
     let (mut nodes, mut edges) = (Vec::new(), Vec::new());
     for (call, inherited) in pending.into_iter().zip(inherited) {

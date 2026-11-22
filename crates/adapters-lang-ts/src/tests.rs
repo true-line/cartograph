@@ -6013,7 +6013,15 @@ class Knot extends Loop {}
 export abstract class Shape { area() { return 0; } abstract label(): string; }
 export class Square extends Shape { label() { return 'sq'; } }
 export function measure(square: Square) { square.area(); }
+export class Pinned extends Disposable { static dispose() {} }
 "#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(src.join("lib")).unwrap();
+    std::fs::write(src.join("lib/index.ts"), "export * from './core';\n").unwrap();
+    std::fs::write(
+        src.join("lib/core.ts"),
+        "export class Core { start() {} }\n",
     )
     .unwrap();
     std::fs::write(
@@ -6021,6 +6029,8 @@ export function measure(square: Square) { square.area(); }
         r#"
 import { Store } from './base.js';
 import { Remote } from 'remote-pkg';
+import { Core } from './lib';
+export class Engine extends Core {}
 export class ResourceStore extends Store {}
 export class OwnStore extends Store { get(key: string) { return key + '!'; } }
 export class Proxy extends Remote {}
@@ -6030,8 +6040,10 @@ export class Proxy extends Remote {}
     std::fs::write(
         src.join("use.ts"),
         r#"
-import { ResourceStore, OwnStore, Proxy } from './derived.js';
-import { Loop } from './base';
+import { ResourceStore, OwnStore, Proxy, Engine } from './derived.js';
+import { Loop, Pinned } from './base';
+export function boot(engine: Engine) { engine.start(); }
+export function unpin(pinned: Pinned) { pinned.dispose(); }
 export function read(store: ResourceStore) { store.get('a'); }
 export function close(store: ResourceStore) { store.dispose(); }
 export function own(store: OwnStore) { store.get('b'); }
@@ -6050,6 +6062,8 @@ export function cycle(loop: Loop) { loop.spin(); }
         ("use.ts#close", "base.ts#Disposable.dispose"),
         ("use.ts#own", "derived.ts#OwnStore.get"),
         ("base.ts#measure", "base.ts#Shape.area"),
+        ("use.ts#boot", "lib/core.ts#Core.start"),
+        ("use.ts#unpin", "base.ts#Disposable.dispose"),
     ] {
         assert!(
             calls.contains(&(sym(from).as_str(), sym(to).as_str())),
