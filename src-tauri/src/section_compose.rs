@@ -145,6 +145,19 @@ pub(crate) fn prepare(
 ) -> Result<Prepared, String> {
     let compiled = compile(state, catalogue_version, document, section, scope)?;
     if compiled.address.scope == spec::SYSTEM_SCOPE {
+        // The longest rule excerpt whose request stays under the input
+        // ceiling, or none (#2386).
+        let ceiling = limits()?
+            .values()
+            .input_bytes
+            .saturating_sub(INPUT_MARGIN_BYTES);
+        for rules in &compiled.excerpts {
+            let text = format!("{}{rules}", compiled.text);
+            let candidate = prepared(&compiled, compiled.address.clone(), None, &text)?;
+            if payload_bytes(&candidate.action) <= ceiling {
+                return Ok(candidate);
+            }
+        }
         let text = compiled.text.clone();
         return prepared(&compiled, compiled.address.clone(), None, &text);
     }
@@ -169,6 +182,19 @@ pub(crate) fn prepare(
     )
 }
 
+/// The longest rule excerpt a system composition reads (#2375); the
+/// section sets its own, smaller or equal, budget.
+const EXCERPT_BYTES: usize = 16 * 1024;
+
+/// Room kept under the input ceiling for what the call adds around the
+/// payload (#2386).
+const INPUT_MARGIN_BYTES: u64 = 4 * 1024;
+
+/// The bytes of `action`'s payload as JSON, which the input ceiling bounds.
+fn payload_bytes(action: &CompletionAction) -> u64 {
+    serde_json::to_vec(&action.payload).map_or(u64::MAX, |bytes| bytes.len() as u64)
+}
+
 /// One read of the graph, the decisions and the knowledge overlay, and the
 /// section compiled from it.
 struct Compiled {
@@ -176,6 +202,9 @@ struct Compiled {
     title: &'static str,
     /// The section as a composition reads it.
     text: String,
+    /// The rule excerpts a system composition may append, longest first
+    /// (#2375, #2386).
+    excerpts: Vec<String>,
     nodes: Arc<Vec<Node>>,
     edges: Arc<Vec<Edge>>,
     /// The overlay's Capabilities and Actors with the base facts each
@@ -251,19 +280,29 @@ fn compile(
     )?;
     // An overview section is read up to its per-capability detail (#1991);
     // a summary section reads the sections it summarises (#2319).
-    let mut text = spec::composition_source(&artifact.content, &address.section)
+    let text = spec::composition_source(&artifact.content, &address.section)
         .ok_or("section_not_compiled")?;
     // A system overview also reads the rules its capabilities enforce, so
-    // what it says a capability does can cite them (#2375).
-    if address.scope == spec::SYSTEM_SCOPE
-        && let Some(rules) = spec::rule_excerpt(&artifact.content, &address.section)
-    {
-        text.push_str(&rules);
+    // what it says a capability does can cite them (#2375): the whole
+    // excerpt, then shorter ones for a request near its input ceiling
+    // (#2386).
+    let mut excerpts: Vec<String> = Vec::new();
+    if address.scope == spec::SYSTEM_SCOPE {
+        for share in [1, 2, 4, 8] {
+            let bytes = EXCERPT_BYTES / share;
+            if let Some(rules) =
+                spec::rule_excerpt_within(&artifact.content, &address.section, bytes)
+                && excerpts.last() != Some(&rules)
+            {
+                excerpts.push(rules);
+            }
+        }
     }
     Ok(Compiled {
         address,
         title,
         text,
+        excerpts,
         nodes,
         edges,
         derived,
