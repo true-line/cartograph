@@ -304,11 +304,13 @@ pub fn rule_excerpt_within(document: &str, number: &str, bytes: usize) -> Option
     ))
 }
 
-/// The capability each rule of a [`rule_excerpt_within`] excerpt in `text`
-/// is listed under, by the rule's citation id (#2416). Empty when `text`
-/// holds no excerpt.
-pub fn excerpt_rule_capabilities(text: &str) -> BTreeMap<String, String> {
-    let mut found = BTreeMap::new();
+/// The capabilities each rule of a [`rule_excerpt_within`] excerpt in
+/// `text` is listed under, by the rule's citation id (#2416): a rule reached
+/// by a few capabilities is listed under each. Names are read back as plain
+/// text, as the capability facts name them. Empty when `text` holds no
+/// excerpt.
+pub fn excerpt_rule_capabilities(text: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let Some(at) = text.find(RULE_EXCERPT_HEADING) else {
         return found;
     };
@@ -325,10 +327,39 @@ pub fn excerpt_rule_capabilities(text: &str) -> BTreeMap<String, String> {
             && printed_ids(citation).len() == 1
             && citation.len() == 18
         {
-            found.insert(citation.to_owned(), capability.to_owned());
+            found
+                .entry(citation.to_owned())
+                .or_default()
+                .insert(plain_text(capability));
         }
     }
     found
+}
+
+/// `text` as written before Markdown literal escaping (`Literal` in the
+/// renderer): entities and backslash escapes are undone (#2416).
+fn plain_text(text: &str) -> String {
+    let text = text
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\'
+            && let Some(&next) = chars.peek()
+            && matches!(
+                next,
+                '\\' | '`' | '*' | '_' | '[' | ']' | '|' | '#' | '!' | '~'
+            )
+        {
+            plain.push(next);
+            chars.next();
+        } else {
+            plain.push(character);
+        }
+    }
+    plain
 }
 
 /// The heading a rule excerpt opens with.

@@ -510,7 +510,10 @@ fn a_system_composition_tries_each_excerpt_listed_then_unlisted() {
 #[test]
 fn a_rule_is_cited_with_the_capability_it_is_listed_under() {
     // AC-1324 (T-1324, #2416).
-    let rules = BTreeMap::from([("F-rule".to_owned(), "Manage user (API)".to_owned())]);
+    let rules = BTreeMap::from([(
+        "F-rule".to_owned(),
+        BTreeSet::from(["Manage user (API)".to_owned()]),
+    )]);
     let capabilities: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::from([
         ("Manage user (API)", BTreeSet::from(["F-user"])),
         ("Enter sudo (dashboard)", BTreeSet::from(["F-sudo"])),
@@ -539,7 +542,20 @@ fn a_rule_is_cited_with_the_capability_it_is_listed_under() {
         &rules,
         &capabilities
     ));
-    let orphan = BTreeMap::from([("F-rule".to_owned(), "Gone".to_owned())]);
+    let orphan = BTreeMap::from([("F-rule".to_owned(), BTreeSet::from(["Gone".to_owned()]))]);
+    // A rule listed under two capabilities is cited with either.
+    let shared = BTreeMap::from([(
+        "F-rule".to_owned(),
+        BTreeSet::from([
+            "Manage user (API)".to_owned(),
+            "Enter sudo (dashboard)".to_owned(),
+        ]),
+    )]);
+    assert!(rule_capability_cited(
+        &cites(&["F-sudo", "F-rule"]),
+        &shared,
+        &capabilities
+    ));
     assert!(rule_capability_cited(
         &cites(&["F-rule"]),
         &orphan,

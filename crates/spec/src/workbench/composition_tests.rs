@@ -303,15 +303,24 @@ fn an_excerpt_names_the_capability_each_rule_is_listed_under() {
     // AC-1324 (T-1324, #2416).
     let header = "| Where | Rule | Source | Citation |\n|---|---|---|---|\n";
     let mut document = String::from("# D1\n\n## 1.5 Business rules (F)\n\n");
-    for (n, capability) in ["Manage user (API)", "Login (authentication)"]
-        .iter()
-        .enumerate()
+    for (n, capability) in [
+        "Manage user (API)",
+        "Login (authentication)",
+        "require\\_api\\_auth &amp; more",
+    ]
+    .iter()
+    .enumerate()
     {
         document.push_str(&format!(
             "### {capability}\n\n{header}| f() | Rule {n} refuses a caller with 401. | when x: 401 | F-{:016x} |\n\n",
             n as u64
         ));
     }
+    // A rule reached by two capabilities is listed under each.
+    document.push_str(&format!(
+        "| g() | Rule 0 refuses a caller with 401. | when x: 401 | F-{:016x} |\n\n",
+        0
+    ));
     let excerpt = rule_excerpt(&document, "1.3").unwrap();
     assert!(excerpt.contains("states the rule only for that capability"));
     let text = format!(
@@ -321,8 +330,21 @@ fn an_excerpt_names_the_capability_each_rule_is_listed_under() {
     assert_eq!(
         found,
         BTreeMap::from([
-            (format!("F-{:016x}", 0), "Manage user (API)".to_owned()),
-            (format!("F-{:016x}", 1), "Login (authentication)".to_owned()),
+            (
+                format!("F-{:016x}", 0),
+                BTreeSet::from([
+                    "Manage user (API)".to_owned(),
+                    "require_api_auth & more".to_owned()
+                ])
+            ),
+            (
+                format!("F-{:016x}", 1),
+                BTreeSet::from(["Login (authentication)".to_owned()])
+            ),
+            (
+                format!("F-{:016x}", 2),
+                BTreeSet::from(["require_api_auth & more".to_owned()])
+            ),
         ])
     );
     // The section's own table before the excerpt is not read.
