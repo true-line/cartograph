@@ -3731,6 +3731,19 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             "{text}"
         );
         assert!(!text.contains("deletedAt"), "{text}");
+        // AC-1056 (T-1056): the ids the count is compared with are said to
+        // be distinct when the source makes them so.
+        let distinct = render(&source.replace(
+            "                const qb = connection",
+            "                const variantIds = unique(order.lines.map(l => l.productVariant.id));\n                const qb = connection",
+        ));
+        assert!(
+            distinct.contains(
+                "Here the variant ids are the distinct product variant IDs of the order's lines."
+            ),
+            "{distinct}"
+        );
+        assert!(!text.contains("distinct"), "{text}");
         // An inner join also drops variants with no product, and a second
         // `where` replaces the earlier conditions: neither is read.
         for changed in [

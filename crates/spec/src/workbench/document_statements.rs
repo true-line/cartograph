@@ -2505,6 +2505,13 @@ fn with_definitions(
             say(&mut out, &what, &is);
             continue;
         }
+        // `unique(xs.map(x => x.a.b))` (AC-1056): "the distinct a bs of xs".
+        if let Some((_, init, _)) = named.iter().find(|(n, ..)| n == name)
+            && let Some(is) = distinct_noun(init, &cx)
+        {
+            say(&mut out, &what, &is);
+            continue;
+        }
         // Outside the textual rules, the recorded expression is read node by
         // node, and each local name it reads is said in a sentence of its
         // own (AC-1040).
@@ -2534,6 +2541,50 @@ fn with_definitions(
         }
     }
     out
+}
+
+/// The distinct values a list's items give, as a noun phrase (AC-1056):
+/// `unique(order.lines.map(l => l.productVariant.id))` is "the distinct
+/// product variant IDs of the order's lines". Only `unique`/`uniq` of one
+/// `.map` whose arrow reads a member path of its own parameter qualifies.
+fn distinct_noun(init: &str, cx: &Context<'_>) -> Option<String> {
+    let text = one_line(init);
+    let inner = ["unique(", "uniq("]
+        .iter()
+        .find_map(|f| text.strip_prefix(f))?
+        .strip_suffix(')')?;
+    let (list, arrow) = inner.split_once(".map(")?;
+    let (param, body) = arrow.strip_suffix(')')?.split_once("=>")?;
+    let param = param
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    let ident = |t: &str| {
+        !t.is_empty()
+            && !t.starts_with(|c: char| c.is_ascii_digit())
+            && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let path: Vec<&str> = body
+        .trim()
+        .strip_prefix(param)?
+        .strip_prefix('.')?
+        .split('.')
+        .collect();
+    if !ident(param) || path.is_empty() || !path.iter().all(|p| ident(p)) {
+        return None;
+    }
+    let Expr::Ref(of) = parse(list.trim())? else {
+        return None;
+    };
+    let mut what = path.iter().map(|p| words(p)).collect::<Vec<_>>().join(" ");
+    if !what.ends_with('s') {
+        what.push('s');
+    }
+    Some(format!(
+        "the distinct {what} of {}",
+        noun(&Expr::Ref(of), cx)?
+    ))
 }
 
 /// A conditional value as a noun phrase (AC-1052): `variant.useGlobal ?
