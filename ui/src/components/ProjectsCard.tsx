@@ -82,7 +82,7 @@ export function ProjectsCard({
                   </button>
                 </form>
               ) : (
-                <span className="project-name">
+                <span className="project-name" title={name}>
                   {name}
                   {project.active && <span className="badge"> Loaded</span>}
                 </span>
