@@ -443,29 +443,44 @@ pub(crate) fn stream_bundle_file(
     stream.finish(&bundle)
 }
 
+/// Start `compile` on a blocking worker, then wait for `choose` while it runs
+/// (#1601): the save panel opened only after the whole bundle compiled, about
+/// 10 s on a real system. `None` from `choose` (a cancelled panel) returns
+/// `Ok(None)` at once; the worker finishes and drops its result, so its temp
+/// file is removed. A compile error is reported after the choice.
+pub(crate) async fn compile_while_choosing<T: Send + 'static, P>(
+    compile: impl FnOnce() -> Result<T, String> + Send + 'static,
+    choose: impl std::future::Future<Output = Option<P>>,
+) -> Result<Option<(T, P)>, String> {
+    let compiled = tauri::async_runtime::spawn_blocking(compile);
+    let Some(chosen) = choose.await else {
+        return Ok(None);
+    };
+    let value = compiled.await.map_err(|error| error.to_string())??;
+    Ok(Some((value, chosen)))
+}
+
 /// Compile the full bundle for the preview the Workbench shows, one artifact
-/// at a time into a temp file (#2215), refuse it if it is no longer that
-/// selection, then ask where to save it and move it there. Returns
-/// `Ok(false)` when the save panel is cancelled. The full bundle never
-/// crosses IPC (#1582, AC-0740).
+/// at a time into a temp file (#2215), while the save panel asks where to
+/// save it; refuse it if it is no longer that selection, then move it there.
+/// Returns `Ok(false)` when the save panel is cancelled. The full bundle
+/// never crosses IPC (#1582, AC-0740).
 #[tauri::command]
 pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
     suggested_name: String,
     expected: ExpectedSpecBundle,
     app: tauri::AppHandle<R>,
 ) -> Result<bool, String> {
-    let file = crate::off_ui_thread(move || {
+    let compile = move || {
         let state = app.state::<crate::AppState>();
         stream_bundle_file(&expected, |push| {
             crate::compile_spec_bundle_kept(crate::export_inputs(&state)?, expected.mode, push)
         })
-    })
-    .await?;
-    let Some(handle) = rfd::AsyncFileDialog::new()
+    };
+    let choose = rfd::AsyncFileDialog::new()
         .set_file_name(sanitize_export_name(&suggested_name))
-        .save_file()
-        .await
-    else {
+        .save_file();
+    let Some((file, handle)) = compile_while_choosing(compile, choose).await? else {
         return Ok(false);
     };
     let path = handle.path().to_path_buf();
@@ -533,6 +548,44 @@ fn sweep_stale_temps(dir: &Path, pid: u32, now: std::time::SystemTime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The save panel opens while the bundle compiles (#1601): the compile
+    /// waits on a signal only the panel sends, so a sequential save would
+    /// never finish.
+    #[test]
+    fn save_panel_opens_while_the_bundle_compiles() {
+        let (opened, panel) = std::sync::mpsc::channel::<()>();
+        let compile = move || {
+            panel
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| "the panel never opened during the compile".to_string())?;
+            Ok("bundle")
+        };
+        let choose = async move {
+            opened.send(()).unwrap();
+            Some("/tmp/out.json")
+        };
+        let result = tauri::async_runtime::block_on(compile_while_choosing(compile, choose));
+        assert_eq!(result, Ok(Some(("bundle", "/tmp/out.json"))));
+    }
+
+    #[test]
+    fn a_cancelled_panel_returns_at_once_and_a_failed_compile_is_reported() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let slow = move || {
+            let _ = wait.recv();
+            Ok(())
+        };
+        let cancelled =
+            tauri::async_runtime::block_on(compile_while_choosing(slow, async { None::<()> }));
+        assert_eq!(cancelled, Ok(None));
+        drop(release);
+        let failed = tauri::async_runtime::block_on(compile_while_choosing(
+            || Err::<(), _>("selection changed".to_string()),
+            async { Some(()) },
+        ));
+        assert_eq!(failed, Err("selection changed".to_string()));
+    }
 
     /// `ui/src/fixtures/spec-bundle-file.input.json`: a Workbench preview
     /// and the full artifacts `read_spec_artifact` returns for it.
