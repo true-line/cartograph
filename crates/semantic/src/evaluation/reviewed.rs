@@ -25,6 +25,12 @@ use std::{
 };
 const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 const MAX_TIME: u64 = 9_007_199_254_740_991;
+/// Most live hops, and most live candidates, one admission ranks: the plan
+/// bound the embedding cache admits.
+const LIVE_INPUT_BOUND: usize = crate::embedding_cache::MAX_ROWS;
+/// Most ranked rows one admission stages across its families: VSCode's
+/// ~100k call hops at three neighbours each, with room to spare.
+const LIVE_STAGED_BOUND: usize = 4 * crate::embedding_cache::MAX_ROWS;
 type Result<T> = std::result::Result<T, String>;
 fn hash(s: &str) -> bool {
     s.len() == 64
@@ -338,8 +344,10 @@ impl IndependentReceipt {
         hops: &[UnresolvedHop],
         candidates: &[Candidate],
     ) -> LiveAdmission {
-        if hops.len() > 4096
-            || candidates.len() > 4096
+        // The live inputs are bounded by the same plan bound the embedding
+        // cache admits (AC-1507), so a VSCode-scale graph is ranked, not refused.
+        if hops.len() > LIVE_INPUT_BOUND
+            || candidates.len() > LIVE_INPUT_BOUND
             || hops
                 .iter()
                 .any(|h| h.subtype.as_ref().is_some_and(|s| s.len() > 128))
@@ -350,7 +358,7 @@ impl IndependentReceipt {
             // Bound work before constructing groups or cloning live candidates.
             let families: BTreeSet<_> = hops
                 .iter()
-                .take(4096)
+                .take(LIVE_INPUT_BOUND)
                 .filter(|h| h.subtype.as_ref().is_none_or(|s| s.len() <= 128))
                 .map(UnresolvedHop::family)
                 .take(256)
@@ -384,7 +392,13 @@ impl IndependentReceipt {
         for h in hops.iter().filter(|h| h.is_ann_candidate()) {
             groups.entry(h.family()).or_default().push(h);
         }
-        if groups.len() > 256 {
+        // Ranking keeps `neighbors` rows per hop, so bound the staged rows the
+        // families can produce, not only the inputs.
+        let staged_bound = groups.iter().try_fold(0_usize, |sum, (family, group)| {
+            let neighbors = policy.families.get(family).map_or(3, |p| p.neighbors);
+            sum.checked_add(group.len().checked_mul(neighbors)?)
+        });
+        if groups.len() > 256 || staged_bound.is_none_or(|rows| rows > LIVE_STAGED_BOUND) {
             return LiveAdmission {
                 staged: Vec::new(),
                 admitted: Vec::new(),
@@ -477,14 +491,19 @@ impl IndependentReceipt {
                 reason = DecisionReason::IncompatibleEvidence;
             }
             if let Some(p) = p {
+                // One pass groups the ranked rows by Gap, keeping ranking order,
+                // so choosing stays linear in the staged rows at scale.
+                // Choosing reads only a Gap's two leaders, so only those are copied.
+                let mut by_gap: BTreeMap<&str, Vec<&SemanticProposal>> = BTreeMap::new();
+                for r in &local {
+                    by_gap.entry(r.gap_id.as_str()).or_default().push(r);
+                }
                 for h in &local_hops {
-                    let rows: Vec<_> = local
-                        .iter()
-                        .filter(|r| r.gap_id == h.gap_id)
-                        .cloned()
-                        .collect();
+                    let gap_rows = by_gap.remove(h.gap_id.as_str()).unwrap_or_default();
+                    let rows: Vec<SemanticProposal> =
+                        gap_rows.iter().take(2).map(|r| (*r).clone()).collect();
                     match policy::choose(&rows, p) {
-                        PredictionChoice::Ambiguous => ambiguous += rows.len() as u64,
+                        PredictionChoice::Ambiguous => ambiguous += gap_rows.len() as u64,
                         PredictionChoice::Admitted { .. }
                             if reason == DecisionReason::IndependentlyEvaluated =>
                         {
@@ -882,6 +901,32 @@ mod tests {
         );
         assert_eq!(result.admitted.len(), 1);
         assert!(!result.staged.is_empty());
+        if !omit_channel_policy {
+            // AC-1509: past the former 4096-hop cap, every hop is still ranked
+            // and admitted under the same receipt, with no new embedding calls.
+            let many: Vec<_> = (0..5000)
+                .map(|i| UnresolvedHop {
+                    gap_id: format!("{}-{i}", hops[0].gap_id),
+                    ..hops[0].clone()
+                })
+                .collect();
+            let scaled = receipt.predict_live(
+                dir.path(),
+                &good_anchor,
+                &observations,
+                &policy,
+                &cached,
+                &many,
+                &candidates,
+            );
+            assert_eq!(scaled.admitted.len(), 5000);
+            assert_eq!(scaled.summary.families[0].admitted, 5000);
+            assert_eq!(
+                scaled.summary.families[0].reason,
+                DecisionReason::IndependentlyEvaluated
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+        }
         if omit_channel_policy {
             let (mut mixed_hops, mut mixed_candidates) = live(&bundle, "c-call-multi-acceptable");
             mixed_hops.extend(hops.clone());
