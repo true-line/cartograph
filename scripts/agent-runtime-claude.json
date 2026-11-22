@@ -1,0 +1,9 @@
+{
+  "comment": "ADR-0085, AC-1424: the Claude Code executable the Agent SDK drives on the Claude lane. Checked at build time (scripts/build-agent-runtime.mjs) and by the app before every runtime start that uses it. darwin builds keep Anthropic's Developer ID signature (team_id).",
+  "sdk_version": "0.3.330",
+  "team_id": "Q6L2SF6YDW",
+  "sha256": {
+    "darwin-arm64": "f7c5093b9dd6560d08af28bc27b123fb55091deae3180ac39df199522da86815",
+    "linux-x64": "f390eaa0814e6a1bff74cbb47acb74cb9c89d30ced809fe0af5af00c7bfe8ebb"
+  }
+}

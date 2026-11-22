@@ -189,6 +189,7 @@ fn harness_with(scripts: Vec<Vec<Answer>>, runners: Vec<&'static str>) -> Harnes
         context_window: Some(32768),
         max_request_bytes: 1 << 20,
         max_response_bytes: 1 << 20,
+        credential: None,
     })
     .unwrap();
     let spawns = Arc::new(AtomicUsize::new(0));
@@ -197,6 +198,7 @@ fn harness_with(scripts: Vec<Vec<Answer>>, runners: Vec<&'static str>) -> Harnes
     let config = SessionConfig {
         lane: RuntimeLane::Pi,
         max_turns: 12,
+        claude_executable: None,
         budget_bytes: 1 << 20,
     };
     let session = NativeSession::new(
