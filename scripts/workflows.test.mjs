@@ -53,16 +53,12 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.match(workflow, /git diff-tree -p HEAD \| git patch-id --stable/u);
   assert.match(workflow, /git diff-tree -p "\$open_sha" \| git patch-id --stable/u);
   assert.match(workflow, /skipping the force-push/u);
-  // The version PR opens and stays ready for review, so its complete suite
-  // runs with no manual undraft; one left in draft is made ready.
+  // The version PR opens ready for review, so its complete suite runs with
+  // no manual undraft. The workflow never changes its draft state after
+  // that, so an owner's deliberate draft hold is kept.
   assert.match(workflow, /gh pr create --base main --head "\$BRANCH"/u);
   assert.doesNotMatch(workflow, /--draft/u);
-  assert.doesNotMatch(workflow, /gh pr ready [^\n]*--undo/u);
-  assert.match(workflow, /gh pr ready "\$open_draft"/u);
-  assert.ok(
-    workflow.indexOf('gh pr ready "$open_draft"') < workflow.indexOf('skipping the force-push'),
-    'a draft version PR is made ready even when its patch is unchanged',
-  );
+  assert.doesNotMatch(workflow, /gh pr ready/u);
   // checkout removes its credentials, so the open-PR fetch must authenticate
   // per command and never wait on a prompt (#667).
   assert.match(workflow, /GIT_TERMINAL_PROMPT: "0"/u);

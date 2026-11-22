@@ -150,9 +150,10 @@ enabled, the exact-commit `main` fallback protects merge/squash SHA rewrites.
   handoff is recovered by manually dispatching the version-cut workflow; tags
   are immutable and are never moved.
 - A Version packages PR receives the normal ready/queue complete suite once;
-  version-cut never dispatches a duplicate suite. It opens the PR as draft and
-  returns a ready one to draft before refreshing its head, so only the owner
-  marking the cut ready starts the suite. Tag and release automation
+  version-cut never dispatches a duplicate suite. It opens the PR ready for
+  review, so the suite starts with no manual step, and never changes its draft
+  state afterwards: an owner who moves the cut to draft keeps it there. An
+  unchanged release patch is not force-pushed (#347). Tag and release automation
   require exact-commit CI and reviewed-PR evidence before release-specific work.
 - macOS production bundles are universal Intel + Apple Silicon `.app` and `.dmg`
   artifacts. Signing is all-or-nothing across the five repository secrets
