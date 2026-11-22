@@ -3529,6 +3529,56 @@ fn pipelines_are_read_from_the_capture() {
     assert_eq!(pipeline.props["stages"], 1, "{:?}", pipeline.props);
 }
 
+// AC-1057: a capture taken with no pipeline files has an empty pipeline
+// selection, so a Dockerfile created in the checkout afterwards is not read.
+#[test]
+fn a_capture_without_pipelines_never_reads_the_checkouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    std::fs::write(
+        root.join("Dockerfile"),
+        "FROM node:20 AS build\nRUN npm ci\n",
+    )
+    .unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    assert!(
+        !extraction.nodes.iter().any(|node| node.label == "Pipeline"),
+        "a Dockerfile outside the capture was read"
+    );
+}
+
 // AC-1055: the Python observed-infrastructure pass reads the same captured
 // bytes as the Python lane, so a checkout edit after capture changes neither.
 #[test]

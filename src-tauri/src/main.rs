@@ -2648,7 +2648,8 @@ fn extract_tree_packed(
     // `unreadable-pipeline-file` finding, which the coverage inventory lists.
     {
         let pipeline_id = ingest::pipelines::SourceId { repo, commit };
-        // A capture holding them is read instead of the checkout (AC-1057).
+        // A capture always holds the reader's whole selection, possibly
+        // none, so with one the checkout is never read (AC-1057).
         let captured_pipelines: Vec<String> = primary
             .map(|capture| {
                 capture
@@ -2661,20 +2662,16 @@ fn extract_tree_packed(
             })
             .unwrap_or_default();
         let pipeline_facts = match primary {
-            Some(capture) if !captured_pipelines.is_empty() => {
-                ingest::pipelines::extract_from_sources(
-                    &captured_pipelines,
-                    &|path| {
-                        capture
-                            .file(path)
-                            .map(|file| file.bytes().to_vec())
-                            .map_err(|_| {
-                                std::io::Error::other("captured pipeline file is unavailable")
-                            })
-                    },
-                    &pipeline_id,
-                )
-            }
+            Some(capture) => ingest::pipelines::extract_from_sources(
+                &captured_pipelines,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| std::io::Error::other("captured pipeline file is unavailable"))
+                },
+                &pipeline_id,
+            ),
             _ => ingest::pipelines::extract_dir(root, &pipeline_id).map_err(|e| e.to_string())?,
         };
         layers.pipelines = LayerSummary {

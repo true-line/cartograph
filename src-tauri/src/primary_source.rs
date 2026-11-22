@@ -2096,11 +2096,20 @@ impl PrimarySourceStore {
             lanes.extend(iac::tf_paths(root).unwrap_or_default());
         }
         // Workflows and Dockerfiles (AC-1057) are read for every layer
-        // selection, so they join it whenever the source is captured.
-        lanes.extend(ingest::pipelines::pipeline_paths(root).unwrap_or_default());
+        // selection, so they are retained with the TS/JS selection itself,
+        // even when the lanes fall back: a capture always holds the pipeline
+        // reader's whole selection, and the reader never falls back to the
+        // checkout.
+        let mut base = selection.files.clone();
+        base.extend(ingest::pipelines::pipeline_paths(root).map_err(|_| {
+            "Pipeline files could not be listed for capture; recovery was not published."
+                .to_string()
+        })?);
+        base.sort();
+        base.dedup();
         let combined = (!lanes.is_empty())
             .then(|| {
-                let mut paths = selection.files.clone();
+                let mut paths = base.clone();
                 paths.extend(lanes);
                 paths.sort();
                 paths.dedup();
@@ -2109,7 +2118,7 @@ impl PrimarySourceStore {
             .flatten();
         let capture = match combined {
             Some(capture) => capture,
-            None => capture_paths(&selection.files).map_err(|_| match commit {
+            None => capture_paths(&base).map_err(|_| match commit {
                 Some(_) => "Selected TS/JS source could not be read from the cloned commit's Git objects within the capture limits; recovery was not published.".to_string(),
                 None => "Selected TS/JS source could not be retained within the capture limits; recovery was not published.".to_string(),
             })?,
