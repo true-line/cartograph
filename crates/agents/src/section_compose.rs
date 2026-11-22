@@ -367,8 +367,35 @@ struct ReplyClaim {
     citation_ids: Vec<String>,
 }
 
+/// Fewest hex digits a cut-short citation id keeps to be completed.
+const COMPLETED_ID_MIN_DIGITS: usize = 15;
+
+/// `id` itself when it is citable, or else the one citable id it is a
+/// prefix of when it keeps at least [`COMPLETED_ID_MIN_DIGITS`] hex digits
+/// (#2442): a model that drops the last digit of `F-24b1ecd740c17dab`
+/// still means that fact. An id that is the prefix of no citable id, or of
+/// more than one, stays as written and is left out.
+fn completed_id(id: String, citable: &BTreeSet<String>) -> String {
+    if citable.contains(&id) {
+        return id;
+    }
+    let Some(digits) = id.strip_prefix("F-") else {
+        return id;
+    };
+    if digits.len() < COMPLETED_ID_MIN_DIGITS || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return id;
+    }
+    let mut matches = citable
+        .range(id.clone()..)
+        .take_while(|candidate| candidate.starts_with(&id));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => only.clone(),
+        _ => id,
+    }
+}
+
 /// Decode `text`, the reply to [`action`] for `address`, keeping only ids in
-/// `citable`.
+/// `citable`; a cut-short id that names one citable id is read as that id.
 pub fn decode(
     address: &SectionAddress,
     text: &str,
@@ -388,6 +415,7 @@ pub fn decode(
         };
         let mut citations: Vec<String> = Vec::new();
         for id in claim.citation_ids {
+            let id = completed_id(id, citable);
             if !citations.contains(&id) {
                 citations.push(id);
             }
