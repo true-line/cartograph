@@ -86,20 +86,22 @@ pub(super) fn stage(
     if read(definition_path)? != definition {
         return Err("Auditor definition changed.".into());
     }
-    let fresh = analyst::collect_bound(parent)?;
     let receipt = read(&parent_output.join("analyst-receipt.json"))?;
-    if receipt != analyst::bytes(&fresh)?
-        || sha(&receipt) != expected.parent_receipt_sha256
-        || fresh["detail"]["revision"] != expected.parent_revision
-        || fresh["detail"]["status"] != "completed"
-        || !parent_outcome_matches(&fresh, expected.parent_completion_outcome.as_deref())
-        || fresh["detail"]["obligation_status"] != "satisfied"
-        || fresh["result"]["result_id"] != expected.parent_result_id
+    // Every check below reads the reviewed receipt; the fresh production read
+    // after them must reproduce it byte for byte, so each holds for the saved
+    // parent too. Cheap mismatches are refused before that full read.
+    let saved: Value = serde_json::from_slice(&receipt).map_err(|e| e.to_string())?;
+    if sha(&receipt) != expected.parent_receipt_sha256
+        || saved["detail"]["revision"] != expected.parent_revision
+        || saved["detail"]["status"] != "completed"
+        || !parent_outcome_matches(&saved, expected.parent_completion_outcome.as_deref())
+        || saved["detail"]["obligation_status"] != "satisfied"
+        || saved["result"]["result_id"] != expected.parent_result_id
     {
         return Err("Reviewed saved parent differs or is not supported.".into());
     }
     let result: InvestigationResult =
-        serde_json::from_value(fresh["result"].clone()).map_err(|e| e.to_string())?;
+        serde_json::from_value(saved["result"].clone()).map_err(|e| e.to_string())?;
     if content_hash(&wire(&result)?) != expected.parent_result_hash
         || sha(review) != expected.review_sha256
     {
@@ -157,7 +159,7 @@ pub(super) fn stage(
             .definition()
             .map_err(|e| e.to_string())?
         || request.parent_id.as_deref() != Some(parent.analyst_id)
-        || Some(conversation) != fresh["detail"]["conversation_id"].as_str()
+        || Some(conversation) != saved["detail"]["conversation_id"].as_str()
         || request.scope != parent.request.scope
         || request.expected_graph_revision != parent.request.expected_graph_revision
         || request.expected_context_id != parent.request.expected_context_id
@@ -165,6 +167,9 @@ pub(super) fn stage(
         || !expected.provider.available
     {
         return Err("Auditor parent, scope, definition or provider differs.".into());
+    }
+    if receipt != analyst::bytes(&analyst::collect_bound(parent)?)? {
+        return Err("Reviewed saved parent differs or is not supported.".into());
     }
     if expected.provider.mode == InvestigationProviderMode::Cloud {
         super::cloud_run::pinned(&expected.provider)?;
