@@ -325,7 +325,18 @@ fn written(text: &str) -> usize {
 
 fn insert_sorted(values: &mut Vec<String>, value: &str) {
     if let Err(at) = values.binary_search_by(|have| have.as_str().cmp(value)) {
+        reserve_one(values);
         values.insert(at, value.into());
+    }
+}
+
+/// Room for exactly one more element. Most rows hold one subject kind, one
+/// citing artifact and one record, and a `Vec`'s first push reserves four:
+/// on REA's 250,000 gap-register rows that unused room alone was hundreds of
+/// MB (#2215).
+fn reserve_one<T>(values: &mut Vec<T>) {
+    if values.len() == values.capacity() {
+        values.reserve_exact(1);
     }
 }
 
@@ -333,8 +344,9 @@ fn insert_sorted(values: &mut Vec<String>, value: &str) {
 pub(super) struct Collector {
     mode: ExportMode,
     id: fn(&FactKey) -> String,
+    /// Keyed by citation id. Every cited id gets its row here, so these keys
+    /// are exactly the ids the export cites.
     rows: BTreeMap<String, FactIndexRow>,
-    cited: BTreeSet<String>,
     lower_bound: usize,
 }
 
@@ -344,7 +356,6 @@ impl Collector {
             mode,
             id,
             rows: BTreeMap::new(),
-            cited: BTreeSet::new(),
             lower_bound: 0,
         }
     }
@@ -376,9 +387,6 @@ impl Collector {
                 && provenance.confidence_tier == ConfidenceTier::InferredWeak
             {
                 return Err(FactIndexError::Withheld { citation_id });
-            }
-            if !self.cited.contains(&citation_id) {
-                self.cited.insert(citation_id.clone());
             }
             // Charged only for what this citation adds to the index.
             let mut charge = 0;
@@ -426,6 +434,7 @@ impl Collector {
                             .iter()
                             .map(|e| written(&e.repo) + written(&e.path) + written(&e.commit_sha))
                             .sum::<usize>();
+                    reserve_one(&mut row.records);
                     row.records.push(FactRecord::of(provenance));
                     row.records.last_mut().expect("record just pushed")
                 }
@@ -436,7 +445,8 @@ impl Collector {
         Ok(())
     }
 
-    /// The finished index, checked: every id the export cites has a row.
+    /// The finished index. Every id the export cites has a row, because each
+    /// citation makes one; the `Result` stays for the callers' error path.
     pub(super) fn finish(self) -> Result<FactIndex, FactIndexError> {
         let rows = self
             .rows
@@ -448,7 +458,8 @@ impl Collector {
                     record.gap = gap_node || record.confidence == ConfidenceTier::Gap;
                     record.inferred_weak = record.confidence == ConfidenceTier::InferredWeak;
                     if !row.provenance_differs {
-                        record.cited_by.clear();
+                        // Not printed: release it rather than keep its slot.
+                        record.cited_by = Vec::new();
                     }
                 }
                 if row.provenance_differs {
@@ -465,7 +476,7 @@ impl Collector {
             mode: self.mode,
             rows,
         };
-        check_citations(&index, self.cited.iter().map(String::as_str))?;
+        // Every citation made its row, so every cited id resolves.
         Ok(index)
     }
 }
@@ -1250,6 +1261,32 @@ mod tests {
             .unwrap();
         collector.cite("adrs", &cited, &[Subject::Node]).unwrap();
         assert_eq!(collector.finish().unwrap().rows.len(), 1);
+    }
+
+    // AC-1206: a row holds no spare room. Most rows have one subject kind,
+    // one citing artifact and one record; a second citation grows each by
+    // exactly what it adds (#2215).
+    #[test]
+    fn collected_rows_hold_no_spare_capacity() {
+        let mut collector = Collector::new(ExportMode::BestEffort, citation_id);
+        let cited = [assertion(ENDPOINT, "Endpoint", confirmed(ENDPOINT))];
+        collector
+            .cite("topology", &cited, &[Subject::Node])
+            .unwrap();
+        let row = collector.rows.values().next().unwrap();
+        assert_eq!(row.subject_kinds.capacity(), 1);
+        assert_eq!(row.cited_by.capacity(), 1);
+        assert_eq!(row.records.capacity(), 1);
+        assert_eq!(row.records[0].cited_by.capacity(), 1);
+        collector.cite("adrs", &cited, &[Subject::Node]).unwrap();
+        let row = collector.rows.values().next().unwrap();
+        assert_eq!(row.cited_by, ["adrs", "topology"]);
+        assert_eq!(row.cited_by.capacity(), 2);
+        assert_eq!(row.records.capacity(), 1);
+        let index = collector.finish().unwrap();
+        assert_eq!(index.rows.len(), 1);
+        assert_eq!(index.rows[0].cited_by, ["adrs", "topology"]);
+        assert_eq!(index.rows[0].records[0].cited_by.capacity(), 0);
     }
 
     // AC-0595: one subject cited with differing provenance keeps every
