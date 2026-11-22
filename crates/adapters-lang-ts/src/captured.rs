@@ -36,6 +36,10 @@ pub use receipt::{
 
 /// Maximum directory entries examined, including excluded entries.
 pub const MAX_VISITED_ENTRIES: usize = 100_000;
+/// Ceiling on the directory entries a project may let one selection examine
+/// (#1653). The walk retains only selected paths, so entries cost time, not
+/// memory.
+pub const HARD_MAX_VISITED_ENTRIES: usize = 1_000_000;
 /// Maximum nested directory depth below the host-selected root.
 pub const MAX_DIRECTORY_DEPTH: usize = 64;
 /// Maximum receipt memory retained in one adapter result, before host
@@ -153,12 +157,46 @@ pub struct Selection {
 /// encodings and selected special files fail, and no partial selection is
 /// returned. This is not a filesystem snapshot.
 pub fn enumerate_selection(root: &Path) -> Result<Selection, CapturedError> {
+    enumerate_selection_within(root, SelectionLimits::default())
+}
+
+/// Bounds of one TS/JS selection walk a project may change (#1653).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionLimits {
+    /// Directory entries examined, including excluded ones; 1 to
+    /// [`HARD_MAX_VISITED_ENTRIES`].
+    pub max_visited_entries: usize,
+    /// Files selected; at most [`source_capture::HARD_MAX_FILES`], and the
+    /// capture that follows applies its own file bound.
+    pub max_files: usize,
+}
+
+impl Default for SelectionLimits {
+    fn default() -> Self {
+        Self {
+            max_visited_entries: MAX_VISITED_ENTRIES,
+            max_files: source_capture::MAX_FILES,
+        }
+    }
+}
+
+/// [`enumerate_selection`] within `limits`. Limits above the hard ceilings
+/// are refused before the walk starts.
+pub fn enumerate_selection_within(
+    root: &Path,
+    limits: SelectionLimits,
+) -> Result<Selection, CapturedError> {
+    if !(1..=HARD_MAX_VISITED_ENTRIES).contains(&limits.max_visited_entries)
+        || limits.max_files > source_capture::HARD_MAX_FILES
+    {
+        return Err(CapturedError::Invalid("selection limits"));
+    }
     let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     enumerate_with_limits(
         &directory,
-        MAX_VISITED_ENTRIES,
+        limits.max_visited_entries,
         MAX_DIRECTORY_DEPTH,
-        source_capture::MAX_FILES,
+        limits.max_files,
     )
 }
 
