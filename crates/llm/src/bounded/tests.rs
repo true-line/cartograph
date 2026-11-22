@@ -54,6 +54,18 @@ fn set_timeouts(stream: &TcpStream) {
         .unwrap();
 }
 
+/// A loopback endpoint that refuses connections and stays reserved while the
+/// returned socket lives. Dropping a listener to get a closed port let a
+/// parallel test bind the same port and receive this test's probe.
+pub(crate) fn refused_endpoint() -> (socket2::Socket, SocketAddr) {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let address = socket.local_addr().unwrap().as_socket().unwrap();
+    (socket, address)
+}
+
 // Reuse the bounded complete-frame reader for a test-only EOF transport fixture.
 pub(crate) fn consume_request(stream: &mut TcpStream) -> io::Result<()> {
     set_timeouts(stream);

@@ -712,10 +712,10 @@ mod tests {
             server.join().unwrap();
         }
 
-        // Nothing listening: unreachable, never a pass.
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}/v1/models?limit=1", closed.local_addr().unwrap());
-        drop(closed);
+        // Nothing listening: unreachable, never a pass. The port stays
+        // reserved, so no parallel test's server receives this probe.
+        let (_reserved, closed) = crate::bounded::tests::refused_endpoint();
+        let endpoint = format!("http://{closed}/v1/models?limit=1");
         assert_eq!(
             check_connection(&endpoint, "sk-test-key", timeout),
             ConnectionOutcome::Unreachable
