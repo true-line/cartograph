@@ -335,16 +335,18 @@ jobs:
         include:
           - group: adapters
             packages: -p adapters-lang-ts -p adapters-lang-python -p adapters-lang-java -p adapters-lang-kotlin
-          # app-store runs here: job-execution-tests already builds its job
-          # modules, and in `core` it made that the longest Rust lane.
+          # app-store's unit tests are the job modules' own tests, so on Linux
+          # they cover job-execution-tests, which compiles the same modules
+          # again: 459 of its 461 tests, plus two semantic runs in `core`.
+          # That harness runs on Windows, in Windows job ownership (#1924).
           - group: ingest
-            packages: -p ingest -p work-packets -p job-execution-tests -p adapters-lang-go -p app-store
+            packages: -p ingest -p work-packets -p adapters-lang-go -p app-store
           - group: core
             packages: >-
-              --workspace --exclude app --exclude agents --exclude spec
+              --workspace --exclude app --exclude agents --exclude spec --exclude job-execution-tests
               --exclude adapters-lang-ts --exclude adapters-lang-python --exclude adapters-lang-java
               --exclude adapters-lang-kotlin --exclude ingest --exclude work-packets
-              --exclude job-execution-tests --exclude adapters-lang-go --exclude app-store
+              --exclude adapters-lang-go --exclude app-store
     # No repo-wide lane group: GitHub keeps one pending job per group, so a
     # third queued PR cancelled the one already waiting (#669). The
     # workflow-level group supersedes a PR's own older run. No lane installs

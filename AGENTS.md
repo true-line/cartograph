@@ -172,7 +172,9 @@ npm --prefix ui run lint && npm --prefix ui run typecheck && npm --prefix ui run
 ```
 
 CI runs the same Rust suite in parallel parts (#1924): the Rust job runs
-every package except `app`, `agents` and `spec`, split into three matrix
+every package except `app`, `agents`, `spec` and `job-execution-tests` (whose
+ownership tests are the production job modules' own unit tests, which
+`app-store` runs on Linux; the harness itself runs on Windows), split into three matrix
 groups (`adapters` and `ingest` name their packages, `core` runs the rest of
 the workspace, so a new crate lands there), "Rust agents & spec
 tests" runs `cargo test -p agents -p spec`, and six "Rust app tests" shards run the `app`
@@ -214,8 +216,8 @@ Which gates run where:
 | Gate | Linux (`ubuntu-latest`) | Windows (`windows-latest`) | macOS (self-hosted, `scheduled.yml`) |
 |---|---|---|---|
 | Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | — | — |
-| `cargo test` (every package; `app` in six shards on Linux, four processes on macOS) | every PR and merge | — | daily; not a PR gate |
-| Job ownership tests (`job-execution-tests --test ownership`) | every PR and merge (in the workspace run) | every PR and merge | daily (in the workspace run) |
+| `cargo test` (every package; `app` in two test groups of six shards on Linux, and `job-execution-tests` covered there by `app-store`; four processes on macOS) | every PR and merge | — | daily; not a PR gate |
+| Job ownership tests (`job-execution-tests --test ownership`) | every PR and merge (as `app-store`'s unit tests) | every PR and merge | daily (in the workspace run) |
 | Real-repository determinism (AC-0593, MT-1812-01) | — | — | daily, Cartograph at its pinned commit |
 | SimpleLogin showcase thresholds (AC-1700) | — | — | weekly, release build |
 | Scale showcase thresholds (AC-1700) | — | — | monthly or on demand |
