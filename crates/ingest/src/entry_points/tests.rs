@@ -1205,3 +1205,72 @@ fn manifest_scanner_and_gradle_namespace_read_as_written() {
     ));
     assert!(android::candidate("app/src/debug/AndroidManifest.xml"));
 }
+
+// AC-1061 (T-1061, #385): over a source capture the entry-point reader
+// reads the captured bytes of its whole selection and never the checkout:
+// a script, module, `Procfile` or `package.json` edited, deleted or created
+// after capture changes nothing.
+#[test]
+fn captured_start_files_are_read_instead_of_the_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |files: &[(&str, &str)]| {
+        for (path, body) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+    };
+    write(&[
+        ("email_handler.py", MAIL),
+        ("events/__init__.py", ""),
+        ("events/event_source.py", EVENT_SOURCE),
+        ("event_listener.py", LISTENER),
+        ("Procfile", "worker: python worker.py\n"),
+        ("worker.py", "print('x')\n"),
+        (
+            "tools/package.json",
+            "{\"name\":\"cli\",\"bin\":{\"cli\":\"./bin/cli.js\"}}",
+        ),
+        ("tools/bin/cli.js", "#!/usr/bin/env node\n"),
+        ("README.md", "notes\n"),
+    ]);
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let none = BTreeSet::new();
+    let facts =
+        |out: &EntryPointExtraction| format!("{:?} {:?} {}", out.nodes, out.edges, out.files);
+    let before = facts(&extract_dir(dir.path(), &id, &none, &none).unwrap());
+
+    let paths = entry_point_paths(dir.path()).unwrap();
+    assert!(paths.contains(&"Procfile".to_string()));
+    assert!(paths.contains(&"tools/package.json".to_string()));
+    assert!(!paths.contains(&"README.md".to_string()));
+    let captured: BTreeMap<String, Vec<u8>> = paths
+        .iter()
+        .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+        .collect();
+
+    // After capture: edits, a deletion and a new start.
+    write(&[
+        ("Procfile", "web: python web.py\n"),
+        ("web.py", "print('web')\n"),
+        ("shell.py", SHELL),
+        ("tools/bin/cli.js", "console.log('no shebang')\n"),
+    ]);
+    std::fs::remove_file(dir.path().join("events/event_source.py")).unwrap();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let after = extract_from_capture(dir.path(), &keys, &read, &id, &none, &none).unwrap();
+    assert_eq!(facts(&after), before);
+    assert_ne!(
+        facts(&extract_dir(dir.path(), &id, &none, &none).unwrap()),
+        before
+    );
+}

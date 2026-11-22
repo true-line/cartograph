@@ -143,24 +143,88 @@ pub fn extract_dir(
     symbols: &BTreeSet<String>,
     scheduled: &BTreeSet<String>,
 ) -> std::io::Result<EntryPointExtraction> {
-    let walked = source_walk::files(
-        root,
-        &crate::preflight::skip_dir,
-        source_walk::Gitignores::Honor,
-    )?;
+    let walked = crate::captured_walk::walk(root)?;
+    let text = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
+    Ok(extract_walked(&walked, &text, id, symbols, scheduled))
+}
+
+/// The JavaScript and TypeScript extensions a Node start or a worker's
+/// `main` module may have.
+const SCRIPT_EXTENSIONS: &[&str] = &[".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"];
+
+/// The other file names the reader opens.
+const START_FILE_NAMES: &[&str] = &[
+    "Dockerfile",
+    "Procfile",
+    "pyproject.toml",
+    "package.json",
+    "Cargo.toml",
+    "build.gradle",
+    "build.gradle.kts",
+];
+
+/// True when the entry-point reader may open `rel`: a Python, Go, Rust,
+/// Java, Kotlin, JavaScript or TypeScript source, a Worker config, an
+/// Android manifest, or a `Dockerfile`, `Procfile`, `pyproject.toml`,
+/// `package.json`, `Cargo.toml` or Gradle build file.
+pub fn is_entry_point_file(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    [".py", ".go", ".rs", ".java", ".kt"]
+        .iter()
+        .chain(SCRIPT_EXTENSIONS)
+        .any(|ext| name.ends_with(ext))
+        || START_FILE_NAMES.contains(&name)
+        || wrangler::config(name)
+        || android::candidate(rel)
+}
+
+/// The files [`extract_dir`] may open under `root`, in path order: a source
+/// capture retains them (AC-1061).
+pub fn entry_point_paths(root: &Path) -> std::io::Result<Vec<String>> {
+    crate::captured_walk::selected(root, is_entry_point_file)
+}
+
+/// [`extract_dir`] over a source capture (AC-1061, #385): `captured` is the
+/// capture's [`is_entry_point_file`] selection and `read` its bytes. The
+/// checkout is listed for its directories and other files, and never read.
+pub fn extract_from_capture(
+    root: &Path,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+    scheduled: &BTreeSet<String>,
+) -> std::io::Result<EntryPointExtraction> {
+    let walked = crate::captured_walk::listing(root, captured, is_entry_point_file)?;
+    let text = |rel: &str| {
+        is_entry_point_file(rel)
+            .then(|| read(rel).ok())
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    Ok(extract_walked(&walked, &text, id, symbols, scheduled))
+}
+
+fn extract_walked(
+    walked: &[source_walk::WalkedFile],
+    text: &dyn Fn(&str) -> Option<String>,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+    scheduled: &BTreeSet<String>,
+) -> EntryPointExtraction {
     let files: BTreeSet<String> = walked.iter().map(|file| file.rel.clone()).collect();
     let mut sources: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut read = |rel: &str| {
         sources
             .entry(rel.to_string())
-            .or_insert_with(|| std::fs::read_to_string(root.join(rel)).ok())
+            .or_insert_with(|| text(rel))
             .clone()
     };
     let mut starts: Vec<Start> = Vec::new();
     let mut java_files: Vec<(String, String)> = Vec::new();
     let mut kotlin_files: Vec<(String, String)> = Vec::new();
     let mut manifests: Vec<(String, String)> = Vec::new();
-    for file in &walked {
+    for file in walked {
         let rel = file.rel.as_str();
         if rel.ends_with(".py") {
             if scheduled.contains(rel) || !system_module(rel) {
@@ -287,7 +351,7 @@ pub fn extract_dir(
     for start in &starts {
         emit(id, start, &mut emitted_files, &mut out);
     }
-    Ok(out)
+    out
 }
 
 /// Whether a Python file is part of the running system rather than its
