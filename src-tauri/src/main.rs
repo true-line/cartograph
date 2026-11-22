@@ -5061,7 +5061,13 @@ async fn run_escalation(
     let provider = egress::escalation_provider_within(
         &mode,
         saved_ollama_port(&state).map_err(&fail)?,
-        cloud_call_limits(&state).map_err(&fail)?,
+        // A local escalation never reads the cloud limits, so a bad saved
+        // value cannot block it (AC-1806).
+        if mode == "cloud" {
+            cloud_call_limits(&state).map_err(&fail)?
+        } else {
+            llm::anthropic::CloudCallLimits::default()
+        },
     )
     .map_err(&fail)?;
     // #1767: a cloud payload is recorded when it is handed to the provider,
