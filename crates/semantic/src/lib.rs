@@ -453,16 +453,22 @@ pub fn embedding_inputs(
         texts.extend(compatible.into_iter().map(|candidate| &candidate.text));
         texts.extend(matching.into_iter().map(|hop| &hop.query));
     }
+    let longest = texts.iter().map(|t| t.len()).max().unwrap_or(0);
+    let total = texts.iter().try_fold(0usize, |n, t| n.checked_add(t.len()));
     if texts.len() > embedding_cache::MAX_ROWS
-        || texts
-            .iter()
-            .any(|t| t.len() > embedding_cache::MAX_TEXT_BYTES)
-        || texts
-            .iter()
-            .try_fold(0usize, |n, t| n.checked_add(t.len()))
-            .is_none_or(|n| n > embedding_cache::MAX_INPUT_BYTES)
+        || longest > embedding_cache::MAX_TEXT_BYTES
+        || total.is_none_or(|n| n > embedding_cache::MAX_INPUT_BYTES)
     {
-        return Err(SemanticError::Index("embedding plan bounds".into()));
+        // Counts only, never text: the caller can tell which bound tripped.
+        return Err(SemanticError::Index(format!(
+            "embedding plan bounds: {} texts (max {}), longest {} bytes (max {}), {} bytes (max {})",
+            texts.len(),
+            embedding_cache::MAX_ROWS,
+            longest,
+            embedding_cache::MAX_TEXT_BYTES,
+            total.unwrap_or(usize::MAX),
+            embedding_cache::MAX_INPUT_BYTES,
+        )));
     }
     Ok(texts.into_iter().cloned().collect())
 }
@@ -1339,6 +1345,12 @@ mod tests {
         assert_eq!(texts.len(), 206_000);
         let over: Vec<_> = (0..embedding_cache::MAX_ROWS + 1).map(candidate).collect();
         assert!(embedding_inputs(&hops, &over, &[]).is_err());
+        // A combined plan past the row bound names the counts that tripped,
+        // never a text (#258).
+        let wide: Vec<_> = (0..250_000).map(candidate).collect();
+        let message = embedding_inputs(&hops, &wide, &[]).unwrap_err().to_string();
+        assert!(message.contains("270000 texts (max 262144)"), "{message}");
+        assert!(!message.contains("function f"), "{message}");
     }
 
     // AC-0285 (T-0285): conservative look-alikes still enter ANN candidacy
