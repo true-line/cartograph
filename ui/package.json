@@ -6,9 +6,9 @@
   "license": "SEE LICENSE IN LICENSE.md",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node ./node_modules/typescript-7/bin/tsc -b && vite build",
     "lint": "eslint .",
-    "typecheck": "tsc -b --force",
+    "typecheck": "node ./node_modules/typescript-7/bin/tsc -b --force",
     "test": "vitest run",
     "preview": "vite preview",
     "storybook": "storybook dev -p 6006",
@@ -45,6 +45,7 @@
     "playwright": "^1.65.0",
     "storybook": "^10.4.6",
     "typescript": "^6.0.3",
+    "typescript-7": "npm:typescript@7.0.2",
     "typescript-eslint": "^8.72.2",
     "vite": "^8.3.8",
     "vitest": "^5.0.5"
