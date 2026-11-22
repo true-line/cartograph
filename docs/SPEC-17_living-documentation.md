@@ -1,6 +1,6 @@
 # SPEC-17 — Living documentation
 
-- **Status:** Proposed for [#1749](https://github.com/true-line/cartograph/issues/1749). Slices 1 to 5 are implemented.
+- **Status:** Implemented for [#1749](https://github.com/true-line/cartograph/issues/1749): slices 1 to 5 are on `main`.
 - **Date:** 2026-11-17
 - **Scope:** US-0048 / AC-0671..0675; ROADMAP W15; v1.0.0 criterion 7.
 - **Decision:** [ADR-0045](adr/ADR-0045-living-documentation.md).
