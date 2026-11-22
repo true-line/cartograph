@@ -108,6 +108,8 @@ fn completed_captured_task_keeps_old_available_receipts_after_equal_fact_reinges
     let changed = assess(&state, &staged.proposal_id).unwrap();
     assert_eq!(changed.graph_comparison, BasisComparison::Unchanged);
     assert_eq!(changed.association_comparison, BasisComparison::Changed);
+    // AC-1038: the cited file's bytes changed, so the comparison says so.
+    assert_eq!(changed.cited_files, BasisComparison::Changed);
     assert!(
         changed
             .evidence
@@ -737,11 +739,12 @@ fn accepted_captured_record_is_a_curated_item_in_best_effort_and_counted_in_veri
     assert!(row.contains("| stale |"), "{row}");
     assert!(row.contains("(`assessment_failed`)"), "{row}");
     assert_eq!(moved.curated_basis.as_ref().unwrap().counts.eligible, 0);
-    // Read again, the assessment sees the changed graph and says so.
+    // Read again, the assessment sees the changed graph, and that every
+    // file the evidence cites is unchanged (AC-1038, #2251).
     let reread = curated_export(&state, spec::ExportMode::BestEffort);
     let row = curated_row(&reread, id).unwrap();
     assert!(row.contains("| stale |"), "{row}");
-    assert!(row.contains("(`graph_changed`)"), "{row}");
+    assert!(row.contains("(`cited_files_unchanged`)"), "{row}");
     assert!(artifact(&reread, "curated").assertions.is_empty());
 
     // Withdrawal is rejection (ADR-0061 decision 9): the record leaves the

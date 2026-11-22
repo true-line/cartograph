@@ -92,6 +92,7 @@ fn unchanged() -> BasisAssessment {
             status: EvidenceAvailability::Available,
         }],
         unverified_evidence: 0,
+        cited_files: BasisComparison::LegacyUnverified,
     })
 }
 
@@ -668,6 +669,7 @@ fn states_and_reasons_are_named_as_the_projection_serializes_them() {
         R::GraphChanged,
         R::AssociationComparisonFailed,
         R::AssociationChanged,
+        R::CitedFilesUnchanged,
         R::EvidenceNotAssessed,
         R::EvidenceReadFailed,
         R::EvidenceUnavailable,

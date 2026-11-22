@@ -198,6 +198,16 @@ pub struct BasisDimensions {
     pub evidence: Vec<EvidenceStatus>,
     /// Number of items the assessment counted as unverified.
     pub unverified_evidence: usize,
+    /// The files the record's captured evidence cites, at the current
+    /// source associations, against the ones it was made with (#2251):
+    /// `unchanged` when every one is byte-identical, `legacy_unverified`
+    /// when they were not compared.
+    #[serde(default = "not_compared")]
+    pub cited_files: BasisComparison,
+}
+
+fn not_compared() -> BasisComparison {
+    BasisComparison::LegacyUnverified
 }
 
 /// The host's basis assessment of one record.
@@ -321,6 +331,10 @@ pub enum StateReason {
     AssociationComparisonFailed,
     /// `stale`: the association comparison is not `unchanged`.
     AssociationChanged,
+    /// `stale`: the graph or the associations changed, but every file the
+    /// record's evidence cites is byte-identical at the current associations
+    /// and every evidence item is available (#2251).
+    CitedFilesUnchanged,
     /// `stale`: a captured item has no availability result.
     EvidenceNotAssessed,
     /// `stale`: a captured item's read failed operationally.
@@ -612,18 +626,31 @@ fn stale(record: &ReviewedProposal, assessment: Option<&BasisAssessment>) -> Opt
         Some(BasisAssessment::Failed) => return Some(StateReason::AssessmentFailed),
         Some(BasisAssessment::Assessed(dimensions)) => dimensions,
     };
-    if let Some(reason) = comparison(
+    let graph = comparison(
         dimensions.graph,
         StateReason::GraphComparisonFailed,
         StateReason::GraphChanged,
-    )
-    .or_else(|| {
-        comparison(
-            dimensions.association,
-            StateReason::AssociationComparisonFailed,
-            StateReason::AssociationChanged,
+    );
+    let association = comparison(
+        dimensions.association,
+        StateReason::AssociationComparisonFailed,
+        StateReason::AssociationChanged,
+    );
+    // A failed comparison is never softened, and neither is a change while
+    // the record's own cited files were not shown unchanged (#2251).
+    let failed = |r: &StateReason| {
+        matches!(
+            r,
+            StateReason::GraphComparisonFailed | StateReason::AssociationComparisonFailed
         )
-    }) {
+    };
+    if let Some(reason) = graph.into_iter().chain(association).find(failed) {
+        return Some(reason);
+    }
+    let moved = graph.or(association);
+    if let Some(reason) = moved
+        && dimensions.cited_files != BasisComparison::Unchanged
+    {
         return Some(reason);
     }
     let statuses: HashMap<&str, EvidenceAvailability> = dimensions
@@ -646,7 +673,9 @@ fn stale(record: &ReviewedProposal, assessment: Option<&BasisAssessment>) -> Opt
             Some(_) => reason = Some(StateReason::EvidenceUnavailable),
         }
     }
-    reason.or((dimensions.unverified_evidence != 0).then_some(StateReason::AssessmentMismatch))
+    reason
+        .or((dimensions.unverified_evidence != 0).then_some(StateReason::AssessmentMismatch))
+        .or(moved.map(|_| StateReason::CitedFilesUnchanged))
 }
 
 fn basis_report(assessment: Option<&BasisAssessment>) -> BasisReport {

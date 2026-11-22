@@ -250,6 +250,7 @@ fn dimensions(assessed: assessment::BasisAssessment) -> BasisDimensions {
         association: comparison(assessed.association_comparison),
         evidence,
         unverified_evidence: assessed.unverified_evidence,
+        cited_files: comparison(assessed.cited_files),
     }
 }
 

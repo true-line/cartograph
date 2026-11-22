@@ -69,6 +69,7 @@ fn dimensions() -> BasisDimensions {
             })
             .collect(),
         unverified_evidence: 0,
+        cited_files: BasisComparison::LegacyUnverified,
     }
 }
 
@@ -302,6 +303,68 @@ fn node_without_provenance_counts_as_a_gap() {
         props: json!({}),
     };
     assert_eq!(outcome(&fixture.run(), "r1").0, RecordState::Eligible);
+}
+
+// AC-1038 (#2251): a record whose graph or associations changed but whose
+// cited files are all unchanged is stale with its own reason; a failed
+// comparison, an unavailable item or changed cited files keep theirs.
+#[test]
+fn unchanged_cited_files_have_their_own_stale_reason() {
+    type Change = fn(&mut BasisDimensions);
+    let cases: [(&str, StateReason, Change); 6] = [
+        ("graph", StateReason::CitedFilesUnchanged, |d| {
+            d.graph = BasisComparison::Changed;
+            d.association = BasisComparison::Changed;
+            d.cited_files = BasisComparison::Unchanged;
+        }),
+        ("association", StateReason::CitedFilesUnchanged, |d| {
+            d.association = BasisComparison::Changed;
+            d.cited_files = BasisComparison::Unchanged;
+        }),
+        ("changed", StateReason::GraphChanged, |d| {
+            d.graph = BasisComparison::Changed;
+            d.association = BasisComparison::Changed;
+            d.cited_files = BasisComparison::Changed;
+        }),
+        ("not-compared", StateReason::GraphChanged, |d| {
+            d.graph = BasisComparison::Changed;
+        }),
+        (
+            "association-failed",
+            StateReason::AssociationComparisonFailed,
+            |d| {
+                d.graph = BasisComparison::Changed;
+                d.association = BasisComparison::OperationalFailure;
+                d.cited_files = BasisComparison::Unchanged;
+            },
+        ),
+        ("unavailable", StateReason::EvidenceUnavailable, |d| {
+            d.graph = BasisComparison::Changed;
+            d.cited_files = BasisComparison::Unchanged;
+            d.evidence[1].status = EvidenceAvailability::Unavailable;
+        }),
+    ];
+    let mut fixture = Fixture::new(
+        cases
+            .iter()
+            .map(|(id, _, _)| {
+                let mut value = record(id);
+                value.gap_id = "gap:2".into();
+                value
+            })
+            .collect(),
+    );
+    for (id, _, change) in cases {
+        fixture.assess(id, change);
+    }
+    let projection = fixture.run();
+    for (id, reason, _) in cases {
+        assert_eq!(
+            outcome(&projection, id),
+            (RecordState::Stale, reason),
+            "{id}"
+        );
+    }
 }
 
 // AC-0652: `unresolvable` precedes `stale`.
