@@ -26,6 +26,11 @@ pub const SPEC_VIEW_MAX_NODES: &str = "spec_view_max_nodes";
 pub const SPEC_VIEW_MAX_EDGES: &str = "spec_view_max_edges";
 pub const SPEC_VIEW_MAX_FLOWS: &str = "spec_view_max_flows";
 
+/// Files and MiB one source capture may retain during recovery (AC-1510).
+pub const SOURCE_CAPTURE_MAX_FILES: &str = "source_capture_max_files";
+pub const SOURCE_CAPTURE_MAX_MIB: &str = "source_capture_max_mib";
+const MIB: u64 = 1024 * 1024;
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -60,6 +65,22 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: 2_000,
         advanced: true,
         description: "Flows the flow view shows before it is truncated.",
+    },
+    LimitSpec {
+        key: SOURCE_CAPTURE_MAX_FILES,
+        default: source_capture::MAX_FILES as u64,
+        min: 1_024,
+        max: source_capture::HARD_MAX_FILES as u64,
+        advanced: true,
+        description: "Source files one recovery may retain for citations. Larger values use more disk and memory.",
+    },
+    LimitSpec {
+        key: SOURCE_CAPTURE_MAX_MIB,
+        default: source_capture::MAX_CAPTURE_BYTES / MIB,
+        min: 16,
+        max: source_capture::HARD_MAX_CAPTURE_BYTES / MIB,
+        advanced: true,
+        description: "MiB of source one recovery may retain for citations. Larger values use more disk and memory.",
     },
 ];
 
@@ -227,6 +248,33 @@ mod tests {
             );
             assert!(REGISTRY[..i].iter().all(|other| other.key != spec.key));
         }
+    }
+
+    // AC-1800 / #1653: the source capture keys default to the capture
+    // crate's historical bounds and stop at its hard ceilings, so every
+    // saved value converts to limits the crate accepts.
+    #[test]
+    fn capture_limit_keys_stop_at_the_crate_hard_ceilings() {
+        let conn = conn();
+        let files = spec(SOURCE_CAPTURE_MAX_FILES).unwrap();
+        let mib = spec(SOURCE_CAPTURE_MAX_MIB).unwrap();
+        assert_eq!(files.default, source_capture::MAX_FILES as u64);
+        assert_eq!(mib.default * MIB, source_capture::MAX_CAPTURE_BYTES);
+        assert_eq!(files.max, source_capture::HARD_MAX_FILES as u64);
+        assert_eq!(mib.max * MIB, source_capture::HARD_MAX_CAPTURE_BYTES);
+        assert!(files.advanced && mib.advanced);
+        write(&conn, SOURCE_CAPTURE_MAX_FILES, Some(files.max)).unwrap();
+        write(&conn, SOURCE_CAPTURE_MAX_MIB, Some(mib.max)).unwrap();
+        let limits = source_capture::CaptureLimits {
+            max_files: read(&conn, SOURCE_CAPTURE_MAX_FILES).unwrap() as usize,
+            max_total_bytes: read(&conn, SOURCE_CAPTURE_MAX_MIB).unwrap() * MIB,
+            ..source_capture::CaptureLimits::default()
+        };
+        assert!(limits.validate().is_ok());
+        assert!(matches!(
+            write(&conn, SOURCE_CAPTURE_MAX_FILES, Some(files.max + 1)),
+            Err(OperatorLimitError::OutOfRange { .. })
+        ));
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value

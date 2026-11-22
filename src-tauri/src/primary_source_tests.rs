@@ -3306,7 +3306,13 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
     let layers = vec!["client".to_string()];
     let input = state
         .primary_sources
-        .prepare_at(&source, source.root(), &layers, Some(&commit))
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            Some(&commit),
+            source_capture::CaptureLimits::default(),
+        )
         .unwrap();
     let capture = input.capture.as_ref().unwrap();
     assert_eq!(
@@ -3353,7 +3359,13 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
     let infra = vec!["infra".to_string()];
     let input = state
         .primary_sources
-        .prepare_at(&source, source.root(), &infra, Some(&commit))
+        .prepare_at(
+            &source,
+            source.root(),
+            &infra,
+            Some(&commit),
+            source_capture::CaptureLimits::default(),
+        )
         .unwrap();
     assert!(matches!(
         input.capture.as_ref().unwrap().manifest().kind,
@@ -3370,7 +3382,13 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
     std::fs::write(root.join("extra.ts"), STABLE_B).unwrap();
     let error = state
         .primary_sources
-        .prepare_at(&source, source.root(), &layers, Some(&commit))
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            Some(&commit),
+            source_capture::CaptureLimits::default(),
+        )
         .err()
         .unwrap();
     assert!(error.contains("cloned commit's Git objects"), "{error}");
