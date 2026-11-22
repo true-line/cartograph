@@ -146,6 +146,11 @@ pub fn tool_definitions_from_schema(
             finish.push(serde_json::json!({ "$ref": action }));
             continue;
         }
+        if let Some(values) = branch.get("enum") {
+            // Pending acquisition choices: one `enum` of concrete actions.
+            enum_tools(values, &mut tools)?;
+            continue;
+        }
         let name = branch["properties"]["type"]["const"]
             .as_str()
             .ok_or(InvestigationError::InvalidInput)?;
@@ -188,6 +193,54 @@ pub fn tool_definitions_from_schema(
         });
     }
     Ok(tools)
+}
+
+/// Splits an `enum` of concrete acquisition actions (the choice schema while
+/// acquisition choices are pending) into one tool per action `type`, each
+/// accepting only its own exact actions. `type` and `context_id` are host
+/// fields as elsewhere, so a tool whose actions carry `context_id` needs them
+/// all to carry it. A type that already has a tool is refused, never merged.
+fn enum_tools(values: &Value, tools: &mut Vec<ToolDefinition>) -> Result<(), InvestigationError> {
+    let values = values.as_array().ok_or(InvestigationError::InvalidInput)?;
+    let mut groups: Vec<(AgentTool, Vec<Value>, Option<bool>)> = Vec::new();
+    for value in values {
+        let mut action = value
+            .as_object()
+            .cloned()
+            .ok_or(InvestigationError::InvalidInput)?;
+        let tool = action
+            .remove("type")
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(AgentTool::from_name)
+            .filter(|tool| *tool != AgentTool::Finish)
+            .ok_or(InvestigationError::InvalidInput)?;
+        let context = action.remove("context_id").is_some();
+        let index = match groups.iter().position(|(seen, _, _)| *seen == tool) {
+            Some(index) => index,
+            None => {
+                groups.push((tool, Vec::new(), None));
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[index];
+        if group.2.replace(context).is_some_and(|seen| seen != context) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        group.1.push(Value::Object(action));
+    }
+    for (tool, actions, context) in groups {
+        if tools.iter().any(|existing| existing.name == tool.name()) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        tools.push(ToolDefinition {
+            name: tool.name(),
+            description: tool.description(),
+            input_schema: serde_json::json!({ "type": "object", "enum": actions }),
+            host_context_id: context.unwrap_or(false),
+        });
+    }
+    Ok(())
 }
 
 /// Removes `type` and `context_id` from an object schema; reports whether
