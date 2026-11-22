@@ -190,6 +190,7 @@ fn analyst27_patch_projection_seals_finish_only_allowance_before_acquisition_bou
             refusal_hash: "c".repeat(64),
             finding_count: 3,
             flagged_indices: vec![1],
+            flagged_limitations: vec![],
         };
         let input = input.with_finish_patch(&patch).unwrap();
         let expected = if opted { 4096 } else { 2048 };
@@ -250,6 +251,7 @@ fn analyst27_merge_does_not_exempt_unflagged_findings_from_guards() {
         refusal_hash: content_hash(b"refusal"),
         finding_count: 2,
         flagged_indices: vec![1],
+        flagged_limitations: vec![],
     };
     let merged = VolatileFinish::capture(first, basis.clone())
         .unwrap()
