@@ -1116,7 +1116,10 @@ pub(super) fn rules_per_capability(
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
     let index = Index::new(nodes, edges);
-    if index.governs.is_empty() && index.machines.is_empty() {
+    // A file whose rule capture stopped is stated even when no rule of it
+    // was kept (AC-1048).
+    let stops = capture_stops(nodes);
+    if index.governs.is_empty() && index.machines.is_empty() && stops.is_empty() {
         return Ok(0);
     }
     let listed = knowledge.capabilities();
@@ -1151,7 +1154,7 @@ pub(super) fn rules_per_capability(
         changes += index.each_picked(owners.iter().copied(), effect, |_| Ok(()))?;
     }
     let (machines, loose_machines) = index.area_machines(knowledge);
-    if total + changes + index.machines.len() == 0 {
+    if total + changes + index.machines.len() == 0 && stops.is_empty() {
         return Ok(0);
     }
     writeln!(
@@ -1175,7 +1178,6 @@ pub(super) fn rules_per_capability(
          what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
          capability, nearest callable first.\n"
     )?;
-    let stops = capture_stops(nodes);
     if !stops.is_empty() {
         let listed: Vec<String> = stops
             .iter()
@@ -1224,16 +1226,17 @@ pub(super) fn rules_per_capability(
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
     // Under an area whose member file's rule capture stopped (AC-1048).
-    let mut area_stops: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut area_stops: BTreeMap<&str, (&Node, Vec<String>)> = BTreeMap::new();
     for stop in &stops {
         if let Some(area) = knowledge.file_areas.get(stop.file.as_str()) {
             area_stops
                 .entry(area.id.as_str())
-                .or_default()
+                .or_insert_with(|| (*area, Vec::new()))
+                .1
                 .push(stop.said());
         }
     }
-    for (area, said) in area_stops {
+    for (area, (_, said)) in &area_stops {
         headings.note(
             area,
             format!(
@@ -1252,6 +1255,7 @@ pub(super) fn rules_per_capability(
         .filter_map(|(area, _)| *area)
         .chain(own_code.iter().map(|(area, _)| *area))
         .chain(machines.iter().map(|(area, _)| *area))
+        .chain(area_stops.values().map(|(area, _)| *area))
         .collect();
     named.sort_by(|a, b| area_order(a).cmp(&area_order(b)));
     named.dedup_by(|a, b| a.id == b.id);
@@ -1268,6 +1272,11 @@ pub(super) fn rules_per_capability(
         );
         if own_code.iter().any(|(a, _)| a.id == area.id) {
             units.push(Unit::Own(area));
+        }
+        // An area whose stopped file kept no rule still gets its heading
+        // and the note under it (AC-1048).
+        if area_stops.contains_key(area.id.as_str()) {
+            units.push(Unit::Stop(area));
         }
     }
     units.extend(
@@ -1294,6 +1303,10 @@ pub(super) fn rules_per_capability(
                     printed +=
                         index.own_code(owners, area, &mut headings, assertions, asserted, out)?;
                 }
+                continue;
+            }
+            Unit::Stop(area) => {
+                headings.before(Some(area), out)?;
                 continue;
             }
             Unit::Story(area, story) => (area, story),
@@ -1384,11 +1397,13 @@ impl CaptureStop {
             "unsupported syntax"
         };
         match self.omitted {
+            Some(1) => format!(
+                "`{}`, at {why}, with 1 later exit or change not recorded",
+                self.path
+            ),
             Some(n) => format!(
-                "`{}`, at {why}, with {n} later exit{} and change{} not recorded",
-                self.path,
-                if n == 1 { "" } else { "s" },
-                if n == 1 { "" } else { "s" },
+                "`{}`, at {why}, with {n} later exits and changes not recorded",
+                self.path
             ),
             None => format!("`{}`, at {why}", self.path),
         }
@@ -1433,6 +1448,9 @@ enum Unit<'s, 'a> {
     Story(Option<&'a Node>, &'s Story<'a>),
     /// The rules in an area's own code (#2066), last in the area.
     Own(&'a Node),
+    /// The heading of an area whose rule capture stopped, with its note
+    /// (AC-1048); prints nothing when the heading was already written.
+    Stop(&'a Node),
 }
 
 /// Change rows printed per capability (#1998).
@@ -3355,48 +3373,74 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         let guards: String = (0..300)
             .map(|i| format!("    if (x === {i}) throw new Error('no');\n"))
             .collect();
-        let source = format!("export function run(x: number) {{\n{guards}}}\n");
-        let facts = adapters_lang_ts::extract_source(
-            source.as_bytes(),
-            "src/order/order.service.ts",
-            &adapters_lang_ts::SourceId {
-                repo: "repo",
-                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
-            },
-        )
-        .unwrap();
-        let (held_nodes, held_edges) =
-            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
-        let nodes: Vec<&Node> = held_nodes.iter().collect();
-        let edges: Vec<&Edge> = held_edges.iter().collect();
+        let capped = format!("export function run(x: number) {{\n{guards}}}\n");
+        // Nested past the branch limit: the stop comes before any rule.
+        let nested = format!(
+            "export function pay(x: boolean) {{ {} throw new Error('no'); {} }}\n",
+            "if (x) {".repeat(100),
+            "}".repeat(100)
+        );
         let order = Node {
             id: "subsystem:1".into(),
             label: "Subsystem".into(),
             props: serde_json::json!({ "name": "Order" }),
         };
-        let knowledge = Stories {
-            included: Vec::new(),
-            filtered: 0,
-            areas: BTreeMap::new(),
-            file_areas: [("file:repo@src/order/order.service.ts", &order)]
+        let payment = Node {
+            id: "subsystem:2".into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": "Payment" }),
+        };
+        let render = |files: &[(&str, &str)]| -> String {
+            let mut nodes_all = Vec::new();
+            let mut edges_all = Vec::new();
+            for (path, source) in files {
+                let facts = adapters_lang_ts::extract_source(
+                    source.as_bytes(),
+                    path,
+                    &adapters_lang_ts::SourceId {
+                        repo: "repo",
+                        commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+                    },
+                )
+                .unwrap();
+                nodes_all.extend(facts.nodes);
+                edges_all.extend(facts.edges);
+            }
+            let (held_nodes, held_edges) =
+                crate::workbench::compacted_for_tests(&nodes_all, &edges_all);
+            let nodes: Vec<&Node> = held_nodes.iter().collect();
+            let edges: Vec<&Edge> = held_edges.iter().collect();
+            let knowledge = Stories {
+                included: Vec::new(),
+                filtered: 0,
+                areas: BTreeMap::new(),
+                file_areas: [
+                    ("file:repo@src/order/order.service.ts", &order),
+                    ("file:repo@src/payment/payment.ts", &payment),
+                ]
                 .into_iter()
                 .collect(),
+            };
+            let budget = Budget::new(None).unwrap();
+            let mut assertions = Assertions::new(&budget);
+            let mut asserted = BTreeSet::new();
+            let mut out = Text::new(&budget, "").unwrap();
+            rules_per_capability(
+                (&nodes, &edges),
+                &knowledge,
+                (&mut assertions, &mut asserted),
+                &mut out,
+            )
+            .unwrap();
+            out.finish()
         };
-        let budget = Budget::new(None).unwrap();
-        let mut assertions = Assertions::new(&budget);
-        let mut asserted = BTreeSet::new();
-        let mut out = Text::new(&budget, "").unwrap();
-        rules_per_capability(
-            (&nodes, &edges),
-            &knowledge,
-            (&mut assertions, &mut asserted),
-            &mut out,
-        )
-        .unwrap();
-        let text = out.finish();
+        let text = render(&[
+            ("src/order/order.service.ts", &capped),
+            ("src/payment/payment.ts", &nested),
+        ]);
         assert!(
             text.contains(
-                "Rule capture stopped early in 1 file (Gap, AC-1048): `src/order/order.service.ts`, at a capture limit, with 44 later exits and changes not recorded."
+                "Rule capture stopped early in 2 files (Gap, AC-1048): `src/order/order.service.ts`, at a capture limit, with 44 later exits and changes not recorded; `src/payment/payment.ts`, at a capture limit, with 1 later exit or change not recorded."
             ),
             "{text}"
         );
@@ -3407,6 +3451,22 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             ),
             "{text}"
         );
+        // An area whose only file kept no rule still states its stop.
+        assert!(
+            text.contains(
+                "### Payment\n\nRule capture stopped early in this area's code (Gap): `src/payment/payment.ts`"
+            ),
+            "{text}"
+        );
+        // A graph with a stop and no rule at all still has the section.
+        let text = render(&[("src/payment/payment.ts", &nested)]);
+        assert!(
+            text.contains(
+                "Rule capture stopped early in 1 file (Gap, AC-1048): `src/payment/payment.ts`"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("### Payment\n"), "{text}");
     }
 
     // AC-1046 (T-1046): a guard testing what a TypeORM query builder
