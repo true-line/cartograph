@@ -218,7 +218,9 @@ pub(super) fn seal_admission_inner(
         }
         (None, None)
     };
-    if before.get("omitted_sources") != after.get("omitted_sources") {
+    if before.get("omitted_sources") != after.get("omitted_sources")
+        || before.get("withheld_sources") != after.get("withheld_sources")
+    {
         return Err(InvestigationError::InvalidInput);
     }
     let raw_facts = array(&before["compact_context"], "facts")?;
@@ -352,6 +354,15 @@ pub(super) fn seal_admission_inner(
             .iter()
             .find(|s| s.id == citation.citation_id)
         else {
+            if withheld_source_ids(&after)?.contains(citation.citation_id.as_str()) {
+                sources.push(DisclosedInvestigationSource {
+                    citation_id: citation.citation_id.clone(),
+                    representation: DisclosureRepresentation::FirewallRefused,
+                    disclosed_text_hash: None,
+                    redacted: false,
+                });
+                continue;
+            }
             let omission = array(&after, "omitted_sources")?
                 .iter()
                 .find(|o| {
