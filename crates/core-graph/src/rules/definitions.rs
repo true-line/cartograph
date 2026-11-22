@@ -10,7 +10,7 @@ pub const MAX_DEFINITION_NODES: usize = 64;
 /// Maximum initializer dependencies across every definition in one rule.
 pub const MAX_INITIALIZER_DEPENDENCIES: usize = 128;
 /// Maximum expression root-to-leaf depth, counting the root as one.
-pub const MAX_DEFINITION_EXPRESSION_DEPTH: usize = 8;
+pub const MAX_DEFINITION_EXPRESSION_DEPTH: usize = 16;
 /// Maximum definition chain, counting the condition's direct definition as one.
 pub const MAX_DEFINITION_CHAIN_DEPTH: usize = 4;
 /// Maximum complete serialized v2 payload, including all source metadata.
@@ -132,6 +132,12 @@ pub enum DefinitionExpressionKind {
         arguments: Vec<u32>,
         /// Index of the unresolved call-value prerequisite.
         dependency: u32,
+    },
+    /// An awaited value (`await qb.getMany()`), AC-1046. What it settles to
+    /// remains unresolved with the awaited expression.
+    Await {
+        /// Awaited expression index.
+        value: u32,
     },
     /// A named argument of a call (`code=api_code`), AC-1034.
     KeywordArgument {
@@ -599,6 +605,10 @@ fn arena(
             DefinitionExpressionKind::Parenthesized { .. } => {
                 node.expression.syntax_kind == "parenthesized_expression"
             }
+            DefinitionExpressionKind::Await { .. } => matches!(
+                node.expression.syntax_kind.as_str(),
+                "await_expression" | "await"
+            ),
             DefinitionExpressionKind::Unary { .. } => {
                 node.expression.syntax_kind == "unary_expression"
             }
@@ -705,7 +715,8 @@ fn arena(
                 }
                 children.extend([*name, *value]);
             }
-            DefinitionExpressionKind::Parenthesized { value } => children.push(*value),
+            DefinitionExpressionKind::Parenthesized { value }
+            | DefinitionExpressionKind::Await { value } => children.push(*value),
             DefinitionExpressionKind::Unary { operand, .. } => children.push(*operand),
             DefinitionExpressionKind::Binary { left, right, .. }
             | DefinitionExpressionKind::Logical { left, right, .. } => {
