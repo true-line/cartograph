@@ -160,7 +160,7 @@ pub(super) fn latest(
 
 /// Exact active invocation witnesses; the worker classifies the frozen query
 /// error before entering this owner-authenticated transaction.
-pub(crate) struct QueryRefusalAdmission<'a> {
+pub struct QueryRefusalAdmission<'a> {
     pub response: &'a InvestigationResponseMeta,
     pub original_action: &'a serde_json::Value,
     pub current: &'a InvestigationInput,
@@ -169,7 +169,7 @@ pub(crate) struct QueryRefusalAdmission<'a> {
     pub active_milliseconds: u64,
 }
 impl JobStore {
-    pub(crate) fn refuse_next_query(
+    pub fn refuse_next_query(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,

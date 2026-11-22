@@ -104,7 +104,7 @@ impl ReadRefusalObservation {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only: treat the Local settled-acquisition fixture as a cloud task,
     /// so the rest of the refusal contract is exercised before slice 2b adds
@@ -116,7 +116,7 @@ thread_local! {
 /// The firewall refuses only toward a cloud provider, so a refusal on a task
 /// that never egresses to one is not authentic.
 fn egresses_to_cloud(task: &StoredTask) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FIXTURE_EGRESSES_TO_CLOUD.with(std::cell::Cell::get) {
         return true;
     }
@@ -327,8 +327,8 @@ impl JobStore {
     /// [`llm::EgressFirewall::evaluate_read`]; nothing is written on any error.
     /// Observation rows stay outside occupancy, like the stop records: each is
     /// at most 4 KiB and there is at most one per completed attempt.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn refuse_acquired_reads(
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub fn refuse_acquired_reads(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
