@@ -1549,30 +1549,7 @@ fn context_error(error: context_hub::ContextError) -> HostError {
         _ => HostError::InvalidInput,
     }
 }
-pub(super) fn bounded_json(
-    value: &(impl Serialize + ?Sized),
-    max: usize,
-) -> Result<Vec<u8>, HostError> {
-    struct Limited {
-        bytes: Vec<u8>,
-        max: usize,
-    }
-    impl std::io::Write for Limited {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > self.max.saturating_sub(self.bytes.len()) {
-                return Err(std::io::Error::other("investigation byte limit"));
-            }
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut writer = Limited { bytes: vec![], max };
-    serde_json::to_writer(&mut writer, value).map_err(|_| HostError::LimitExceeded)?;
-    Ok(writer.bytes)
-}
+pub(super) use app_store::investigation_host::bounded_json;
 
 #[cfg(test)]
 #[path = "context_coverage_tests.rs"]

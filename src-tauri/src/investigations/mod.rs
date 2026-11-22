@@ -17,7 +17,7 @@ pub(crate) mod provider_workspace;
 #[cfg(any(unix, test))]
 pub(crate) mod query_workspace;
 mod recovery;
-mod runtime;
+use app_store::investigation_runtime as runtime;
 pub(crate) mod section_drafts;
 #[cfg(unix)]
 pub(crate) mod source_candidate_workspace;
@@ -34,30 +34,7 @@ pub(crate) use runtime::InvestigationRuntime;
 
 use agents::investigation::{InvestigationInputLedger, InvestigationUsage};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum HostError {
-    #[error("Investigation context changed during acquisition.")]
-    InputChanged,
-    #[error("Investigation evidence is unavailable; no source was substituted.")]
-    SourceUnavailable,
-    #[error("Investigation input or source metadata is invalid.")]
-    InvalidInput,
-    #[error("Investigation limit exhausted.")]
-    LimitExceeded,
-    #[error("Investigation durable store capacity exhausted.")]
-    StoreCapacity,
-    #[error("Investigation storage or source ownership could not be verified.")]
-    Operational,
-}
-
-impl From<agents::investigation::InvestigationError> for HostError {
-    fn from(error: agents::investigation::InvestigationError) -> Self {
-        match error {
-            agents::investigation::InvestigationError::LimitExceeded => Self::LimitExceeded,
-            _ => Self::InvalidInput,
-        }
-    }
-}
+pub(crate) use app_store::investigation_host::HostError;
 
 /// Implemented by the owning worker's durable transition adapter. Publication
 /// happens while source guards still protect every newly supplied receipt.

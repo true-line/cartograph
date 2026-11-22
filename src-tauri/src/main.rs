@@ -13,7 +13,7 @@ mod context;
 mod curated;
 mod curated_workbench;
 mod drop_intake;
-mod egress;
+use app_store::egress;
 mod escalation;
 mod evidence;
 mod export_save;
@@ -47,7 +47,7 @@ mod primary_source_tests;
 mod projects;
 mod proposals;
 mod provider_checks;
-mod provider_credentials;
+use app_store::provider_credentials;
 #[cfg(test)]
 mod registered_source_tests;
 #[cfg(test)]
