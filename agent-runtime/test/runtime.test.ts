@@ -1,13 +1,16 @@
 // AC-1423, AC-1424, AC-1425 (ADR-0085): the sidecar runs the harness loop and
 // nothing else. Every tool call and declared hook is a host round trip.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from "@mariozechner/pi-ai";
 import { claudeOptions } from "../src/claude-runner.ts";
 import { HostChannel } from "../src/host.ts";
-import { serve } from "../src/main.ts";
+import { packageVersion, serve } from "../src/main.ts";
 import { runPi } from "../src/pi-runner.ts";
 import { parseHostMessage, type SidecarMessage, type StartMessage } from "../src/protocol.ts";
+
+const VERSIONS = { pi: "pi-agent-core@0.0.0-test", claude: "claude-agent-sdk@0.0.0-test" };
 
 const tools = [
   { name: "query_context", description: "q", input_schema: { type: "object", properties: { query: { type: "object" } }, required: ["query"] } },
@@ -230,9 +233,17 @@ test("serve: refuses traffic before start and a second start", async () => {
   const out: string[] = [];
   const io = (items: string[]) => ({ lines: lines(...items), write: (line: string) => out.push(line) });
   const never = async () => {};
-  const before = await serve(io([JSON.stringify({ type: "cancel" })]), { pi: never, claude: never });
+  const before = await serve(io([JSON.stringify({ type: "cancel" })]), { pi: never, claude: never }, VERSIONS);
   assert.match(before.detail ?? "", /before start/);
-  const twice = await serve(io([JSON.stringify(start()), JSON.stringify(start())]), { pi: never, claude: never });
+  const twice = await serve(io([JSON.stringify(start()), JSON.stringify(start())]), { pi: never, claude: never }, VERSIONS);
   assert.match(twice.detail ?? "", /second start/);
-  assert.equal(JSON.parse(out[0]!).type, "ready");
+  assert.deepEqual(JSON.parse(out[0]!), { type: "ready", runtime: "cartograph-agent", version: "1", runners: VERSIONS });
+});
+
+// AC-1423: the ready line names each lane's installed harness, read from the
+// package the process loads, not from this bridge's protocol version.
+test("packageVersion: names the installed copy of a dependency", () => {
+  const installed = JSON.parse(readFileSync(new URL("../node_modules/@mariozechner/pi-agent-core/package.json", import.meta.url), "utf8"));
+  assert.equal(packageVersion("@mariozechner/pi-agent-core"), `pi-agent-core@${installed.version}`);
+  assert.throws(() => packageVersion("@cartograph/not-installed"));
 });

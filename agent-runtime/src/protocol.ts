@@ -65,7 +65,7 @@ export type HostMessage = StartMessage | ToolResultMessage | HookResultMessage |
 
 /** Sidecar -> host. */
 export type SidecarMessage =
-  | { type: "ready"; runtime: string; version: string }
+  | { type: "ready"; runtime: string; version: string; runners: RunnerVersions }
   | { type: "tool_call"; call_id: string; name: string; arguments: unknown }
   | {
       type: "hook";
@@ -161,4 +161,10 @@ function validateStart(value: Record<string, unknown>): StartMessage {
     max_output_tokens: typeof value.max_output_tokens === "number" ? value.max_output_tokens : undefined,
     backend,
   };
+}
+
+/** The installed harness behind each lane, such as `pi-agent-core@0.73.1`. */
+export interface RunnerVersions {
+  pi: string;
+  claude: string;
 }
