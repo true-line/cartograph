@@ -1,0 +1,686 @@
+//! JVM class-file artifact reader (ADR-0051 §5 slice 8, #1445).
+//!
+//! A deterministic, static read of compiled `.class` files: each class and
+//! method is a `Symbol`, each class file a `File`, each call instruction
+//! between methods of the read classes a `CALLS` edge, and each referenced
+//! class outside the class's own package and `java.lang` an `IMPORTS` edge.
+//! Every fact is T0 `Confirmed` with an `artifact` evidence basis: the class
+//! file's `sha256:` digest, kind `jvm-class` and the byte span it was read
+//! from (AC-1215). Nothing is executed, verified or decompiled. A class file
+//! the reader cannot walk whole is one `Gap` naming why.
+
+pub mod class_file;
+
+use class_file::{
+    ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_ENUM, ACC_INTERFACE, ACC_STATIC, ACC_SYNTHETIC,
+    Call, ClassFile, MemberRef, Method, Span,
+};
+use core_graph::{Edge, Node};
+use core_prov::{ArtifactLocator, ArtifactRef, ConfidenceTier, EvidenceBasis, Provenance, Tier};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Provenance extractor id of every fact this reader emits.
+pub const EXTRACTOR_ID: &str = "t0.artifact-jvm";
+
+/// Artifact kind recorded on every evidence reference.
+pub const ARTIFACT_KIND: &str = "jvm-class";
+
+/// Largest class file read; a larger one is a Gap.
+pub const MAX_CLASS_BYTES: usize = 8 * 1024 * 1024;
+
+/// Most synthetic bodies followed from one method (lambdas in lambdas).
+const MAX_SYNTHETIC_DEPTH: usize = 8;
+
+/// Identity of the source being recovered.
+pub struct SourceId<'a> {
+    /// Repository identity.
+    pub repo: &'a str,
+    /// Commit SHA, or `workdir` for an unversioned tree.
+    pub commit: &'a str,
+}
+
+/// Graph facts read from a set of class files.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Extraction {
+    /// Recovered nodes.
+    pub nodes: Vec<Node>,
+    /// Recovered edges.
+    pub edges: Vec<Edge>,
+}
+
+fn file_id(repo: &str, path: &str) -> String {
+    format!("file:{repo}@{path}")
+}
+
+fn symbol_id(repo: &str, path: &str, name: &str) -> String {
+    format!("sym:{repo}@{path}#{name}")
+}
+
+/// `sha256:` and the lowercase hex digest of `bytes`.
+pub fn digest(bytes: &[u8]) -> String {
+    let hash = Sha256::digest(bytes);
+    let mut out = String::with_capacity(71);
+    out.push_str("sha256:");
+    for byte in hash {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn prov(digest: &str, span: Span, confidence: ConfidenceTier, fact: &str) -> serde_json::Value {
+    let provenance = Provenance::new(
+        Tier::Deterministic,
+        confidence,
+        Vec::new(),
+        EXTRACTOR_ID,
+        fact.as_bytes(),
+    )
+    .expect("Deterministic confidence is within its ceiling")
+    .with_basis(EvidenceBasis::Artifact {
+        refs: vec![ArtifactRef {
+            digest: digest.to_string(),
+            kind: ARTIFACT_KIND.into(),
+            at: ArtifactLocator::Offset {
+                start: span.0,
+                end: span.1,
+            },
+        }],
+    });
+    serde_json::to_value(provenance).expect("provenance serializes")
+}
+
+/// The class's name below its package, nested classes joined by `.`
+/// (`Ledger.Store`), or `None` for an anonymous or local class (a segment
+/// after `$` that starts with a digit).
+fn nested_name(internal: &str) -> Option<String> {
+    let simple = internal.rsplit('/').next().unwrap_or(internal);
+    let segments: Vec<&str> = simple.split('$').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || segment.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(segments.join("."))
+}
+
+fn package_of(internal: &str) -> &str {
+    internal.rsplit_once('/').map_or("", |(package, _)| package)
+}
+
+fn dotted(internal: &str) -> String {
+    internal.replace(['/', '$'], ".")
+}
+
+fn class_kind(access: u16) -> &'static str {
+    if access & ACC_ANNOTATION != 0 {
+        "annotation_type"
+    } else if access & ACC_INTERFACE != 0 {
+        "interface"
+    } else if access & ACC_ENUM != 0 {
+        "enum"
+    } else {
+        "class"
+    }
+}
+
+/// How many leading constructor parameters the compiler added that the
+/// source does not declare: an inner (non-static member) class's enclosing
+/// instance, or an enum constant's name and ordinal.
+fn added_constructor_parameters(class: &ClassFile, descriptor: &str) -> usize {
+    if class.access & ACC_ENUM != 0
+        && class.super_class.as_deref() == Some("java/lang/Enum")
+        && descriptor.starts_with("(Ljava/lang/String;I")
+    {
+        return 2;
+    }
+    match &class.nesting {
+        Some(nesting)
+            if nesting.access & (ACC_STATIC | ACC_INTERFACE | ACC_ENUM) == 0
+                && class.access & ACC_INTERFACE == 0 =>
+        {
+            match &nesting.outer {
+                Some(outer) if descriptor.starts_with(&format!("(L{outer};")) => 1,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// A method's qualified name as the Java source adapter spells it:
+/// `Owner.method(Type,Type)`, a constructor named for its class and listing
+/// only the parameters its source declares.
+fn method_name(owner: &str, class: &ClassFile, method: &str, descriptor: &str) -> Option<String> {
+    let mut params = class_file::parameter_types(descriptor)?;
+    let name = if method == "<init>" {
+        let added = added_constructor_parameters(class, descriptor).min(params.len());
+        params.drain(..added);
+        owner.rsplit('.').next().unwrap_or(owner)
+    } else {
+        method
+    };
+    Some(format!("{owner}.{name}({})", params.join(",")))
+}
+
+/// A method this reader emits: not a static initializer, bridge or other
+/// compiler-generated method.
+fn emitted(method: &Method) -> bool {
+    method.name != "<clinit>" && method.access & (ACC_SYNTHETIC | ACC_BRIDGE) == 0
+}
+
+struct Read<'a> {
+    path: &'a str,
+    digest: String,
+    class: ClassFile,
+    nested: String,
+}
+
+/// Read `files` — `(repository-relative path, bytes)` pairs of `.class`
+/// files — into graph facts. Output is ordered by path, so the same files
+/// in any order give the same extraction.
+pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
+    let mut out = Extraction::default();
+    let mut ordered: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut reads: Vec<Read<'_>> = Vec::new();
+    for (path, bytes) in ordered {
+        let digest = digest(bytes);
+        let parsed = if bytes.len() > MAX_CLASS_BYTES {
+            Err("too_large")
+        } else {
+            class_file::parse(bytes).map_err(|refusal| refusal.code())
+        };
+        match parsed {
+            Ok(class) => {
+                // An anonymous or local class has no name to cite; its
+                // calls are not attributed (AC-1215).
+                if let Some(nested) = nested_name(&class.this_class) {
+                    reads.push(Read {
+                        path,
+                        digest,
+                        class,
+                        nested,
+                    });
+                }
+            }
+            Err(code) => {
+                let gap = format!("gap:{}@{path}#jvm-class", id.repo);
+                out.nodes.push(Node {
+                    id: gap.clone(),
+                    label: "Gap".into(),
+                    props: serde_json::json!({
+                        "path": path,
+                        "reason": format!("unreadable JVM class file: {code}"),
+                        "reason_code": code,
+                        "attempted_tiers": ["T0"],
+                        "prov": prov(
+                            &digest,
+                            (0, bytes.len() as u64),
+                            ConfidenceTier::Gap,
+                            &format!("Gap {gap}"),
+                        ),
+                    }),
+                });
+            }
+        }
+    }
+
+    // Every emitted method of the read classes, by (owner, name, descriptor),
+    // then by the path of each file that declares it: a checkout may ship
+    // the same binary class more than once.
+    let mut methods: Methods<'_> = BTreeMap::new();
+    for read in &reads {
+        for method in &read.class.methods {
+            if !emitted(method) {
+                continue;
+            }
+            if let Some(name) =
+                method_name(&read.nested, &read.class, &method.name, &method.descriptor)
+            {
+                methods
+                    .entry((
+                        read.class.this_class.clone(),
+                        method.name.clone(),
+                        method.descriptor.clone(),
+                    ))
+                    .or_default()
+                    .insert(read.path, symbol_id(id.repo, read.path, &name));
+            }
+        }
+    }
+
+    for read in &reads {
+        emit_class(id, read, &methods, &mut out);
+    }
+    out
+}
+
+/// Method symbols by (owner, name, descriptor), then by declaring path.
+type Methods<'a> = BTreeMap<(String, String, String), BTreeMap<&'a str, String>>;
+
+fn emit_class(id: &SourceId<'_>, read: &Read<'_>, methods: &Methods<'_>, out: &mut Extraction) {
+    let Read {
+        path,
+        digest,
+        class,
+        nested,
+    } = read;
+    let file = file_id(id.repo, path);
+    out.nodes.push(Node {
+        id: file.clone(),
+        label: "File".into(),
+        props: serde_json::json!({
+            "path": path,
+            "language": "jvm-class",
+            "artifact_digest": digest,
+            "prov": prov(digest, class.header_span, ConfidenceTier::Confirmed, &format!("File {path}")),
+        }),
+    });
+    let symbol = symbol_id(id.repo, path, nested);
+    let mut props = serde_json::json!({
+        "name": nested,
+        "kind": class_kind(class.access),
+        "language": "java",
+        "binary_name": class.this_class.replace('/', "."),
+        "abstract": class.access & ACC_ABSTRACT != 0 && class.access & ACC_INTERFACE == 0,
+        "prov": prov(digest, class.header_span, ConfidenceTier::Confirmed, &format!("Symbol {symbol}")),
+    });
+    if let Some(super_class) = class
+        .super_class
+        .as_deref()
+        .filter(|s| *s != "java/lang/Object")
+    {
+        props["extends"] = dotted(super_class).into();
+    }
+    if !class.interfaces.is_empty() {
+        props["implements"] = class
+            .interfaces
+            .iter()
+            .map(|i| dotted(i))
+            .collect::<Vec<_>>()
+            .into();
+    }
+    out.nodes.push(Node {
+        id: symbol.clone(),
+        label: "Symbol".into(),
+        props,
+    });
+    out.edges.push(Edge {
+        src: symbol.clone(),
+        dst: file.clone(),
+        label: "DEFINED_IN".into(),
+        props: serde_json::json!({
+            "prov": prov(digest, class.header_span, ConfidenceTier::Confirmed, &format!("DEFINED_IN {symbol}")),
+        }),
+    });
+
+    // Synthetic methods of this class, for lambda bodies.
+    let synthetic: BTreeMap<(&str, &str), &Method> = class
+        .methods
+        .iter()
+        .filter(|method| method.access & ACC_SYNTHETIC != 0)
+        .map(|method| ((method.name.as_str(), method.descriptor.as_str()), method))
+        .collect();
+
+    for method in class.methods.iter().filter(|method| emitted(method)) {
+        let Some(name) = method_name(nested, class, &method.name, &method.descriptor) else {
+            continue;
+        };
+        let source = symbol_id(id.repo, path, &name);
+        out.nodes.push(Node {
+            id: source.clone(),
+            label: "Symbol".into(),
+            props: serde_json::json!({
+                "name": name,
+                "kind": if method.name == "<init>" { "constructor" } else { "method" },
+                "language": "java",
+                "descriptor": method.descriptor,
+                "prov": prov(digest, method.span, ConfidenceTier::Confirmed, &format!("Symbol {source}")),
+            }),
+        });
+        out.edges.push(Edge {
+            src: source.clone(),
+            dst: file.clone(),
+            label: "DEFINED_IN".into(),
+            props: serde_json::json!({
+                "prov": prov(digest, method.span, ConfidenceTier::Confirmed, &format!("DEFINED_IN {source}")),
+            }),
+        });
+        let mut seen = BTreeSet::new();
+        let mut calls = Vec::new();
+        collect_calls(
+            class,
+            &synthetic,
+            method,
+            None,
+            0,
+            &mut BTreeSet::new(),
+            &mut calls,
+        );
+        for (target, opcode, span, via) in calls {
+            let key = (
+                target.owner.clone(),
+                target.name.clone(),
+                target.descriptor.clone(),
+            );
+            // A call into this file's own class names this file's method;
+            // a call into a class shipped more than once names no one copy.
+            let Some(dst) = methods.get(&key).and_then(|paths| {
+                paths
+                    .get(&**path)
+                    .or_else(|| (paths.len() == 1).then(|| paths.values().next()).flatten())
+            }) else {
+                continue;
+            };
+            if !seen.insert((dst.clone(), span)) {
+                continue;
+            }
+            let mut props = serde_json::json!({
+                "opcode": opcode,
+                "prov": prov(digest, span, ConfidenceTier::Confirmed, &format!("CALLS {source} {dst} {}", span.0)),
+            });
+            if let Some(via) = via {
+                props["via"] = via.into();
+            }
+            out.edges.push(Edge {
+                src: source.clone(),
+                dst: dst.clone(),
+                label: "CALLS".into(),
+                props,
+            });
+        }
+    }
+
+    let own_package = package_of(&class.this_class);
+    let mut imported = BTreeSet::new();
+    // Classes the constant pool names, then classes named only in a field
+    // or method descriptor (a parameter, return or field type).
+    let pooled = class.class_refs.iter().filter_map(|reference| {
+        // An array type names its element class after the `[`s and `L`.
+        let name = reference.name.trim_start_matches('[');
+        let name = match name.strip_prefix('L') {
+            Some(element) if reference.name.starts_with('[') => element.trim_end_matches(';'),
+            _ if reference.name.starts_with('[') => return None,
+            _ => name,
+        };
+        Some((name, reference.span))
+    });
+    let described = class
+        .fields
+        .iter()
+        .map(|field| (field.descriptor.as_str(), field.span))
+        .chain(
+            class
+                .methods
+                .iter()
+                .map(|method| (method.descriptor.as_str(), method.span)),
+        )
+        .flat_map(|(descriptor, span)| {
+            class_file::descriptor_classes(descriptor)
+                .into_iter()
+                .map(move |name| (name, span))
+        });
+    for (name, span) in pooled.chain(described) {
+        let package = package_of(name);
+        let outer = name.split('$').next().unwrap_or(name);
+        if outer == class.this_class.split('$').next().unwrap_or("")
+            || package == own_package
+            || package == "java/lang"
+            || nested_name(name).is_none()
+        {
+            continue;
+        }
+        let module = dotted(name);
+        if !imported.insert(module.clone()) {
+            continue;
+        }
+        out.edges.push(Edge {
+            src: file.clone(),
+            dst: format!("mod:{module}"),
+            label: "IMPORTS".into(),
+            props: serde_json::json!({
+                "specifier": module,
+                "prov": prov(digest, span, ConfidenceTier::Confirmed, &format!("IMPORTS {path} {module}")),
+            }),
+        });
+    }
+}
+
+type Found = (MemberRef, &'static str, Span, Option<&'static str>);
+
+/// The calls `method` makes, following the bodies of this class's synthetic
+/// methods its `invokedynamic` instructions name (a lambda's calls are its
+/// enclosing method's, `via: lambda`).
+fn collect_calls(
+    class: &ClassFile,
+    synthetic: &BTreeMap<(&str, &str), &Method>,
+    method: &Method,
+    via: Option<&'static str>,
+    depth: usize,
+    visited: &mut BTreeSet<(String, String)>,
+    out: &mut Vec<Found>,
+) {
+    for call in &method.calls {
+        match call {
+            Call::Invoke {
+                opcode,
+                target,
+                span,
+            } => out.push((target.clone(), opcode, *span, via)),
+            Call::Dynamic { handles, span } => {
+                for handle in handles {
+                    let body = (handle.owner == class.this_class)
+                        .then(|| synthetic.get(&(handle.name.as_str(), handle.descriptor.as_str())))
+                        .flatten();
+                    let Some(body) = body else {
+                        // A method reference (`store::amount`) names the
+                        // method it calls.
+                        out.push((
+                            handle.clone(),
+                            "invokedynamic",
+                            *span,
+                            Some("method_reference"),
+                        ));
+                        continue;
+                    };
+                    if depth >= MAX_SYNTHETIC_DEPTH {
+                        continue;
+                    }
+                    if !visited.insert((handle.name.clone(), handle.descriptor.clone())) {
+                        continue;
+                    }
+                    collect_calls(
+                        class,
+                        synthetic,
+                        body,
+                        Some("lambda"),
+                        depth + 1,
+                        visited,
+                        out,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A directory the walk does not enter: hidden, dependency or build output
+/// (a build's classes come from sources the source adapters read).
+fn skipped_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "target" | "build" | "out" | "node_modules" | "dist" | "generated"
+        )
+}
+
+/// Every path suffix, at `/` boundaries, of each Java or Kotlin source path
+/// without its extension: `src/com/acme/Pay.java` gives `com/acme/Pay`,
+/// `acme/Pay` and `Pay` among others.
+fn source_stems(paths: &[String]) -> BTreeSet<String> {
+    let mut stems = BTreeSet::new();
+    for path in paths {
+        let Some(stem) = path
+            .strip_suffix(".java")
+            .or_else(|| path.strip_suffix(".kt"))
+        else {
+            continue;
+        };
+        stems.insert(stem.to_string());
+        for (at, _) in stem.match_indices('/') {
+            stems.insert(stem[at + 1..].to_string());
+        }
+    }
+    stems
+}
+
+/// The Java and Kotlin sources of a checkout, as far as deciding whether a
+/// class was compiled from one of them.
+#[derive(Default)]
+struct Sources {
+    /// [`source_stems`] of every source path.
+    stems: BTreeSet<String>,
+    /// Kotlin file name to the internal package names its files declare.
+    kotlin_packages: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// The internal package name a Kotlin file's `package` header declares,
+/// empty for the default package.
+fn kotlin_package(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("package "))
+        .and_then(|rest| rest.split([';', ' ', '\t']).next())
+        .map(|name| name.replace('.', "/"))
+        .unwrap_or_default()
+}
+
+fn sources(paths: &[String], read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>) -> Sources {
+    let mut kotlin_packages: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for path in paths.iter().filter(|path| path.ends_with(".kt")) {
+        let Ok(bytes) = read(path) else {
+            continue;
+        };
+        let name = path.rsplit('/').next().unwrap_or(path);
+        kotlin_packages
+            .entry(name.to_string())
+            .or_default()
+            .insert(kotlin_package(&String::from_utf8_lossy(&bytes)));
+    }
+    Sources {
+        stems: source_stems(paths),
+        kotlin_packages,
+    }
+}
+
+/// Whether the checkout holds the source of `class`: a `.java` or `.kt`
+/// file at its outer class's package path or for its `…Kt` file facade,
+/// the file its `SourceFile` attribute names at its package path, or a
+/// Kotlin file of that name declaring its package (Kotlin files need not
+/// sit at their package path, nor be named for their classes).
+fn has_source(sources: &Sources, class: &ClassFile) -> bool {
+    let internal = class.this_class.as_str();
+    let outer = internal.split('$').next().unwrap_or(internal);
+    if sources.stems.contains(outer)
+        || outer
+            .strip_suffix("Kt")
+            .is_some_and(|facade| sources.stems.contains(facade))
+    {
+        return true;
+    }
+    let Some(file) = class.source_file.as_deref() else {
+        return false;
+    };
+    let package = package_of(internal);
+    let stem = file
+        .strip_suffix(".java")
+        .or_else(|| file.strip_suffix(".kt"));
+    let at_package = stem.is_some_and(|stem| {
+        sources.stems.contains(&if package.is_empty() {
+            stem.to_string()
+        } else {
+            format!("{package}/{stem}")
+        })
+    });
+    at_package
+        || sources
+            .kotlin_packages
+            .get(file)
+            .is_some_and(|packages| packages.contains(package))
+}
+
+/// Read the compiled classes of the checkout at `root`: every `.class` file
+/// the ordinary walk selects (`.gitignore` honored; hidden, dependency and
+/// build-output directories not entered) whose class has no Java or Kotlin
+/// source in the same walk. A repository built from its sources is read by
+/// the source adapters; this reads the classes it ships without them. A file
+/// that is not a readable class file is still read, so it becomes a Gap.
+pub fn extract_dir(
+    root: &std::path::Path,
+    id: &SourceId<'_>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<Extraction> {
+    let (classes, source_paths) = walk(root)?;
+    let read = |rel: &str| std::fs::read(root.join(rel));
+    extract_selected(id, &classes, &source_paths, &read, on_file)
+}
+
+/// [`extract_dir`] over `classes`, `.class` paths whose bytes `read`
+/// returns (a capture's retained bytes, not the checkout). The checkout's
+/// Java and Kotlin source paths still decide which classes have source; a
+/// Kotlin file's package header is read through `read` too.
+pub fn extract_dir_from(
+    root: &std::path::Path,
+    id: &SourceId<'_>,
+    classes: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<Extraction> {
+    let (_, source_paths) = walk(root)?;
+    extract_selected(id, classes, &source_paths, read, on_file)
+}
+
+/// The `.class` files the ordinary walk of `root` selects, sorted: the
+/// paths [`extract_dir`] reads, for a capture to retain.
+pub fn class_paths(root: &std::path::Path) -> std::io::Result<Vec<String>> {
+    Ok(walk(root)?.0)
+}
+
+/// The walk's `.class` paths and its Java and Kotlin source paths, sorted.
+fn walk(root: &std::path::Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
+    let walked = source_walk::files(root, &skipped_dir, source_walk::Gitignores::Honor)?;
+    let (mut classes, mut source_paths): (Vec<_>, Vec<_>) = walked
+        .into_iter()
+        .map(|file| file.rel)
+        .filter(|rel| rel.ends_with(".class") || rel.ends_with(".java") || rel.ends_with(".kt"))
+        .partition(|rel| rel.ends_with(".class"));
+    classes.sort();
+    source_paths.sort();
+    Ok((classes, source_paths))
+}
+
+fn extract_selected(
+    id: &SourceId<'_>,
+    classes: &[String],
+    source_paths: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<Extraction> {
+    let sources = sources(source_paths, read);
+    let mut files = Vec::new();
+    for rel in classes {
+        on_file(rel);
+        let bytes = read(rel)?;
+        let covered = bytes.len() <= MAX_CLASS_BYTES
+            && class_file::parse(&bytes).is_ok_and(|class| has_source(&sources, &class));
+        if !covered {
+            files.push((rel.clone(), bytes));
+        }
+    }
+    Ok(extract(id, &files))
+}
+
+#[cfg(test)]
+mod tests;
