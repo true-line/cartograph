@@ -350,6 +350,43 @@ impl SqliteGraphStore {
         Ok((revision, (graph, coverage)))
     }
 
+    /// [`Self::read_snapshot_with_coverage_and_revision`] with each row handed
+    /// to `node` or `edge` as it is decoded and before the next one is, so a
+    /// reader can hold rows in a smaller form without the whole graph ever
+    /// being decoded at once (#2215). Same rows, order and test hook.
+    pub fn read_snapshot_with_coverage_and_revision_each(
+        &self,
+        mut node: impl FnMut(&mut Node),
+        mut edge: impl FnMut(&mut Edge),
+    ) -> Result<(crate::StoreRevision, CoveredSnapshot), GraphError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let revision = crate::generation::read_store_revision(&transaction)?;
+        let mut nodes = Vec::new();
+        self.read_nodes_each(None, |mut row| {
+            node(&mut row);
+            nodes.push(row);
+            Ok(())
+        })?;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let after_nodes = self.snapshot_after_nodes.borrow_mut().take();
+            if let Some(after_nodes) = after_nodes {
+                after_nodes()?;
+            }
+        }
+        let mut edges = Vec::new();
+        self.read_edges_each(None, |mut row| {
+            edge(&mut row);
+            edges.push(row);
+            Ok(())
+        })?;
+        nodes.shrink_to_fit();
+        edges.shrink_to_fit();
+        let coverage = read_all(&transaction)?;
+        transaction.commit()?;
+        Ok((revision, ((nodes, edges), coverage)))
+    }
+
     /// [`Self::read_snapshot_with_coverage`] under admission limits: the
     /// inventories are counted and measured, and the graph is admitted as by
     /// [`Self::read_snapshot_bounded`], before either is materialized.
