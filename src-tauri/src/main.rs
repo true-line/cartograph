@@ -1805,8 +1805,10 @@ fn publication_view(
     (nodes, edges)
 }
 
-/// Observed receipts for the facts in `facts` whose observation cites the
-/// input `capture` (ADR-0079, AC-1045). Only those facts are decoded.
+/// Observed receipts for the published view of `facts` whose observation
+/// cites the input `capture` (ADR-0079, AC-1045): each node's last
+/// occurrence and each edge's merged occurrences, as publication keeps
+/// them. Only facts with an occurrence citing the input are decoded.
 fn observed_receipts_packed(
     capture: &source_capture::Capture,
     facts: &FactStore,
@@ -1815,12 +1817,32 @@ fn observed_receipts_packed(
         "\"repo\":{}",
         serde_json::to_string(capture.manifest().source_id.as_str()).map_err(|e| e.to_string())?
     );
-    let nodes = facts
-        .nodes_where(|node| node.props_json().contains(&cited))
-        .map_err(|e| e.to_string())?;
-    let edges = facts
-        .edges_where(|edge| edge.props_json().contains(&cited))
-        .map_err(|e| e.to_string())?;
+    let error = |e: core_graph::GraphError| e.to_string();
+    let mut winners = std::collections::BTreeMap::new();
+    for (index, node) in facts.nodes().iter().enumerate() {
+        winners.insert(node.id.as_str(), index);
+    }
+    let nodes = winners
+        .into_values()
+        .filter(|&index| facts.nodes()[index].props_json().contains(&cited))
+        .map(|index| facts.nodes()[index].unpack())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let observed_edges: std::collections::BTreeSet<_> = facts
+        .edges()
+        .iter()
+        .filter(|edge| edge.props_json().contains(&cited))
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
+        .collect();
+    let occurrences = facts
+        .edges_where(|edge| {
+            observed_edges.contains(&(edge.src.as_str(), edge.dst.as_str(), edge.label.as_str()))
+        })
+        .map_err(error)?;
+    let edges: Vec<Edge> = merged_edge_view(&occurrences)
+        .into_values()
+        .map(std::borrow::Cow::into_owned)
+        .collect();
     Ok(adapters_lang_ts::captured::mint_observed_receipts(
         capture, &nodes, &edges,
     ))
@@ -6497,16 +6519,36 @@ fn add_system_blocking<R: tauri::Runtime>(
             .persist(&primary, source, &receipts)
             .map_err(&fail)?;
         let charged = retained.charged();
-        let (omitted_stored_receipts, omitted_stored_facts) = retained.keep_retained(&mut receipts);
+        let (mut omitted_stored_receipts, mut omitted_stored_facts) =
+            retained.keep_retained(&mut receipts);
         // The captured observation inputs are retained with the source, so
         // the bytes their evidence cites outlive this recovery (ADR-0080),
         // with a receipt for each observation's exact span (ADR-0079).
         if let Some(capture) = observed.capture() {
-            let observed_receipts = observed_receipts_packed(capture, &facts).map_err(&fail)?;
-            state
+            let mut observed_receipts = observed_receipts_packed(capture, &facts).map_err(&fail)?;
+            let (omitted, omitted_facts) = state
                 .primary_sources
                 .persist_input(source, capture, &observed_receipts, charged)
-                .map_err(&fail)?;
+                .map_err(&fail)?
+                .keep_retained(&mut observed_receipts);
+            // Observed receipts the store had no room for are store-capacity
+            // omissions too. A fact keeps an omission record only when it has
+            // no retained receipt of its own, so a declaration binding is
+            // never reported as omitted.
+            for (path, count) in omitted {
+                *omitted_stored_receipts.entry(path).or_default() += count;
+            }
+            let recorded: std::collections::BTreeSet<_> = receipts
+                .iter()
+                .map(adapters_lang_ts::captured::Citable::fact_key)
+                .chain(omitted_stored_facts.iter().map(|(fact, _)| fact))
+                .cloned()
+                .collect();
+            omitted_stored_facts.extend(
+                omitted_facts
+                    .into_iter()
+                    .filter(|(fact, _)| !recorded.contains(fact)),
+            );
         }
         reads.omitted_stored_receipts = omitted_stored_receipts;
         reads.record_stored_omissions(omitted_stored_facts);
@@ -14284,6 +14326,61 @@ export function App() {
         super::primary_source::forget(&state, &source.source_id, &retained.fingerprint).unwrap();
         let after = super::primary_source::preview(&state, &source.source_id).unwrap();
         assert_eq!(after.input_receipts, 0);
+    }
+
+    #[test]
+    fn observed_receipts_follow_the_published_fact_view() {
+        // AC-1045 (ADR-0079): observed receipts are minted from the facts
+        // publication keeps, the last occurrence of a node, so an earlier
+        // occurrence's observation mints nothing.
+        const INPUT: &str = "input/src_11111111111111111111111111111111";
+        const STATE: &[u8] = br#"{"address":"aws_sqs_queue.jobs"}"#;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("state.json"), STATE).unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new(INPUT).unwrap(),
+            &["state.json".into()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let observed = |repo: &str| {
+            serde_json::to_value(
+                core_prov::Provenance::new(
+                    core_prov::Tier::Dynamic,
+                    core_prov::ConfidenceTier::Confirmed,
+                    vec![core_prov::EvidenceRef {
+                        repo: repo.into(),
+                        path: "state.json".into(),
+                        byte_start: 0,
+                        byte_end: STATE.len() as u64,
+                        commit_sha: "workdir".into(),
+                    }],
+                    "t1.terraform-state",
+                    b"Observed aws_sqs_queue.jobs",
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let resource = |id: &str, repo: &str, url: &str| Node {
+            id: id.into(),
+            label: "Resource".into(),
+            props: serde_json::json!({"observed_prov": observed(repo), "url": url}),
+        };
+        let facts = core_graph::facts::FactStore::from_facts(
+            vec![
+                resource("res:a", INPUT, "first"),
+                resource("res:a", INPUT, "last"),
+                resource("res:b", INPUT, "first"),
+                resource("res:b", "acme/api", "last"),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let receipts = super::observed_receipts_packed(&capture, &facts).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].matches_node(&resource("res:a", INPUT, "last")));
     }
 
     #[test]
