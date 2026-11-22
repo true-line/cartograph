@@ -1,5 +1,40 @@
 # cartograph
 
+## 0.76.0
+
+### Minor Changes
+
+- 6e24b10: Re-ingesting a repository no longer re-parses TypeScript and JavaScript files whose captured bytes are unchanged. Each reused file's source receipts are still minted from the current capture, so the graph and its citations match a full re-parse (#438, ADR-0087, AC-1517).
+- 30f76fb: A project can lower how long a cloud gap escalation may wait and how many output tokens it may ask for (advanced operator limits). A changed value is named in the provider id, so consent and the egress record show it (#1653).
+- d00d403: The knowledge phase now embeds the ingested repository's commit history: each first-parent commit's message and touched files become a searchable unit that cites those files, read locally without author names or emails. Issue text is reported as not read, since no issue tracker is connected (#1441, AC-1516).
+- ec8fb0f: An external agent can follow a recovered system's relations over MCP: `cartograph_query` reads a bounded page of a node's neighborhood, one node or all facts from a complete read session, with the same contract the in-app agents use (#250).
+- b0fdc34: Scoped MCP read sessions offer `cartograph_query` too: a bounded page of a node's neighborhood at the session's revision, without a partial or global claim (#250).
+- 61424d5: The agent roster lists Flow Tracer, Contract Matcher and IaC Grapher as read-only pipeline agents with their tier ceilings, each shown running while a recovery or semantic preview that runs it is in flight (#256).
+- fca84fa: Coverage-qualified whole-system investigations, which current analyst and auditor versions use, now page from the store too, instead of loading the whole graph. A coverage-only change during a task keeps it running on its frozen basis; a graph change stops it as a changed input.
+- 1b5b5f7: New investigations start only each role's current specialist version (plus domain-analyst@27 while an acceptance freeze names it, and @29 for native tool calling). Older versions are retired: their saved runs still reopen, labelled retired, and a follow-up asks you to pick a version offered today.
+- 627b87d: A project can lower how many texts and how many MiB of vectors one semantic preview may hold, so a smaller machine fails an oversized plan at admission instead of running out of memory (advanced operator limits) (#1653).
+- 0c017f4: Export bundle writes the smaller v2 bundle file (ADR-0086): each artifact's content appears once, under `files`; evidence repos and commits, and assertions two artifacts share, are listed once and referenced by index; and the JSON is compact with one entry per line. Scripts that read `artifacts[].content` or an evidence row's `repo` directly need the v2 shape, or the spec crate's `read_bundle_file`, which reads v1 and v2 files alike.
+- 6dac16b: Terraform files now join a source's capture when infrastructure is recovered. They are parsed from the retained bytes instead of the checkout, and each Terraform fact gets a source receipt you can open in the captured-source panel (#385, AC-1053).
+- 554d955: Whole-system ("Recovered system") investigations no longer load the whole graph. Preparation pins a store revision and streams only the graph's identity; each query reads one page from the store, so memory tracks the question, not the estate.
+
+### Patch Changes
+
+- f1fc861: domain-analyst@29: a supported finish can disclose a capacity-excluded obligation by naming it in a top-level limitation, and it is recorded as disclosed, not met. A correction located in top-level limitations is now a finish patch of those limitations, and a full finish on a patch step is read as the patch.
+- 3b04772: A local composition is reviewed claim by claim against the facts it cites, and a claim that says more than those facts show is left out.
+- 4acc9a7: A composed claim citing a fact id cut short by a digit or so is kept when the id still names exactly one citable fact.
+- 9561b0b: The capabilities overview no longer fails as too large on big systems: it reads as many of the capabilities' rules as fit the request.
+- edd9058: The capabilities overview describes operations in domain terms instead of naming routes it cannot cite, so its claims are no longer all left out.
+- 12c6588: The capabilities overview no longer stages a claim that states a capability's rule without citing that capability.
+- ef63453: The capabilities overview of a large system now has room for the capabilities' rules: when the full list of citable ids leaves no room, the request leaves that list out of its reply schema.
+- 517231c: A Rust desktop app whose executable only calls its library's `run()` (for example `fn main() { app::run(); }`) is now recovered as a desktop application rather than a command. The library function that builds the Tauri app is cited as the evidence (#1227).
+- 8fc5c9f: A tool-calling investigation whose first steps offer acquisition choices now starts. Each offered choice becomes a native tool that accepts only that exact choice, where v0.75.0 refused the step before calling the model (AC-1420).
+- 8fc5c9f: A tool-calling investigation no longer ends on the first tool call that does not decode. The call is not run; it goes back to the model as an invalid_action tool error, recorded in the run's journal, up to two times a run, and a third ends the run as before (AC-1420).
+  
+  On an OpenAI-compatible server such as vLLM, a step that offers tools now requires the model to call one. Before this, GLM could write the finish as plain text, and the run ended with empty_completion.
+- 59b3ec6: Workflows and Dockerfiles are now read from the source capture rather than the current checkout, so pipeline facts match the bytes the rest of recovery used (#385, AC-1057).
+- a461460: Observed infrastructure in Python code (clients, HTTP calls, configuration reads) is now read from the source capture, the same bytes the Python parser sees, rather than the current checkout (#385, AC-1055).
+- 4cee6b9: The gap register names the cause of each source-rule gap reason. Python gaps that an adapter did not word itself no longer share one generic "Source-rule interpretation remains incomplete." class.
+
 ## 0.75.0
 
 ### Minor Changes
