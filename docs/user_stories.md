@@ -1630,6 +1630,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** P1 (#1782) · `app`, `ui` · ADR-0051, ADR-0052 · T-0588
 - **AC-1202** Given a committed ingest and the knowledge phase that follows it, when the phase reads its base, then it streams the graph under the same snapshot admission, in the same row order and revision as the materialized bounded read, and keeps every node and edge with its id and label, but holds `BusinessRule` props, which no producer, knowledge unit or overlay admission reads, as `{}`. The derived facts and the published overlay are identical. On REA the phase's read goes from +1.73 GB to +0.74 GB and its peak from 3.79 GB to 2.80 GB.
 - **Trace:** P1 · `core-graph`, `app` · ADR-0051, ADR-0052 · T-1202
+- **AC-1209** Given the knowledge phase after an ingest, when it reads its base, then each fact's own `prov` (when its text needs no escape) is held as marked compact JSON text as its row is streamed, so the whole graph is never decoded at once. Restored, every row is the stored row; every producer (capabilities, business flows, domain entities, actors, subsystems) and every knowledge unit reads both forms alike, a unit never renders the held text, and the derived facts are byte-identical (#2215).
+- **Trace:** P1 · `app`, `spec`, `semantic` · ADR-0058 · T-1209
 
 ### US-0047 — Have an agent draft a section of a catalogue document
 - **Actor:** Engineer or product owner
