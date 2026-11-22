@@ -95,6 +95,8 @@ fn no_provider_publishes_the_overlay_as_a_named_omission() {
             published: true,
             sections_read: 0,
             sections_unread: 0,
+            commits_read: 0,
+            source_omissions: vec![],
             derived: 0,
             oversized: 0,
             derived_omission: None,
@@ -169,6 +171,7 @@ fn a_base_past_the_interactive_default_is_read_and_published() {
         None,
         SnapshotReadLimits::default(),
         &no_sections,
+        &no_history,
     )
     .unwrap();
     assert_eq!(skipped.omission, Some(BASE_BOUNDS));
@@ -193,6 +196,7 @@ fn a_base_past_the_snapshot_bounds_is_a_named_omission() {
         None,
         limits,
         &no_sections,
+        &no_history,
     )
     .unwrap();
     assert_eq!(
@@ -740,6 +744,7 @@ fn the_status_sent_to_the_ui_carries_the_named_reasons() {
             ..SnapshotReadLimits::default()
         },
         &no_sections,
+        &no_history,
     );
     let status = serde_json::to_value(KnowledgeStatus::from(report)).unwrap();
     assert_eq!(status["report"]["omission"], BASE_BOUNDS);
@@ -976,4 +981,201 @@ fn sections_are_embedded_with_text_read_from_their_source() {
     // Without a provider nothing is read and nothing is counted.
     let report = run_with_sections(&host.graph, &host.cache, &host.overlay, None, &reader).unwrap();
     assert_eq!((report.sections_read, report.sections_unread), (0, 0));
+}
+
+fn git_commit(
+    git: &git2::Repository,
+    update: Option<&str>,
+    files: &[(&str, &str)],
+    message: &str,
+    parents: &[&git2::Commit<'_>],
+) -> git2::Oid {
+    let mut index = git.index().unwrap();
+    for (path, body) in files {
+        let full = git.workdir().unwrap().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, body).unwrap();
+        index.add_path(std::path::Path::new(path)).unwrap();
+    }
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let author = git2::Signature::now("Fixture Author", "author@example.invalid").unwrap();
+    git.commit(update, &author, &author, message, &tree, parents)
+        .unwrap()
+}
+
+fn file_node(repo: &str, path: &str, commit: &str) -> Node {
+    let prov = core_prov::Provenance::new(
+        core_prov::Tier::Deterministic,
+        core_prov::ConfidenceTier::Confirmed,
+        vec![core_prov::EvidenceRef {
+            repo: repo.into(),
+            path: path.into(),
+            byte_start: 0,
+            byte_end: 1,
+            commit_sha: commit.into(),
+        }],
+        "fixture",
+        path.as_bytes(),
+    )
+    .unwrap();
+    Node {
+        id: format!("file:{repo}@{path}"),
+        label: "File".into(),
+        props: serde_json::json!({ "path": path, "prov": prov }),
+    }
+}
+
+// AC-1516: the first-parent history of the ingested commit is embedded as
+// commit units, by message and touched paths, never author identity; a
+// side branch merged in, a later commit, and a commit touching no base file
+// are not units; issue text is a named omission whenever the phase embeds.
+#[test]
+fn commits_of_the_ingested_history_are_embedded_without_author_identity() {
+    let host = host();
+    let repo = tempfile::tempdir().unwrap();
+    let git = git2::Repository::init(repo.path()).unwrap();
+    let first = git_commit(
+        &git,
+        Some("HEAD"),
+        &[("README.md", "shop\n")],
+        "Initial import",
+        &[],
+    );
+    let first = git.find_commit(first).unwrap();
+    let side = git_commit(
+        &git,
+        None,
+        &[("src/side.ts", "side\n")],
+        "Side branch experiment",
+        &[&first],
+    );
+    let side = git.find_commit(side).unwrap();
+    let settle = git_commit(
+        &git,
+        Some("HEAD"),
+        &[("src/refunds.ts", "settle\n")],
+        "Settle refunds nightly",
+        &[&first, &side],
+    );
+    let head = settle.to_string();
+    let settle = git.find_commit(settle).unwrap();
+    git_commit(
+        &git,
+        Some("HEAD"),
+        &[("vendor/x.js", "x\n")],
+        "Vendor a library",
+        &[&settle],
+    );
+    let data = tempfile::tempdir().unwrap();
+    let mut registry =
+        crate::sources::SourceRegistry::open(data.path().join("sources.db"), data.path()).unwrap();
+    let source = registry.register_local(repo.path()).unwrap();
+    let registry = Mutex::new(registry);
+    {
+        let mut graph = host.graph.lock().unwrap();
+        for path in ["README.md", "src/refunds.ts", "src/side.ts"] {
+            graph
+                .put_node(&file_node(&source.repo_key, path, &head))
+                .unwrap();
+        }
+    }
+    let provider = Recording(Mutex::new(Vec::new()));
+    let history = |heads: &BTreeMap<String, String>, held: &BTreeSet<String>| {
+        source_history(&registry, heads, held)
+    };
+    let report = run_with_sources(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        Some(&provider),
+        &no_sections,
+        &history,
+    )
+    .unwrap();
+    assert_eq!(report.commits_read, 2);
+    assert_eq!(report.source_omissions, [knowledge_ingest::NO_ISSUE_SOURCE]);
+    let sent = provider.0.lock().unwrap().clone();
+    let commits: Vec<&String> = sent.iter().filter(|t| t.starts_with("Commit\n")).collect();
+    assert_eq!(commits.len(), 2, "{commits:?}");
+    assert!(
+        commits
+            .iter()
+            .any(|t| t.contains("message: Settle refunds nightly")
+                && t.contains("path: src/refunds.ts")
+                && t.contains(&format!("sha: {head}")))
+    );
+    assert!(
+        commits
+            .iter()
+            .any(|t| t.contains("message: Initial import"))
+    );
+    assert!(sent.iter().all(|t| !t.contains("Side branch")
+        && !t.contains("Vendor")
+        && !t.contains("author@example.invalid")
+        && !t.contains("Fixture Author")));
+    // Without a provider no history is read and nothing is counted.
+    let report = run_with_sources(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        None,
+        &no_sections,
+        &history,
+    )
+    .unwrap();
+    assert_eq!((report.commits_read, report.source_omissions.len()), (0, 0));
+}
+
+// AC-1516: a repository's base names its commit only when every file cites
+// the same full object id.
+#[test]
+fn ingested_heads_need_one_full_commit_per_repository() {
+    let sha = "a".repeat(40);
+    let nodes = [
+        file_node("one", "a.ts", &sha),
+        file_node("one", "b.ts", &sha),
+        file_node("mixed", "a.ts", &sha),
+        file_node("mixed", "b.ts", &"b".repeat(40)),
+        file_node("tree", "a.ts", "workdir"),
+    ];
+    assert_eq!(
+        ingested_heads(&nodes),
+        BTreeMap::from([("one".to_string(), sha)])
+    );
+}
+
+// AC-1516: the path cap keeps the base's files a commit touched, a commit
+// touching none of them is not read, and a shallow clone's history ends
+// before its boundary commit instead of calling its whole tree changed.
+#[test]
+fn commit_paths_keep_base_files_and_history_stops_at_a_shallow_boundary() {
+    let repo = tempfile::tempdir().unwrap();
+    let git = git2::Repository::init(repo.path()).unwrap();
+    let wide: Vec<String> = (0..70).map(|i| format!("a/{i:03}.ts")).collect();
+    let mut files: Vec<(&str, &str)> = wide.iter().map(|path| (path.as_str(), "x\n")).collect();
+    files.push(("z.ts", "z\n"));
+    let first = git_commit(&git, Some("HEAD"), &files, "Wide import", &[]);
+    let parent = git.find_commit(first).unwrap();
+    let head = git_commit(
+        &git,
+        Some("HEAD"),
+        &[("z.ts", "zz\n")],
+        "Touch z",
+        &[&parent],
+    )
+    .to_string();
+    let held = BTreeSet::from(["file:r@z.ts".to_string()]);
+    let read = repository_history(repo.path(), "r", &head, &held).unwrap();
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[1].paths.len(), knowledge_ingest::MAX_COMMIT_PATHS);
+    assert_eq!(read[1].paths[..2], ["z.ts", "a/000.ts"]);
+    let none = repository_history(repo.path(), "r", &head, &BTreeSet::new()).unwrap();
+    assert!(none.is_empty());
+    std::fs::write(git.path().join("shallow"), format!("{first}\n")).unwrap();
+    let read = repository_history(repo.path(), "r", &head, &held).unwrap();
+    assert_eq!(
+        read.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(),
+        [head.as_str()]
+    );
 }

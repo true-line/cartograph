@@ -475,3 +475,41 @@ fn a_derived_flow_is_ranked_and_cites_its_base_facts() {
     let plain = Retrieval::build(&nodes, &edges).unwrap();
     assert!(plain.search("refund ledger", None, 10).unwrap().is_empty());
 }
+
+// AC-1516: a commit the phase embedded is a ranked hit by its message and
+// cites the base files it touched, never one the base lacks.
+#[test]
+fn a_commit_is_ranked_by_its_message_and_cites_the_files_it_touched() {
+    let nodes = vec![
+        Node {
+            id: "file:r@src/refunds.ts".into(),
+            label: "File".into(),
+            props: serde_json::json!({"path": "src/refunds.ts"}),
+        },
+        Node {
+            id: "mod:m".into(),
+            label: "Module".into(),
+            props: serde_json::json!({"name": "m"}),
+        },
+    ];
+    let commits = [knowledge_ingest::CommitText {
+        repo: "r".into(),
+        sha: "b2".into(),
+        message: "Settle refunds nightly".into(),
+        paths: vec!["src/gone.ts".into(), "src/refunds.ts".into()],
+    }];
+    let index = Retrieval::build_with_history(
+        &nodes,
+        &[],
+        &[],
+        &knowledge_ingest::SectionText::new(),
+        &commits,
+    )
+    .unwrap();
+    let hits = index.search("nightly", None, 10).unwrap();
+    assert_eq!(ids(&hits), [("commit:r@b2", Reason::Ranked)]);
+    assert_eq!(
+        hits[0].cites,
+        vec![BaseRef::Node("file:r@src/refunds.ts".into())]
+    );
+}

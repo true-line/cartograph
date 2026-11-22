@@ -97,7 +97,7 @@ pub struct Retrieval {
     vector_index: Option<Index>,
     names: BTreeMap<String, BTreeSet<String>>,
     edges: Vec<Edge>,
-    /// Base citations of each derived flow unit, by flow id.
+    /// Base citations of each derived flow and commit unit, by unit id.
     flow_cites: BTreeMap<String, Vec<BaseRef>>,
 }
 
@@ -130,6 +130,19 @@ impl Retrieval {
         derived: &[OverlayFact],
         section_text: &knowledge_ingest::SectionText,
     ) -> Result<Self, RetrievalError> {
+        Self::build_with_history(nodes, edges, derived, section_text, &[])
+    }
+
+    /// [`Self::build_with_sources`] with the commits the host read for the
+    /// embedding phase (AC-1516). A commit is ranked, never an anchor or a
+    /// neighbour, and its hit cites the base `File` nodes it touched.
+    pub fn build_with_history(
+        nodes: &[Node],
+        edges: &[Edge],
+        derived: &[OverlayFact],
+        section_text: &knowledge_ingest::SectionText,
+        commits: &[knowledge_ingest::CommitText],
+    ) -> Result<Self, RetrievalError> {
         let flows: Vec<(&Node, &OverlayFact)> = derived
             .iter()
             .filter_map(|fact| match &fact.item {
@@ -139,7 +152,7 @@ impl Retrieval {
             .collect();
         let flow_nodes: Vec<&Node> = flows.iter().map(|(node, _)| *node).collect();
         let (units, omitted) =
-            knowledge_ingest::units_with_sources(nodes, &flow_nodes, section_text);
+            knowledge_ingest::units_with_history(nodes, &flow_nodes, section_text, commits);
         let base_ids: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
         let mut flow_cites: BTreeMap<String, Vec<BaseRef>> = BTreeMap::new();
         for (node, fact) in flows {
@@ -149,6 +162,23 @@ impl Retrieval {
                 flow_cites
                     .entry(node.id.clone())
                     .or_insert_with(|| fact.cites.iter().cloned().collect());
+            }
+        }
+        let files: BTreeSet<&str> = nodes
+            .iter()
+            .filter(|node| node.label == "File")
+            .map(|node| node.id.as_str())
+            .collect();
+        for commit in knowledge_ingest::cited_commits(nodes, commits) {
+            let id = commit.id();
+            if !base_ids.contains(id.as_str()) {
+                flow_cites.entry(id).or_insert_with(|| {
+                    commit
+                        .files()
+                        .filter(|file| files.contains(file.as_str()))
+                        .map(BaseRef::Node)
+                        .collect()
+                });
             }
         }
         let index = Connection::open_in_memory()?;

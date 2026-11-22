@@ -98,6 +98,7 @@ fn run_with(
         nodes,
         &[],
         &SectionText::new(),
+        &[],
         provider,
         Arc::clone(cache),
         lease,
@@ -407,6 +408,7 @@ fn flow_units_are_redacted_and_reuse_cached_vectors() {
             &base(),
             flows,
             &SectionText::new(),
+            &[],
             Some(&provider),
             Arc::clone(&cache),
             lease,
@@ -520,4 +522,85 @@ fn sections_past_their_share_are_counted_and_admission_matches() {
         .map(|node| node.id.as_str())
         .collect();
     assert_eq!(admitted, ["docsec:r@README.md#0"]);
+}
+
+fn commit(sha: &str, message: &str, paths: &[&str]) -> CommitText {
+    CommitText {
+        repo: "r".into(),
+        sha: sha.into(),
+        message: message.into(),
+        paths: paths.iter().map(|path| path.to_string()).collect(),
+    }
+}
+
+// AC-1516: commits the host read are units after the sections and before
+// the modules, rendered by message and touched paths and redacted; a base
+// node of their label or id is never displaced by one, and commits past
+// their share are counted, never embedded.
+#[test]
+fn commits_are_units_after_sections_and_past_their_share_are_counted() {
+    let canary = "AKIAIOSFODNN7EXAMPLE";
+    let nodes = vec![
+        section("docsec:r@README.md#1", "Refunds"),
+        node("mod:m", "Module", serde_json::json!({"name": "m"})),
+        node(
+            "commit:r@base",
+            "Commit",
+            serde_json::json!({"sha": "base"}),
+        ),
+        node("file:r@README.md", "File", serde_json::json!({})),
+        node("file:r@src/settle.ts", "File", serde_json::json!({})),
+    ];
+    let commits = [
+        commit(
+            "b2",
+            &format!("Settle refunds nightly\n\n  key {canary}\n"),
+            &["src/refunds.ts", "src/settle.ts"],
+        ),
+        commit("a1", "Initial import", &["README.md"]),
+        // A commit with a base node's id is not a unit: the base node is.
+        commit("base", "shadowed", &["README.md"]),
+        // Nor is one that touched no file the base holds: nothing to cite.
+        commit("c3", "Vendored", &["vendor/x.js"]),
+    ];
+    let (units, omitted) = units_with_history(&nodes, &[], &SectionText::new(), &commits);
+    assert_eq!(omitted, 0);
+    let order: Vec<&str> = units.iter().map(|unit| unit.node_id.as_str()).collect();
+    assert_eq!(
+        order,
+        [
+            "docsec:r@README.md#1",
+            "commit:r@a1",
+            "commit:r@b2",
+            "mod:m"
+        ]
+    );
+    let settle = &units[2].text;
+    assert!(settle.starts_with("Commit\n"), "{settle}");
+    assert!(
+        settle.contains("message: Settle refunds nightly key "),
+        "{settle}"
+    );
+    assert!(!settle.contains(canary), "{settle}");
+    assert!(
+        settle.contains("path: src/refunds.ts\npath: src/settle.ts"),
+        "{settle}"
+    );
+    assert!(settle.contains("sha: b2"), "{settle}");
+    assert_eq!(
+        commits[0].files().collect::<Vec<_>>(),
+        ["file:r@src/refunds.ts", "file:r@src/settle.ts"]
+    );
+    // Without history the recipe is the one `units_with_sources` gives.
+    assert_eq!(
+        units_with_history(&nodes, &[], &SectionText::new(), &[]),
+        units_with_sources(&nodes, &[], &SectionText::new())
+    );
+
+    let many: Vec<CommitText> = (0..MAX_COMMIT_UNITS + 2)
+        .map(|n| commit(&format!("{n:05}"), "change", &["README.md"]))
+        .collect();
+    let file = [node("file:r@README.md", "File", serde_json::json!({}))];
+    let (units, omitted) = units_with_history(&file, &[], &SectionText::new(), &many);
+    assert_eq!((units.len(), omitted), (MAX_COMMIT_UNITS, 2));
 }
