@@ -55,13 +55,15 @@ def score(expected, cand):
                     break
         else:
             wanted = [norm(e) for e in step.get("endpoint_any", [step["endpoint"]])]
+            # The goal is the call the journey ends at, after every screen.
+            if cand["goal"] in wanted:
+                found[sid] = {"at": (len(cand["steps"]), 0), "matched": cand["goal"]}
+                continue
             for i, s in enumerate(cand["steps"]):
                 hit = next((c for c in s["calls"] if c in wanted), None)
                 if hit:
                     found[sid] = {"at": (i, 0), "matched": hit}
                     break
-            if sid not in found and cand["goal"] in wanted:
-                found[sid] = {"at": (len(cand["steps"]), 0), "matched": cand["goal"]}
     return found
 
 
@@ -78,7 +80,10 @@ def main():
     required_goals = {norm(e) for s in expected["steps"] if s["required"] and s["kind"] == "client_call" for e in s.get("endpoint_any", [s["endpoint"]])}
     best, found = max(scored, key=lambda cf: (sum(1 for r in required if r in cf[1]), cf[0]["goal"] in required_goals))
     present = [r for r in expected["order"] if r in found]
-    order_ok = [found[r]["at"] for r in present] == sorted(found[r]["at"] for r in present)
+    # Strictly increasing: two calls listed on one screen carry no order
+    # between them, so a tie is unproven, never in order.
+    at = [found[r]["at"] for r in present]
+    order_ok = all(a < b for a, b in zip(at, at[1:]))
     calls = {s["id"]: s for s in expected["steps"] if s["kind"] == "client_call"}
     endpoint_rows = {sid: found[sid]["matched"] in fetched for sid in calls if sid in found}
     expected_calls = {norm(e) for s in calls.values() for e in s.get("endpoint_any", [s["endpoint"]])}

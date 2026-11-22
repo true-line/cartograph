@@ -64,6 +64,10 @@ J5 matches either custom-alias version in `endpoint_any`, because public
 help does not say which one the pinned extension calls. The score records
 the version found.
 
+Order is strict. A call that is the candidate's goal comes after every
+screen. Two required calls listed on the same screen carry no order between
+them, so a tie is unproven and fails the order measure.
+
 | Measure | Definition | Pass |
 |---|---|---|
 | Required steps | required steps present in one candidate journey | 5 / 5 |
