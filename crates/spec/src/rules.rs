@@ -1140,15 +1140,10 @@ pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) 
 
 /// A `BusinessRule` node's `rule` payload, typed. Every spec reader goes
 /// through here, so the payload may be held as the object the store keeps or
-/// as its JSON text (see [`compact_rule_payloads`]): both parse alike.
+/// as its marked JSON text (see [`compact_rule_payloads`]): both parse alike,
+/// and a string the store holds stays malformed.
 pub(crate) fn rule_payload(node: &Node) -> Result<GuardedExitEvidence, RuleValidationError> {
-    let value = match &node.props["rule"] {
-        serde_json::Value::String(text) => {
-            serde_json::from_str(text).map_err(|_| RuleValidationError::MalformedPayload)?
-        }
-        value => value.clone(),
-    };
-    GuardedExitEvidence::from_value(value)
+    GuardedExitEvidence::from_value(core_graph::stored::stored(&node.props["rule"]).into_owned())
 }
 
 /// Hold each `BusinessRule` payload as its compact JSON text instead of a
@@ -1160,15 +1155,18 @@ pub(crate) fn rule_payload(node: &Node) -> Result<GuardedExitEvidence, RuleValid
 /// are rewritten, so a malformed one stays as it was read.
 pub fn compact_rule_payloads(nodes: &mut [Node]) {
     for node in nodes.iter_mut().filter(|node| node.label == "BusinessRule") {
-        let Some(rule) = node.props.get_mut("rule") else {
-            continue;
-        };
-        if rule.is_object() {
-            let mut text = serde_json::to_string(rule).expect("a JSON value serializes");
-            text.shrink_to_fit();
-            *rule = serde_json::Value::String(text);
+        if let Some(rule) = node.props.get_mut("rule") {
+            core_graph::stored::compact_object(rule);
         }
     }
+}
+
+/// A test's nodes with their rule payloads compacted ([`compact_rule_payloads`]).
+#[cfg(test)]
+pub(crate) fn compacted_for_tests(nodes: &[Node]) -> Vec<Node> {
+    let mut nodes = nodes.to_vec();
+    compact_rule_payloads(&mut nodes);
+    nodes
 }
 
 /// Relationships actually queried by the source-rule inventory renderer.
@@ -1693,6 +1691,11 @@ mod tests {
             ("rule:valid", serde_json::to_value(payload()).unwrap()),
             ("rule:text", json!("synthetic-private-payload")),
             ("rule:version", invalid_version),
+            // A stored string whose text is a valid payload stays malformed.
+            (
+                "rule:string",
+                json!(serde_json::to_string(&payload()).unwrap()),
+            ),
         ] {
             let mut node = rule_node(id, Tier::Deterministic, ConfidenceTier::Confirmed);
             node.props["rule"] = rule;
@@ -1711,6 +1714,12 @@ mod tests {
         assert!(held("rule:valid").is_string());
         assert!(held("rule:version").is_string());
         assert_eq!(held("rule:text"), json!("synthetic-private-payload"));
+        assert_eq!(
+            held("rule:string"),
+            nodes.iter().find(|n| n.id == "rule:string").unwrap().props["rule"]
+        );
+        let string = compacted.iter().find(|n| n.id == "rule:string").unwrap();
+        assert!(rule_payload(string).is_err());
         for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
             let stored = compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
             let text = compile_spec(&compacted, &edges, &[], mode, &BTreeSet::new());
