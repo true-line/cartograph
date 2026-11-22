@@ -61,6 +61,7 @@ wasmtime = { version = "50.0.3", default-features = false, features = [
 wasmtime-wasi = "50.0.3"
 
 # Internal crates (SPEC-00 §8.1 crate map)
+app-store = { path = "crates/app-store" }
 core-graph = { path = "crates/core-graph" }
 core-prov = { path = "crates/core-prov" }
 core-redact = { path = "crates/core-redact" }

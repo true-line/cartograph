@@ -3,7 +3,7 @@ use rusqlite::Connection;
 
 /// Explicit caller ceilings for the complete registered-source inventory.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SourceListLimits {
+pub struct SourceListLimits {
     pub max_rows: usize,
     /// Sum of raw UTF-8 bytes in all eight selected SQL text fields; NULL costs zero.
     pub max_bytes: usize,
@@ -11,7 +11,7 @@ pub(crate) struct SourceListLimits {
 
 /// Closed failures contain no registry locators, SQL or stored cell contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum SourceListError {
+pub enum SourceListError {
     #[error("source registry row limit exceeded")]
     RowLimit,
     #[error("source registry byte limit exceeded")]

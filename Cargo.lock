@@ -240,6 +240,7 @@ dependencies = [
  "adapters-lang-ts",
  "adapters-plugin-host",
  "agents",
+ "app-store",
  "cap-fs-ext",
  "cap-std",
  "context-hub",
@@ -274,6 +275,19 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "work-packets",
+]
+
+[[package]]
+name = "app-store"
+version = "0.73.0"
+dependencies = [
+ "context-hub",
+ "dunce",
+ "ingest",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

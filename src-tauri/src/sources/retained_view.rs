@@ -3,12 +3,12 @@
 //! this view. Captured evidence authority remains its original frozen binding.
 use super::*;
 
-pub(crate) struct RetainedSourceView<'tx> {
+pub struct RetainedSourceView<'tx> {
     connection: &'tx Connection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RetainedSourceError {
+pub enum RetainedSourceError {
     Missing,
     Changed,
     Operational,
@@ -17,13 +17,13 @@ pub(crate) enum RetainedSourceError {
 impl<'tx> RetainedSourceView<'tx> {
     /// Borrow the actual writer transaction; the view cannot outlive its commit.
     /// Empty retained-source sets require no source registry initialization.
-    pub(crate) fn from_transaction(transaction: &'tx rusqlite::Transaction<'_>) -> Self {
+    pub fn from_transaction(transaction: &'tx rusqlite::Transaction<'_>) -> Self {
         Self {
             connection: transaction,
         }
     }
 
-    pub(crate) fn verify(&self, expected: &RegisteredSource) -> Result<(), RetainedSourceError> {
+    pub fn verify(&self, expected: &RegisteredSource) -> Result<(), RetainedSourceError> {
         // Reuse authoritative schema/meta/type/UTF-8 bounds every time. The view
         // caches no validation that could become stale after a same-Tx write.
         check_state(self.connection, Some(&expected.registry_id))

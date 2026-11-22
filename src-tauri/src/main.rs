@@ -17,7 +17,7 @@ mod egress;
 mod escalation;
 mod evidence;
 mod export_save;
-mod findings;
+use app_store::findings;
 #[cfg(test)]
 mod graph_projection_tests;
 mod investigations;
@@ -34,7 +34,7 @@ mod model_debug;
 #[cfg(test)]
 mod name_unique_tests;
 mod observation_inputs;
-mod paths;
+use app_store::paths;
 mod primary_source;
 #[cfg(test)]
 mod primary_source_tests;
@@ -55,7 +55,7 @@ mod settings;
 #[cfg(test)]
 mod showcase_tests;
 mod source_access;
-mod sources;
+use app_store::sources;
 mod spec_bundle_file;
 mod system_preflight;
 mod task_evidence;
