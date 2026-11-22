@@ -27,6 +27,48 @@ pub(crate) const SEQUENCE_CEILING: i64 = i64::MAX - MAX_ROWS as i64;
 /// this, never three times (AC-1507).
 pub const MAX_VECTOR_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_DIMENSIONS: usize = 4096;
+
+/// Rows and vector bytes one embedding operation may hold in memory (#1653,
+/// AC-1807). They can only lower [`MAX_ROWS`] and [`MAX_VECTOR_BYTES`], so a
+/// smaller machine can fail an oversized plan at admission instead of running
+/// out of memory. The store's own capacity stays at the shipped bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationLimits {
+    max_rows: usize,
+    max_vector_bytes: usize,
+}
+
+impl OperationLimits {
+    pub const MIN_ROWS: usize = 65_536;
+    pub const MIN_VECTOR_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Limits inside the shipped bounds, or `None`.
+    pub fn within(max_rows: usize, max_vector_bytes: usize) -> Option<Self> {
+        ((Self::MIN_ROWS..=MAX_ROWS).contains(&max_rows)
+            && (Self::MIN_VECTOR_BYTES..=MAX_VECTOR_BYTES).contains(&max_vector_bytes))
+        .then_some(Self {
+            max_rows,
+            max_vector_bytes,
+        })
+    }
+
+    pub fn max_rows(self) -> usize {
+        self.max_rows
+    }
+
+    pub fn max_vector_bytes(self) -> usize {
+        self.max_vector_bytes
+    }
+}
+
+impl Default for OperationLimits {
+    fn default() -> Self {
+        Self {
+            max_rows: MAX_ROWS,
+            max_vector_bytes: MAX_VECTOR_BYTES,
+        }
+    }
+}
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 /// Plan text bytes: `MAX_ROWS` texts averaging 512 bytes.
 pub const MAX_INPUT_BYTES: usize = 512 * 1024 * 1024;
@@ -375,6 +417,7 @@ pub struct CachedProvider<'a> {
     lease: Lease,
     identity: Option<EmbeddingIdentity>,
     space: Option<String>,
+    limits: OperationLimits,
     state: Mutex<Operation>,
 }
 /// Observed embedding space of a successfully sealed operation.
@@ -397,6 +440,15 @@ impl<'a> CachedProvider<'a> {
         provider: &'a dyn LlmProvider,
         cache: Arc<Mutex<EmbeddingCache>>,
         lease: Lease,
+    ) -> Result<Self, ProviderError> {
+        Self::within(provider, cache, lease, OperationLimits::default())
+    }
+    /// [`Self::new`] holding at most `limits` in this operation.
+    pub fn within(
+        provider: &'a dyn LlmProvider,
+        cache: Arc<Mutex<EmbeddingCache>>,
+        lease: Lease,
+        limits: OperationLimits,
     ) -> Result<Self, ProviderError> {
         if provider.locality() != Locality::Local || provider.id().len() > 512 {
             return Err(error("local provider required"));
@@ -428,8 +480,13 @@ impl<'a> CachedProvider<'a> {
             lease,
             identity,
             space,
+            limits,
             state: Mutex::new(Operation::default()),
         })
+    }
+    /// The bounds this operation holds.
+    pub fn limits(&self) -> OperationLimits {
+        self.limits
     }
     /// Publish only after all provider calls and final manifest observation succeed.
     /// Read first-writer winning bytes back before any final semantic computation.
@@ -599,7 +656,7 @@ impl CachedProvider<'_> {
                     .len()
                     .checked_add(misses.len())
                     .and_then(|n| n.checked_add(1))
-                    .is_none_or(|n| n > MAX_ROWS)
+                    .is_none_or(|n| n > self.limits.max_rows)
             {
                 return Err(error("whole-preview working set"));
             }
@@ -617,7 +674,7 @@ impl CachedProvider<'_> {
             };
             if let Some(vector) = hit {
                 state.vector_bytes += vector.len() * 4;
-                if state.vector_bytes > MAX_VECTOR_BYTES {
+                if state.vector_bytes > self.limits.max_vector_bytes {
                     return Err(error("whole-preview vector bytes"));
                 }
                 state.vectors.insert(key.clone(), (text.len(), vector));
@@ -665,7 +722,7 @@ impl CachedProvider<'_> {
                     .vector_bytes
                     .checked_add(vector.len() * 4)
                     .ok_or_else(|| error("vector overflow"))?;
-                if state.vector_bytes > MAX_VECTOR_BYTES {
+                if state.vector_bytes > self.limits.max_vector_bytes {
                     return Err(error("whole-preview vector bytes"));
                 }
                 state.staged.insert(key.clone());
@@ -684,7 +741,7 @@ impl CachedProvider<'_> {
                     .and_then(|b| n.checked_add(b))
             })
             .ok_or_else(|| error("output byte overflow"))?;
-        if output_bytes > MAX_VECTOR_BYTES {
+        if output_bytes > self.limits.max_vector_bytes {
             return Err(error("returned vector byte limit"));
         }
         state.stats.returned_vector_bytes = output_bytes;
