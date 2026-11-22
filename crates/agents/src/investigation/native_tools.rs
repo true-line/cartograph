@@ -259,7 +259,8 @@ pub fn action_from_tool_call(
 /// Read-before-finish (AC-1421, D3 of #1382). A supported finish needs at
 /// least one admitted evidence read, and every citation it names must have
 /// been acquired in this run. An insufficient-evidence finish needs at least
-/// one admitted query, so a run cannot give up before looking.
+/// one admitted query, so a run cannot give up before looking; reading the
+/// coverage inventory alone does not count.
 pub fn read_before_finish(
     ledger: &InvestigationInputLedger,
     finish_arguments: &Value,
@@ -269,7 +270,7 @@ pub fn read_before_finish(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     if findings.is_empty() {
-        if ledger.queries.is_empty() && ledger.coverage_reads.is_empty() {
+        if ledger.queries.is_empty() {
             return Err(ToolRefusal::new(
                 "read_before_finish",
                 "Run query_context before reporting insufficient evidence.",
