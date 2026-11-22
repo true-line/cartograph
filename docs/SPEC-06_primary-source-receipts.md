@@ -320,6 +320,22 @@ none, and with a capture the reader parses only those retained bytes: a
 pipeline file created after capture is not read. Preflight's unreadable-pipeline
 finding still reads the checkout, and pipeline facts carry no receipt.
 
+## Captured environment reads (AC-1059, #385)
+
+The environment reader's selection (`environments::is_environment_file`:
+Compose, kustomize, Helm, Kubernetes-candidate YAML and settings files)
+joins the lanes' capture for every layer selection when the whole set fits;
+otherwise the lanes are retained without it, so it never costs a lane its
+capture. The capture records whether that selection was listed and retained
+(`environments_captured`); when it was, the reader reads only the retained
+bytes, and the checkout is listed only for its directories and other files: a
+selected file absent from the capture is not among the files read, and a
+captured file the checkout no longer lists still is. Otherwise, and with no
+capture, the reader reads the checkout. Env files are never retained,
+because they hold secrets (AC-0097); the reader checks in the checkout only
+that one is readable. Preflight's unread-manifest findings still read the
+checkout, and environment facts carry no receipt.
+
 ## Directory-built lane facts (AC-1037, #385)
 
 The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each

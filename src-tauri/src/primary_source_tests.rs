@@ -3466,6 +3466,51 @@ fn the_selection_walk_follows_the_projects_capture_and_entry_limits() {
     assert_eq!(input.capture.as_ref().unwrap().manifest().files.len(), 2);
 }
 
+// AC-1059: when the environment selection does not fit beside the lanes,
+// the lanes keep their capture without it and the environment reader reads
+// the checkout.
+#[test]
+fn an_environment_selection_that_does_not_fit_never_costs_the_lanes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "local");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("app.py"), "print('app')\n").unwrap();
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx\n",
+    )
+    .unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits {
+                max_files: 2,
+                ..source_capture::CaptureLimits::default()
+            },
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+        )
+        .unwrap();
+    assert!(!input.environments_captured);
+    let paths: Vec<_> = input
+        .capture
+        .as_ref()
+        .unwrap()
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["app.py", "source.ts"]);
+}
+
 // AC-1057: a source's workflows and Dockerfiles join its capture, and the
 // pipeline reader parses the retained bytes, not the checkout.
 #[test]
@@ -3578,6 +3623,89 @@ fn a_capture_without_pipelines_never_reads_the_checkouts() {
         !extraction.nodes.iter().any(|node| node.label == "Pipeline"),
         "a Dockerfile outside the capture was read"
     );
+}
+
+// AC-1059: the environment reader's selection joins the capture, and with
+// the capture the reader reads the retained bytes: a Compose file edited or
+// created in the checkout afterwards changes nothing. Without the flag that
+// says the selection was retained, the checkout is read.
+#[test]
+fn environments_are_read_from_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx:1.27\n",
+    )
+    .unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.environments_captured);
+    let capture = input.capture.as_ref().unwrap();
+    assert!(
+        capture
+            .manifest()
+            .files
+            .iter()
+            .any(|entry| entry.path == "compose.yaml")
+    );
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: busybox:1\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("late")).unwrap();
+    std::fs::write(
+        root.join("late/compose.yaml"),
+        "services:\n  late:\n    image: late:1\n",
+    )
+    .unwrap();
+    let extract = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                environments_captured: captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0
+    };
+    let images = |extraction: &adapters_lang_ts::Extraction| -> Vec<String> {
+        extraction
+            .nodes
+            .iter()
+            .filter(|node| node.label == "Workload")
+            .filter_map(|node| node.props["image"].as_str().map(str::to_string))
+            .collect()
+    };
+    assert_eq!(images(&extract(true)), ["nginx:1.27"]);
+    let mut checkout = images(&extract(false));
+    checkout.sort();
+    assert_eq!(checkout, ["busybox:1", "late:1"]);
 }
 
 // AC-1055: the Python observed-infrastructure pass reads the same captured

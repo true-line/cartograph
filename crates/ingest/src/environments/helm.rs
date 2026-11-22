@@ -256,6 +256,20 @@ pub(super) struct Helmfile {
 }
 
 /// A helmfile, or why it yields no `Environment`.
+/// The repository paths the helmfile at `rel` names as values files, in
+/// the order its releases name them.
+pub(super) fn named_values(rel: &str, text: &str) -> Vec<String> {
+    let Ok(helmfile) = helmfile(text) else {
+        return Vec::new();
+    };
+    helmfile
+        .releases
+        .iter()
+        .flat_map(|release| release.values.iter())
+        .filter_map(|(path, _)| normalise(dir_of(rel), path))
+        .collect()
+}
+
 pub(super) fn helmfile(text: &str) -> Result<Helmfile, (&'static str, Span)> {
     let whole = (0, text.len() as u64);
     if text.contains("{{") {
@@ -415,7 +429,7 @@ pub(super) enum ChartTarget {
 }
 
 impl<'a> Index<'a> {
-    pub(super) fn read(walked: &'a [WalkedFile]) -> Self {
+    pub(super) fn read(walked: &'a [WalkedFile], src: &super::Source) -> Self {
         let mut index = Self {
             files: walked
                 .iter()
@@ -428,14 +442,11 @@ impl<'a> Index<'a> {
             if !HELMFILE_NAMES.contains(&file.name.as_str()) {
                 continue;
             }
-            let parsed = match std::fs::read_to_string(&file.path) {
+            let parsed = match src.text(&file.rel) {
                 Ok(text) => helmfile(&text),
                 Err(_) => Err((
                     "the file is not readable UTF-8 text",
-                    (
-                        0,
-                        std::fs::metadata(&file.path).map_or(0, |meta| meta.len()),
-                    ),
+                    (0, src.len_or_zero(&file.rel)),
                 )),
             };
             if let Ok(helmfile) = &parsed {

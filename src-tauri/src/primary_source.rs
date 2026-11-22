@@ -2047,6 +2047,7 @@ impl PrimarySourceStore {
             return Ok(PrimaryInput {
                 capture: None,
                 unfollowed: Vec::new(),
+                environments_captured: false,
                 _guard: None,
             });
         }
@@ -2109,16 +2110,26 @@ impl PrimarySourceStore {
         })?);
         base.sort();
         base.dedup();
-        let combined = (!lanes.is_empty())
-            .then(|| {
-                let mut paths = base.clone();
-                paths.extend(lanes);
-                paths.sort();
-                paths.dedup();
-                capture_paths(&paths).ok()
-            })
-            .flatten();
-        let capture = match combined {
+        let with = |extra: &[String]| {
+            let mut paths = base.clone();
+            paths.extend(lanes.iter().chain(extra).cloned());
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        // The environment reader's selection (AC-1059), read for every layer
+        // selection, is tried with the lanes first. When the whole set cannot
+        // be retained, the lanes are retained without it and the reader reads
+        // the checkout, so it never costs a lane its capture.
+        let environments = ingest::environments::environment_paths(root).ok();
+        let mut capture = environments
+            .as_ref()
+            .and_then(|paths| capture_paths(&with(paths)).ok());
+        let environments_captured = capture.is_some();
+        if capture.is_none() && !lanes.is_empty() {
+            capture = capture_paths(&with(&[])).ok();
+        }
+        let capture = match capture {
             Some(capture) => capture,
             None => capture_paths(&base).map_err(|_| match commit {
                 Some(_) => "Selected TS/JS source could not be read from the cloned commit's Git objects within the capture limits; recovery was not published.".to_string(),
@@ -2128,6 +2139,7 @@ impl PrimarySourceStore {
         Ok(PrimaryInput {
             capture: Some(capture),
             unfollowed: selection.unfollowed,
+            environments_captured,
             _guard: Some(guard),
         })
     }
@@ -2270,6 +2282,9 @@ pub struct PrimaryInput {
     pub capture: Option<Capture>,
     /// Symlinks the capture did not follow, reported in coverage (#1229).
     pub unfollowed: Vec<String>,
+    /// Whether the capture holds the environment reader's whole selection
+    /// (AC-1059); when it does not, that reader reads the checkout.
+    pub environments_captured: bool,
     _guard: Option<RetentionGuard>,
 }
 
