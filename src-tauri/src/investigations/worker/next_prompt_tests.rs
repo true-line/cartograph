@@ -268,11 +268,15 @@ struct NextProvider {
     metadata_order: Option<[bool; 2]>,
     metadata_query: Option<Value>,
     repeat_metadata_query: bool,
+    /// Each repeat asks one more fact, so no two queries are identical.
+    vary_repeated_query: bool,
     duplicate_metadata_recovery: bool,
     duplicate_inventory: bool,
     replay_metadata_query: bool,
     ignore_duplicate_finish: bool,
     query_refusal_recovery: bool,
+    /// Call 2 resends the exact query answered at call 1.
+    repeat_after_inventory: bool,
     received_payloads: std::sync::Mutex<Vec<llm::CompletionPayload>>,
     inventory_max_bytes: usize,
     lose_metadata_ack: bool,
@@ -298,11 +302,13 @@ impl NextProvider {
             metadata_order: None,
             metadata_query: None,
             repeat_metadata_query: false,
+            vary_repeated_query: false,
             duplicate_metadata_recovery: false,
             duplicate_inventory: false,
             replay_metadata_query: false,
             ignore_duplicate_finish: false,
             query_refusal_recovery: false,
+            repeat_after_inventory: false,
             received_payloads: std::sync::Mutex::new(Vec::new()),
             inventory_max_bytes: 32768,
             lose_metadata_ack: false,
@@ -654,6 +660,12 @@ impl LlmProvider for NextProvider {
                     "type":"finish","findings":findings,
                     "knowledge_completeness":"partial","limitations":if audit { json!(["This review leaves broader behavior unresolved."]) } else { json!(["No complete business policy was established."]) }}}).to_string()
             }
+        } else if self.repeat_after_inventory && call == 2 {
+            let prompts = self.observed.prompts.lock().unwrap();
+            let prompt = prompts.last().unwrap();
+            json!({"type":"query_context","context_id":prompt["context_id"],
+                "query":self.metadata_query.clone().unwrap()})
+            .to_string()
         } else if self.query_refusal_recovery && call == 2 {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
@@ -705,12 +717,17 @@ impl LlmProvider for NextProvider {
         } else if self.repeat_metadata_query {
             let prompts = self.observed.prompts.lock().unwrap();
             let prompt = prompts.last().unwrap();
-            json!({"type":"query_context","context_id":prompt["context_id"],
-            "query":self.metadata_query.clone().unwrap_or_else(|| json!({
-                "scope":{"type":"all"},"kind":null,"labels":[],
-                "max_facts":12,"max_bytes":16384,"cursor":null
-            }))})
-            .to_string()
+            let mut query = self.metadata_query.clone().unwrap_or_else(|| {
+                json!({
+                    "scope":{"type":"all"},"kind":null,"labels":[],
+                    "max_facts":12,"max_bytes":16384,"cursor":null
+                })
+            });
+            if self.vary_repeated_query {
+                query["max_facts"] = json!(12 + call);
+            }
+            json!({"type":"query_context","context_id":prompt["context_id"],"query":query})
+                .to_string()
         } else if let Some(order) = self
             .metadata_order
             .filter(|_| call < if self.malformed { 1 } else { 2 })
@@ -2149,6 +2166,7 @@ fn next_prompt_preparation_phases_preserve_failures() {
 fn next_prompt_host_limit_phase_and_query_budget_refusal_are_durable() {
     let mut scripted = NextProvider::new(false);
     scripted.repeat_metadata_query = true;
+    scripted.vary_repeated_query = true;
     scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
         "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
     let provider = Arc::new(scripted);
@@ -2202,6 +2220,78 @@ fn next_prompt_host_limit_phase_and_query_budget_refusal_are_durable() {
     );
     drop(jobs);
 
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+}
+
+// AC-1412 (#1352): an exact repeat of an answered query adds nothing. A
+// model without closed action feedback stops before spending the remaining
+// query bytes on the same page.
+#[test]
+fn next_prompt_exact_repeated_query_stops_with_repeated_query_limit() {
+    let mut scripted = NextProvider::new(false);
+    scripted.repeat_metadata_query = true;
+    scripted.metadata_query = Some(json!({"scope":{"type":"all"},"kind":null,
+        "labels":[],"max_facts":12,"max_bytes":16384,"cursor":null}));
+    let provider = Arc::new(scripted);
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV15);
+    f.run(provider.clone());
+
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.error.as_deref(),
+        Some(
+            "Investigation limit reached: host_limit; phase=metadata_query; limit=repeated_query."
+        )
+    );
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 2);
+    let ledger = jobs.investigation_ledger(&f.id).unwrap().unwrap();
+    assert_eq!(ledger.queries.len(), 1);
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    assert_eq!(
+        events.items.last().unwrap().summary,
+        detail.error.clone().unwrap()
+    );
+    drop(jobs);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
+    assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+}
+
+// AC-1412 (#1352): @18 has closed action feedback, so an exact repeat is
+// refused as repeated_read and the model continues without a second page.
+#[test]
+fn desktop_v18_exact_repeated_query_is_refused_and_recovers() {
+    let mut scripted = NextProvider::new(false);
+    scripted.metadata_order = Some([false, true]);
+    scripted.repeat_after_inventory = true;
+    scripted.metadata_query = Some(json!({
+        "scope":{"type":"all"},"kind":"node","labels":["BusinessRule"],
+        "max_facts":1,"max_bytes":32768,"cursor":null
+    }));
+    let provider = Arc::new(scripted);
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV18);
+    f.run(provider.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(provider.observed.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert!(detail.error.is_none());
+    let ledger = jobs.investigation_ledger(&f.id).unwrap().unwrap();
+    assert_eq!(ledger.queries.len(), 1);
+    let prompts = provider.observed.prompts.lock().unwrap();
+    assert_eq!(
+        prompts[3]["turn_progress"]["action_feedback"]["reason"],
+        "repeated_read"
+    );
+    drop(prompts);
+    let events = jobs.investigation_events(&f.id, 0).unwrap();
+    drop(jobs);
     let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
     assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
     assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
