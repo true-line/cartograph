@@ -13,12 +13,87 @@
 // a test that was selected and did not run (or one that ran unselected) fails
 // the shard instead of passing silently.
 //
-// Usage: rust-test-shard.mjs <index>/<count> -- <cargo test target arguments>
-//   e.g. rust-test-shard.mjs 2/4 -- -p app --bin app
+// Usage: rust-test-shard.mjs <index>/<count> [--group <name>] -- <cargo test target arguments>
+//   e.g. rust-test-shard.mjs 2/4 --group core -- -p app --bin app
+//
+// With --group, the app binary is built with APP_TEST_GROUP=<name>, which
+// leaves the other group's test modules out (src-tauri/build.rs), and the
+// shard runs only the tests app-test-groups.json assigns to that group. A
+// test the file assigns to no group fails every shard. Each shard writes the
+// tests its binary listed and the ones it selected to SHARD_LIST_FILE; the
+// coverage job (--verify-coverage) checks that every test listed by any
+// group's build ran in exactly one shard.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// Test groups of the app binary (#1924): each group's shards build only its
+// tests. A test belongs to the group with the longest matching name prefix.
+export const GROUPS_PATH = fileURLToPath(new URL('./app-test-groups.json', import.meta.url));
+
+export function loadGroups(file = GROUPS_PATH) {
+  const { groups } = JSON.parse(readFileSync(file, 'utf8'));
+  const owners = new Map();
+  for (const [name, { shards, prefixes }] of Object.entries(groups)) {
+    if (!/^[a-z]+$/u.test(name)) throw new Error(`group name ${JSON.stringify(name)} is not lowercase letters`);
+    if (!Number.isInteger(shards) || shards < 1) throw new Error(`group ${name} needs a positive shard count`);
+    if (!Array.isArray(prefixes) || prefixes.length === 0) throw new Error(`group ${name} lists no prefixes`);
+    for (const prefix of prefixes) {
+      if (!prefix.endsWith('::')) throw new Error(`prefix ${JSON.stringify(prefix)} must end with ::`);
+      if (owners.has(prefix)) throw new Error(`prefix ${prefix} is in groups ${owners.get(prefix)} and ${name}`);
+      owners.set(prefix, name);
+    }
+  }
+  return groups;
+}
+
+// The group of each name; throws on a name no prefix covers.
+export function groupOf(names, groups) {
+  const prefixes = Object.entries(groups)
+    .flatMap(([group, { prefixes: list }]) => list.map((prefix) => ({ prefix, group })))
+    .sort((a, b) => b.prefix.length - a.prefix.length);
+  const unassigned = [];
+  const result = new Map();
+  for (const name of names) {
+    const match = prefixes.find(({ prefix }) => name.startsWith(prefix));
+    if (match) result.set(name, match.group);
+    else unassigned.push(name);
+  }
+  if (unassigned.length > 0) {
+    throw new Error(
+      `${unassigned.length} tests are not assigned to a group in scripts/app-test-groups.json, e.g. ${unassigned.slice(0, 5).join(', ')}`,
+    );
+  }
+  return result;
+}
+
+// Shard list files ({group, shard, listed, selected}) from every shard of one
+// run: every test any group's build listed ran in exactly one shard, and each
+// group's shards are all present.
+export function verifyCoverage(files, groups) {
+  const problems = [];
+  const listed = new Set();
+  const ran = new Map();
+  const seen = new Map();
+  for (const { group, shard, listed: names, selected } of files) {
+    if (!(group in groups)) problems.push(`shard file for unknown group ${group}`);
+    seen.set(group, [...(seen.get(group) ?? []), shard]);
+    for (const name of names) listed.add(name);
+    for (const name of selected) ran.set(name, [...(ran.get(name) ?? []), `${group} ${shard}`]);
+  }
+  for (const [group, { shards }] of Object.entries(groups)) {
+    const got = (seen.get(group) ?? []).sort().join(',');
+    const want = Array.from({ length: shards }, (_, index) => `${index + 1}/${shards}`).sort().join(',');
+    if (got !== want) problems.push(`group ${group} reported shards [${got}], expected [${want}]`);
+  }
+  for (const name of [...listed].sort()) {
+    const where = ran.get(name) ?? [];
+    if (where.length !== 1) problems.push(`${name} ran in ${where.length} shards${where.length ? ` (${where.join(', ')})` : ''}`);
+  }
+  for (const name of ran.keys()) if (!listed.has(name)) problems.push(`${name} ran but no build listed it`);
+  return problems;
+}
 
 export function parseShard(text) {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/u.exec(text ?? '');
@@ -124,9 +199,10 @@ export function verifyRun(selected, output, status) {
   return null;
 }
 
-function list(cargoArguments) {
+function list(cargoArguments, env) {
   const listed = spawnSync('cargo', ['test', ...cargoArguments, '--', '--list', '--format', 'terse'], {
     encoding: 'utf8',
+    env,
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -150,9 +226,10 @@ export function parseExecutable(messages) {
   return found[0];
 }
 
-function executable(cargoArguments) {
+function executable(cargoArguments, env) {
   const built = spawnSync('cargo', ['test', ...cargoArguments, '--no-run', '--message-format=json'], {
     encoding: 'utf8',
+    env,
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -189,22 +266,56 @@ async function main(argv) {
     process.stdout.write(weightsFromTimes(argv.slice(1).map((file) => JSON.parse(readFileSync(file, 'utf8')))));
     return;
   }
+  if (argv[0] === '--verify-coverage' && argv.length >= 2) {
+    const files = argv.slice(1).map((file) => JSON.parse(readFileSync(file, 'utf8')));
+    const problems = verifyCoverage(files, loadGroups());
+    if (problems.length > 0) throw new Error(`app test coverage:\n${problems.join('\n')}`);
+    const total = new Set(files.flatMap(({ listed }) => listed)).size;
+    console.log(`app test coverage: ${total} tests, each ran in exactly one of ${files.length} shards`);
+    return;
+  }
   const separator = argv.indexOf('--');
-  if (separator !== 1 || argv.length < 3) {
-    throw new Error('usage: rust-test-shard.mjs <index>/<count> -- <cargo test target arguments>');
+  const options = argv.slice(1, separator);
+  const grouped = options.length === 2 && options[0] === '--group';
+  if (separator < 1 || argv.length < separator + 2 || !(options.length === 0 || grouped)) {
+    throw new Error('usage: rust-test-shard.mjs <index>/<count> [--group <name>] -- <cargo test target arguments>');
   }
   const shard = parseShard(argv[0]);
   const cargoArguments = argv.slice(separator + 1);
-  const names = list(cargoArguments);
+  const env = { ...process.env };
+  let names;
+  let label = `shard ${shard.index}/${shard.count}`;
+  if (grouped) {
+    const group = options[1];
+    const groups = loadGroups();
+    if (!(group in groups)) throw new Error(`unknown test group ${group}`);
+    if (groups[group].shards !== shard.count) {
+      throw new Error(`group ${group} has ${groups[group].shards} shards, not ${shard.count}`);
+    }
+    env.APP_TEST_GROUP = group;
+    label = `${group} ${label}`;
+    const listed = list(cargoArguments, env);
+    const owners = groupOf(listed, groups);
+    names = listed.filter((name) => owners.get(name) === group);
+    if (process.env.SHARD_LIST_FILE) {
+      const selected = selectShard(names, shard, loadWeights());
+      writeFileSync(
+        process.env.SHARD_LIST_FILE,
+        `${JSON.stringify({ group, shard: `${shard.index}/${shard.count}`, listed, selected }, null, 2)}\n`,
+      );
+    }
+  } else {
+    names = list(cargoArguments, env);
+  }
   const selected = selectShard(names, shard, loadWeights());
-  if (selected.length === 0) throw new Error(`shard ${shard.index}/${shard.count} selects no test of ${names.length}`);
-  console.log(`shard ${shard.index}/${shard.count}: ${selected.length} of ${names.length} tests`);
-  const { output, status } = await run(executable(cargoArguments), selected);
+  if (selected.length === 0) throw new Error(`${label} selects no test of ${names.length}`);
+  console.log(`${label}: ${selected.length} of ${names.length} tests`);
+  const { output, status } = await run(executable(cargoArguments, env), selected);
   if (process.env.SHARD_TIMES_FILE) {
     writeFileSync(process.env.SHARD_TIMES_FILE, `${JSON.stringify(parseTimes(output), null, 2)}\n`);
   }
   const problem = verifyRun(selected, output, status);
-  if (problem) throw new Error(`shard ${shard.index}/${shard.count}: ${problem}`);
+  if (problem) throw new Error(`${label}: ${problem}`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
