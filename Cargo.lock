@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "adapters-artifact-jvm"
+version = "0.75.0"
+dependencies = [
+ "core-graph",
+ "core-prov",
+ "serde_json",
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "adapters-fw"
 version = "0.75.0"
 dependencies = [

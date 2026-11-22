@@ -76,6 +76,7 @@ adapters-lang-go = { path = "crates/adapters-lang-go" }
 adapters-lang-rust = { path = "crates/adapters-lang-rust" }
 adapters-lang-java = { path = "crates/adapters-lang-java" }
 adapters-lang-kotlin = { path = "crates/adapters-lang-kotlin" }
+adapters-artifact-jvm = { path = "crates/adapters-artifact-jvm" }
 dynamic = { path = "crates/dynamic" }
 events = { path = "crates/events" }
 flowtracer = { path = "crates/flowtracer" }
