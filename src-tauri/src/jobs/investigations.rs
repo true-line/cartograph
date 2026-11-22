@@ -71,6 +71,7 @@ pub(crate) use source_settlement::snapshot_workspace::{
 pub(crate) use source_settlement::writer_workspace::workspace as source_settlement_workspace;
 #[path = "investigations/source_validation.rs"]
 mod source_validation;
+pub(crate) use completion::read_refusals::ReadDecider;
 pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
 #[cfg(test)]
 pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};

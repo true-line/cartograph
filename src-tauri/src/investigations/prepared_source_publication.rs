@@ -127,13 +127,16 @@ impl RetainedOutcome {
     ) -> Result<PublishedSourceContinuation, SourcePublicationFailure> {
         let result = self.prepare_and_commit(context, state, execution, clock, input);
         match result {
-            Ok(published) => {
+            Ok((published, refused)) => {
                 if let Self::Acquired(candidate) = self {
                     let PreparedSourceCandidate {
                         ledger, evidence, ..
                     } = *candidate;
                     // Capacity was reserved before entering the transaction;
                     // these are moves, with no fallible work after acknowledgement.
+                    if refused {
+                        context.withheld.insert(evidence.id.clone());
+                    }
                     context.evidence.push(evidence);
                     context.ledger = ledger;
                 }
@@ -152,8 +155,39 @@ impl RetainedOutcome {
         execution: &JobExecution,
         clock: &RunClock,
         input: &SourcePublicationInput<'_>,
-    ) -> Result<PublishedSourceContinuation, SourcePublicationError> {
+    ) -> Result<(PublishedSourceContinuation, bool), SourcePublicationError> {
         self.validate(context, state)?;
+        // #679: the firewall decides the acquired representation toward this
+        // provider. A refused read is withheld from the next prompt, and its
+        // witness, bound to the real acquired attempt id, settles with it.
+        let acquired = match self {
+            Self::Acquired(candidate) => Some((
+                llm::read_deny::ReadIdentity {
+                    repo: candidate.evidence.source.repo.clone(),
+                    path: candidate.evidence.source.path.clone(),
+                    commit_sha: candidate.evidence.source.commit_sha.clone(),
+                    byte_start: candidate.evidence.source.byte_start,
+                    byte_end: candidate.evidence.source.byte_end,
+                },
+                candidate.evidence.text.as_bytes(),
+                candidate.evidence.id.clone(),
+            )),
+            Self::Unavailable(_) => None,
+        };
+        let decide = |attempt_id: &str| match &acquired {
+            Some((read, text, _)) => {
+                input
+                    .firewall
+                    .evaluate_read(input.provider, attempt_id, read, text)
+            }
+            None => llm::read_deny::ReadDecision::Allowed,
+        };
+        // The decision depends on the provider and path only; the attempt id
+        // binds the witness the settlement derives in its own transaction.
+        let refused =
+            acquired.is_some() && matches!(decide(""), llm::read_deny::ReadDecision::Refused(_));
+        let refusal: Option<crate::jobs::investigations::ReadDecider<'_>> =
+            acquired.is_some().then_some(&decide as _);
         clock.deadline()?;
         let receipt = self
             .prepared()
@@ -172,6 +206,7 @@ impl RetainedOutcome {
                 candidate_ledger: self.ledger(context),
                 outcome: self.outcome(),
                 active_milliseconds: active,
+                refusal,
             })?;
         if snapshot.base_ledger() != &context.ledger || input.current.ledger() != &context.ledger {
             return Err(HostError::InputChanged.into());
@@ -236,12 +271,16 @@ impl RetainedOutcome {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let candidate = InvestigationInput::prepare_v9_with_policy(
+        let mut withheld = context.withheld.clone();
+        if refused && let Some((_, _, id)) = &acquired {
+            withheld.insert(id.clone());
+        }
+        let candidate = InvestigationInput::prepare_v9_withholding_with_policy(
             &snapshot.request().question,
             snapshot.detail().summary.specialist_id,
             snapshot.ledger().clone(),
             &pages,
-            &evidence,
+            &crate::investigations::context::supplied(&evidence, &withheld),
             input.supplied_history,
             &snapshot.detail().usage,
             snapshot.basis(),
@@ -252,6 +291,7 @@ impl RetainedOutcome {
             snapshot.capacity_refusal_count(),
             snapshot.capacity_feedback(),
             &context.policy,
+            &withheld,
         )
         .map_err(|error| {
             if error == InvestigationError::LimitExceeded {
@@ -354,6 +394,7 @@ impl RetainedOutcome {
                     candidate: &candidate,
                     candidate_prepared: &prepared,
                     proof: input.proof,
+                    refusal,
                 },
                 self.outcome(),
                 active,
@@ -374,13 +415,16 @@ impl RetainedOutcome {
             return Err(error.into());
         }
         let detail = result?;
-        Ok(PublishedSourceContinuation {
-            detail,
-            #[cfg(test)]
-            input: candidate,
-            #[cfg(test)]
-            prepared,
-        })
+        Ok((
+            PublishedSourceContinuation {
+                detail,
+                #[cfg(test)]
+                input: candidate,
+                #[cfg(test)]
+                prepared,
+            },
+            refused,
+        ))
     }
 }
 impl PreparedSourceCandidate {
