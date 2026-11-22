@@ -84,7 +84,7 @@ pub struct GraphMetrics {
 ///
 /// Production reads the graph packed through [`compute_packed`]; this decoded
 /// form is the reference the packed one must equal.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn compute(
     nodes: &[Node],
     edges: &[Edge],
@@ -428,7 +428,7 @@ impl MetricsStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     use serde_json::json;
