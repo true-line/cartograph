@@ -1884,6 +1884,21 @@ fn attested_parses_are_reused_only_for_unchanged_bytes_and_equal_a_cold_walk() {
     let (_, _, stats) = walk(&fewer, later_commit, &mut cache);
     assert_eq!(counts(&stats), (0, 2, 1));
     assert_eq!(cache.len(), 2);
+
+    // A walk whose directory completion fails, here because its live
+    // configuration root cannot be read, leaves no cached parse.
+    assert!(
+        extract_captured_dir_packed_cached(
+            &directory.path().join("missing"),
+            &at(later_commit),
+            &fewer,
+            Registries::builtin(),
+            &mut cache,
+            &mut |_| {},
+        )
+        .is_err()
+    );
+    assert!(cache.is_empty());
 }
 
 // AC-1517: an attestation names everything the parse read; any difference

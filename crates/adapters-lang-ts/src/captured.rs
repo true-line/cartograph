@@ -1094,9 +1094,6 @@ fn extract_captured_dir_packed_with_policy(
         },
     )?;
     drop(previous);
-    if let Some(cache) = cache {
-        cache.files = next;
-    }
     super::complete_directory(&mut extraction, &mut store, root, id)?;
     let matching = packed_matcher(&store);
     receipts.retain(|receipt| matching(receipt));
@@ -1147,6 +1144,10 @@ fn extract_captured_dir_packed_with_policy(
         }
     }
     drop(matching);
+    // Installed only once every fallible step has succeeded.
+    if let Some(cache) = cache {
+        cache.files = next;
+    }
     Ok((extraction, store, receipts, stats))
 }
 
