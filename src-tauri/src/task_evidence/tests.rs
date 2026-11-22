@@ -222,9 +222,9 @@ pub(super) fn replace_current_receipts(
     assert_eq!(graph.read_snapshot().unwrap(), expected);
 }
 
-struct RecordingProvider {
-    response: String,
-    seen: Mutex<Vec<llm::PayloadSpan>>,
+pub(super) struct RecordingProvider {
+    pub(super) response: String,
+    pub(super) seen: Mutex<Vec<llm::PayloadSpan>>,
 }
 
 impl llm::LlmProvider for RecordingProvider {

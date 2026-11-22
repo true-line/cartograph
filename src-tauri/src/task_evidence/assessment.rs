@@ -163,11 +163,11 @@ pub(crate) fn assess(state: &AppState, proposal_id: &str) -> Result<BasisAssessm
 #[derive(Default)]
 pub(crate) struct SharedObservation(Option<Observation>);
 
-struct Observation {
+pub(super) struct Observation {
     /// The complete graph and its store revision, with no selection kept.
-    rows: core_graph::source::SourceSelectionSnapshot,
+    pub(super) rows: core_graph::source::SourceSelectionSnapshot,
     /// `ContextSnapshot::id` of `rows.graph`. `Err` when it has none.
-    identity: Result<String, ()>,
+    pub(super) identity: Result<String, ()>,
 }
 
 #[cfg(test)]
@@ -185,7 +185,7 @@ impl SharedObservation {
     /// The observation the store is at now and the source-selection states
     /// of `keys` in it. The graph lock is held for the store read alone and
     /// not while the identity is computed. `Err` when the store read failed.
-    fn observe(
+    pub(super) fn observe(
         &mut self,
         state: &AppState,
         keys: &[core_graph::source::FactKey],

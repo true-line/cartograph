@@ -369,6 +369,25 @@ impl PrimarySourceStore {
             .read_text_span(&range.captured)
             .map_err(capture_error)
     }
+    /// [`Self::task_text`] without decoding: the exact retained span bytes,
+    /// for comparisons that must tell strict UTF-8 from lossy text (ADR-0072).
+    pub fn task_bytes(
+        &self,
+        guard: &RetentionGuard,
+        receipt: &Receipt,
+        range_index: usize,
+    ) -> Result<Vec<u8>, PinnedReadError> {
+        self.validate_task_guard(guard, receipt.source_id().as_str())?;
+        let range = receipt
+            .ranges()
+            .get(range_index)
+            .ok_or(PinnedReadError::Invalid)?;
+        self.captures
+            .lock()
+            .map_err(|_| PinnedReadError::Operational)?
+            .read_span(&range.captured)
+            .map_err(capture_error)
+    }
     /// MCP callers pass the admitted host file-validation and returned-span
     /// maxima; the capture store also enforces its own hard/stored ceilings.
     /// Ordinary task_text intentionally keeps its existing capture-store policy

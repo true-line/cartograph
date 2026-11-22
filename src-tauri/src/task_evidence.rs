@@ -20,6 +20,7 @@ use crate::sources::RegisteredSource;
 
 pub(crate) mod assessment;
 mod planning;
+pub(crate) mod reconcile;
 
 use planning::{MAX_CANDIDATES, MAX_REQUESTS, TaskPlan};
 
