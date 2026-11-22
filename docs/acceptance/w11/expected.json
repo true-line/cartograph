@@ -48,6 +48,7 @@
       "kind": "client_call",
       "name": "Load alias options",
       "endpoint": "GET /api/v5/alias/options",
+      "endpoint_any": ["GET /api/v5/alias/options", "GET /api/v4/alias/options"],
       "inputs": ["Authentication header", "hostname query (optional, recommended)"],
       "statement": "The main screen loads can_create, the suffixes with their signed_suffix, a prefix_suggestion from the hostname and an optional recommendation of an alias already used on that site.",
       "label": "documented intent",
