@@ -138,7 +138,7 @@ fn investigation_metadata_source_replay_can_finish_once_with_fixed_feedback() {
         result.findings[0].statement,
         "The recorded graph metadata supports this limited observation."
     );
-    let events = super::acceptance::ordered_events(&jobs, &fixture.id);
+    let events = super::ordered_events(&jobs, &fixture.id);
     assert_eq!(
         events
             .iter()
@@ -237,7 +237,7 @@ fn investigation_source_replay_cancellation_race_retains_refusal_and_measured_us
         assert_eq!(detail.usage.reported_output_tokens, Some(80));
         // AC-0418: cancellation retains both real reports, including refused finish.
         assert_eq!(detail.usage.reported_cache_read_tokens, Some(14));
-        let events = super::acceptance::ordered_events(&jobs, &fixture.id);
+        let events = super::ordered_events(&jobs, &fixture.id);
         let refusals: Vec<_> = events
             .iter()
             .filter(|event| event.kind == InvestigationEventKind::SourceReplayRefused)

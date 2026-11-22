@@ -643,7 +643,7 @@ thread_local! { static TEXT_READS:std::cell::Cell<usize>=const {std::cell::Cell:
 #[cfg(test)]
 thread_local! { static AFTER_CHARGE:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const {std::cell::RefCell::new(None)}; }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "prepared_source_tests.rs"]
 mod tests;
 
