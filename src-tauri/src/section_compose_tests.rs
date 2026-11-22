@@ -165,6 +165,62 @@ fn a_section_is_composed_from_its_compiled_text_and_staged_for_review() {
     );
 }
 
+/// AC-1313 (T-1313): §1.1 Purpose and scope prints no fact of its own; it
+/// is composed from the facts §1.2 and the §1.3 overview print, and staged
+/// (#2319).
+#[test]
+fn purpose_and_scope_is_composed_from_the_sections_it_summarises() {
+    let (_dir, state) = state();
+    let prepared = prepare(&state, "1.0", "D1", "1.1", "system").unwrap();
+    let provider = Scripted {
+        reply: reply(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(composed.left_out, 1);
+    let prompt = provider.prompts.lock().unwrap().remove(0);
+    assert!(prompt.contains("<section>\n## 1.1 Purpose and scope"));
+    assert!(prompt.contains("## 1.3 Capabilities"));
+    assert!(prompt.contains(&format!("{} | Capability | Checkout |", id("cap:checkout"))));
+    assert!(prompt.contains("not a capability-by-capability listing"));
+    let (_, job) = crate::start_job(&state, "section-compose:D1:1.1:system:local").unwrap();
+    let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
+    assert_eq!((outcome.claims, outcome.left_out), (1, 2));
+    assert!(matches!(outcome.outcome, DraftingOutcome::Staged { .. }));
+}
+
+/// AC-1313: the capability areas §1.3 prints are citable facts of the
+/// composition, so §1.1 can cite its main areas (#2319).
+#[test]
+fn the_capability_areas_are_citable_beside_capabilities_and_actors() {
+    let (_dir, state) = crate::area_briefing::tests::state();
+    let compiled = compile(&state, "1.0", "D1", "1.1", "system").unwrap();
+    let areas: Vec<&str> = compiled
+        .derived
+        .iter()
+        .filter_map(|fact| match &fact.item {
+            core_graph::overlay::OverlayItem::Node(node) if node.label == "Subsystem" => {
+                Some(node.id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        areas,
+        ["subsystem:cluster:alias", "subsystem:cluster:mailbox"]
+    );
+    assert_eq!(compiled.overlay.len(), 2);
+}
+
 #[test]
 fn a_composition_is_refused_off_the_system_or_an_area_scope_or_after_the_graph_changed() {
     let (_dir, state) = state();

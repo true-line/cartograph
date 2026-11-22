@@ -130,8 +130,8 @@ pub use workbench::{
 pub use workbench::{
     CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,
     DerivedGroup, SYSTEM_SCOPE, SectionFrame, SectionKind, SectionScopeError, SourceIdentifiers,
-    catalogue_section, catalogue_sections, composition_facts, composition_text, drafted_section,
-    section_citation_set, section_text,
+    catalogue_section, catalogue_sections, composition_facts, composition_source, composition_text,
+    drafted_section, section_citation_set, section_text,
 };
 
 /// Edge labels that appear on the topology map — callers use this to query

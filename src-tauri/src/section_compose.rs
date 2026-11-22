@@ -207,6 +207,10 @@ fn compile(
         .capabilities
         .iter()
         .chain(&read.knowledge.actors)
+        // The areas 1.3 prints, so a summary of them can cite them (#2319).
+        .chain(read.knowledge.subsystems.iter().filter(|fact| {
+            matches!(&fact.item, core_graph::overlay::OverlayItem::Node(node) if node.label == "Subsystem")
+        }))
         .cloned()
         .collect();
     let overlay = Arc::new(
@@ -223,10 +227,10 @@ fn compile(
         spec::ExportMode::BestEffort,
         D1_ARTIFACT_ID,
     )?;
-    let whole =
-        spec::section_text(&artifact.content, &address.section).ok_or("section_not_compiled")?;
-    // An overview section is read up to its per-capability detail (#1991).
-    let (text, _) = spec::composition_text(whole, &address.section);
+    // An overview section is read up to its per-capability detail (#1991);
+    // a summary section reads the sections it summarises (#2319).
+    let text = spec::composition_source(&artifact.content, &address.section)
+        .ok_or("section_not_compiled")?;
     Ok(Compiled {
         address,
         title,

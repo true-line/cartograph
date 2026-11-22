@@ -71,6 +71,13 @@ Reply with the JSON object the response schema describes and nothing else.";
 /// that section needs from it. A section without an entry gets none.
 const GUIDANCE: &[(&str, &str)] = &[
     (
+        "1.1",
+        "State the system's purpose and scope from the sections it summarises: what the \
+         system is for, who uses it, its main capability areas and what lies outside it. \
+         Write a short overview, not a capability-by-capability listing, and never name \
+         a route, callable or file.",
+    ),
+    (
         "1.2",
         "Describe each actor or role by what it is, what it may do and what it may not.",
     ),
