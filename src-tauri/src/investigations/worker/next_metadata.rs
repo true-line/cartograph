@@ -218,12 +218,12 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         let view = context
             .prospective_context(&read)
             .map_err(|error| Failure::from(error).preparation_at(PreparationPhase::Candidate))?;
-        let candidate = InvestigationInput::prepare_v9_with_policy(
+        let candidate = InvestigationInput::prepare_v9_withholding_with_policy(
             &request.question,
             self.detail.summary.specialist_id,
             view.ledger.clone(),
             &view.query_pages,
-            view.evidence,
+            &crate::investigations::context::supplied(view.evidence, &context.withheld),
             history,
             snapshot.usage(),
             snapshot.basis(),
@@ -234,6 +234,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             snapshot.capacity_refusal_count(),
             None, // An accepted acquisition clears only the latest refusal slot.
             policy,
+            &context.withheld,
         );
         let candidate = candidate.and_then(|candidate| snapshot.attach_acquisition(candidate));
         let candidate = match candidate {

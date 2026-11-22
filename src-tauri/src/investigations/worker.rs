@@ -599,23 +599,26 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>();
-                snapshot.attach_acquisition(InvestigationInput::prepare_v9_with_policy(
-                    &snapshot.request().question,
-                    self.detail.summary.specialist_id,
-                    context.ledger.clone(),
-                    &query_pages,
-                    &context.evidence,
-                    &history,
-                    &pre_call_usage,
-                    snapshot.basis(),
-                    snapshot.request(),
-                    snapshot.metadata(),
-                    &inventory_details,
-                    snapshot.preparation_mode()?,
-                    snapshot.capacity_refusal_count(),
-                    snapshot.capacity_feedback(),
-                    policy,
-                )?)?
+                snapshot.attach_acquisition(
+                    InvestigationInput::prepare_v9_withholding_with_policy(
+                        &snapshot.request().question,
+                        self.detail.summary.specialist_id,
+                        context.ledger.clone(),
+                        &query_pages,
+                        &context.supplied_evidence(),
+                        &history,
+                        &pre_call_usage,
+                        snapshot.basis(),
+                        snapshot.request(),
+                        snapshot.metadata(),
+                        &inventory_details,
+                        snapshot.preparation_mode()?,
+                        snapshot.capacity_refusal_count(),
+                        snapshot.capacity_feedback(),
+                        policy,
+                        &context.withheld,
+                    )?,
+                )?
             } else if let Some(completion_request) = completion_request {
                 let snapshot = completion_snapshot
                     .as_ref()
@@ -1560,14 +1563,28 @@ fn acquisition_error(error: Failure) -> HostError {
     }
 }
 fn firewall(state: &AppState) -> Result<EgressFirewall, HostError> {
-    Ok(EgressFirewall::new(
+    let firewall = EgressFirewall::new(
         state
             .settings
             .lock()
             .map_err(|_| HostError::Operational)?
             .egress_policy()
             .map_err(|_| HostError::Operational)?,
-    ))
+    );
+    #[cfg(test)]
+    if let Some(rules) = TEST_READ_DENY_RULES.with(|rules| rules.borrow().clone()) {
+        return Ok(firewall.with_read_deny_rules(
+            llm::read_deny::ReadDenyRules::with_project_rules(rules)
+                .map_err(|_| HostError::InvalidInput)?,
+        ));
+    }
+    Ok(firewall)
+}
+#[cfg(test)]
+thread_local! {
+    /// Test-only project read-deny rules for the worker's firewall (#679).
+    pub(super) static TEST_READ_DENY_RULES: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
 }
 fn read_detail(
     state: &AppState,
