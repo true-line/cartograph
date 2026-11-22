@@ -134,6 +134,13 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
+          # The cut stays ready for review, so its suite runs with no manual
+          # step. A Version packages PR left in draft by the earlier workflow
+          # is made ready here, before an unchanged patch skips the refresh.
+          open_draft=$(gh pr list --head "$BRANCH" --base main --state open --json number,isDraft --jq '.[] | select(.isDraft) | .number')
+          if [ -n "$open_draft" ]; then
+            gh pr ready "$open_draft"
+          fi
           # Skip the force-push when the regenerated release patch is
           # identical to what the open Version packages PR already carries: a
           # force-push always mints a new head SHA, which re-runs a complete
@@ -176,11 +183,6 @@ jobs:
           open=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
           if [ -n "$open" ]; then
             gh pr edit "$open" --body-file "$RUNNER_TEMP/pr-body.md"
-            # The cut stays ready for review: no manual step before its suite
-            # runs. A PR left in draft by an earlier workflow is made ready.
-            if [ "$(gh pr view "$open" --json isDraft --jq .isDraft)" = "true" ]; then
-              gh pr ready "$open"
-            fi
           else
             # Opened ready for review, so the complete suite runs on the cut
             # and on each refresh without anyone marking it ready.
