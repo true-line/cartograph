@@ -1403,7 +1403,19 @@ fn whole_system_pages_are_the_complete_snapshot_pages() {
         ),
     ];
     for (scope, kind, labels) in selections {
-        for max_facts in [1, 2, 5] {
+        // A byte budget that fits about one fact stops a five-fact page early.
+        let one = held
+            .query(QueryRequest {
+                scope: scope.clone(),
+                kind,
+                labels: labels.clone(),
+                max_facts: 1,
+                max_bytes: 32 * 1024,
+                cursor: None,
+            })
+            .unwrap();
+        let tight = context_hub::logical::count(&one).unwrap() + 1;
+        for (max_facts, max_bytes) in [(1, 32 * 1024), (2, 32 * 1024), (5, 32 * 1024), (5, tight)] {
             let mut cursor = None;
             let mut pages = 0;
             loop {
@@ -1412,10 +1424,15 @@ fn whole_system_pages_are_the_complete_snapshot_pages() {
                     kind,
                     labels: labels.clone(),
                     max_facts,
-                    max_bytes: 32 * 1024,
+                    max_bytes,
                     cursor: cursor.clone(),
                 };
-                let expected = held.query(request.clone()).unwrap();
+                let expected = match held.query(request.clone()) {
+                    Ok(expected) => expected,
+                    // A fact larger than the tight budget is refused alike.
+                    Err(_) if max_bytes == tight => break,
+                    Err(error) => panic!("{error}"),
+                };
                 let (page, rows) = match paged::query_at(
                     &fixture.state,
                     &revision,

@@ -185,6 +185,26 @@ pub(super) fn query_at(
                 rows: (Vec::new(), Vec::new()),
             };
             let response = context_hub::query_source(snapshot_id, request, &mut source)?;
-            Ok((response, source.rows))
+            // The byte budget may return fewer facts than were read; keep
+            // only the stored copies of those returned.
+            let returned: BTreeSet<_> = response.facts.iter().map(|f| &f.reference).collect();
+            let (nodes, edges) = source.rows;
+            let rows = (
+                nodes
+                    .into_iter()
+                    .filter(|n| returned.contains(&FactReference::Node { id: n.id.clone() }))
+                    .collect(),
+                edges
+                    .into_iter()
+                    .filter(|e| {
+                        returned.contains(&FactReference::Edge {
+                            source: e.src.clone(),
+                            label: e.label.clone(),
+                            destination: e.dst.clone(),
+                        })
+                    })
+                    .collect(),
+            );
+            Ok((response, rows))
         })
 }
