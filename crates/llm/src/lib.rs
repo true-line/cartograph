@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod debug_log;
 pub mod openai;
 pub mod openai_compatible;
+pub mod read_deny;
 
 use reqwest::Url;
 use reqwest::blocking::{Client, ClientBuilder};
@@ -345,6 +346,7 @@ pub type EgressRecorder = dyn Fn(&str, u64) -> bool + Send + Sync;
 pub struct EgressFirewall {
     policy: EgressPolicy,
     recorder: Option<Box<EgressRecorder>>,
+    read_deny: read_deny::ReadDenyRules,
 }
 
 impl EgressFirewall {
@@ -353,7 +355,35 @@ impl EgressFirewall {
         Self {
             policy,
             recorder: None,
+            read_deny: read_deny::ReadDenyRules::default(),
         }
+    }
+
+    /// Apply these read deny rules: the `egress-read-deny/v1` defaults plus
+    /// the project's own (#679). The defaults always apply.
+    #[must_use]
+    pub fn with_read_deny_rules(mut self, rules: read_deny::ReadDenyRules) -> Self {
+        self.read_deny = rules;
+        self
+    }
+
+    /// Decide whether one acquired read representation may reach `provider`
+    /// (#679, `egress-read-deny/v1`). The provider's own locality decides
+    /// whether the rules apply, so a local provider is always allowed. A
+    /// refusal carries the only constructor of its witness.
+    pub fn evaluate_read(
+        &self,
+        provider: &dyn LlmProvider,
+        acquired_attempt_id: &str,
+        read: &read_deny::ReadIdentity,
+        representation: &[u8],
+    ) -> read_deny::ReadDecision {
+        self.read_deny.evaluate(
+            provider.locality(),
+            acquired_attempt_id,
+            read,
+            representation,
+        )
     }
 
     /// Record every cloud payload `complete` hands to a provider (#1767).
