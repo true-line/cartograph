@@ -649,8 +649,14 @@ impl OllamaProvider {
 
     /// Construct the default local provider.
     pub fn local_default() -> Result<Self, ProviderError> {
+        Self::local_on_port(Self::DEFAULT_PORT)
+    }
+
+    /// The default local provider on the loopback Ollama listening on `port`
+    /// (#1653). Its provider id does not depend on the port.
+    pub fn local_on_port(port: u16) -> Result<Self, ProviderError> {
         Self::with_models(
-            Self::DEFAULT_URL,
+            &Self::loopback_url(port),
             Self::DEFAULT_EMBEDDING_MODEL,
             Self::DEFAULT_COMPLETION_MODEL,
             Duration::from_secs(120),

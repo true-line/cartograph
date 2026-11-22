@@ -6,11 +6,12 @@
 
 use llm::{ConsentGrant, EgressPreview, LlmProvider};
 
-/// The provider for one escalation mode. Local is the pinned catalog SLM;
-/// cloud is the Opus reasoning lane and needs an API key — its absence is
-/// an explicit error, never a silent local fallback.
-pub fn escalation_provider(mode: &str) -> Result<Box<dyn LlmProvider>, String> {
-    escalation_provider_with(mode, crate::provider_credentials::system())
+/// The provider for one escalation mode. Local is the pinned catalog SLM on
+/// the loopback Ollama at `local_port` (#1653); cloud is the Opus reasoning
+/// lane and needs an API key — its absence is an explicit error, never a
+/// silent local fallback.
+pub fn escalation_provider(mode: &str, local_port: u16) -> Result<Box<dyn LlmProvider>, String> {
+    escalation_provider_with(mode, local_port, crate::provider_credentials::system())
 }
 
 /// [`escalation_provider`] over explicit credentials. The key comes from the
@@ -19,11 +20,12 @@ pub fn escalation_provider(mode: &str) -> Result<Box<dyn LlmProvider>, String> {
 /// every cloud step still passes the firewall and its consent.
 fn escalation_provider_with(
     mode: &str,
+    local_port: u16,
     credentials: &crate::provider_credentials::ProviderCredentials,
 ) -> Result<Box<dyn LlmProvider>, String> {
     match mode {
         "local" => Ok(Box::new(
-            llm::OllamaProvider::local_default().map_err(|e| e.to_string())?,
+            llm::OllamaProvider::local_on_port(local_port).map_err(|e| e.to_string())?,
         )),
         "cloud" => {
             let key = credentials
@@ -84,7 +86,7 @@ mod tests {
     #[test]
     fn cloud_without_api_key_fails_closed() {
         let none = crate::provider_credentials::for_test(None);
-        let err = escalation_provider_with("cloud", &none)
+        let err = escalation_provider_with("cloud", llm::OllamaProvider::DEFAULT_PORT, &none)
             .err()
             .expect("missing key rejected");
         assert!(err.contains("ANTHROPIC_API_KEY"));
@@ -101,17 +103,41 @@ mod tests {
         credentials
             .save(ProviderId::Anthropic, "sk-ant-test-0123456789")
             .unwrap();
-        let provider = escalation_provider_with("cloud", &credentials).expect("constructed");
+        let provider =
+            escalation_provider_with("cloud", llm::OllamaProvider::DEFAULT_PORT, &credentials)
+                .expect("constructed");
         assert!(provider.id().starts_with("anthropic"), "{}", provider.id());
         // The constructor makes no request; consent is still required to send.
         assert_eq!(provider.locality(), llm::Locality::Cloud);
         credentials.remove(ProviderId::Anthropic).unwrap();
-        assert!(escalation_provider_with("cloud", &credentials).is_err());
+        assert!(
+            escalation_provider_with("cloud", llm::OllamaProvider::DEFAULT_PORT, &credentials)
+                .is_err()
+        );
+    }
+
+    // AC-1416 / #1653: the local escalation provider reaches the Ollama on
+    // the saved port, and its provider id does not depend on the port.
+    #[test]
+    fn local_escalation_uses_the_saved_port() {
+        let none = crate::provider_credentials::for_test(None);
+        let saved = escalation_provider_with("local", 11500, &none).unwrap();
+        let default =
+            escalation_provider_with("local", llm::OllamaProvider::DEFAULT_PORT, &none).unwrap();
+        assert_eq!(
+            saved.bounded_profile().unwrap().endpoint_id,
+            "http://127.0.0.1:11500/api/chat"
+        );
+        assert_eq!(
+            default.bounded_profile().unwrap().endpoint_id,
+            "http://127.0.0.1:11434/api/chat"
+        );
+        assert_eq!(saved.id(), default.id());
     }
 
     #[test]
     fn unknown_mode_is_rejected() {
-        let err = escalation_provider("quantum")
+        let err = escalation_provider("quantum", llm::OllamaProvider::DEFAULT_PORT)
             .err()
             .expect("unknown mode rejected");
         assert!(err.contains("unknown escalation mode"));
