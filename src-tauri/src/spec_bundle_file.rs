@@ -213,29 +213,65 @@ pub(crate) fn stream_bundle_file(
     stream.finish(&bundle)
 }
 
+/// One bundle compile at a time. A cancelled save panel leaves its compile
+/// running, so the next export's compile waits for it instead of running
+/// alongside it.
+static ONE_COMPILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Start `compile` on a blocking worker, then wait for `choose` while it runs
+/// (#1601): the save panel opened only after the whole bundle compiled, about
+/// 10 s on a real system. `None` from `choose` (a cancelled panel) returns
+/// `Ok(None)` at once; a compile already running finishes and drops its
+/// result, so its temp file is removed. The worker compiles only while it
+/// holds `gate`, and skips its compile if the panel was cancelled before it
+/// got the gate, so cancelling and exporting again never runs two compiles at
+/// once. A compile error is reported after the choice.
+pub(crate) async fn compile_while_choosing<T: Send + 'static, P>(
+    gate: &'static std::sync::Mutex<()>,
+    compile: impl FnOnce() -> Result<T, String> + Send + 'static,
+    choose: impl std::future::Future<Output = Option<P>>,
+) -> Result<Option<(T, P)>, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+    let skip = cancelled.clone();
+    let compiled = tauri::async_runtime::spawn_blocking(move || {
+        let _one = gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if skip.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        compile().map(Some)
+    });
+    let Some(chosen) = choose.await else {
+        cancelled.store(true, Ordering::Release);
+        return Ok(None);
+    };
+    let value = compiled.await.map_err(|error| error.to_string())??;
+    Ok(value.map(|value| (value, chosen)))
+}
+
 /// Compile the full bundle for the preview the Workbench shows, one artifact
-/// at a time into a temp file (#2215), refuse it if it is no longer that
-/// selection, then ask where to save it and move it there. Returns
-/// `Ok(false)` when the save panel is cancelled. The full bundle never
-/// crosses IPC (#1582, AC-0740).
+/// at a time into a temp file (#2215), while the save panel asks where to
+/// save it; refuse it if it is no longer that selection, then move it there.
+/// Returns `Ok(false)` when the save panel is cancelled. The full bundle
+/// never crosses IPC (#1582, AC-0740).
 #[tauri::command]
 pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
     suggested_name: String,
     expected: ExpectedSpecBundle,
     app: tauri::AppHandle<R>,
 ) -> Result<bool, String> {
-    let file = crate::off_ui_thread(move || {
+    let compile = move || {
         let state = app.state::<crate::AppState>();
         stream_bundle_file(&expected, |push| {
             crate::compile_spec_bundle_kept(crate::export_inputs(&state)?, expected.mode, push)
         })
-    })
-    .await?;
-    let Some(handle) = rfd::AsyncFileDialog::new()
+    };
+    let choose = rfd::AsyncFileDialog::new()
         .set_file_name(sanitize_export_name(&suggested_name))
-        .save_file()
-        .await
-    else {
+        .save_file();
+    let Some((file, handle)) = compile_while_choosing(&ONE_COMPILE, compile, choose).await? else {
         return Ok(false);
     };
     let path = handle.path().to_path_buf();
@@ -304,6 +340,69 @@ fn sweep_stale_temps(dir: &Path, pid: u32, now: std::time::SystemTime) {
 mod tests {
     use super::*;
     use crate::SpecArtifactPreview;
+
+    /// The save panel opens while the bundle compiles (#1601): the compile
+    /// waits on a signal only the panel sends, so a sequential save would
+    /// never finish.
+    #[test]
+    fn save_panel_opens_while_the_bundle_compiles() {
+        let (opened, panel) = std::sync::mpsc::channel::<()>();
+        let compile = move || {
+            panel
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| "the panel never opened during the compile".to_string())?;
+            Ok("bundle")
+        };
+        let choose = async move {
+            opened.send(()).unwrap();
+            Some("/tmp/out.json")
+        };
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let result = tauri::async_runtime::block_on(compile_while_choosing(&GATE, compile, choose));
+        assert_eq!(result, Ok(Some(("bundle", "/tmp/out.json"))));
+    }
+
+    /// Cancelling and exporting again never runs two compiles at once: an
+    /// export cancelled while another compile runs never starts its own.
+    #[test]
+    fn an_export_cancelled_behind_a_running_compile_never_compiles() {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let running = GATE.lock().unwrap();
+        let (ran, compiled) = std::sync::mpsc::channel::<()>();
+        let compile = move || {
+            ran.send(()).unwrap();
+            Ok(())
+        };
+        let cancelled =
+            tauri::async_runtime::block_on(compile_while_choosing(&GATE, compile, async {
+                None::<()>
+            }));
+        assert_eq!(cancelled, Ok(None));
+        drop(running);
+        assert!(compiled.recv().is_err(), "the cancelled export compiled");
+    }
+
+    #[test]
+    fn a_cancelled_panel_returns_at_once_and_a_failed_compile_is_reported() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let slow = move || {
+            let _ = wait.recv();
+            Ok(())
+        };
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let cancelled =
+            tauri::async_runtime::block_on(compile_while_choosing(&GATE, slow, async {
+                None::<()>
+            }));
+        assert_eq!(cancelled, Ok(None));
+        drop(release);
+        let failed = tauri::async_runtime::block_on(compile_while_choosing(
+            &GATE,
+            || Err::<(), _>("selection changed".to_string()),
+            async { Some(()) },
+        ));
+        assert_eq!(failed, Err("selection changed".to_string()));
+    }
 
     /// `ui/src/fixtures/spec-bundle-file.input.json`: a Workbench preview
     /// and the full artifacts `read_spec_artifact` returns for it.

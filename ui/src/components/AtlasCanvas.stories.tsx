@@ -617,6 +617,25 @@ export const ClustersCollapseAtScale: Story = {
   },
 };
 
+export const ClusterIndexesNameRepositories: Story = {
+  // AC-1900 (#1601): cluster tiles and indexes name the repository as
+  // Workspace does, never its local/src_<hash> key; keys stay exact.
+  args: {
+    snapshot: { nodes: SCALE_NODES, edges: [] },
+    repoLabel: (repo: string) => (repo === 'local/shop' ? 'Shop API' : repo),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const index = within(canvas.getByLabelText('Collapsed clusters'));
+    const button = index.getByRole('button', { name: /Infrastructure · Shop API · aws_lambda_function · 90/ });
+    await expect(index.queryByRole('button', { name: /local\/shop/ })).not.toBeInTheDocument();
+    await userEvent.click(button);
+    await waitFor(() =>
+      expect(canvas.getByRole('status')).toHaveTextContent('1 of 2 clusters collapsed'),
+    );
+  },
+};
+
 // 500 directories × 2 symbols in one repository: 500 clusters (#1079).
 const ESTATE_NODES: GraphNode[] = Array.from({ length: 1000 }, (_, index) => {
   const dir = `d${String(Math.floor(index / 2)).padStart(3, '0')}`;
