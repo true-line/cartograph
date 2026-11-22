@@ -93,11 +93,7 @@ impl ReadRefusalObservation {
     }
 
     /// The observation names exactly this recipe and this saved citation.
-    fn matches(
-        &self,
-        acquired_attempt_id: &str,
-        citation: &InvestigationCitation,
-    ) -> bool {
+    fn matches(&self, acquired_attempt_id: &str, citation: &InvestigationCitation) -> bool {
         self.schema_version == 1
             && self.recipe == READ_DENY_RECIPE
             && !self.rule_id.is_empty()
@@ -284,9 +280,14 @@ pub(super) fn verify(
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    let observation: ReadRefusalObservation =
-        read_body(connection, TABLE, "attempt_id", id, &entry.record.attempt_id)?
-            .ok_or(InvestigationStoreError::Invalid)?;
+    let observation: ReadRefusalObservation = read_body(
+        connection,
+        TABLE,
+        "attempt_id",
+        id,
+        &entry.record.attempt_id,
+    )?
+    .ok_or(InvestigationStoreError::Invalid)?;
     let ledger = ledger_at(connection, id, acquired.record.input_revision)?;
     if observation.hash()? != *observation_hash
         || !observation.matches(acquired_attempt_id, citation(&ledger, citation_id)?)

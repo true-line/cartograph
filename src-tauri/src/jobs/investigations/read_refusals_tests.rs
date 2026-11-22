@@ -41,8 +41,13 @@ fn acquired() -> (Fixture, String) {
     };
     let tx = fixture.f.store.conn.unchecked_transaction().unwrap();
     let active = fixture.f.task.detail.usage.active_milliseconds + 1;
-    let plan = project(&tx, &fixture.f.task, SourceSettlement::Acquired(continuation), active)
-        .unwrap();
+    let plan = project(
+        &tx,
+        &fixture.f.task,
+        SourceSettlement::Acquired(continuation),
+        active,
+    )
+    .unwrap();
     let next = persist(&tx, &fixture.f.task, plan).unwrap();
     let attempt = completion::attempts(&tx, &next).unwrap()[0]
         .record
@@ -75,10 +80,11 @@ fn commit(
     witnesses: &[ReadDenialWitness],
 ) -> Result<InvestigationDetail, InvestigationStoreError> {
     let revision = fixture.f.task.detail.summary.revision;
-    let result = fixture
-        .f
-        .store
-        .refuse_acquired_reads(&fixture.f._execution_guard, revision, witnesses);
+    let result =
+        fixture
+            .f
+            .store
+            .refuse_acquired_reads(&fixture.f._execution_guard, revision, witnesses);
     fixture.refresh();
     result
 }
@@ -119,7 +125,10 @@ fn firewall_refusal_persists_after_acquisition_and_reopens() {
         entries[0].record.outcome,
         AttemptOutcome::SourceAcquired { .. }
     ));
-    assert_eq!(entries[1].record.input_revision, entries[0].record.input_revision);
+    assert_eq!(
+        entries[1].record.input_revision,
+        entries[0].record.input_revision
+    );
     fixture.refresh();
     assert_eq!(fixture.f.task.ledger_revision, revision);
     let events = fixture
@@ -189,7 +198,10 @@ fn mismatched_or_repeated_witnesses_are_refused() {
             Err(InvestigationStoreError::Invalid)
         );
     }
-    assert_eq!(commit(&mut fixture, &[]), Err(InvestigationStoreError::Stale));
+    assert_eq!(
+        commit(&mut fixture, &[]),
+        Err(InvestigationStoreError::Stale)
+    );
     assert_eq!(reload(&fixture).unwrap().len(), 1);
     commit(&mut fixture, std::slice::from_ref(&good)).unwrap();
     assert_eq!(
@@ -227,7 +239,10 @@ fn altered_or_missing_observation_fails_fresh_readback() {
     for statement in &schema()[1..] {
         conn.execute_batch(statement).unwrap();
     }
-    assert_eq!(reload(&fixture).err(), Some(InvestigationStoreError::Invalid));
+    assert_eq!(
+        reload(&fixture).err(),
+        Some(InvestigationStoreError::Invalid)
+    );
 
     conn.execute_batch(&format!(
         "DROP TRIGGER {TABLE}_no_update; DROP TRIGGER {TABLE}_no_delete; DELETE FROM {TABLE}"
@@ -236,5 +251,8 @@ fn altered_or_missing_observation_fails_fresh_readback() {
     for statement in &schema()[1..] {
         conn.execute_batch(statement).unwrap();
     }
-    assert_eq!(reload(&fixture).err(), Some(InvestigationStoreError::Invalid));
+    assert_eq!(
+        reload(&fixture).err(),
+        Some(InvestigationStoreError::Invalid)
+    );
 }
