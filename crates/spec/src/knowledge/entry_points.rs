@@ -102,6 +102,12 @@ fn add_evidence(group: &mut Group, prov: &Provenance) {
 /// Derive Capability candidates from recovered entry points and schedules.
 /// The borrowed base is unchanged.
 pub fn derive_entry_point_capabilities(base: &RevisionedSnapshot) -> CapabilityReport {
+    // Every derivation under test reads a compacted base, as the knowledge
+    // phase reads it (#2215).
+    #[cfg(test)]
+    let compacted = crate::workbench::compacted_snapshot_for_tests(base);
+    #[cfg(test)]
+    let base = &compacted;
     let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
     for node in &base.graph.0 {
         nodes

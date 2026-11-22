@@ -1368,6 +1368,12 @@ fn repositories(base: &RevisionedSnapshot) -> BTreeSet<String> {
 /// with too few files to separate yields nothing, and one past
 /// [`MAX_SUBSYSTEM_FILES`] is a named omission.
 pub fn derive_subsystems(base: &RevisionedSnapshot) -> SubsystemReport {
+    // Every derivation under test reads a compacted base, as the knowledge
+    // phase reads it (#2215).
+    #[cfg(test)]
+    let compacted = crate::workbench::compacted_snapshot_for_tests(base);
+    #[cfg(test)]
+    let base = &compacted;
     /// One repository's groups: its files, each group's title, terms and
     /// members, and its shared files.
     struct Grouped<'a> {
