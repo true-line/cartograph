@@ -288,4 +288,12 @@ fn a_rule_excerpt_stops_at_its_budget() {
     let excerpt = rule_excerpt(&document, "1.1").unwrap();
     assert!(excerpt.len() < 6 * 1024 + 512, "{}", excerpt.len());
     assert!(excerpt.contains(" of 400.") && !excerpt.contains("400 of 400"));
+    // A smaller byte allowance shortens it; none leaves no excerpt (#2386).
+    let short = rule_excerpt_within(&document, "1.1", 1024).unwrap();
+    assert!(short.len() < 1024 + 512 && short.len() < excerpt.len());
+    assert_eq!(rule_excerpt_within(&document, "1.1", 0), None);
+    assert_eq!(
+        (rule_excerpt_budget("1.1"), rule_excerpt_budget("1.4")),
+        (Some(6 * 1024), None)
+    );
 }
