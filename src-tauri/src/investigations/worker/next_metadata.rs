@@ -64,7 +64,24 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 query,
                 ..
             }) => {
-                let read = match context.prepare_query_with_diagnostic(self.state, query.clone()) {
+                // #1352: a query whose exact page is already in the context adds
+                // nothing. Acquisition-choice specialists are refused earlier as
+                // repeated_read and continue; a specialist without that closed
+                // feedback is stopped before it spends the query bytes again.
+                if !self.detail.summary.specialist_id.uses_acquisition_choices()
+                    && current
+                        .ledger()
+                        .queries
+                        .iter()
+                        .any(|answered| answered.query == query)
+                {
+                    return Err(Failure::Stop(InvestigationStopReason::HostLimitAt {
+                        phase: PreparationPhase::Query,
+                        limit: HostLimitKind::RepeatedQuery,
+                    }));
+                }
+                let prepared = context.prepare_query_with_diagnostic(self.state, query.clone());
+                let read = match prepared {
                     Ok(read) => read,
                     Err(ContextReadPreparationError::QueryBudget(budget))
                         if current.is_maximum_obligation_query(&query) =>
