@@ -1107,6 +1107,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agents`, `app`, `agent-runtime` · ADR-0085 · T-1426
 - **AC-1427** Given the packaged app on macOS, Windows or Linux, when a tool-calling run starts, then the app starts its bundled, signed `cartograph-agent` executable for that run with no install step, talks to it over stdio only, and stops it on finish, cancel, deadline or limit; a run whose process exits without an admitted finish produces nothing (ADR-0085, ADR-0066).
 - **Trace:** H4 · `agent-runtime`, `app` · ADR-0085 · T-1427
+- **AC-1428** Given a tool-calling run, when the worker hands the runtime its next firewall-authorized payload, then the first step starts the runtime with the full payload and each later step answers the model's last tool call with only what changed (prompt fields set or removed, evidence spans added or dropped), so every byte sent was authorized for that step; when the offered tools, the system text or the prompt shape change, or the conversation would exceed its byte budget, the runtime restarts from the full authorized payload, and a tool call becomes the bounded loop's exact action bytes with the step's `context_id` (ADR-0085).
+- **Trace:** H4 · `agents` · ADR-0085 · T-1428
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned
