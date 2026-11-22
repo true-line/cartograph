@@ -57,5 +57,5 @@ Every link must also cite the call's line. A miss is reported with its call
 line and the reason, never silently dropped.
 
 The pass thresholds were frozen by the owner's one-line go on 2026-11-22.
-Changing a threshold or a label after a scored run needs a new go and is
-recorded here with the reason.
+Any later change to a threshold or a label needs a new go and is recorded
+here with the reason.

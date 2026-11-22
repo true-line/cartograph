@@ -23,8 +23,8 @@ Keep this directory outside every model input. Recovery never reads it.
 ## Status
 
 The expected set and the pass column below were frozen by the owner's
-one-line go on 2026-11-22. Changing a step, a label or a pass value after a
-scored run needs a new go and is recorded here with the reason. No run has
+one-line go on 2026-11-22. Any later change to a step, a label or a pass
+value needs a new go and is recorded here with the reason. No run has
 been scored yet. #2169 is done only when a scored run and its table are committed
 here, whatever the result.
 
