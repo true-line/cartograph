@@ -120,9 +120,10 @@ pub(crate) fn knowledge_phase_status() -> Option<KnowledgeStatus> {
 /// Serializes phases so an older base can never be published after a newer one.
 static PHASE: Mutex<()> = Mutex::new(());
 
-/// The local embedding provider when its pinned model is installed.
-pub(crate) fn local_provider() -> Option<llm::OllamaProvider> {
-    let provider = llm::OllamaProvider::local_default().ok()?;
+/// The local embedding provider on the loopback Ollama at `port` (#1653),
+/// when its pinned model is installed there.
+pub(crate) fn local_provider(port: u16) -> Option<llm::OllamaProvider> {
+    let provider = llm::OllamaProvider::local_on_port(port).ok()?;
     let health = llm::catalog::classify_health(
         llm::catalog::ModelAction::Embedding,
         &provider.list_local_models(),
@@ -723,7 +724,10 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                     cache,
                     overlay,
                     semantic_enabled(&state.settings),
-                    || local_provider().map(|p| Box::new(p) as Box<dyn LlmProvider>),
+                    || {
+                        let port = crate::settings::saved_ollama_port(&state.settings).ok()?;
+                        local_provider(port).map(|p| Box::new(p) as Box<dyn LlmProvider>)
+                    },
                     &|sections| source_sections(&state.sources, sections),
                 ));
                 remember(&status);
