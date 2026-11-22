@@ -882,7 +882,7 @@ impl<'a> Index<'a> {
         // followed into that function too (AC-1036): `alias_suffix =
         // check_suffix_signature(signed_suffix)` under `not alias_suffix`.
         let mut scan = row.when.clone();
-        if let Ok(parsed) = GuardedExitEvidence::from_value(row.rule.props["rule"].clone()) {
+        if let Ok(parsed) = crate::rules::rule_payload(row.rule) {
             for definition in parsed.local_definitions.iter().flatten() {
                 // Only a recorded call of a plain name: an unsupported
                 // initializer (`a() if f else b()`) is not one call's value.
@@ -2045,7 +2045,9 @@ function checkQuantity(qty: number) {
     /// The §1.5 rows of one capability whose endpoint `handler_name`
     /// handles, over adapter facts.
     fn rows(nodes: &[Node], edges: &[Edge], handler_name: &str) -> (String, usize) {
-        let nodes: Vec<&Node> = nodes.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let compacted = crate::rules::compacted_for_tests(nodes);
+        let nodes: Vec<&Node> = compacted.iter().collect();
         let edges: Vec<&Edge> = edges.iter().collect();
         let handler = nodes
             .iter()
