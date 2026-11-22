@@ -793,11 +793,11 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
             ),
             (
                 "desk/src/shell.rs",
-                "// tauri::Builder in a comment states nothing.\npub fn helper() {}\n\npub fn run() {\n    tauri::Builder::default().run(tauri::generate_context!()).unwrap();\n}\n",
+                "// tauri::Builder in a comment states nothing.\npub fn helper() -> Option<tauri::Builder<tauri::Wry>> { None }\n\npub fn run() {\n    tauri::Builder::default().run(tauri::generate_context!()).unwrap();\n}\n",
             ),
             (
                 "desk/src/bin/desk.rs",
-                "fn main() {\n    desk_shell::run();\n}\n",
+                "fn main() {\n    // Start it.\n    desk_shell /* the library */ :: run();\n}\n",
             ),
             (
                 "desk/src/bin/tool.rs",

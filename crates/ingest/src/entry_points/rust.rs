@@ -64,22 +64,50 @@ fn span(node: TsNode) -> (u64, u64) {
 }
 
 /// The call a binary's `main` delegates to: `fn main() { krate::name(); }`
-/// with nothing else in the body gives `(krate, name)`.
+/// with nothing else in the body gives `(krate, name)`, read from the
+/// syntax tree.
 pub(super) fn delegated_call(text: &str, span: (u64, u64)) -> Option<(String, String)> {
     let tree = rust_parser().parse(text, None)?;
-    let code = code_only(text, tree.root_node());
-    let function = code.get(span.0 as usize..span.1 as usize)?;
-    let body = function.split_once('{')?.1.trim_end().strip_suffix('}')?;
-    let call = body.trim().strip_suffix(';').unwrap_or(body.trim()).trim();
-    let call = call.strip_suffix("()")?.trim_end();
-    let (krate, name) = call.split_once("::")?;
-    let ident = |part: &str| {
-        !part.is_empty()
-            && part.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
-            && !part.starts_with(|c: char| c.is_ascii_digit())
+    let function = tree
+        .root_node()
+        .descendant_for_byte_range(span.0 as usize, span.1 as usize)?;
+    if function.kind() != "function_item" {
+        return None;
+    }
+    let body = function.child_by_field_name("body")?;
+    let mut walk = body.walk();
+    let statements: Vec<TsNode> = body
+        .named_children(&mut walk)
+        .filter(|node| !matches!(node.kind(), "line_comment" | "block_comment"))
+        .collect();
+    let [statement] = statements[..] else {
+        return None;
     };
-    (ident(krate) && ident(name) && !matches!(krate, "crate" | "self" | "super"))
-        .then(|| (krate.to_string(), name.to_string()))
+    let call = if statement.kind() == "expression_statement" {
+        statement.named_child(0)?
+    } else {
+        statement
+    };
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let arguments = call.child_by_field_name("arguments")?;
+    if arguments.named_child_count() != 0 {
+        return None;
+    }
+    let path = call.child_by_field_name("function")?;
+    if path.kind() != "scoped_identifier" {
+        return None;
+    }
+    let krate = path.child_by_field_name("path")?;
+    let name = path.child_by_field_name("name")?;
+    if krate.kind() != "identifier" || name.kind() != "identifier" {
+        return None;
+    }
+    Some((
+        text[krate.byte_range()].to_string(),
+        text[name.byte_range()].to_string(),
+    ))
 }
 
 /// The package directory of a binary root (`<pkg>/src/main.rs` or
@@ -120,7 +148,7 @@ pub(super) fn library(manifest: &str) -> Option<(String, String)> {
 }
 
 /// The span of the top-level `pub fn <name>` in a library root when its
-/// body builds a `tauri::Builder`.
+/// body (not its signature) builds a `tauri::Builder`.
 pub(super) fn desktop_function(text: &str, name: &str) -> Option<(u64, u64)> {
     let tree = rust_parser().parse(text, None)?;
     let root = tree.root_node();
@@ -134,7 +162,9 @@ pub(super) fn desktop_function(text: &str, name: &str) -> Option<(u64, u64)> {
             && node
                 .named_child(0)
                 .is_some_and(|first| first.kind() == "visibility_modifier")
-            && code[node.byte_range()].contains("tauri::Builder")
+            && node
+                .child_by_field_name("body")
+                .is_some_and(|body| code[body.byte_range()].contains("tauri::Builder::"))
     })?;
     Some(span(found))
 }
