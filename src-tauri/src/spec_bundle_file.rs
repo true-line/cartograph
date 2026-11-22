@@ -11,7 +11,6 @@
 //! null, 2)`.
 
 use std::io::{BufWriter, Write};
-#[cfg(test)]
 use std::path::Path;
 
 #[cfg(test)]
@@ -476,13 +475,59 @@ pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
     Ok(true)
 }
 
+/// Every bundle temp file's name starts with this, then the creating
+/// process's id and a `-`.
+const TEMP_PREFIX: &str = ".cartograph-bundle-";
+const TEMP_SUFFIX: &str = ".partial";
+/// A bundle temp file another process has not written for this long is left
+/// over from an export that never finished, such as one whose app was killed
+/// while compiling or with the save panel open.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
 /// The bundle file's temp file: named, so the finished file can be renamed
-/// into place, and owner-only.
+/// into place, and owner-only. A named file outlives a killed app, so
+/// creating one first removes the stale ones earlier exports left.
 fn new_temp() -> std::io::Result<tempfile::NamedTempFile> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    sweep_stale_temps(&dir, pid, std::time::SystemTime::now());
     tempfile::Builder::new()
-        .prefix(".cartograph-bundle-")
-        .suffix(".partial")
-        .tempfile()
+        .prefix(&format!("{TEMP_PREFIX}{pid}-"))
+        .suffix(TEMP_SUFFIX)
+        .tempfile_in(dir)
+}
+
+/// Remove the bundle temp files in `dir` that another process left and has
+/// not written for [`STALE_TEMP_AGE`]. This process's own are never touched,
+/// since one may be waiting on its save panel. Failures are ignored: a file
+/// that cannot be removed now is tried again by the next export.
+fn sweep_stale_temps(dir: &Path, pid: u32, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(TEMP_PREFIX))
+            .filter(|rest| rest.ends_with(TEMP_SUFFIX))
+        else {
+            continue;
+        };
+        if rest.split('-').next() == Some(pid.to_string().as_str()) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file())
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_TEMP_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +632,43 @@ mod tests {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut file, &mut text).unwrap();
         Ok(text)
+    }
+
+    // AC-1213 (T-1213): a bundle temp file left by another process and not
+    // written for six hours is removed when an export starts; this
+    // process's own, a recent one and any other file are kept.
+    #[test]
+    fn stale_bundle_temps_from_other_processes_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = std::time::SystemTime::now();
+        let old = now - STALE_TEMP_AGE - std::time::Duration::from_secs(60);
+        let pid = 4242;
+        let file = |name: &str, modified: std::time::SystemTime| {
+            let path = dir.path().join(name);
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+            path
+        };
+        let left = file(".cartograph-bundle-17-abc.partial", old);
+        let own = file(".cartograph-bundle-4242-abc.partial", old);
+        let recent = file(".cartograph-bundle-17-def.partial", now);
+        let other = file(".cartograph-bundle-17-abc.json", old);
+        let unrelated = file("export.partial", old);
+        sweep_stale_temps(dir.path(), pid, now);
+        assert!(!left.exists());
+        for kept in [own, recent, other, unrelated] {
+            assert!(kept.exists(), "{kept:?} kept");
+        }
+
+        let temp = new_temp().unwrap();
+        let name = temp.path().file_name().unwrap().to_str().unwrap();
+        let mine = format!("{TEMP_PREFIX}{}-", std::process::id());
+        assert!(
+            name.starts_with(&mine) && name.ends_with(TEMP_SUFFIX),
+            "{name}"
+        );
     }
 
     // AC-1212 (T-1212): the file written one artifact at a time is byte for
