@@ -1140,33 +1140,25 @@ pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) 
 
 /// A `BusinessRule` node's `rule` payload, typed. Every spec reader goes
 /// through here, so the payload may be held as the object the store keeps or
-/// as its marked JSON text (see [`compact_rule_payloads`]): both parse alike,
+/// as its marked JSON text (see [`compact_rule_payload`]): both parse alike,
 /// and a string the store holds stays malformed.
 pub(crate) fn rule_payload(node: &Node) -> Result<GuardedExitEvidence, RuleValidationError> {
     GuardedExitEvidence::from_value(core_graph::stored::stored(&node.props["rule"]).into_owned())
 }
 
-/// Hold each `BusinessRule` payload as its compact JSON text instead of a
+/// Hold a `BusinessRule` payload as its compact JSON text instead of a
 /// decoded object, for a base that only the spec compiler reads from here
 /// on. A decoded payload costs about six times its text: each JSON object is
 /// a B-tree leaf of some 620 bytes however few keys it has, and on REA the
 /// rules' payloads were 1.0 GB of a 3.0 GB base (#2215). [`rule_payload`]
 /// parses the text to the same value the object gives. Only object payloads
 /// are rewritten, so a malformed one stays as it was read.
-pub fn compact_rule_payloads(nodes: &mut [Node]) {
-    for node in nodes.iter_mut().filter(|node| node.label == "BusinessRule") {
-        if let Some(rule) = node.props.get_mut("rule") {
-            core_graph::stored::compact_object(rule);
-        }
+pub(crate) fn compact_rule_payload(node: &mut Node) {
+    if node.label == "BusinessRule"
+        && let Some(rule) = node.props.get_mut("rule")
+    {
+        core_graph::stored::compact_object(rule);
     }
-}
-
-/// A test's nodes with their rule payloads compacted ([`compact_rule_payloads`]).
-#[cfg(test)]
-pub(crate) fn compacted_for_tests(nodes: &[Node]) -> Vec<Node> {
-    let mut nodes = nodes.to_vec();
-    compact_rule_payloads(&mut nodes);
-    nodes
 }
 
 /// Relationships actually queried by the source-rule inventory renderer.
@@ -1709,7 +1701,7 @@ mod tests {
             ConfidenceTier::Confirmed,
         )];
         let mut compacted = nodes.clone();
-        compact_rule_payloads(&mut compacted);
+        compacted.iter_mut().for_each(compact_rule_payload);
         let held = |id: &str| compacted.iter().find(|n| n.id == id).unwrap().props["rule"].clone();
         assert!(held("rule:valid").is_string());
         assert!(held("rule:version").is_string());

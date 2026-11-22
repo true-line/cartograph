@@ -478,3 +478,119 @@ fn filtered_projection_preserves_topology_and_semantic_input_order() {
         );
     }
 }
+
+// AC-1208 (T-1208): a spec read holds each fact's `prov` and rule payload as
+// marked text as its row is read. Restored, the rows are the stored rows,
+// and the graph basis, flows and bundle are those of the stored rows.
+#[test]
+fn a_compacted_read_restores_to_the_stored_rows_and_compiles_alike() {
+    let source = r#"
+from flask import jsonify
+
+def check_suffix_signature(signed_suffix):
+    if not signed_suffix:
+        return None
+    return signed_suffix
+
+def new_custom_alias(signed_suffix):
+    alias_suffix = check_suffix_signature(signed_suffix)
+    if not alias_suffix:
+        return jsonify(error="Alias creation time is expired, please retry"), 412
+"#;
+    let python = adapters_lang_python::extract_source(
+        source.as_bytes(),
+        "app/api/alias.py",
+        &adapters_lang_python::SourceId {
+            repo: "repo",
+            commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+        },
+    )
+    .unwrap();
+    let (mut nodes, mut edges) = fixture("old");
+    nodes.extend(python.nodes);
+    // A store holds only edges between facts it holds.
+    let ids: std::collections::BTreeSet<String> =
+        nodes.iter().map(|node| node.id.clone()).collect();
+    edges.extend(
+        python
+            .edges
+            .into_iter()
+            .filter(|edge| ids.contains(&edge.src) && ids.contains(&edge.dst)),
+    );
+    // A `prov` whose text needs an escape stays an object.
+    nodes[0].props["prov"]["evidence"][0]["path"] = json!("src/\"quoted\".ts");
+    let escaped = nodes[0].id.clone();
+    let graph = memory_graph(&(nodes, edges));
+    let (revision, ((nodes, edges), coverage)) = crate::curated::read_graph(&graph).unwrap();
+    let (compacted_revision, ((held_nodes, held_edges), held_coverage)) =
+        crate::curated::read_graph_compacted(&graph).unwrap();
+    assert_eq!(revision, compacted_revision);
+    assert_eq!(coverage, held_coverage);
+    let text = |value: &Value| core_graph::stored::compact_text(value).is_some();
+    assert!(
+        held_nodes
+            .iter()
+            .any(|node| node.label == "BusinessRule" && text(&node.props["rule"]))
+    );
+    assert!(
+        held_edges
+            .iter()
+            .all(|edge| !edge.props["prov"].is_object())
+    );
+    let held = |id: &str| held_nodes.iter().find(|node| node.id == id).unwrap();
+    assert!(held(&escaped).props["prov"].is_object());
+    assert!(
+        held_nodes
+            .iter()
+            .filter(|node| node.id != escaped)
+            .all(|node| text(&node.props["prov"]))
+    );
+    let restore = |props: &Value| {
+        let mut props = props.clone();
+        core_graph::stored::restore_prov(&mut props);
+        if let std::borrow::Cow::Owned(rule) = core_graph::stored::stored(&props["rule"]) {
+            props["rule"] = rule;
+        }
+        props
+    };
+    assert!(
+        held_nodes
+            .iter()
+            .zip(&nodes)
+            .all(|(held, stored)| restore(&held.props) == stored.props)
+    );
+    assert!(
+        held_edges
+            .iter()
+            .zip(&edges)
+            .all(|(held, stored)| restore(&held.props) == stored.props)
+    );
+    assert_eq!(held_nodes.len(), nodes.len());
+    assert_eq!(held_edges.len(), edges.len());
+    assert_eq!(
+        serde_json::to_value(crate::graph_basis_of(&held_nodes, &held_edges)).unwrap(),
+        serde_json::to_value(crate::graph_basis_of(&nodes, &edges)).unwrap()
+    );
+    let flows = flowtracer::trace(&nodes, &edges);
+    let held_flows = flowtracer::trace(&held_nodes, &held_edges);
+    assert!(!flows.is_empty());
+    assert_eq!(
+        serde_json::to_string(&held_flows).unwrap(),
+        serde_json::to_string(&flows).unwrap()
+    );
+    for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+        let compile = |nodes: &[Node], edges: &[Edge]| {
+            let bundle = spec::try_compile_spec_with_coverage(
+                nodes,
+                edges,
+                &flows,
+                mode,
+                &Default::default(),
+                &coverage,
+            )
+            .unwrap();
+            serde_json::to_string(&bundle).unwrap()
+        };
+        assert_eq!(compile(&held_nodes, &held_edges), compile(&nodes, &edges));
+    }
+}

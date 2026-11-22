@@ -90,7 +90,9 @@ fn orm_model_support(node: &Node) -> Option<(Provenance, String, String)> {
     {
         return None;
     }
-    let prov: Provenance = serde_json::from_value(node.props.get("prov")?.clone()).ok()?;
+    node.props.get("prov")?;
+    let prov: Provenance =
+        serde_json::from_value(crate::stored_prov(&node.props).into_owned()).ok()?;
     if prov.validate().is_err()
         || prov.tier != Tier::Deterministic
         || prov.confidence_tier != ConfidenceTier::Confirmed
@@ -226,7 +228,8 @@ fn support(props: &serde_json::Value) -> Option<Provenance> {
 }
 /// Source-backed, confident deterministic support from one named adapter.
 fn support_from(props: &serde_json::Value, extractor: &str) -> Option<Provenance> {
-    let prov: Provenance = serde_json::from_value(props.get("prov")?.clone()).ok()?;
+    props.get("prov")?;
+    let prov: Provenance = serde_json::from_value(crate::stored_prov(props).into_owned()).ok()?;
     (prov.validate().is_ok()
         && prov.tier == Tier::Deterministic
         && prov.extractor_id == extractor

@@ -2116,6 +2116,11 @@ fn finalize_candidate<'a>(
     )));
     let id = format!("journey:{repo}@{JOURNEY_RULE}:{}", &id_digest[..16]);
 
+    // Hashed as stored, whichever form the base holds the `prov` in (#2215).
+    let nav_edge_props: Vec<_> = nav_edge_props
+        .iter()
+        .map(|props| props.map(crate::workbench::stored_props))
+        .collect();
     let support_fingerprint = if assumptions.is_empty() {
         content_hash(&hash_bytes(&(
             &steps,

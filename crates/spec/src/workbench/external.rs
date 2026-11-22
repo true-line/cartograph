@@ -341,21 +341,14 @@ type Place<'a> = (&'a str, &'a str, u64);
 
 /// The evidence spans a fact stores, without decoding its provenance.
 fn places(props: &serde_json::Value) -> impl Iterator<Item = Place<'_>> {
-    props["prov"]["evidence"]
-        .as_array()
+    crate::workbench::stored_spans(props)
         .into_iter()
-        .flatten()
-        .filter_map(|span| {
-            Some((
-                span["repo"].as_str()?,
-                span["path"].as_str()?,
-                span["byte_start"].as_u64()?,
-            ))
-        })
+        .filter_map(|span| Some((span.repo?, span.path?, span.byte_start?)))
 }
 
 fn confidence(props: &serde_json::Value) -> ConfidenceTier {
-    ConfidenceTier::deserialize(&props["prov"]["confidence_tier"]).unwrap_or(ConfidenceTier::Gap)
+    ConfidenceTier::deserialize(&crate::stored_prov(props)["confidence_tier"])
+        .unwrap_or(ConfidenceTier::Gap)
 }
 
 fn rank(confidence: ConfidenceTier) -> u8 {

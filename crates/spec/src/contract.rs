@@ -382,7 +382,7 @@ fn evidence(repo: &str, path: &str, commit: &str, start: usize, end: usize) -> E
 }
 
 fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {
-    Provenance::deserialize(&value["prov"])
+    Provenance::deserialize(&*crate::stored_prov(value))
         .ok()
         .filter(|provenance| provenance.validate().is_ok())
 }

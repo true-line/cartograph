@@ -396,8 +396,23 @@ impl<'a> ProvenanceView<'a> {
             method,
         })
     }
+    // A graph read for an export holds `prov` as its compact text, which
+    // needs no escape (core_graph::stored), so the view borrows from the
+    // text. The decoded text is checked first, as a stored object is, so a
+    // malformed one still takes the fallback without a serde diagnostic.
+    fn stored(edge: &'a Edge) -> Option<Self> {
+        let prov = &edge.props["prov"];
+        match core_graph::stored::compact_text(prov) {
+            Some(text) => {
+                let decoded = serde_json::from_str::<serde_json::Value>(text).ok()?;
+                ProvenanceView::borrow(&decoded)?;
+                serde_json::from_str::<Self>(text).ok()
+            }
+            None => Self::borrow(prov),
+        }
+    }
     fn new(edge: &'a Edge) -> Self {
-        if let Some(view) = Self::borrow(&edge.props["prov"]) {
+        if let Some(view) = Self::stored(edge) {
             let validation = Provenance {
                 tier: view.tier,
                 confidence_tier: view.confidence_tier,
@@ -667,6 +682,49 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&view).unwrap(),
             serde_json::to_vec(&owned).unwrap()
+        );
+    }
+
+    // AC-1208 (T-1208): a provenance a spec read holds as text borrows from it.
+    #[test]
+    fn a_compacted_provenance_borrows_from_its_text_and_reads_as_stored() {
+        let stored = serde_json::json!({
+            "tier": "Deterministic", "confidence_tier": "Confirmed",
+            "evidence": [{"repo": "repo", "path": "src/a.ts", "byte_start": 0, "byte_end": 9, "commit_sha": "sha"}],
+            "extractor_id": "extractor", "content_hash": "hash",
+            "method": {"kind": "rule", "rule": "r", "version": "v1"}
+        });
+        let edge = |prov: serde_json::Value| Edge {
+            src: "a".into(),
+            dst: "b".into(),
+            label: "CALLS".into(),
+            props: serde_json::json!({ "prov": prov }),
+        };
+        let object = edge(stored.clone());
+        let mut text = edge(stored.clone());
+        core_graph::stored::compact_borrowable(&mut text.props["prov"]);
+        let held = core_graph::stored::compact_text(&text.props["prov"]).unwrap();
+        let view = ProvenanceView::new(&text);
+        assert!(matches!(view.content_hash, Cow::Borrowed(_)));
+        assert!(
+            held.as_bytes()
+                .as_ptr_range()
+                .contains(&view.evidence[0].path.as_ptr())
+        );
+        assert_eq!(
+            serde_json::to_vec(&view).unwrap(),
+            serde_json::to_vec(&ProvenanceView::new(&object)).unwrap()
+        );
+        // Text of a provenance outside its tier's ceiling takes the fallback,
+        // as the object does.
+        let mut gap = stored;
+        gap["tier"] = "Semantic".into();
+        let object = edge(gap.clone());
+        let mut text = edge(gap);
+        core_graph::stored::compact_borrowable(&mut text.props["prov"]);
+        assert_eq!(
+            serde_json::to_vec(&ProvenanceView::new(&text)).unwrap(),
+            serde_json::to_vec(&ProvenanceView::new(&object)).unwrap()
         );
     }
 

@@ -41,7 +41,7 @@ struct Expectations<'a> {
 }
 
 fn typed_provenance(value: &serde_json::Value) -> Option<Provenance> {
-    serde::Deserialize::deserialize(&value["prov"])
+    serde::Deserialize::deserialize(&*crate::stored_prov(value))
         .ok()
         .filter(|provenance: &Provenance| provenance.validate().is_ok())
 }

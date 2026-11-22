@@ -1398,9 +1398,8 @@ fn state_machine<'a>(
     // The guarded exits of the hooks beside the table (`onTransitionStart`),
     // every exit: a hook refuses a move by what it returns or throws.
     let file = machine.props["file"].as_str().unwrap_or_default();
-    let repo = machine.props["prov"]["evidence"][0]["repo"]
-        .as_str()
-        .unwrap_or_default();
+    let spans = crate::workbench::stored_spans(&machine.props);
+    let repo = spans.first().and_then(|span| span.repo).unwrap_or_default();
     let prefix = format!("sym:{repo}@{file}#");
     for hook in machine.props["hooks"].as_array().into_iter().flatten() {
         let (Some(hook_name), Some(start)) = (hook["name"].as_str(), hook["byte_start"].as_u64())
@@ -1524,8 +1523,12 @@ impl<'a> Index<'a> {
         let mut by_area: BTreeMap<(&str, &str), (&'a Node, Vec<&'a Node>)> = BTreeMap::new();
         let mut loose = Vec::new();
         for machine in &self.machines {
-            let evidence = &machine.props["prov"]["evidence"][0];
-            let file = match (evidence["repo"].as_str(), evidence["path"].as_str()) {
+            let spans = crate::workbench::stored_spans(&machine.props);
+            let evidence = spans.first();
+            let file = match (
+                evidence.and_then(|span| span.repo),
+                evidence.and_then(|span| span.path),
+            ) {
                 (Some(repo), Some(path)) => format!("file:{repo}@{path}"),
                 _ => String::new(),
             };
@@ -1911,8 +1914,11 @@ function checkQuantity(qty: number) {
             },
         )
         .unwrap();
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
         let handler = nodes
             .iter()
             .copied()
@@ -2056,8 +2062,8 @@ function checkQuantity(qty: number) {
     /// handles, over adapter facts.
     fn rows(nodes: &[Node], edges: &[Edge], handler_name: &str) -> (String, usize) {
         // Rendered from a compacted base, as an export renders (#2215).
-        let compacted = crate::rules::compacted_for_tests(nodes);
-        let nodes: Vec<&Node> = compacted.iter().collect();
+        let (nodes, edges) = crate::workbench::compacted_for_tests(nodes, edges);
+        let nodes: Vec<&Node> = nodes.iter().collect();
         let edges: Vec<&Edge> = edges.iter().collect();
         let handler = nodes
             .iter()
@@ -2910,8 +2916,11 @@ def plain(f):
             },
         )
         .unwrap();
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
         let id_of = |name: &str| {
             nodes
                 .iter()
@@ -3007,8 +3016,11 @@ def create(user):
             .push(read("MAX_OLD", "app/config.py", 15.into()));
         facts.nodes.push(read("TWICE", "app/config.py", 1.into()));
         facts.nodes.push(read("TWICE", "app/other.py", 2.into()));
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
         let handler = nodes
             .iter()
             .find(|n| n.label == "Symbol" && n.props["name"] == "create")
@@ -3245,8 +3257,11 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             },
         )
         .unwrap();
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
         let order = Node {
             id: "subsystem:1".into(),
             label: "Subsystem".into(),
@@ -3357,8 +3372,11 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             },
         )
         .unwrap();
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
         let knowledge = Stories {
             included: Vec::new(),
             filtered: 0,
@@ -3429,8 +3447,11 @@ export function assertPaymentState(state) {
             },
         )
         .unwrap();
-        let nodes: Vec<&Node> = facts.nodes.iter().collect();
-        let edges: Vec<&Edge> = facts.edges.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
         let payment = Node {
             id: "subsystem:1".into(),
             label: "Subsystem".into(),

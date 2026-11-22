@@ -903,11 +903,11 @@ fn compile_selected(
     ),
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
     // Every compile under test reads a compacted base, so a reader of a
-    // rule payload that skips `rule_payload` fails (#2215).
+    // fact's `prov` or rule payload that skips the accessors fails (#2215).
     #[cfg(test)]
-    let compacted = crate::rules::compacted_for_tests(nodes);
+    let compacted = super::compacted_for_tests(nodes, edges);
     #[cfg(test)]
-    let nodes = compacted.as_slice();
+    let (nodes, edges) = (compacted.0.as_slice(), compacted.1.as_slice());
     let (requested_ids, limits, security, stories, supplied) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
@@ -1069,11 +1069,11 @@ pub(super) fn all<A>(
     keep: impl FnMut(SpecArtifact) -> A,
 ) -> Result<SpecBundle<A>, FactIndexError> {
     // Every compile under test reads a compacted base, so a reader of a
-    // rule payload that skips `rule_payload` fails (#2215).
+    // fact's `prov` or rule payload that skips the accessors fails (#2215).
     #[cfg(test)]
-    let compacted = crate::rules::compacted_for_tests(nodes);
+    let compacted = super::compacted_for_tests(nodes, edges);
     #[cfg(test)]
-    let nodes = compacted.as_slice();
+    let (nodes, edges) = (compacted.0.as_slice(), compacted.1.as_slice());
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let beside = Beside::new(nodes, edges, mode, rejected, supplied);

@@ -73,6 +73,7 @@ mod registers;
 pub(crate) mod render;
 pub(crate) mod selected;
 use core_graph::omission::{FillSeam, Omission, OmissionClass};
+use core_graph::stored::compact_borrowable;
 use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, Provenance, Tier};
 use flowtracer::{Flow, FlowStatus, Hop};
@@ -254,11 +255,139 @@ pub(crate) fn fallback_provenance(identity: &str) -> Provenance {
     .expect("Gap is within the deterministic confidence ceiling")
 }
 
+/// A fact's own `prov` as it was stored. An export's base holds it as its
+/// compact JSON text ([`compact_base`]); every spec reader of a fact's own
+/// provenance goes through here, so both forms read alike (#2215).
+pub use core_graph::stored::stored_prov;
+
+/// A fact's props as they were stored, for a reader that hashes or prints
+/// them whole: borrowed unless the base holds the `prov` as text (#2215).
+pub fn stored_props(props: &serde_json::Value) -> Cow<'_, serde_json::Value> {
+    match stored_prov(props) {
+        Cow::Owned(prov) => {
+            let mut props = props.clone();
+            props["prov"] = prov;
+            Cow::Owned(props)
+        }
+        Cow::Borrowed(_) => Cow::Borrowed(props),
+    }
+}
+
+/// Restore a fact's props to the form they were stored in, for a fact that
+/// leaves the compiler whole, as a view's nodes and edges do (#2215).
+pub(crate) fn restore_stored(label: &str, props: &mut serde_json::Value) {
+    core_graph::stored::restore_prov(props);
+    if label == "BusinessRule"
+        && let Cow::Owned(rule) = core_graph::stored::stored(&props["rule"])
+    {
+        props["rule"] = rule;
+    }
+}
+
+/// One evidence span of a fact's own `prov`, borrowed from the fact: the
+/// fields that are a string or a whole number, as `Value` indexing reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoredSpan<'a> {
+    pub repo: Option<&'a str>,
+    pub path: Option<&'a str>,
+    pub byte_start: Option<u64>,
+}
+
+/// The evidence spans of a fact's own `prov`, borrowed and in order, in
+/// either stored form: an empty list when `evidence` is not an array, and one
+/// span per element, with no fields for an element that is not an object.
+/// Compacted text never needs an escape ([`compact_base`]), so it borrows.
+pub(crate) fn stored_spans(props: &serde_json::Value) -> Vec<StoredSpan<'_>> {
+    use serde_json::value::RawValue;
+    match core_graph::stored::compact_text(&props["prov"]) {
+        Some(text) => {
+            #[derive(Deserialize)]
+            struct Prov<'a> {
+                #[serde(borrow, default)]
+                evidence: Option<&'a RawValue>,
+            }
+            let Ok(Prov {
+                evidence: Some(evidence),
+            }) = serde_json::from_str::<Prov<'_>>(text)
+            else {
+                return Vec::new();
+            };
+            let Ok(spans) = serde_json::from_str::<Vec<&RawValue>>(evidence.get()) else {
+                return Vec::new();
+            };
+            spans
+                .into_iter()
+                .map(|span| {
+                    let fields: BTreeMap<&str, &RawValue> =
+                        serde_json::from_str(span.get()).unwrap_or_default();
+                    let text = |key: &str| {
+                        fields
+                            .get(key)
+                            .and_then(|raw| serde_json::from_str::<&str>(raw.get()).ok())
+                    };
+                    StoredSpan {
+                        repo: text("repo"),
+                        path: text("path"),
+                        byte_start: fields
+                            .get("byte_start")
+                            .and_then(|raw| serde_json::from_str::<u64>(raw.get()).ok()),
+                    }
+                })
+                .collect()
+        }
+        None => props["prov"]["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|span| StoredSpan {
+                repo: span["repo"].as_str(),
+                path: span["path"].as_str(),
+                byte_start: span["byte_start"].as_u64(),
+            })
+            .collect(),
+    }
+}
+
+/// Hold the base of an export that only the spec compiler reads from here on
+/// with each fact's own `prov` and each `BusinessRule` payload as compact JSON
+/// text. A decoded JSON object costs a B-tree leaf of some 620 bytes however
+/// few keys it has, so text is about a sixth of the memory: on REA, `prov`
+/// was 1.3 GB and rule payloads 1.0 GB of a 3.0 GB base (#2215). Only objects
+/// are rewritten, and only when their text needs no escape, so a reader that
+/// borrows strings from the text always can; anything else stays as read.
+pub fn compact_base(nodes: &mut [Node], edges: &mut [Edge]) {
+    nodes.iter_mut().for_each(compact_node);
+    edges.iter_mut().for_each(compact_edge);
+}
+
+/// One node of a base held as [`compact_base`] holds it, as it is read.
+pub fn compact_node(node: &mut Node) {
+    crate::rules::compact_rule_payload(node);
+    if let Some(prov) = node.props.get_mut("prov") {
+        compact_borrowable(prov);
+    }
+}
+
+/// One edge of a base held as [`compact_base`] holds it, as it is read.
+pub fn compact_edge(edge: &mut Edge) {
+    if let Some(prov) = edge.props.get_mut("prov") {
+        compact_borrowable(prov);
+    }
+}
+
+/// A compacted copy of a test's base ([`compact_base`]).
+#[cfg(test)]
+pub(crate) fn compacted_for_tests(nodes: &[Node], edges: &[Edge]) -> (Vec<Node>, Vec<Edge>) {
+    let (mut nodes, mut edges) = (nodes.to_vec(), edges.to_vec());
+    compact_base(&mut nodes, &mut edges);
+    (nodes, edges)
+}
+
 /// The validated provenance of a fact, or the explicit-Gap fallback when a
 /// fact carries none. Public for the same reason as the register predicates
 /// (#116): tier tallies must count with one definition on every surface.
 pub fn provenance(props: &serde_json::Value, identity: &str) -> Provenance {
-    serde_json::from_value::<Provenance>(props["prov"].clone())
+    serde_json::from_value::<Provenance>(stored_prov(props).into_owned())
         .ok()
         .filter(|provenance| provenance.validate().is_ok())
         .unwrap_or_else(|| fallback_provenance(identity))

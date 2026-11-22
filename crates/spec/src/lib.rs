@@ -50,7 +50,6 @@ pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
 }
 mod rules;
 mod test_drift;
-pub use rules::compact_rule_payloads;
 pub use rules::journey::{
     self, AssumedGoal, AssumptionKind, ENTRY_CALLBACK_LIMITATION, EntrySearchSummary, ForwardHop,
     GoalBasis, JOURNEY_RULE, JOURNEY_RULE_VERSION, JourneyAssumption, JourneyBudget,
@@ -69,6 +68,7 @@ pub use test_drift::{
     FOLLOWS_REDIRECTS_REASON, PARTIAL_RESPONSES_REASON, TEST_DRIFT_EXTRACTOR_ID, UNASSERTED_REASON,
     derive_test_drift,
 };
+pub use workbench::{compact_base, compact_edge, compact_node};
 mod security;
 pub use security::{
     SecurityLimit, SecurityLimitExceeded, SecurityLimits, SecurityProjectionSize,
@@ -122,8 +122,9 @@ pub use workbench::{
     curated_finding_shown, curated_reason_sentence, is_drift_edge, is_drift_node, is_gap_edge,
     is_gap_node, logical_actor_story_workspace_bound, logical_capability_compile_bound,
     logical_compile_bound, logical_coverage_render_bound, logical_knowledge_story_compile_bound,
-    logical_partition_bound, project_recovered_facts, provenance, try_compile_spec_supplied,
-    try_compile_spec_supplied_kept, try_compile_spec_with_coverage, validate_knowledge_stories,
+    logical_partition_bound, project_recovered_facts, provenance, stored_prov,
+    try_compile_spec_supplied, try_compile_spec_supplied_kept, try_compile_spec_with_coverage,
+    validate_knowledge_stories,
 };
 pub use workbench::{
     CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,

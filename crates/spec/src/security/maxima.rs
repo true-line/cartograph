@@ -132,7 +132,11 @@ pub fn security_projection_value_bound(graph_rows: usize, graph_values: usize) -
     };
     let evidence = serde_json::to_value(evidence_template()).ok()?;
     let mut endpoint2 = endpoint.clone();
-    endpoint2.props["prov"] = with(endpoint.props["prov"].clone(), "evidence", evidence.clone())?;
+    endpoint2.props["prov"] = with(
+        crate::stored_prov(&endpoint.props).into_owned(),
+        "evidence",
+        evidence.clone(),
+    )?;
     let mut grant2 = grant.clone();
     grant2.props = with(grant.props.clone(), "actions", "*2".into())?;
     let mut grant3 = grant.clone();
