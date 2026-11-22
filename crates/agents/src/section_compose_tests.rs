@@ -61,7 +61,11 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
         .find("<guidance>\nThis section lists rules as code")
         .unwrap();
     assert!(guide < prompt.find("<section>").unwrap());
-    assert!(guidance("1.3").unwrap().contains("never enumerate routes"));
+    assert!(
+        guidance("1.3")
+            .unwrap()
+            .contains("never state or enumerate routes")
+    );
     // A stated route rests on a cited fact that shows it (#2328).
     assert!(SYSTEM.contains("a route you state must be one a fact you cite shows"));
     assert!(SYSTEM.contains("A number, count or version you state must appear in a fact you cite"));

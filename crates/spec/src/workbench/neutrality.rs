@@ -236,6 +236,9 @@ pub struct CitedText {
     routes: BTreeSet<String>,
     /// The cited facts that are Endpoints (#2349).
     endpoints: BTreeSet<String>,
+    /// What each cited fact shows besides its ids: its label and props, for
+    /// figures, since an id's hex digits are no figure (#2357).
+    figures: BTreeMap<String, String>,
 }
 
 impl CitedText {
@@ -248,6 +251,7 @@ impl CitedText {
         }
         let mut routes = BTreeSet::new();
         let mut endpoints = BTreeSet::new();
+        let mut figures = BTreeMap::new();
         let shown = |props: &serde_json::Value| {
             let mut props = props.clone();
             if let Some(map) = props.as_object_mut() {
@@ -264,6 +268,7 @@ impl CitedText {
                 if node.label == "Endpoint" {
                     endpoints.insert(id.clone());
                 }
+                figures.insert(id.clone(), format!("{} {}", node.label, shown(&node.props)));
                 by_citation.insert(id, text);
             }
             routes.extend(route_literals(&node.id).into_iter().map(str::to_owned));
@@ -283,6 +288,7 @@ impl CitedText {
                     edge.dst,
                     shown(&edge.props)
                 );
+                figures.insert(id.clone(), format!("{} {}", edge.label, shown(&edge.props)));
                 by_citation.insert(id, text);
             }
             for end in [&edge.src, &edge.label, &edge.dst] {
@@ -294,6 +300,7 @@ impl CitedText {
             by_citation,
             routes,
             endpoints,
+            figures,
         }
     }
 
@@ -305,12 +312,16 @@ impl CitedText {
     pub fn uncited_number<'a>(&self, statement: &'a str, citations: &[String]) -> Option<&'a str> {
         let cited: Vec<&String> = citations
             .iter()
-            .filter_map(|id| self.by_citation.get(id))
+            .filter_map(|id| self.figures.get(id))
             .collect();
         number_literals(statement).into_iter().find(|literal| {
             !cited.iter().any(|text| match version(literal) {
                 Some(version) => contains_version(text, version),
-                None => numerals(literal).all(|numeral| contains_numeral(text, numeral)),
+                // `15s` shown whole, or each numeral standing alone.
+                None => {
+                    contains_numeral(text, literal)
+                        || numerals(literal).all(|numeral| contains_numeral(text, numeral))
+                }
             })
         })
     }
@@ -436,16 +447,27 @@ fn numerals(literal: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Whether `text` shows `numeral` whole: not inside a longer number.
+/// Whether `text` shows `numeral` as a whole token: not inside a longer
+/// number or word, so `25` is not shown by `a25f` or `1.25` (#2357).
 fn contains_numeral(text: &str, numeral: &str) -> bool {
-    let bytes = text.as_bytes();
+    // A letter or digit in any script continues a token (`25秒`).
+    let continues = |mut around: std::str::Chars<'_>, back: bool| {
+        let next = |chars: &mut std::str::Chars<'_>| {
+            if back {
+                chars.next_back()
+            } else {
+                chars.next()
+            }
+        };
+        match next(&mut around) {
+            Some(c) if c.is_alphanumeric() => true,
+            Some('.') => next(&mut around).is_some_and(|c| c.is_ascii_digit()),
+            _ => false,
+        }
+    };
     text.match_indices(numeral).any(|(start, matched)| {
         let end = start + matched.len();
-        let digit = |at: usize| bytes.get(at).is_some_and(u8::is_ascii_digit);
-        let before = start == 0
-            || !(digit(start - 1) || (bytes[start - 1] == b'.' && start >= 2 && digit(start - 2)));
-        let after = !(digit(end) || (bytes.get(end) == Some(&b'.') && digit(end + 1)));
-        before && after
+        !continues(text[..start].chars(), true) && !continues(text[end..].chars(), false)
     })
 }
 
@@ -910,6 +932,23 @@ mod tests {
         assert_eq!(text.uncited_number("Aliases use v2.", c), Some("v2"));
         // A longer version does not show a shorter one.
         assert!(!contains_version("served at /api/v2.1/alias", "2"));
+        // Hex digits of an id, or digits inside a word, are no figure (#2357).
+        let hex = Node {
+            id: "cap:a25f17b0".into(),
+            label: "Capability".into(),
+            props: json!({"title": "Manage alias", "source": "k25x"}),
+        };
+        let h = ids(&hex);
+        let hexed = CitedText::of(&[hex], &[], &[], &[h.clone()].into());
+        let h = std::slice::from_ref(&h);
+        assert_eq!(
+            hexed.uncited_number("It has 25 capabilities.", h),
+            Some("25")
+        );
+        assert_eq!(hexed.uncited_number("It has 17 areas.", h), Some("17"));
+        assert!(!contains_numeral("1.25", "25") && !contains_numeral("x25", "25"));
+        assert!(!contains_numeral("第25章", "25") && !contains_numeral("25秒", "25"));
+        assert!(contains_numeral("timeout 15s", "15s") && contains_numeral("[2, 3]", "2"));
         assert!(contains_version("served at /api/v2/alias.", "2"));
         // A section reference and a route are not figures.
         assert_eq!(
