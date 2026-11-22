@@ -913,13 +913,14 @@ fn run_blocking(
     }
 }
 
-/// Review the composed claims against the facts they cite (#2419): one
-/// bounded call of `claim-reviewer@1` on a local provider, and each claim it
-/// judges an overreach left out as `claim_overreaches`. A cloud provider is
-/// not called again, since its consent covers the composition's payload
-/// alone; a reply that is not the schema's, or a request over the input
-/// ceiling, leaves the claims as they are. Returns the claims kept and how
-/// the review went.
+/// Review the composed claims against the facts they cite (#2419): the same
+/// bounded call of `claim-reviewer@1` on a local provider, asked
+/// [`claim_review::REVIEW_SAMPLES`] times, and each claim a majority of the
+/// readable replies judges an overreach left out as `claim_overreaches`
+/// (#2458). A cloud provider is not called again, since its consent covers
+/// the composition's payload alone; fewer than two readable replies, or a
+/// request over the input ceiling, leave the claims as they are. Returns
+/// the claims kept and how the review went.
 pub(crate) fn review(
     state: &AppState,
     provider: &dyn LlmProvider,
@@ -944,16 +945,29 @@ pub(crate) fn review(
     if payload_bytes(&action) > ceiling {
         return Ok((composed, "review_too_large"));
     }
-    let text = complete(state, provider, &action, None, check, job_id)?.text;
-    let Some(verdicts) = claim_review::decode(&text, composed.finish.claims.len()) else {
+    // One sample's verdicts vary between identical calls, so the review is
+    // asked several times and a claim left out on a majority (#2458).
+    let claims = composed.finish.claims.len();
+    let mut samples = Vec::with_capacity(claim_review::REVIEW_SAMPLES);
+    for _ in 0..claim_review::REVIEW_SAMPLES {
+        // A failed call is an unreadable sample, unless the job was
+        // cancelled or lost.
+        let sample = match complete(state, provider, &action, None, check, job_id) {
+            Ok(completion) => claim_review::decode(&completion.text, claims),
+            Err(error) if check() != CallDirective::Continue => return Err(error),
+            Err(_) => None,
+        };
+        samples.push(sample.unwrap_or_default());
+    }
+    let Some(overreaching) = claim_review::overreaching(&samples, claims) else {
         return Ok((composed, "review_unavailable"));
     };
-    let mut verdicts = verdicts.into_iter();
+    let mut overreaching = overreaching.into_iter();
     let before = composed.finish.claims.len();
     composed
         .finish
         .claims
-        .retain(|_| verdicts.next() != Some(claim_review::Verdict::Overreach));
+        .retain(|_| overreaching.next() != Some(true));
     let dropped = before - composed.finish.claims.len();
     if dropped > 0 {
         composed.left_out += dropped;

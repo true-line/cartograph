@@ -642,7 +642,11 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
     );
     assert_eq!((kept.left_out, kept.reasons["claim_overreaches"]), (2, 1));
     // The reviewer read both claims and the cited capability's text.
-    let prompt = reviewer.prompts.lock().unwrap()[0].clone();
+    // AC-1329 (T-1329): the same review is asked three times (#2458).
+    let prompts = reviewer.prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), agents::claim_review::REVIEW_SAMPLES);
+    assert!(prompts.iter().all(|prompt| *prompt == prompts[0]));
+    let prompt = prompts[0].clone();
     assert!(prompt.contains("2. Shoppers place orders from every channel there is."));
     assert!(!prompt.contains("17 orders"));
     assert!(prompt.contains(&format!("{}: ", id("cap:orders"))) && prompt.contains("Place orders"));
@@ -661,6 +665,48 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
     )
     .unwrap();
     assert_eq!((how, kept.finish.claims.len()), ("review_unavailable", 2));
+    // A failed review call is an unreadable sample, so no reply keeps every
+    // claim; a cancelled job still fails (#2458).
+    struct Failing;
+    impl LlmProvider for Failing {
+        fn id(&self) -> &str {
+            "local-failing"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Local
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let (kept, how) = review(
+        &state,
+        &Failing,
+        &prepared,
+        composed(),
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap();
+    assert_eq!((how, kept.finish.claims.len()), ("review_unavailable", 2));
+    assert!(
+        review(
+            &state,
+            &Failing,
+            &prepared,
+            composed(),
+            &|| CallDirective::Cancelled,
+            None
+        )
+        .is_err()
+    );
 }
 
 /// AC-1328 (T-1328, #2449): a local composition whose reply lost two claims

@@ -252,11 +252,21 @@ impl CitedText {
         let mut routes = BTreeSet::new();
         let mut endpoints = BTreeSet::new();
         let mut figures = BTreeMap::new();
+        // Provenance is no part of what a fact shows, at any depth: an
+        // Endpoint's property groups each carry their own (#2458).
+        fn strip_prov(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("prov");
+                    map.values_mut().for_each(strip_prov);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip_prov),
+                _ => {}
+            }
+        }
         let shown = |props: &serde_json::Value| {
             let mut props = props.clone();
-            if let Some(map) = props.as_object_mut() {
-                map.remove("prov");
-            }
+            strip_prov(&mut props);
             props.to_string()
         };
         for node in nodes.iter().chain(overlay) {
@@ -1220,5 +1230,39 @@ mod tests {
         assert!(!text.endpoint_claim_uncited(claim, k));
         assert!(text.endpoint_claim_uncited("It accepts /api/v2/alias/custom/new.", c));
         assert!(!text.endpoint_claim_uncited("Users create aliases.", c));
+    }
+
+    /// AC-1329 (T-1329): a fact's text leaves out provenance at any depth,
+    /// so an Endpoint's guarded groups show their guards, not hashes and
+    /// byte offsets (#2458).
+    #[test]
+    fn a_fact_text_leaves_out_nested_provenance() {
+        let endpoint = Node {
+            id: "ep:GET /dashboard/".into(),
+            label: "Endpoint".into(),
+            props: json!({
+                "auth": {"guards": ["login_required"], "prov": prov("app.py", "auth")},
+                "responses": [{"status": 302, "prov": prov("app.py", "302")}],
+                "prov": prov("app.py", "ep"),
+            }),
+        };
+        let id = cite(&endpoint.id);
+        let text = CitedText::of(&[endpoint], &[], &[], &[id.clone()].into());
+        let shown = text.text(&id).unwrap();
+        assert!(
+            shown.contains("login_required") && shown.contains("302"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("content_hash")
+                && !shown.contains("evidence")
+                && !shown.contains("abc123"),
+            "{shown}"
+        );
+        // An offset of the evidence is no figure the fact shows.
+        assert_eq!(
+            text.uncited_number("It reads 9 bytes.", std::slice::from_ref(&id)),
+            Some("9")
+        );
     }
 }
