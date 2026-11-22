@@ -1,8 +1,10 @@
 // Local lane (ADR-0085 decision 9, AC-1423): Pi drives the loop against the
-// host's loopback proxy, which forwards to Ollama's OpenAI-compatible API.
+// host's loopback proxy, which forwards to Ollama's native chat API so the
+// frozen context window (ADR-0081) is sent on every request.
 import { Agent, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
 import type { Model } from "@mariozechner/pi-ai";
 import type { HostChannel } from "./host.ts";
+import { ollamaStreamFn } from "./ollama-stream.ts";
 import type { SidecarMessage, StartMessage } from "./protocol.ts";
 
 export function piModel(start: StartMessage): Model<"openai-completions"> {
@@ -11,7 +13,7 @@ export function piModel(start: StartMessage): Model<"openai-completions"> {
     name: start.model,
     api: "openai-completions",
     provider: "ollama",
-    baseUrl: `${start.base_url.replace(/\/$/, "")}/v1`,
+    baseUrl: start.base_url,
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -50,7 +52,7 @@ export async function runPi(
     // The proxy token, not a provider key: the host adds any real credential.
     getApiKey: () => start.token,
     toolExecution: "sequential",
-    ...(streamFn ? { streamFn } : {}),
+    streamFn: (streamFn ?? ollamaStreamFn(start.base_url, start.token, start.context_window)) as StreamFn,
     beforeToolCall: async ({ toolCall, args }) => {
       const outcome = await host.hook("pre_tool", { tool: toolCall.name, arguments: args });
       return outcome.allow ? undefined : { block: true, reason: outcome.reason ?? "Denied by the run's pre_tool hook." };
