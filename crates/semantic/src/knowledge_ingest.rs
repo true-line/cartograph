@@ -69,7 +69,7 @@ pub struct CommitText {
     pub repo: String,
     pub sha: String,
     pub message: String,
-    /// Touched paths, sorted, at most [`MAX_COMMIT_PATHS`].
+    /// Touched paths, the base's files first, at most [`MAX_COMMIT_PATHS`].
     pub paths: Vec<String>,
 }
 

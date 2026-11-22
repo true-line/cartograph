@@ -18,7 +18,7 @@ use llm::LlmProvider;
 use semantic::embedding_cache::EmbeddingCache;
 use semantic::knowledge_ingest::{self, CommitText, PhaseOutcome, SectionText};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// Versioned phase recipe recorded in the overlay basis; [`recipe_name`]
@@ -170,14 +170,21 @@ pub(crate) fn run_with_sections(
 }
 
 /// Reads the first-parent history of each ingested repository at the
-/// commit its base was ingested from, given as repository key to commit
-/// (AC-1516). Commits never enter the graph, so the phase asks the host.
-pub(crate) type HistoryReader<'a> = dyn Fn(&BTreeMap<String, String>) -> Vec<CommitText> + 'a;
+/// commit its base was ingested from, given as repository key to commit,
+/// with the base's `File` ids so the paths a commit names start with the
+/// ones the base holds (AC-1516). Commits never enter the graph, so the
+/// phase asks the host.
+pub(crate) type HistoryReader<'a> =
+    dyn Fn(&BTreeMap<String, String>, &BTreeSet<String>) -> Vec<CommitText> + 'a;
 
 /// No source access: no commit is a unit.
-pub(crate) fn no_history(_: &BTreeMap<String, String>) -> Vec<CommitText> {
+pub(crate) fn no_history(_: &BTreeMap<String, String>, _: &BTreeSet<String>) -> Vec<CommitText> {
     Vec::new()
 }
+
+// A managed clone holds enough history for every commit unit and its
+// first parent's tree.
+const _: () = assert!(knowledge_ingest::MAX_COMMIT_UNITS < ingest::HISTORY_DEPTH as usize);
 
 /// [`run_with_sections`] with the host's history reader (AC-1516).
 pub(crate) fn run_with_sources(
@@ -360,7 +367,14 @@ fn run_within(
     // History is read the same way: only when it can be embedded, outside
     // the graph lock, at the commit each repository's base came from.
     let commits = if embeds {
-        history(&ingested_heads(&snapshot.graph.0))
+        let held: BTreeSet<String> = snapshot
+            .graph
+            .0
+            .iter()
+            .filter(|node| node.label == "File")
+            .map(|node| node.id.clone())
+            .collect();
+        history(&ingested_heads(&snapshot.graph.0), &held)
     } else {
         Vec::new()
     };
@@ -797,12 +811,14 @@ pub(crate) fn ingested_heads(nodes: &[core_graph::Node]) -> BTreeMap<String, Str
 /// (AC-1516): at most [`knowledge_ingest::MAX_COMMIT_UNITS`] commits per
 /// repository, newest first, each with its message and up to
 /// [`knowledge_ingest::MAX_COMMIT_PATHS`] paths its tree changed from its
-/// first parent. Author names and emails are never read. A source that is
+/// first parent, the base's files first; a commit touching none of them is
+/// left out. Author names and emails are never read. A source that is
 /// busy, unregistered, not a repository root or missing the commit gives
-/// no commits.
+/// no commits, and a shallow clone's history ends before its boundary.
 pub(crate) fn source_history(
     registry: &Mutex<crate::sources::SourceRegistry>,
     heads: &BTreeMap<String, String>,
+    held: &BTreeSet<String>,
 ) -> Vec<CommitText> {
     let mut commits = Vec::new();
     if heads.is_empty() {
@@ -826,7 +842,7 @@ pub(crate) fn source_history(
         let Ok(root) = operation.root(repo) else {
             continue;
         };
-        if let Ok(read) = repository_history(root, repo, head) {
+        if let Ok(read) = repository_history(root, repo, head, held) {
             commits.extend(read);
         }
     }
@@ -838,6 +854,7 @@ fn repository_history(
     root: &std::path::Path,
     repo: &str,
     head: &str,
+    held: &BTreeSet<String>,
 ) -> Result<Vec<CommitText>, git2::Error> {
     // The source root itself must be the repository: a discovered parent
     // repository's paths would not be the base's paths.
@@ -846,20 +863,31 @@ fn repository_history(
         git2::RepositoryOpenFlags::NO_SEARCH,
         std::iter::empty::<&std::ffi::OsStr>(),
     )?;
+    // A shallow clone's boundary commits have no parents to diff against:
+    // the walk ends there rather than call a whole tree changed.
+    let shallow: BTreeSet<git2::Oid> = std::fs::read_to_string(git.path().join("shallow"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| git2::Oid::from_str(line.trim()).ok())
+        .collect();
     let mut walk = git.revwalk()?;
     walk.set_sorting(git2::Sort::TOPOLOGICAL)?;
     walk.simplify_first_parent()?;
     walk.push(git2::Oid::from_str(head)?)?;
     let mut out = Vec::new();
     for oid in walk.take(knowledge_ingest::MAX_COMMIT_UNITS) {
-        let commit = git.find_commit(oid?)?;
+        let oid = oid?;
+        if shallow.contains(&oid) {
+            break;
+        }
+        let commit = git.find_commit(oid)?;
         let parent = commit
             .parents()
             .next()
             .map(|parent| parent.tree())
             .transpose()?;
         let diff = git.diff_tree_to_tree(parent.as_ref(), Some(&commit.tree()?), None)?;
-        let mut paths = std::collections::BTreeSet::new();
+        let mut paths = BTreeSet::new();
         for delta in diff.deltas() {
             for file in [delta.old_file(), delta.new_file()] {
                 if let Some(path) = file.path().and_then(|path| path.to_str()) {
@@ -867,14 +895,21 @@ fn repository_history(
                 }
             }
         }
+        // The base's files first, so the cap never drops the ones a hit
+        // cites; a commit touching none of them is not a unit.
+        let (mut paths, rest): (Vec<String>, Vec<String>) = paths
+            .into_iter()
+            .partition(|path| held.contains(&format!("file:{repo}@{path}")));
+        if paths.is_empty() {
+            continue;
+        }
+        paths.extend(rest);
+        paths.truncate(knowledge_ingest::MAX_COMMIT_PATHS);
         out.push(CommitText {
             repo: repo.to_string(),
             sha: commit.id().to_string(),
             message: String::from_utf8_lossy(commit.message_bytes()).into_owned(),
-            paths: paths
-                .into_iter()
-                .take(knowledge_ingest::MAX_COMMIT_PATHS)
-                .collect(),
+            paths,
         });
     }
     Ok(out)
@@ -912,7 +947,7 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                         local_provider(port).map(|p| Box::new(p) as Box<dyn LlmProvider>)
                     },
                     &|sections| source_sections(&state.sources, sections),
-                    &|heads| source_history(&state.sources, heads),
+                    &|heads, held| source_history(&state.sources, heads, held),
                 ));
                 remember(&status);
                 let _ = app.emit("knowledge-phase", status);

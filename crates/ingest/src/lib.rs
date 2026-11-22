@@ -4,7 +4,7 @@
 //! The auth ladder for v1 (ADR-0009): an explicit token from
 //! `GH_TOKEN`/`GITHUB_TOKEN`, else a `gh auth token` shell-out for
 //! environments already authenticated. Clones are `git2` shallow
-//! (depth 1), land in a temp directory and only move into place on
+//! ([`HISTORY_DEPTH`]), land in a temp directory and only move into place on
 //! success — an auth failure leaves **no partial clone** (AC-0003) and
 //! maps to a typed error carrying remediation text.
 
@@ -193,6 +193,11 @@ fn classify_git_error(url: &str, e: git2::Error, token_found: bool) -> IngestErr
     }
 }
 
+/// Commits a remote clone fetches: still shallow, but deep enough for the
+/// knowledge phase's commit units (AC-1516), 2,048 first-parent commits
+/// and the tree of the oldest one's parent.
+pub const HISTORY_DEPTH: i32 = 2049;
+
 /// Clone only into a caller-owned fresh attempt path. This primitive cannot
 /// replace an existing destination; managed publication owns that separate step.
 fn clone_into_new(
@@ -217,7 +222,7 @@ fn clone_into_new(
     let mut fetch = git2::FetchOptions::new();
     fetch.remote_callbacks(callbacks);
     if !clone_url.starts_with("file://") {
-        fetch.depth(1); // shallow per SPEC §10 (local transport can't)
+        fetch.depth(HISTORY_DEPTH); // shallow per SPEC §10 (local transport can't)
     }
 
     let result = git2::build::RepoBuilder::new()
