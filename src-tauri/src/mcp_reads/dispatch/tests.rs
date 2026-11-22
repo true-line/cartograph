@@ -738,7 +738,7 @@ fn query_reads_a_nodes_visible_neighborhood_with_its_relations() {
     assert!(!error.to_string().contains("ledger"));
 }
 
-// #250 worked example: an external agent answers "what handles POST
+// AC-1811 (#250) worked example: an external agent answers "what handles POST
 // /owners/new" purely through the MCP reads, every step citing exact facts,
 // and the same reads return byte-identical responses.
 #[test]
@@ -788,6 +788,11 @@ fn agent_answers_what_handles_an_endpoint_through_mcp_reads_alone() {
                 "Symbol",
                 json!({"name":"save"}),
             ),
+            (
+                "sym:OwnerImport.kt#importOwner",
+                "Symbol",
+                json!({"name":"importOwner"}),
+            ),
         ] {
             let mut props = props;
             props["prov"] = serde_json::to_value(prov(id, controller)).unwrap();
@@ -813,6 +818,13 @@ fn agent_answers_what_handles_an_endpoint_through_mcp_reads_alone() {
             (
                 "sym:OwnerController.kt#processCreationForm",
                 "sym:OwnerRepository.kt#save",
+                "CALLS",
+            ),
+            // A caller of the handler: the undirected neighborhood returns
+            // it, and the agent must not report it as downstream work.
+            (
+                "sym:OwnerImport.kt#importOwner",
+                "sym:OwnerController.kt#processCreationForm",
                 "CALLS",
             ),
         ] {
@@ -848,6 +860,9 @@ fn agent_answers_what_handles_an_endpoint_through_mcp_reads_alone() {
             .unwrap()
             .to_owned();
         assert_eq!(endpoint, "ep:petclinic@POST:/owners/new");
+        // Every answer element carries checkable provenance.
+        assert_eq!(candidates[0]["confidence_tier"], "Confirmed", "{found}");
+        assert!(candidates[0].to_string().contains("OwnerController.kt"));
         // 2. Follow its HANDLES relation, then what the handler calls.
         let handles = json!({"scope":{"type":"neighborhood","anchor":endpoint,"hops":1},"kind":"edge","labels":["HANDLES"],"max_facts":10,"max_bytes":65536});
         let args = query_args(dispatch, handles);
@@ -857,7 +872,6 @@ fn agent_answers_what_handles_an_endpoint_through_mcp_reads_alone() {
             ["ep:petclinic@POST:/owners/new-HANDLES->sym:OwnerController.kt#processCreationForm"]
         );
         let fact = &handled["result"]["structuredContent"]["context"]["response"]["facts"][0];
-        // Every answer element carries checkable provenance.
         assert_eq!(fact["confidence_tier"], "Confirmed", "{fact}");
         assert!(fact.to_string().contains("OwnerController.kt"));
         let handler = fact["reference"]["destination"]
@@ -867,10 +881,29 @@ fn agent_answers_what_handles_an_endpoint_through_mcp_reads_alone() {
         let calls = json!({"scope":{"type":"neighborhood","anchor":handler,"hops":1},"kind":"edge","labels":["CALLS"],"max_facts":10,"max_bytes":65536});
         let args = query_args(dispatch, calls);
         let called = call(dispatch, base + 4, "cartograph_query", args);
+        // Neighborhoods are undirected: the page holds the handler's caller
+        // too, so what the handler does is the edges whose source it is.
         assert_eq!(
             references(&called),
-            ["sym:OwnerController.kt#processCreationForm-CALLS->sym:OwnerRepository.kt#save"]
+            [
+                "sym:OwnerController.kt#processCreationForm-CALLS->sym:OwnerRepository.kt#save",
+                "sym:OwnerImport.kt#importOwner-CALLS->sym:OwnerController.kt#processCreationForm"
+            ]
         );
+        let downstream: Vec<_> =
+            called["result"]["structuredContent"]["context"]["response"]["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|fact| fact["reference"]["source"] == handler.as_str())
+                .collect();
+        assert_eq!(downstream.len(), 1);
+        assert_eq!(
+            downstream[0]["reference"]["destination"],
+            "sym:OwnerRepository.kt#save"
+        );
+        assert_eq!(downstream[0]["confidence_tier"], "Confirmed");
+        assert!(downstream[0].to_string().contains("OwnerController.kt"));
         // Request ids differ; the read results must not.
         [found, handled, called].map(|response| response["result"].clone())
     };

@@ -164,10 +164,14 @@ Answer it from the recovered system alone, citing each step:
    `ep:petclinic@POST:/owners/new`); never build an ID by hand.
 2. Follow what handles it: `cartograph_query` with
    `{ scope: { type: "neighborhood", anchor: endpointId, hops: 1 }, kind: "edge", labels: ["HANDLES"] }`.
-   Each edge's `reference.destination` is a handler, and the fact carries its
+   For each edge whose `reference.source` is the endpoint, `reference.destination`
+   is a handler, and the fact carries its
    tier, confidence and evidence references.
 3. Follow what the handler does: the same query anchored on the handler with
-   `labels: ["CALLS"]`, or `hops: 2` for a wider view.
+   `labels: ["CALLS"]`. Neighborhoods are undirected, so the page also holds
+   the handler's callers: keep only edges whose `reference.source` is the
+   handler for what it calls, and report edges whose `reference.destination`
+   is the handler as its callers. Use `hops: 2` for a wider view.
 4. Quote source only through `cartograph_evidence` for a fact you cite.
 
 Report the handler with the endpoint and edge references you read, and their
