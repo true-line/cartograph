@@ -25,6 +25,10 @@ pub mod curated_settlements;
 pub mod edge_merge;
 #[path = "../../../src-tauri/src/egress.rs"]
 pub mod egress;
+#[path = "../../../src-tauri/src/escalation.rs"]
+pub mod escalation;
+#[path = "../../../src-tauri/src/evidence.rs"]
+pub mod evidence;
 #[path = "../../../src-tauri/src/extraction_cache.rs"]
 pub mod extraction_cache;
 #[path = "../../../src-tauri/src/findings.rs"]
@@ -35,6 +39,8 @@ pub mod ingest_basis;
 pub mod investigation_host;
 #[path = "../../../src-tauri/src/investigations/runtime.rs"]
 pub mod investigation_runtime;
+#[path = "../../../src-tauri/src/job_claim.rs"]
+pub mod job_claim;
 #[path = "../../../src-tauri/src/job_execution.rs"]
 pub mod job_execution;
 #[path = "../../../src-tauri/src/jobs.rs"]
@@ -55,5 +61,7 @@ pub mod primary_source;
 pub mod provider_credentials;
 #[path = "../../../src-tauri/src/settings.rs"]
 pub mod settings;
+#[path = "../../../src-tauri/src/source_access.rs"]
+pub mod source_access;
 #[path = "../../../src-tauri/src/sources.rs"]
 pub mod sources;
