@@ -35,6 +35,10 @@ mod model_debug;
 mod name_unique_tests;
 use app_store::observation_inputs;
 mod operator_limits;
+use app_store::ingest_basis::{
+    ActivePlugin, SystemRepo, coverage_config_hash, plugin_settings_root, source_revisions_of,
+    system_contents_of,
+};
 use app_store::paths;
 #[path = "primary_source_commands.rs"]
 mod primary_source;
@@ -467,16 +471,6 @@ impl PluginCorpus {
     }
 }
 
-/// The lifecycle key for a plugin's enablement rows: the resolved project
-/// root that supplied a project copy, or `"user"` for user-level copies.
-fn plugin_settings_root(plugin: &adapters_plugin_host::discovery::DiscoveredPlugin) -> String {
-    plugin
-        .project_root
-        .as_ref()
-        .map(|root| root.display().to_string())
-        .unwrap_or_else(|| "user".to_string())
-}
-
 /// Discovery metadata stays coupled to the managed roots that supplied it.
 /// Keep this value alive through every dependent source read and publication;
 /// a discovered path alone cannot prevent participating clone replacement.
@@ -521,27 +515,6 @@ fn discover_session_plugins<R: tauri::Runtime>(
         plugins: adapters_plugin_host::discovery::discover(&roots, &user_dir),
         _source_operation: operation,
     })
-}
-
-/// A plugin cleared for extraction on one project root (#201): discovered,
-/// explicitly enabled for these exact bytes, and gate-passed for these
-/// exact bytes. `extensions` is the coverage claim from its golden corpus
-/// — the gate already proved the corpus, so the claim is trusted as far as
-/// routing; the facts themselves are still bounded and pinned per call.
-struct ActivePlugin {
-    plugin_id: String,
-    path: std::path::PathBuf,
-    /// The gated hash — extraction re-verifies the bytes on disk still
-    /// match before running them (fail closed on a swap).
-    content_hash: String,
-    extensions: Vec<String>,
-    /// Coverage cells the gated corpus declares (AC-0263).
-    cells: Vec<ingest::matrix::ReportedCell>,
-    /// The corpus's names for extensions the core cannot name.
-    languages: std::collections::BTreeMap<String, String>,
-    /// The gate key over the artifact and its exact corpus bytes; it enters
-    /// the coverage basis, so a corpus edit stales recorded inventories.
-    gate_key: String,
 }
 
 /// The plugins allowed to extract for `root` right now. Everything about
@@ -1020,19 +993,6 @@ fn adapter_inventory() -> AdapterInventory {
     }
 }
 
-/// One repo currently contributing facts to the unified graph (#162).
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct SystemRepo {
-    repo: String,
-    commit: String,
-    display_name: Option<String>,
-    /// Graph content hash recorded by the latest completed ingest of this
-    /// registration at `commit` (#1765, AC-0593); `None` when none is
-    /// recorded. Scoped per registration: a `local/` key is random per
-    /// installation, so the value is not comparable across installations.
-    graph_hash: Option<String>,
-}
-
 /// What the current system contains, derived from the graph's own facts
 /// (never from history logs, which survive a clear): each distinct repo
 /// any node's evidence cites, with its recorded commit identity. Evidence
@@ -1069,43 +1029,6 @@ fn system_contents_for(state: &AppState) -> Result<Vec<SystemRepo>, String> {
             .map(|source| source.display_name);
     }
     Ok(contents)
-}
-
-fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
-    let mut repos: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    for node in nodes {
-        let prov = core_graph::stored::stored_prov(&node.props);
-        let evidence = &prov["evidence"][0];
-        // A captured observation input is not a source registration (ADR-0080).
-        let Some(repo) = evidence["repo"].as_str().filter(|repo| {
-            !repo.is_empty() && !repo.starts_with(observation_inputs::INPUT_REPO_PREFIX)
-        }) else {
-            continue;
-        };
-        let commit = evidence["commit_sha"].as_str().unwrap_or("workdir");
-        repos.entry(repo.to_string()).or_insert(commit.to_string());
-    }
-    repos
-        .into_iter()
-        .map(|(repo, commit)| SystemRepo {
-            repo,
-            commit,
-            display_name: None,
-            graph_hash: None,
-        })
-        .collect()
-}
-
-/// The source registrations `nodes` cite and the revision of each, ordered
-/// by registry key: the `sources` of a graph basis (AC-0593).
-fn source_revisions_of(nodes: &[Node]) -> Vec<spec::SourceRevision> {
-    system_contents_of(nodes)
-        .into_iter()
-        .map(|entry| spec::SourceRevision {
-            repo: entry.repo,
-            commit: entry.commit,
-        })
-        .collect()
 }
 
 /// What an export was compiled from (#1765, AC-0593): the content hash of
@@ -1418,32 +1341,6 @@ fn refusal_reason(reason: adapters_plugin_host::RefusalReason) -> ingest::covera
         Host::GuestError => Recorded::GuestError,
         Host::BoundExceeded => Recorded::BoundExceeded,
     }
-}
-
-/// Identity of the plugin and registry basis an inventory was recorded
-/// under: the only parts of an ingest's configuration re-derivable at read
-/// time. Layer hints and declared inputs are per-ingest options the
-/// inventory records itself. The registry identity covers every accepted
-/// file's bytes — SDK entries, qualifiers, batch keys, and backings alike.
-pub(crate) fn coverage_config_hash(plugins: &[ActivePlugin], registries: &Registries) -> String {
-    let mut pinned: Vec<String> = plugins
-        .iter()
-        .map(|plugin| {
-            // The gate key binds the corpus: edited routing or coverage
-            // claims change the basis even when the artifact did not.
-            let pinned =
-                adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash);
-            format!("{pinned}#{}", plugin.gate_key)
-        })
-        .collect();
-    pinned.sort();
-    pinned.dedup();
-    let basis = serde_json::json!({
-        "basis": "coverage-config-v2",
-        "plugins": pinned,
-        "registries": registries.identity(),
-    });
-    core_prov::content_hash(basis.to_string().as_bytes())
 }
 
 /// The inventory a publication records with its repo's facts (AC-0239).

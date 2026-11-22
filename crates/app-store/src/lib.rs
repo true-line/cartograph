@@ -19,6 +19,8 @@
 pub mod edge_merge;
 #[path = "../../../src-tauri/src/findings.rs"]
 pub mod findings;
+#[path = "../../../src-tauri/src/ingest_basis.rs"]
+pub mod ingest_basis;
 #[path = "../../../src-tauri/src/job_execution.rs"]
 pub mod job_execution;
 #[path = "../../../src-tauri/src/jobs.rs"]
