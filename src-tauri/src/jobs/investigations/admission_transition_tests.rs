@@ -799,3 +799,48 @@ fn auditor14_capacity_exclusion_reopens_without_ledger_credit() {
         // Roll back the corruption; missing history must never authenticate.
     }
 }
+#[test]
+fn undecodable_native_calls_are_ledgered_refusals_capped_per_run() {
+    // AC-1420: an @29 tool call that does not decode goes back to the model as
+    // invalid_action feedback; the journal derives the count and refuses a
+    // third, which the worker turns into the terminal decode stop.
+    use admission_journal::RefusalReason;
+    use agents::investigation::{ActionRefusalReason, MAX_INVALID_ACTION_REFUSALS};
+    let invalid = RefusalReason::Action(ActionRefusalReason::InvalidAction);
+    let proposal = serde_json::json!({"type": "refused_tool_call", "tool": "query_context",
+        "refusal": "host_owned_field", "arguments": {"context_id": "x"}});
+    let write = |f: &mut completion::InternalFixture, value: &Value, reason| {
+        let revision = f.task.detail.summary.revision;
+        let response = fixture::response(f, value);
+        f.store
+            .refuse_next_prompt(&f._execution_guard, revision, &response, value, reason)
+    };
+    // Earlier roles keep the terminal decode stop.
+    let (mut old, _) = action_fixture();
+    assert!(write(&mut old, &proposal, invalid).is_err());
+    let (mut f, offered) = action_fixture_for("domain-analyst@29");
+    // A proposal that decodes is never an invalid_action refusal.
+    assert!(write(&mut f, &offered, invalid).is_err());
+    for index in 0..=MAX_INVALID_ACTION_REFUSALS {
+        if index != 0 {
+            action_next(&mut f);
+        }
+        let result = write(&mut f, &proposal, invalid);
+        if index == MAX_INVALID_ACTION_REFUSALS {
+            assert_eq!(result.unwrap_err(), InvestigationStoreError::Capacity);
+            break;
+        }
+        result.unwrap();
+        let reopened = JobStore::open(f.store.conn.path().unwrap()).unwrap();
+        let tx = reopened.conn.unchecked_transaction().unwrap();
+        f.task = load_next_prompt_task(&tx, &f.basis.task_id).unwrap();
+        let state = admission_journal::derive_current(&tx, &f.task).unwrap();
+        let feedback = state.action_feedback.unwrap();
+        assert_eq!(feedback.reason, ActionRefusalReason::InvalidAction);
+        assert_eq!(feedback.invocation_ordinal, index as u32 + 1);
+        assert_eq!(state.count, 0, "not a capacity refusal");
+        assert_eq!(f.task.detail.usage.tool_actions, 0, "nothing ran");
+        assert_eq!(f.task.detail.usage.model_invocations, index as u32 + 1);
+        tx.commit().unwrap();
+    }
+}
