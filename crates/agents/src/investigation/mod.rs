@@ -21,12 +21,12 @@ mod enumeration_claims;
 mod finding_review;
 #[doc(hidden)]
 pub mod finish_patch;
-pub mod native_tools;
 mod input;
 mod inspection;
 mod inventory_workspace;
 mod mcp_client_id;
 mod mcp_grant;
+pub mod native_tools;
 pub mod rejected_response;
 // Separate completion families preserve every legacy generation and identity.
 #[doc(hidden)]
