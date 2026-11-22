@@ -274,7 +274,7 @@ pub fn project_use_case(
         if node.label != "BusinessRule" {
             continue;
         }
-        let Ok(rule) = GuardedExitEvidence::from_value(node.props["rule"].clone()) else {
+        let Ok(rule) = super::rule_payload(node) else {
             continue;
         };
         // A guarded effect (#1998) changes state; it is not an exit that may
