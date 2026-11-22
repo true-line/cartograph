@@ -182,10 +182,6 @@ pub(crate) fn prepare(
     )
 }
 
-/// The longest rule excerpt a system composition reads (#2375); the
-/// section sets its own, smaller or equal, budget.
-const EXCERPT_BYTES: usize = 16 * 1024;
-
 /// Room kept under the input ceiling for what the call adds around the
 /// payload (#2386).
 const INPUT_MARGIN_BYTES: u64 = 4 * 1024;
@@ -287,9 +283,11 @@ fn compile(
     // excerpt, then shorter ones for a request near its input ceiling
     // (#2386).
     let mut excerpts: Vec<String> = Vec::new();
-    if address.scope == spec::SYSTEM_SCOPE {
+    if address.scope == spec::SYSTEM_SCOPE
+        && let Some(budget) = spec::rule_excerpt_budget(&address.section)
+    {
         for share in [1, 2, 4, 8] {
-            let bytes = EXCERPT_BYTES / share;
+            let bytes = budget / share;
             if let Some(rules) =
                 spec::rule_excerpt_within(&artifact.content, &address.section, bytes)
                 && excerpts.last() != Some(&rules)
