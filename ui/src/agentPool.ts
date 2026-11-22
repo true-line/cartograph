@@ -179,7 +179,7 @@ export async function saveAgentPoolControls(controls: AgentPoolControls): Promis
 
 /** One line on what the controls do to new agent work. */
 export function controlsLine(controls: AgentPoolControls): string {
-  if (controls.paused) return 'New agent work is paused. Work already running continues.';
+  if (controls.paused) return 'New agent work waits until the pool is resumed. Work already running continues.';
   const limit = (count: number, mode: string) => (count === 0 ? `no ${mode} limit` : `at most ${count} ${mode}`);
   return `New agent work starts with ${limit(controls.local_limit, 'local')} and ${limit(controls.cloud_limit, 'cloud')} at a time.`;
 }

@@ -90,7 +90,7 @@ describe('usageLine and usageTotal', () => {
 // AC-1704 (T-1704): the controls line says what happens to new agent work.
 describe('controlsLine', () => {
   it('names pause first, then each mode limit', () => {
-    expect(controlsLine({ paused: true, local_limit: 1, cloud_limit: 1 })).toBe('New agent work is paused. Work already running continues.');
+    expect(controlsLine({ paused: true, local_limit: 1, cloud_limit: 1 })).toBe('New agent work waits until the pool is resumed. Work already running continues.');
     expect(controlsLine({ paused: false, local_limit: 0, cloud_limit: 4 })).toBe('New agent work starts with no local limit and at most 4 cloud at a time.');
   });
 });
