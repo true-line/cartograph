@@ -687,20 +687,128 @@ fn dependencies(text: &str, node: TsNode) -> Option<Vec<(String, Span)>> {
 /// sorted, and every id derives from the path and the service name, or from
 /// the path and the document.
 pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExtraction> {
-    let walked = source_walk::files(
+    let walked = walk(root)?;
+    let read = |rel: &str| std::fs::read(root.join(rel));
+    let len = |rel: &str| std::fs::metadata(root.join(rel)).map(|meta| meta.len());
+    Ok(extract_walked(
+        &walked,
+        &Source {
+            read: &read,
+            len: &len,
+        },
+        id,
+    ))
+}
+
+/// The files [`extract_dir`] would open under `root`: every file
+/// [`is_environment_file`] selects, in path order. A source capture retains
+/// them (AC-1059).
+pub fn environment_paths(root: &Path) -> std::io::Result<Vec<String>> {
+    Ok(walk(root)?
+        .into_iter()
+        .map(|file| file.rel)
+        .filter(|rel| is_environment_file(rel))
+        .collect())
+}
+
+/// True when this reader may open `rel`: a Compose file, an environment
+/// file, a kustomization, a Helm chart, helmfile or values file, a YAML file
+/// that may hold a Kubernetes manifest, or a settings file. Every file the
+/// reader opens is one of these.
+pub fn is_environment_file(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    compose_file(name)
+        || names_an_environment(name)
+        || kustomize::FILE_NAMES.contains(&name)
+        || name == "Chart.yaml"
+        || helm::HELMFILE_NAMES.contains(&name)
+        || helm::values_name(name)
+        || manifest_candidate(name, rel)
+        || settings::spring_file(name).is_some()
+        || settings::names_an_environment(rel)
+}
+
+/// [`extract_dir`] over a source capture (AC-1059, #385): `captured` is the
+/// capture's [`is_environment_file`] selection and `read` its bytes. The
+/// checkout is listed for its directories and other files, and never read:
+/// a selected file the capture does not hold is not among the files read,
+/// and a captured file the checkout no longer lists is.
+pub fn extract_from_capture(
+    root: &Path,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+) -> std::io::Result<EnvironmentExtraction> {
+    let held: std::collections::BTreeSet<&str> = captured.iter().map(String::as_str).collect();
+    let mut walked = walk(root)?;
+    walked.retain(|file| !is_environment_file(&file.rel) || held.contains(file.rel.as_str()));
+    let listed: std::collections::BTreeSet<String> =
+        walked.iter().map(|file| file.rel.clone()).collect();
+    for rel in held {
+        if !listed.contains(rel) {
+            walked.push(source_walk::WalkedFile {
+                rel: rel.to_string(),
+                path: root.join(rel),
+                name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+            });
+        }
+    }
+    walked.sort_by(|a, b| a.rel.cmp(&b.rel));
+    let len = |rel: &str| read(rel).map(|bytes| bytes.len() as u64);
+    Ok(extract_walked(&walked, &Source { read, len: &len }, id))
+}
+
+fn walk(root: &Path) -> std::io::Result<Vec<source_walk::WalkedFile>> {
+    source_walk::files(
         root,
         &crate::preflight::skip_dir,
         source_walk::Gitignores::Honor,
-    )?;
-    let tree = Tree::read(&walked);
-    let charts = helm::Index::read(&walked);
-    let spring = settings::Index::read(&walked);
+    )
+}
+
+/// Where the reader's bytes come from, by repo-relative path: the checkout,
+/// or a source capture.
+struct Source<'a> {
+    read: &'a dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    len: &'a dyn Fn(&str) -> std::io::Result<u64>,
+}
+
+impl Source<'_> {
+    /// The file's text, or an error when it cannot be read or is not UTF-8.
+    fn text(&self, rel: &str) -> std::io::Result<String> {
+        String::from_utf8((self.read)(rel)?)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))
+    }
+
+    /// The file's length in bytes, or 0 when it cannot be read.
+    fn len_or_zero(&self, rel: &str) -> u64 {
+        (self.len)(rel).unwrap_or(0)
+    }
+
+    /// The file's length in bytes.
+    fn len(&self, rel: &str) -> std::io::Result<u64> {
+        (self.len)(rel)
+    }
+}
+
+fn extract_walked(
+    walked: &[source_walk::WalkedFile],
+    src: &Source,
+    id: &SourceId,
+) -> EnvironmentExtraction {
+    let tree = Tree::read(walked, src);
+    let charts = helm::Index::read(walked, src);
+    let spring = settings::Index::read(walked, src);
     let mut out = EnvironmentExtraction::default();
-    for file in &walked {
-        let emitter = Emitter { id, rel: &file.rel };
+    for file in walked {
+        let emitter = Emitter {
+            id,
+            rel: &file.rel,
+            src,
+        };
         if compose_file(&file.name) {
             out.files += 1;
-            match std::fs::read_to_string(&file.path) {
+            match src.text(&file.rel) {
                 Ok(text) => match compose(&text) {
                     Ok(decl) => emitter.compose(decl, &mut out),
                     Err((reason, span)) => {
@@ -710,7 +818,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
                     }
                 },
                 Err(_) => {
-                    let len = std::fs::metadata(&file.path).map_or(0, |meta| meta.len());
+                    let len = src.len_or_zero(&file.rel);
                     let mut findings = Findings::default();
                     findings.add("the file is not readable UTF-8 text", (0, len));
                     out.nodes.push(emitter.gap("compose-file", None, findings));
@@ -719,7 +827,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
         } else if names_an_environment(&file.name)
             // The toolchain reader records an environment file only when it
             // can read it; this Gap exists for exactly those files.
-            && std::fs::read_to_string(&file.path).is_ok()
+            && src.text(&file.rel).is_ok()
         {
             out.files += 1;
             out.nodes.push(emitter.name_only());
@@ -757,21 +865,20 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> std::io::Result<EnvironmentExt
             if emitter.spring(&file.name, parsed, &spring, &mut out) {
                 out.files += 1;
             }
-        } else if settings::names_an_environment(&file.rel)
-            && std::fs::read_to_string(&file.path).is_ok()
-        {
+        } else if settings::names_an_environment(&file.rel) && src.text(&file.rel).is_ok() {
             // A settings module or configuration file named like an
             // environment: the name alone declares nothing.
             out.files += 1;
             out.nodes.push(emitter.name_only());
         }
     }
-    Ok(out)
+    out
 }
 
 struct Emitter<'a> {
     id: &'a SourceId<'a>,
     rel: &'a str,
+    src: &'a Source<'a>,
 }
 
 impl Emitter<'_> {
@@ -1058,8 +1165,10 @@ impl Emitter<'_> {
     }
 
     /// The key paths of the values file `rel`, or why none are read.
-    fn values_keys(&self, path: &Path) -> Result<(Vec<String>, usize), String> {
-        let text = std::fs::read_to_string(path)
+    fn values_keys(&self, rel: &str) -> Result<(Vec<String>, usize), String> {
+        let text = self
+            .src
+            .text(rel)
             .map_err(|_| "the values file is not readable UTF-8 text".to_string())?;
         helm::values_keys(&text).map_err(|reason| format!("the values file: {reason}"))
     }
@@ -1072,7 +1181,9 @@ impl Emitter<'_> {
         index: &helm::Index,
         out: &mut EnvironmentExtraction,
     ) {
-        let parsed = std::fs::read_to_string(&file.path)
+        let parsed = self
+            .src
+            .text(&file.rel)
             .map_err(|_| ("the file is not readable UTF-8 text", (0, 0)))
             .and_then(|text| helm::chart(&text));
         let decl = match parsed {
@@ -1092,7 +1203,7 @@ impl Emitter<'_> {
             let keys = index
                 .path(&values)
                 .ok_or_else(|| "the default values file is not readable".to_string())
-                .and_then(|path| self.values_keys(path));
+                .and_then(|_| self.values_keys(&values));
             match keys {
                 Ok((keys, omitted)) => {
                     props.insert("values_file".into(), values.into());
@@ -1168,25 +1279,20 @@ impl Emitter<'_> {
             let mut cited = vec![release.span];
             for (entry, span) in &release.values {
                 match index.values_file(self.rel, entry) {
-                    Ok(rel) => {
-                        match index
-                            .path(&rel)
-                            .and_then(|path| self.values_keys(path).ok())
-                        {
-                            Some((keys, omitted)) => {
-                                let mut value = serde_json::json!({ "path": rel, "keys": keys });
-                                if omitted > 0 {
-                                    value["keys_omitted"] = omitted.into();
-                                }
-                                values.push(value);
-                                cited.push(*span);
+                    Ok(rel) => match index.path(&rel).and_then(|_| self.values_keys(&rel).ok()) {
+                        Some((keys, omitted)) => {
+                            let mut value = serde_json::json!({ "path": rel, "keys": keys });
+                            if omitted > 0 {
+                                value["keys_omitted"] = omitted.into();
                             }
-                            None => findings.add(
-                                format!("values file `{rel}` does not parse as a mapping"),
-                                *span,
-                            ),
+                            values.push(value);
+                            cited.push(*span);
                         }
-                    }
+                        None => findings.add(
+                            format!("values file `{rel}` does not parse as a mapping"),
+                            *span,
+                        ),
+                    },
                     Err(reason) => findings.add(reason, *span),
                 }
             }

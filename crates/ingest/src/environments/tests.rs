@@ -1291,3 +1291,81 @@ fn spring_named_manifests_stay_manifests_and_profile_lists_are_gaps() {
     );
     assert!(!out.nodes.iter().any(|node| node.label == "Environment"));
 }
+
+// AC-1059 (T-1059, #385): over a source capture the reader reads the
+// captured bytes of its whole selection and never the checkout: a file
+// edited, deleted or created after capture changes nothing, and a selected
+// file the capture does not hold is not among the files read.
+#[test]
+fn captured_bytes_are_read_instead_of_the_checkout() {
+    let deployment = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n";
+    let mut files: Vec<(String, String)> = helm_tree()
+        .into_iter()
+        .map(|(path, text)| (path.to_string(), text))
+        .collect();
+    files.extend([
+        ("compose.yaml".to_string(), main_compose()),
+        (".env.production".into(), format!("TOKEN={SECRET}\n")),
+        ("k8s/deployment.yaml".into(), deployment.into()),
+        (
+            "overlays/prod/kustomization.yaml".into(),
+            "resources:\n  - ../../k8s/deployment.yaml\n".into(),
+        ),
+        (
+            "src/main/resources/application-prod.yml".into(),
+            "server:\n  port: 8080\n".into(),
+        ),
+        ("src/main.rs".into(), "fn main() {}\n".into()),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    write(dir.path(), &borrowed);
+    let before = serialized(&extract_in(dir.path()));
+
+    let paths = environment_paths(dir.path()).unwrap();
+    assert!(paths.contains(&"compose.yaml".to_string()));
+    assert!(paths.contains(&"deploy/helmfile.yaml".to_string()));
+    assert!(paths.contains(&".env.production".to_string()));
+    assert!(!paths.contains(&"src/main.rs".to_string()));
+    let captured: std::collections::BTreeMap<String, Vec<u8>> = paths
+        .iter()
+        .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+        .collect();
+
+    // After capture: an edit, a deletion and new files.
+    write(
+        dir.path(),
+        &[
+            ("compose.yaml", "services:\n  other:\n    image: busybox\n"),
+            ("late/compose.yaml", "services:\n  late:\n    image: late\n"),
+            (
+                "late/kustomization.yaml",
+                "resources:\n  - ../k8s/deployment.yaml\n",
+            ),
+            (
+                "k8s/deployment.yaml",
+                "apiVersion: v1\nkind: Pod\nmetadata:\n  name: x\n",
+            ),
+        ],
+    );
+    std::fs::remove_file(dir.path().join("charts/shop/values-prod.yaml")).unwrap();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let after = extract_from_capture(dir.path(), &keys, &read, &id).unwrap();
+    assert_eq!(serialized(&after), before);
+
+    // Without the capture the checkout's changes are read.
+    assert_ne!(serialized(&extract_in(dir.path())), before);
+}

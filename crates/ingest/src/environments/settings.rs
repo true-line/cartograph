@@ -430,20 +430,17 @@ fn dir_of(rel: &str) -> &str {
 }
 
 impl Index {
-    pub(super) fn read(walked: &[source_walk::WalkedFile]) -> Self {
+    pub(super) fn read(walked: &[source_walk::WalkedFile], src: &super::Source) -> Self {
         let mut index = Self::default();
         for file in walked {
             let Some((profile, format)) = spring_file(&file.name) else {
                 continue;
             };
-            let parsed = match std::fs::read_to_string(&file.path) {
+            let parsed = match src.text(&file.rel) {
                 Ok(text) => spring(&text, format),
                 Err(_) => Err((
                     "the file is not readable UTF-8 text",
-                    (
-                        0,
-                        std::fs::metadata(&file.path).map_or(0, |meta| meta.len()),
-                    ),
+                    (0, src.len_or_zero(&file.rel)),
                 )),
             };
             if profile.is_none()

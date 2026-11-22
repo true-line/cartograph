@@ -361,7 +361,7 @@ fn normalise(dir: &str, entry: &str) -> Option<String> {
 impl<'a> Tree<'a> {
     /// Parse every kustomization of the walk, every YAML file that may hold a
     /// manifest, and every file a kustomization names.
-    pub(super) fn read(walked: &'a [WalkedFile]) -> Self {
+    pub(super) fn read(walked: &'a [WalkedFile], src: &super::Source) -> Self {
         let mut tree = Self {
             files: walked
                 .iter()
@@ -378,18 +378,15 @@ impl<'a> Tree<'a> {
                 dir = dir_of(dir);
             }
             if FILE_NAMES.contains(&file.name.as_str()) {
-                let parsed = match std::fs::read_to_string(&file.path) {
+                let parsed = match src.text(&file.rel) {
                     Ok(text) => parse(&text),
                     Err(_) => Err((
                         "the file is not readable UTF-8 text",
-                        (
-                            0,
-                            std::fs::metadata(&file.path).map_or(0, |meta| meta.len()),
-                        ),
+                        (0, src.len_or_zero(&file.rel)),
                     )),
                 };
                 tree.kustomizations.insert(&file.rel, parsed);
-            } else if let Some(manifest) = load(file, false) {
+            } else if let Some(manifest) = load(file, false, src) {
                 tree.manifests.insert(&file.rel, manifest);
             }
         }
@@ -421,7 +418,7 @@ impl<'a> Tree<'a> {
         }
         for rel in named {
             if !tree.manifests.contains_key(rel)
-                && let Some(manifest) = load(tree.files[rel], true)
+                && let Some(manifest) = load(tree.files[rel], true, src)
             {
                 tree.manifests.insert(rel, manifest);
             }
@@ -615,14 +612,14 @@ impl<'a> Tree<'a> {
 /// The manifest state of one YAML file. On the walk (`named` false) a file
 /// that cannot hold a manifest is not kept; a file a kustomization names is
 /// always classified, so the kustomization can say why it yields nothing.
-fn load(file: &WalkedFile, named: bool) -> Option<Manifest> {
+fn load(file: &WalkedFile, named: bool, src: &super::Source) -> Option<Manifest> {
     if !manifest_candidate(&file.name, &file.rel) || names_an_environment(&file.name) {
         return None;
     }
-    if std::fs::metadata(&file.path).ok()?.len() > MAX_MANIFEST_PROBE_BYTES {
+    if src.len(&file.rel).ok()? > MAX_MANIFEST_PROBE_BYTES {
         return named.then_some(Manifest::TooLarge);
     }
-    let Ok(text) = std::fs::read_to_string(&file.path) else {
+    let Ok(text) = src.text(&file.rel) else {
         return named.then_some(Manifest::Unparsed);
     };
     if kubernetes::may_hold_manifest(&text) {
