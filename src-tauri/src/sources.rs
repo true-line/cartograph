@@ -9,12 +9,12 @@ use std::path::{Component, Path, PathBuf};
 mod bounded;
 #[path = "sources/retained_view.rs"]
 mod retained_view;
-pub(crate) use bounded::{SourceListError, SourceListLimits};
-pub(crate) use retained_view::{RetainedSourceError, RetainedSourceView};
+pub use bounded::{SourceListError, SourceListLimits};
+pub use retained_view::{RetainedSourceError, RetainedSourceView};
 
 // Bound UTF-8 byte lengths before fetching retained strings. Paths allow the
 // Windows long-path range; origin validation additionally applies ingest's cap.
-pub(crate) const MAX_PATH_BYTES: usize = 128 * 1024;
+pub const MAX_PATH_BYTES: usize = 128 * 1024;
 const MAX_ORIGIN_BYTES: usize = 128 * 1024;
 const MAX_DISPLAY_BYTES: usize = 4096;
 const MAX_REPO_BYTES: usize = 512;
@@ -49,7 +49,7 @@ pub struct RegisteredSource {
 }
 
 /// Per-row host owner metadata copied in addition to admitted SQL text.
-pub(crate) fn source_owner_metadata_bytes(rows: usize) -> Option<usize> {
+pub fn source_owner_metadata_bytes(rows: usize) -> Option<usize> {
     rows.checked_mul(
         MAX_PATH_BYTES
             .checked_add("reg_".len())?
@@ -60,7 +60,7 @@ pub(crate) fn source_owner_metadata_bytes(rows: usize) -> Option<usize> {
 /// One selected registry observation, including its validation temporaries.
 /// lookup's coherent check_state SQL bounds every raw cell before decoding.
 /// Logical payload/header roles only; allocator slack and SQLite are excluded.
-pub(crate) fn selected_source_peak_bytes() -> Option<usize> {
+pub fn selected_source_peak_bytes() -> Option<usize> {
     use context_hub::logical::{slots, sum};
     sum(&[
         "src_".len().checked_add(ID_SUFFIX_BYTES)?,
@@ -94,7 +94,7 @@ impl RegisteredSource {
     /// This source as the owner of receipts under another identity, such as
     /// its observation inputs' (ADR-0079): `id` is both its source id and
     /// its repo key.
-    pub(crate) fn owning_as(&self, id: String) -> Self {
+    pub fn owning_as(&self, id: String) -> Self {
         Self {
             source_id: id.clone(),
             repo_key: id,
@@ -151,7 +151,7 @@ pub fn source_id_from_ingest_job_kind(kind: &str) -> Result<&str, String> {
 }
 
 pub struct SourceRegistry {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     checkout_accesses: std::sync::atomic::AtomicUsize,
     conn: Connection,
     registry_id: String,
@@ -159,14 +159,14 @@ pub struct SourceRegistry {
 }
 
 impl SourceRegistry {
-    #[cfg(test)]
-    pub(crate) fn observe_checkout_access(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observe_checkout_access(&self) {
         self.checkout_accesses
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[cfg(test)]
-    pub(crate) fn checkout_access_attempts(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn checkout_access_attempts(&self) -> usize {
         self.checkout_accesses
             .load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -212,7 +212,7 @@ impl SourceRegistry {
         read_sources(&tx, &app_data_dir, &registry_id, None)?;
         tx.commit().map_err(storage_error)?;
         Ok(Self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             checkout_accesses: std::sync::atomic::AtomicUsize::new(0),
             conn,
             registry_id,
@@ -349,7 +349,7 @@ impl SourceRegistry {
     /// not allocator overhead, derived copies, SQLite caches or process RSS.
     /// Zero ceilings admit an empty registry. The standalone read transaction
     /// must not be called inside another transaction on this registry connection.
-    pub(crate) fn list_bounded(
+    pub fn list_bounded(
         &self,
         limits: SourceListLimits,
     ) -> Result<Vec<RegisteredSource>, SourceListError> {
