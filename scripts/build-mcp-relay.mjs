@@ -2,7 +2,7 @@
 // Package-only sidecar staging. Never run under signing credentials: Cargo can
 // execute build scripts and embed its environment. No app launch or activation.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, renameSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -14,20 +14,31 @@ export const SIGNING_INPUTS = [
 ];
 export function buildRelay({ root = ROOT, platform = process.platform, env = process.env,
   run = (command, args, options) => execFileSync(command, args, options) } = {}) {
-  if (platform !== 'darwin') throw new Error('macOS relay packaging requires macOS');
+  if (platform !== 'darwin' && platform !== 'win32') throw new Error('relay packaging requires macOS or Windows');
   if (SIGNING_INPUTS.some((name) => Boolean(env[name]))) {
     throw new Error('signing inputs must be absent while compiling the relay');
   }
   // Match the existing package pipeline's fixed target directory. This also
   // keeps the overlay independent of caller CARGO_TARGET_DIR overrides.
   const target = path.join(root, 'target');
-  const output = path.join(target, 'mcp-relay', 'cartograph-mcp-universal-apple-darwin');
+  // #227: Windows packages one MSVC slice, named as Tauri's externalBin expects.
+  const windows = platform === 'win32';
+  const output = path.join(target, 'mcp-relay', windows
+    ? 'cartograph-mcp-x86_64-pc-windows-msvc.exe' : 'cartograph-mcp-universal-apple-darwin');
   const temporary = `${output}.tmp`;
   mkdirSync(path.dirname(output), { recursive: true });
   rmSync(output, { force: true });
   rmSync(temporary, { force: true });
   const options = { cwd: root, env, stdio: 'inherit' };
   try {
+    if (windows) {
+      const triple = 'x86_64-pc-windows-msvc';
+      run('cargo', ['build', '--locked', '--release', '-p', 'mcp-relay', '--bin',
+        'cartograph-mcp', '--target', triple, '--target-dir', target], options);
+      copyFileSync(path.join(target, triple, 'release', 'cartograph-mcp.exe'), temporary);
+      renameSync(temporary, output);
+      return output;
+    }
     const slices = ['aarch64-apple-darwin', 'x86_64-apple-darwin'].map((triple) => {
       run('cargo', ['build', '--locked', '--release', '-p', 'mcp-relay', '--bin',
         'cartograph-mcp', '--target', triple, '--target-dir', target], options);
@@ -44,5 +55,5 @@ export function buildRelay({ root = ROOT, platform = process.platform, env = pro
   }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { buildRelay(); } catch { console.error('macOS relay build failed'); process.exitCode = 1; }
+  try { buildRelay(); } catch { console.error('relay build failed'); process.exitCode = 1; }
 }

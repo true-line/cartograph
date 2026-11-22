@@ -13,15 +13,15 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const archive = (slice) => `node archive ${slice}`;
 const digest = (text) => createHash('sha256').update(text).digest('hex');
 
-function fixture(t, { pi = '0.73.1', sdk = '0.3.330', claude = 'claude code' } = {}) {
+function fixture(t, { pi = '0.73.1', sdk = '0.3.330', claude = 'claude code', license = 'node license' } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cartograph-agent-package-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(path.join(root, 'scripts'));
   mkdirSync(path.join(root, 'agent-runtime'));
-  const slices = ['darwin-arm64', 'darwin-x64', 'linux-x64'];
+  const slices = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win-x64'];
   writeFileSync(path.join(root, 'scripts/agent-runtime-node.json'), JSON.stringify({
     version: '22.23.5', sha256: Object.fromEntries(slices.map((slice) => [slice, digest(archive(slice))])),
-    license_sha256: digest('node license'),
+    license_sha256: digest(license),
   }));
   writeFileSync(path.join(root, 'agent-runtime/package-lock.json'), JSON.stringify({
     packages: {
@@ -43,7 +43,7 @@ function tools(root, calls, { corrupt, license = 'node license' } = {}) {
   return (command, args, options) => {
     calls.push([path.basename(command), ...args]);
     if (command === 'curl') {
-      const slice = /node-v[\d.]+-(.+?)\.tar/u.exec(args.at(-1))[1];
+      const slice = /node-v[\d.]+-(.+?)\.(?:tar|zip)/u.exec(args.at(-1))[1];
       writeFileSync(args[args.indexOf('-o') + 1], slice === corrupt ? 'tampered' : archive(slice));
     }
     if (command === 'tar') {
@@ -104,6 +104,22 @@ test('linux: one slice, no Mach-O steps', (t) => {
   assert.equal(calls.find((call) => call.includes('NODE_SEA_BLOB')).includes('--macho-segment-name'), false);
 });
 
+test('windows: the zip archive, node.exe, a CRLF LICENSE and an .exe sidecar (#227)', (t) => {
+  const root = fixture(t, { license: 'node\nlicense\n' });
+  const calls = [];
+  const output = buildAgentRuntime({ root, target: 'x86_64-pc-windows-msvc', env: {}, hostSlice: 'win-x64',
+    run: tools(root, calls, { license: 'node\r\nlicense\r\n' }), bundle: () => {} });
+  assert.equal(path.basename(output), 'cartograph-agent-x86_64-pc-windows-msvc.exe');
+  assert.equal(readFileSync(output, 'utf8'), 'node');
+  assert.ok(calls.some((call) => call[0] === 'curl' && call.at(-1).endsWith('/node-v22.23.5-win-x64.zip')));
+  assert.ok(calls.some((call) => call[0] === 'tar' && call.includes('node-v22.23.5-win-x64/node.exe')));
+  assert.ok(calls.some((call) => call[0] === 'npm.cmd'), 'npm is a .cmd script on Windows');
+  assert.equal(calls.some(([command]) => command === 'codesign' || command === 'lipo'), false);
+  assert.equal(calls.find((call) => call.includes('NODE_SEA_BLOB')).includes('--macho-segment-name'), false);
+  assert.equal(readFileSync(path.join(root, 'target/agent-runtime/NODE-LICENSE'), 'utf8'), 'node\nlicense\n',
+    'one pinned sha256 covers the CRLF copy, and the shipped notices carry LF line ends');
+});
+
 test('a cached archive that still matches its pin is not downloaded again', (t) => {
   const root = fixture(t);
   const build = (calls) => buildAgentRuntime({ root, target: 'x86_64-unknown-linux-gnu', env: {}, hostSlice: 'linux-x64',
@@ -153,7 +169,7 @@ test('signing inputs, unknown targets, the wrong host and an unlocked Pi all fai
 
 test('the repository pins exact Node and Pi versions and packages the sidecar on macOS', () => {
   const node = pinnedNode(ROOT);
-  for (const slice of ['darwin-arm64', 'darwin-x64', 'linux-x64']) assert.match(node.sha256[slice], /^[0-9a-f]{64}$/u);
+  for (const slice of ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win-x64']) assert.match(node.sha256[slice], /^[0-9a-f]{64}$/u);
   assert.match(node.license_sha256, /^[0-9a-f]{64}$/u);
   assert.match(lockedRunners(ROOT).pi, /^pi-agent-core@\d+\.\d+\.\d+$/u);
   assert.match(lockedRunners(ROOT).claude, /^claude-agent-sdk@\d+\.\d+\.\d+$/u);

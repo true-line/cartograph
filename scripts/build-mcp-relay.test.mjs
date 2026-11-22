@@ -27,6 +27,24 @@ test('builds locked native slices, verifies universal output, and stages atomica
   assert.deepEqual(calls[3].slice(0, 1), ['lipo']);
   assert.deepEqual(calls.slice(3).map(([, args]) => args.slice(1)), [['-verify_arch', 'arm64'], ['-verify_arch', 'x86_64']]);
 });
+test('windows builds one MSVC slice named as Tauri externalBin expects (#227)', (t) => {
+  const root = fixture(t); const calls = [];
+  const output = buildRelay({ root, platform: 'win32', env: {}, run(command, args) {
+    calls.push([command, ...args]);
+    const built = path.join(root, 'target', 'x86_64-pc-windows-msvc', 'release');
+    mkdirSync(built, { recursive: true });
+    writeFileSync(path.join(built, 'cartograph-mcp.exe'), 'windows-fixture');
+  } });
+  assert.equal(output, path.join(root, 'target', 'mcp-relay', 'cartograph-mcp-x86_64-pc-windows-msvc.exe'));
+  assert.equal(readFileSync(output, 'utf8'), 'windows-fixture');
+  assert.equal(existsSync(`${output}.tmp`), false);
+  assert.deepEqual(calls, [['cargo', 'build', '--locked', '--release', '-p', 'mcp-relay', '--bin', 'cartograph-mcp',
+    '--target', 'x86_64-pc-windows-msvc', '--target-dir', path.join(root, 'target')]]);
+  const overlay = JSON.parse(readFileSync(path.join(ROOT, 'src-tauri/tauri.windows-bundle.conf.json')));
+  assert.deepEqual(overlay.bundle.externalBin, ['../target/mcp-relay/cartograph-mcp', '../target/agent-runtime/cartograph-agent']);
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, 'package.json')));
+  assert.equal(manifest.scripts['package:windows'], 'node scripts/build-mcp-relay.mjs && node scripts/build-agent-runtime.mjs x86_64-pc-windows-msvc && tauri build --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows-bundle.conf.json');
+});
 test('compilation and universal verification failures cannot leave a stale staged relay', (t) => {
   const root = fixture(t);
   const output = buildRelay({ root, platform: 'darwin', env: {}, run(command, args) {
