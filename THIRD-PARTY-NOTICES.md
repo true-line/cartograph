@@ -15,12 +15,12 @@ Cartograph bundles the following Rust crates. Each is used under the terms of
 its respective license, reproduced below. This list is generated from the
 dependency lockfile by `cargo about`; do not edit by hand.
 
-- Apache License 2.0 (273 crate(s))
+- Apache License 2.0 (275 crate(s))
 - MIT License (74 crate(s))
 - Unicode License v3 (19 crate(s))
 - BSD 3-Clause "New" or "Revised" License (9 crate(s))
+- ISC License (5 crate(s))
 - Mozilla Public License 2.0 (5 crate(s))
-- ISC License (4 crate(s))
 - BSD Zero Clause License (1 crate(s))
 - zlib License (1 crate(s))
 
@@ -4596,6 +4596,7 @@ Used by:
 - regex-automata 0.4.18 — https://github.com/rust-lang/regex
 - regex-syntax 0.8.11 — https://github.com/rust-lang/regex
 - regex 1.13.1 — https://github.com/rust-lang/regex
+- ring 0.17.14 — https://github.com/briansmith/ring
 - rustc-demangle 0.1.28 — https://github.com/rust-lang/rustc-demangle
 - rustix-linux-procfs 0.1.1 — https://github.com/sunfishcode/rustix-linux-procfs
 - rustix 1.1.6 — https://github.com/bytecodealliance/rustix
@@ -5675,6 +5676,7 @@ APPENDIX: How to apply the Apache License to your work.
 ## Apache License 2.0
 
 Used by:
+- getrandom 0.2.17 — https://github.com/rust-random/getrandom
 - getrandom 0.3.4 — https://github.com/rust-random/getrandom
 - getrandom 0.4.3 — https://github.com/rust-random/getrandom
 
@@ -6830,6 +6832,28 @@ Used by:
 // WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+```
+
+## ISC License
+
+Used by:
+- ring 0.17.14 — https://github.com/briansmith/ring
+
+```
+Copyright 2015-2025 Brian Smith.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ```
 

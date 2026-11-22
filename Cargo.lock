@@ -1530,6 +1530,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "eval-runner"
+version = "0.73.0"
+dependencies = [
+ "llm",
+ "ring",
+ "semantic",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "events"
 version = "0.73.0"
 dependencies = [

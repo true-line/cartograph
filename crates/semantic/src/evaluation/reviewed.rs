@@ -582,7 +582,7 @@ impl IndependentReceipt {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         HopKind,
@@ -594,9 +594,9 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
-    struct Scripted {
-        calls: AtomicUsize,
-        version: AtomicUsize,
+    pub(crate) struct Scripted {
+        pub(crate) calls: AtomicUsize,
+        pub(crate) version: AtomicUsize,
     }
     impl LlmProvider for Scripted {
         fn id(&self) -> &str {
@@ -652,7 +652,7 @@ mod tests {
             }
         }
     }
-    fn independent_files(missing_policy_case: bool) -> tempfile::TempDir {
+    pub(crate) fn independent_files(missing_policy_case: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         copy(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/t2-visible-mechanism-v1"),
