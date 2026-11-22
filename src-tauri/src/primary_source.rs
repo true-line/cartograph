@@ -2794,6 +2794,7 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
 /// receipts, and no task can prepare against it; a busy source is skipped
 /// and settles on its next publish. Receipts a prepared task cites stay
 /// pinned until it has staged ([`InFlightPin`]).
+#[cfg(test)]
 pub(crate) fn reclaim_superseded(
     state: &AppState,
     source: &RegisteredSource,
