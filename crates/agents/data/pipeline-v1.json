@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "agent": "agt-flow",
+      "version": 1,
+      "name": "Flow Tracer",
+      "pass": "flow_trace",
+      "glyph": "→",
+      "role_line": "Traces end-to-end flows across the recovered graph and its semantic overlay.",
+      "tier_ceiling": "semantic"
+    },
+    {
+      "agent": "agt-contract",
+      "version": 1,
+      "name": "Contract Matcher",
+      "pass": "contract_match",
+      "glyph": "⇄",
+      "role_line": "Proposes links between unresolved calls and recovered symbols by local embedding similarity.",
+      "tier_ceiling": "semantic"
+    },
+    {
+      "agent": "agt-iac",
+      "version": 1,
+      "name": "IaC Grapher",
+      "pass": "iac_graph",
+      "glyph": "▦",
+      "role_line": "Recovers infrastructure resources and their wiring from infrastructure-as-code during recovery.",
+      "tier_ceiling": "deterministic"
+    }
+  ]
+}
