@@ -514,14 +514,15 @@ fn a_task_staged_between_reclaim_snapshots_keeps_its_receipts() {
         )
         .unwrap();
     let mut staged = None;
-    let reclaimed = crate::primary_source::reclaim_superseded_with(&state, &source, "next", || {
-        staged = Some(
-            crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal)
-                .unwrap(),
-        );
-        drop(task);
-    })
-    .unwrap();
+    let reclaimed =
+        crate::primary_source::reclaim_superseded_with(&state, &source, Some("next"), None, || {
+            staged = Some(
+                crate::stage_completed_prepared_job_proposal(&state, &execution, &task, &proposal)
+                    .unwrap(),
+            );
+            drop(task);
+        })
+        .unwrap();
     assert!(reclaimed > 0);
     let receipts = state.primary_sources.receipts.lock().unwrap();
     for id in &cited {

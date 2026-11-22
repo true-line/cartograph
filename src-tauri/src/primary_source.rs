@@ -1795,7 +1795,7 @@ impl ReceiptStore {
                     },
                 )
                 .map_err(storage_error)?;
-            source_id(&tombstone.source_id).map_err(storage_error)?;
+            receipt_owner(&tombstone.source_id).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
             return Ok(ReceiptStatus::CaptureForgotten { tombstone });
         }
@@ -1822,7 +1822,8 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
         if let Some((tombstone, cause)) = tombstone {
-            source_id(&tombstone.source_id).map_err(storage_error)?;
+            // An observed receipt's tombstone names its input owner (ADR-0079).
+            receipt_owner(&tombstone.source_id).map_err(storage_error)?;
             return Ok(if cause == ReclaimCause::Superseded.as_str() {
                 ReceiptStatus::Superseded { tombstone }
             } else {
@@ -1830,6 +1831,22 @@ impl ReceiptStore {
             });
         }
         Ok(ReceiptStatus::Unknown)
+    }
+
+    /// The capture ids the tombstone of a reclaimed receipt records.
+    #[cfg(test)]
+    pub(crate) fn tombstone_capture_ids(&self, receipt_id: &str) -> Result<Vec<String>, String> {
+        let ids: String = self
+            .conn
+            .query_row(
+                "SELECT t.capture_ids FROM receipt_reclaims r
+                 JOIN receipt_tombstones t ON t.id = r.tombstone_id
+                 WHERE r.receipt_id = ?1",
+                [receipt_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        serde_json::from_str(&ids).map_err(storage_error)
     }
 }
 
@@ -2782,15 +2799,29 @@ pub(crate) fn reclaim_superseded(
     source: &RegisteredSource,
     capture_id: &str,
 ) -> Result<u64, String> {
-    reclaim_superseded_with(state, source, capture_id, || {})
+    reclaim_superseded_with(state, source, Some(capture_id), None, || {})
 }
 
-/// [`reclaim_superseded`], pausing between its two keep-set snapshots so
+/// [`reclaim_superseded`] for a recovery that captured `capture_id` for the
+/// source's code and `input_capture_id` for its observation inputs, either of
+/// which may be absent. Each owner's superseded receipts are tombstoned with
+/// the capture that superseded them (ADR-0079).
+pub(crate) fn reclaim_superseded_by(
+    state: &AppState,
+    source: &RegisteredSource,
+    capture_id: Option<&str>,
+    input_capture_id: Option<&str>,
+) -> Result<u64, String> {
+    reclaim_superseded_with(state, source, capture_id, input_capture_id, || {})
+}
+
+/// [`reclaim_superseded_by`], pausing between its two keep-set snapshots so
 /// tests can stage a task in the handoff.
 pub(crate) fn reclaim_superseded_with(
     state: &AppState,
     source: &RegisteredSource,
-    capture_id: &str,
+    capture_id: Option<&str>,
+    input_capture_id: Option<&str>,
     between_snapshots: impl FnOnce(),
 ) -> Result<u64, String> {
     let Ok(_guard) = state.primary_sources.guard(&source.source_id, true) else {
@@ -2822,14 +2853,20 @@ pub(crate) fn reclaim_superseded_with(
         .receipts
         .lock()
         .map_err(storage_error)?;
-    let reclaimed = store.reclaim_superseded(source, &[capture_id.to_owned()], &keep)?;
-    // Observed receipts the published observed role no longer binds are
-    // reclaimed with the recovery that superseded them (ADR-0079, AC-1047).
-    if locked.preview.input_receipts == 0 {
-        return Ok(reclaimed);
+    let mut reclaimed = 0;
+    if let Some(capture_id) = capture_id {
+        reclaimed += store.reclaim_superseded(source, &[capture_id.to_owned()], &keep)?;
     }
-    let owner = source.owning_as(input_id(&source.source_id)?.as_str().to_owned());
-    Ok(reclaimed + store.reclaim_superseded(&owner, &[capture_id.to_owned()], &keep)?)
+    // Observed receipts the published observed role no longer binds are
+    // reclaimed with the input capture that superseded them (ADR-0079,
+    // AC-1047).
+    if let Some(input_capture_id) = input_capture_id
+        && locked.preview.input_receipts > 0
+    {
+        let owner = source.owning_as(input_id(&source.source_id)?.as_str().to_owned());
+        reclaimed += store.reclaim_superseded(&owner, &[input_capture_id.to_owned()], &keep)?;
+    }
+    Ok(reclaimed)
 }
 
 #[tauri::command]

@@ -3139,21 +3139,22 @@ fn reclaim_superseded_receipts(
     primary: primary_source::PrimaryInput,
     input_capture: Option<&str>,
 ) {
-    // A source with no captured code of its own may still have captured
-    // observation inputs; their capture supersedes its observed receipts
-    // (ADR-0079).
-    let Some(capture_id) = primary
+    // The code capture supersedes the source's own receipts and the input
+    // capture its observed ones; a source with no captured code of its own
+    // may still have captured observation inputs (ADR-0079).
+    let capture_id = primary
         .capture
         .as_ref()
-        .map(|capture| capture.id().to_owned())
-        .or_else(|| input_capture.map(str::to_owned))
-    else {
+        .map(|capture| capture.id().to_owned());
+    if capture_id.is_none() && input_capture.is_none() {
         return;
-    };
+    }
     // The prepared input holds the shared retention guard; the reclaim
     // needs the exclusive one.
     drop(primary);
-    if primary_source::reclaim_superseded(state, source, &capture_id).is_err() {
+    if primary_source::reclaim_superseded_by(state, source, capture_id.as_deref(), input_capture)
+        .is_err()
+    {
         eprintln!("cartograph: superseded receipts were kept; they settle on the next recovery");
     }
 }
@@ -14440,7 +14441,8 @@ export function App() {
         // from each fact its captured state enriched to that fact's observed
         // receipt, beside its primary binding; the preview counts it as a
         // current reference; recovering a changed state rebinds the fact and
-        // reclaims the receipt nothing binds any more.
+        // reclaims the receipt nothing binds any more, tombstoned with the
+        // input capture that superseded it, not the code capture.
         use tauri::Manager;
         let state_with = |url: &str| {
             format!(
@@ -14459,6 +14461,11 @@ export function App() {
         )
         .unwrap();
         std::fs::write(
+            root.join("ready.ts"),
+            "export function ready(ok: boolean) { if (!ok) return false; return true; }\n",
+        )
+        .unwrap();
+        std::fs::write(
             system.join("state.json"),
             state_with("https://sqs.example/a"),
         )
@@ -14466,7 +14473,7 @@ export function App() {
         let manifest = system.join("cartograph.system.toml");
         std::fs::write(
             &manifest,
-            "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\n",
+            "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\", \"server\"]\nstate_json = \"state.json\"\n",
         )
         .unwrap();
         let app = preflight_test_app(dir.path());
@@ -14504,6 +14511,8 @@ export function App() {
         let preview = super::primary_source::preview(&state, &source.source_id).unwrap();
         assert_eq!(preview.input_receipts, 1);
         assert!(preview.current_references >= 1);
+        let first_input = preview.input_capture_ids.clone();
+        assert_eq!(first_input.len(), 1);
 
         std::fs::write(
             system.join("state.json"),
@@ -14517,6 +14526,20 @@ export function App() {
         assert_ne!(second[0].receipt_id, first[0].receipt_id);
         let preview = super::primary_source::preview(&state, &source.source_id).unwrap();
         assert_eq!(preview.input_receipts, 1);
+        assert!(!preview.capture_ids.is_empty());
+        let receipts = state.primary_sources.receipts.lock().unwrap();
+        assert!(matches!(
+            receipts.receipt_status(&first[0].receipt_id).unwrap(),
+            super::primary_source::ReceiptStatus::Superseded { .. }
+        ));
+        // The superseding capture is the new input capture.
+        let superseding = receipts
+            .tombstone_capture_ids(&first[0].receipt_id)
+            .unwrap();
+        assert_eq!(superseding.len(), 1);
+        assert_ne!(superseding, first_input);
+        assert!(preview.input_capture_ids.contains(&superseding[0]));
+        assert!(!preview.capture_ids.contains(&superseding[0]));
     }
 
     #[test]
