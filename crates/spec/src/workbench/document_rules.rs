@@ -3317,7 +3317,7 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         assert!(
             at("Guards in `onTransitionStart`")
                 < at(
-                    "| onTransitionStart | When the to state is “ArrangingPayment” and the lines's length is 0, the move is refused with a message the export withholds. |"
+                    "| onTransitionStart | When the to state is “ArrangingPayment” and the lines's length is 0, the move is refused with the message “cannot transition to payment when order is empty”. |"
                 )
         );
         assert!(text.contains(
@@ -3411,10 +3411,10 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         .unwrap();
         let text = out.finish();
         for line in [
-            "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires contents is not false and the lines's length is 0, the move is refused with a message the export withholds. |",
+            "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires contents is not false and the lines's length is 0, the move is refused with the message “cannot transition to payment when order is empty”. |",
             "| onTransitionStart | When the to state is “ArrangingPayment”, and the options's arranging payment requires shipping is not false and the shipping lines's length is 0, the move is refused with the message “no shipping”. |",
             "| onTransitionStart | When the to state is “PaymentSettled” and the check “order total is covered” does not hold, the move is refused. |",
-            "| onTransitionStart | When the to state is “Cancelled” and the check “has no authorized payment” holds, the move is refused. |",
+            "| onTransitionStart | When the to state is “Cancelled” and the check “has no authorized payment” holds, the move is refused with the message “cannot cancel”. |",
         ] {
             assert!(text.contains(line), "{line}\n{text}");
         }

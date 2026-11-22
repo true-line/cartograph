@@ -2897,8 +2897,22 @@ fn rendered(
             // `true` lets the move happen; any other value refuses it.
             "true" => Some("the move is allowed".to_owned()),
             other => match parse(other) {
-                Some(Expr::Lit(Lit::Str(message))) => {
-                    Some(format!("the move is refused with the message “{message}”"))
+                Some(Expr::Lit(Lit::Str(message))) => Some(format!(
+                    "the move is refused with the message “{}”",
+                    message_words(&message)
+                )),
+                // `ctx.translate('message.x', {...})`: the message it names.
+                Some(Expr::Apply(path, args))
+                    if path.last().is_some_and(|m| m == "translate")
+                        && matches!(args.first(), Some(Arg::Pos(Expr::Lit(Lit::Str(_))))) =>
+                {
+                    let Some(Arg::Pos(Expr::Lit(Lit::Str(message)))) = args.first() else {
+                        return None;
+                    };
+                    Some(format!(
+                        "the move is refused with the message “{}”",
+                        message_words(message)
+                    ))
                 }
                 _ => Some("the move is refused".to_owned()),
             },
@@ -3138,6 +3152,21 @@ fn ts_equality(clause: &str) -> Option<String> {
         clause.split_once(" == ")?
     };
     Some(format!("{} equals {}", ts_noun(left)?, ts_noun(right)?))
+}
+
+/// A dotted lowercase message key read as its words (AC-1044):
+/// `message.cannot-transition-to-payment-when-order-is-empty` is “cannot
+/// transition to payment when order is empty”. Any other message is kept as
+/// written.
+fn message_words(message: &str) -> String {
+    let key = message.contains('.')
+        && message
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-'));
+    match message.rsplit('.').next() {
+        Some(last) if key && !last.is_empty() => last.replace('-', " "),
+        _ => message.to_owned(),
+    }
 }
 
 #[cfg(test)]
