@@ -327,6 +327,25 @@ function foldRanges(band: Band, scope: string, units: AtlasUnit[]): AtlasUnit[] 
   return foldRanges(band, scope, ranges);
 }
 
+/**
+ * A cluster or group key as shown (#1601): each `repo · segment` part names
+ * its repository through `repoLabel` (the Workspace labeler, AC-0144), and a
+ * bare repository fold names it the same way. Keys and ids stay the exact
+ * repository keys; only the text changes.
+ */
+export function displayClusterKey(key: string, repoLabel?: (repo: string) => string): string {
+  if (!repoLabel) return key;
+  const part = (text: string): string => {
+    const split = text.indexOf(' · ');
+    if (split < 0) return repoLabel(text);
+    return `${repoLabel(text.slice(0, split))}${text.slice(split)}`;
+  };
+  return key
+    .split(' / ')
+    .map((scope) => scope.split(' … ').map(part).join(' … '))
+    .join(' / ');
+}
+
 /** How many range levels {@link foldRanges} nests `count` units under. */
 function foldDepth(count: number): number {
   return count <= GROUP_BUDGET ? 0 : 1 + foldDepth(Math.ceil(count / GROUP_BUDGET));
@@ -451,7 +470,11 @@ const ROW_WIDTH = GRID_COLUMNS * (NODE_DX + CLUSTER_GAP);
  * user opened; snapshots at or under {@link CLUSTER_THRESHOLD} nodes are
  * always fully expanded.
  */
-export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<string>): AtlasScene {
+export function buildAtlasScene(
+  snapshot: AtlasSnapshot,
+  expanded: ReadonlySet<string>,
+  repoLabel?: (repo: string) => string,
+): AtlasScene {
   const bands = assignBands(snapshot);
   // Boundary placeholders are excluded from the scene entirely (#244) — no
   // tile, no band membership; edges that only reach one through `endpointFor`
@@ -519,7 +542,7 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
           collapsedGroups.push(group);
           sceneNodes.push({
             id: group.id,
-            label: `${group.key} · ${group.clusters.length} clusters · ${group.size} nodes`,
+            label: `${displayClusterKey(group.key, repoLabel)} · ${group.clusters.length} clusters · ${group.size} nodes`,
             band,
             group,
             position: place(NODE_DX, NODE_DY),
@@ -556,7 +579,7 @@ export function buildAtlasScene(snapshot: AtlasSnapshot, expanded: ReadonlySet<s
         collapsed.push(cluster);
         sceneNodes.push({
           id: cluster.id,
-          label: `${cluster.key} · ${cluster.members.length}`,
+          label: `${displayClusterKey(cluster.key, repoLabel)} · ${cluster.members.length}`,
           band,
           cluster,
           position: place(NODE_DX, NODE_DY),

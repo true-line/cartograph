@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   assignBands,
   buildAtlasScene,
+  displayClusterKey,
   expandAcross,
   GROUP_BUDGET,
   revealExpansion,
   type AtlasScene,
 } from './atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode } from './store';
+import { createRepositoryLabeler } from './repositoryLabels';
 
 function node(id: string, label: string, props: GraphNode['props'] = {}): GraphNode {
   return { id, label, props };
@@ -245,6 +247,34 @@ describe('buildAtlasScene — estate-scale grouping', () => {
     expect(opened.openGroups.map((group) => group.id)).toEqual([repo!.id]);
     const inside = tiles(opened).filter((item) => item.group && item.id.startsWith('group:server:local/r0 / '));
     expect(inside).toHaveLength(2);
+  });
+
+  it('names repositories in tile labels while keys and ids stay exact (#1601)', () => {
+    const snapshot = estate(12, 90);
+    const repoLabel = createRepositoryLabeler([
+      { repo: 'local/r0', display_name: 'simple-login' },
+      { repo: 'local/r1', display_name: 'app' },
+      { repo: 'local/r2', display_name: 'app' },
+    ]);
+    const scene = buildAtlasScene(snapshot, new Set(), repoLabel);
+    const labels = tiles(scene).map((item) => item.label);
+    expect(labels).toContain('simple-login · 90 clusters · 180 nodes');
+    // Two repositories sharing a name keep their keys visible (AC-0144).
+    expect(labels).toContain('app (local/r1) · 90 clusters · 180 nodes');
+    expect(scene.collapsedGroups.find((group) => group.key === 'local/r0')?.id).toMatch(/^group:[a-z]+:local\/r0$/u);
+    const plain = buildAtlasScene(snapshot, new Set());
+    expect(scene.clusters.map((cluster) => cluster.id)).toEqual(plain.clusters.map((cluster) => cluster.id));
+  });
+
+  it('labels each repository part of range and nested keys', () => {
+    const repoLabel = createRepositoryLabeler([{ repo: 'local/src_ab12', display_name: 'api' }]);
+    expect(displayClusterKey('local/src_ab12 · d000 … d055', repoLabel)).toBe('api · d000 … d055');
+    expect(displayClusterKey('local/src_ab12 / local/src_ab12 · a … local/src_ab12 · z', repoLabel)).toBe(
+      'api / api · a … api · z',
+    );
+    expect(displayClusterKey('local/src_ab12', repoLabel)).toBe('api');
+    expect(displayClusterKey('Http', repoLabel)).toBe('Http');
+    expect(displayClusterKey('local/src_ab12 · users')).toBe('local/src_ab12 · users');
   });
 
   it('reaches every cluster in at most three clicks', () => {
