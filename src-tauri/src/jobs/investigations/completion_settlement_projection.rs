@@ -25,7 +25,7 @@ pub(in super::super) fn project_attempt_entries(
 /// projected suffix. The caller must separately authenticate/derive the suffix.
 /// Reads only: these rows need not already have been published to calculate
 /// task-body growth. Existing refresh_observation uses the same pure kernel.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in super::super) fn project_observation(
     connection: &Connection,
     before: &StoredTask,
@@ -53,7 +53,7 @@ pub(in super::super) fn project_observation_with_offset(
     if connection.is_autocommit() {
         return Err(InvestigationStoreError::Invalid);
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if REREAD_PREFIX.with(|flag| flag.get()) {
         let offset = attempts(connection, before)?.len();
         let suffix = build_suffix(next, offset)?;
@@ -83,9 +83,9 @@ fn observation_from_prefix(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static REREAD_PREFIX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in super::super) fn with_observation_prefix_reread<T>(read: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {

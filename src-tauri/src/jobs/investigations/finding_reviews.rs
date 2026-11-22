@@ -13,7 +13,7 @@ pub(super) fn schema() -> Vec<(String, String, String)> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FindingReviewError {
+pub enum FindingReviewError {
     Store(InvestigationStoreError),
     SubjectChanged,
     Conflict(Box<FindingReviewObservation>),
@@ -225,13 +225,13 @@ fn load(
 /// saved citation behind each of its citation ids. Nothing in it comes from
 /// the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedFinding {
-    pub(crate) subject: FindingReviewSubjectV1,
+pub struct ResolvedFinding {
+    pub subject: FindingReviewSubjectV1,
     /// The saved specialist id, such as `domain-analyst@2`.
-    pub(crate) role: String,
-    pub(crate) finding: InvestigationFinding,
+    pub role: String,
+    pub finding: InvestigationFinding,
     /// One citation per citation id of the finding, in its order.
-    pub(crate) citations: Vec<InvestigationCitation>,
+    pub citations: Vec<InvestigationCitation>,
 }
 
 impl JobStore {
@@ -239,7 +239,7 @@ impl JobStore {
     /// must be the one this store computes for that finding of that result;
     /// any other fails as [`FindingReviewError::SubjectChanged`]. Reads
     /// only: no review row and no task state is written.
-    pub(crate) fn resolve_investigation_finding(
+    pub fn resolve_investigation_finding(
         &self,
         subject: &FindingReviewSubjectV1,
     ) -> Result<ResolvedFinding, FindingReviewError> {
@@ -289,7 +289,7 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn investigation_finding_reviews(
+    pub fn investigation_finding_reviews(
         &self,
         id: &str,
         expected_result: &str,
@@ -300,7 +300,7 @@ impl JobStore {
         Ok(response)
     }
 
-    pub(crate) fn review_investigation_finding(
+    pub fn review_investigation_finding(
         &mut self,
         request: &ReviewInvestigationFindingRequest,
     ) -> Result<FindingReviewObservation, FindingReviewError> {
@@ -381,7 +381,7 @@ pub(super) fn stored_bytes(
     usize::try_from(bytes).map_err(|_| InvestigationStoreError::Invalid)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod identity_tests {
     use super::*;
     // AC-0293: literal JSON was assembled outside the production serializer;

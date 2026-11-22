@@ -4,7 +4,7 @@
 
 /// Which preparation read hit its limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraphSnapshotPhase {
+pub enum GraphSnapshotPhase {
     /// The streamed complete-graph identity pass (ADR-0052 ceilings in
     /// aggregate, the retained limits for the one row it holds).
     Identity,
@@ -14,7 +14,7 @@ pub(crate) enum GraphSnapshotPhase {
 
 /// Which snapshot limit was hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GraphSnapshotLimitKind {
+pub enum GraphSnapshotLimitKind {
     /// Combined node and edge rows.
     Rows,
     /// Raw stored or canonical graph bytes.
@@ -31,16 +31,16 @@ pub(crate) enum GraphSnapshotLimitKind {
 
 /// A preparation snapshot read that stopped at a named limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GraphSnapshotLimit {
-    pub(crate) phase: GraphSnapshotPhase,
-    pub(crate) limit: GraphSnapshotLimitKind,
+pub struct GraphSnapshotLimit {
+    pub phase: GraphSnapshotPhase,
+    pub limit: GraphSnapshotLimitKind,
 }
 
 impl GraphSnapshotLimit {
     /// The named limit behind `error`, or `None` when it is not a snapshot
     /// size limit (invalid input, storage or coverage failures keep their
     /// existing classification).
-    pub(crate) fn from_graph_error(
+    pub fn from_graph_error(
         phase: GraphSnapshotPhase,
         error: &core_graph::GraphError,
     ) -> Option<Self> {
@@ -61,8 +61,8 @@ impl GraphSnapshotLimit {
         Some(Self { phase, limit })
     }
 
-    #[cfg(test)]
-    pub(crate) fn all() -> impl Iterator<Item = Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn all() -> impl Iterator<Item = Self> {
         use GraphSnapshotLimitKind as Kind;
         [GraphSnapshotPhase::Identity, GraphSnapshotPhase::Scope]
             .into_iter()
@@ -80,7 +80,7 @@ impl GraphSnapshotLimit {
             })
     }
 
-    pub(crate) fn message(self) -> &'static str {
+    pub fn message(self) -> &'static str {
         use GraphSnapshotLimitKind as Kind;
         use GraphSnapshotPhase as Phase;
         macro_rules! message {
@@ -115,7 +115,7 @@ impl GraphSnapshotLimit {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     use crate::jobs::investigations::InvestigationStopReason as Stop;
