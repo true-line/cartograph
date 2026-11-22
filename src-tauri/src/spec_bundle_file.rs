@@ -213,21 +213,42 @@ pub(crate) fn stream_bundle_file(
     stream.finish(&bundle)
 }
 
+/// One bundle compile at a time. A cancelled save panel leaves its compile
+/// running, so the next export's compile waits for it instead of running
+/// alongside it.
+static ONE_COMPILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Start `compile` on a blocking worker, then wait for `choose` while it runs
 /// (#1601): the save panel opened only after the whole bundle compiled, about
 /// 10 s on a real system. `None` from `choose` (a cancelled panel) returns
-/// `Ok(None)` at once; the worker finishes and drops its result, so its temp
-/// file is removed. A compile error is reported after the choice.
+/// `Ok(None)` at once; a compile already running finishes and drops its
+/// result, so its temp file is removed. The worker compiles only while it
+/// holds `gate`, and skips its compile if the panel was cancelled before it
+/// got the gate, so cancelling and exporting again never runs two compiles at
+/// once. A compile error is reported after the choice.
 pub(crate) async fn compile_while_choosing<T: Send + 'static, P>(
+    gate: &'static std::sync::Mutex<()>,
     compile: impl FnOnce() -> Result<T, String> + Send + 'static,
     choose: impl std::future::Future<Output = Option<P>>,
 ) -> Result<Option<(T, P)>, String> {
-    let compiled = tauri::async_runtime::spawn_blocking(compile);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+    let skip = cancelled.clone();
+    let compiled = tauri::async_runtime::spawn_blocking(move || {
+        let _one = gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if skip.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        compile().map(Some)
+    });
     let Some(chosen) = choose.await else {
+        cancelled.store(true, Ordering::Release);
         return Ok(None);
     };
     let value = compiled.await.map_err(|error| error.to_string())??;
-    Ok(Some((value, chosen)))
+    Ok(value.map(|value| (value, chosen)))
 }
 
 /// Compile the full bundle for the preview the Workbench shows, one artifact
@@ -250,7 +271,7 @@ pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
     let choose = rfd::AsyncFileDialog::new()
         .set_file_name(sanitize_export_name(&suggested_name))
         .save_file();
-    let Some((file, handle)) = compile_while_choosing(compile, choose).await? else {
+    let Some((file, handle)) = compile_while_choosing(&ONE_COMPILE, compile, choose).await? else {
         return Ok(false);
     };
     let path = handle.path().to_path_buf();
@@ -336,8 +357,29 @@ mod tests {
             opened.send(()).unwrap();
             Some("/tmp/out.json")
         };
-        let result = tauri::async_runtime::block_on(compile_while_choosing(compile, choose));
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let result = tauri::async_runtime::block_on(compile_while_choosing(&GATE, compile, choose));
         assert_eq!(result, Ok(Some(("bundle", "/tmp/out.json"))));
+    }
+
+    /// Cancelling and exporting again never runs two compiles at once: an
+    /// export cancelled while another compile runs never starts its own.
+    #[test]
+    fn an_export_cancelled_behind_a_running_compile_never_compiles() {
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let running = GATE.lock().unwrap();
+        let (ran, compiled) = std::sync::mpsc::channel::<()>();
+        let compile = move || {
+            ran.send(()).unwrap();
+            Ok(())
+        };
+        let cancelled =
+            tauri::async_runtime::block_on(compile_while_choosing(&GATE, compile, async {
+                None::<()>
+            }));
+        assert_eq!(cancelled, Ok(None));
+        drop(running);
+        assert!(compiled.recv().is_err(), "the cancelled export compiled");
     }
 
     #[test]
@@ -347,11 +389,15 @@ mod tests {
             let _ = wait.recv();
             Ok(())
         };
+        static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let cancelled =
-            tauri::async_runtime::block_on(compile_while_choosing(slow, async { None::<()> }));
+            tauri::async_runtime::block_on(compile_while_choosing(&GATE, slow, async {
+                None::<()>
+            }));
         assert_eq!(cancelled, Ok(None));
         drop(release);
         let failed = tauri::async_runtime::block_on(compile_while_choosing(
+            &GATE,
             || Err::<(), _>("selection changed".to_string()),
             async { Some(()) },
         ));
