@@ -1,9 +1,11 @@
 """Score one showcase run against the W10a labels (docs/acceptance/w10a/README.md).
 
-python3 -I score.py <app checkout> <graph.db> [labels.json]
+python3 -I score.py [--summary] <app checkout> <graph.db> [labels.json]
 
 Reads the run's graph (read-only) and the app source only to turn each
-labelled call line into a byte range. Prints a JSON report.
+labelled call line into a byte range. Prints a JSON report: every call
+with what it linked to, the misses and the measures; with `--summary`,
+only the misses and the measures (the committed `scores.json`).
 """
 import json
 import pathlib
@@ -35,10 +37,12 @@ def line_ranges(text: bytes):
 
 
 def main():
-    app = pathlib.Path(sys.argv[1])
-    db = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
+    summary = "--summary" in sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--summary"]
+    app = pathlib.Path(args[0])
+    db = sqlite3.connect(f"file:{args[1]}?mode=ro", uri=True)
     here = pathlib.Path(__file__).resolve().parent
-    labels = json.loads(pathlib.Path(sys.argv[3] if len(sys.argv) > 3 else here / "labels.json").read_text())
+    labels = json.loads(pathlib.Path(args[2] if len(args) > 2 else here / "labels.json").read_text())
 
     nodes = {i: (l, json.loads(p)) for i, l, p in db.execute("select id, label, props from nodes where label in ('Endpoint','Gap','TestCase')")}
     requests = [(s, d, json.loads(p)) for s, d, p in db.execute("select src, dst, props from edges where label = 'REQUESTS'")]
@@ -148,6 +152,8 @@ def main():
         "key_recall": {"value": ratio(k_tp, k_lab), "pass": k_lab == 0 or k_tp / k_lab >= 0.9},
     }
     report["pass"] = all(s["pass"] for s in report["scores"].values())
+    if summary:
+        report = {key: report[key] for key in ("misses", "scores", "pass")}
     print(json.dumps(report, indent=1))
 
 

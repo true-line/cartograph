@@ -82,8 +82,9 @@ Run: the showcase manifest (`docs/showcases/simplelogin.md`, gap 1) at
 Cartograph `40ff457`, with the app at the commit above, the extension at
 `d18b40fc` and Android at `ab6e7103`. This is the same run as the first
 score; only the labels changed. Scored by [`score.py`](score.py)
-(`python3 -I score.py <app checkout> <graph.db>`). The report is in
-[`scores.json`](scores.json).
+(`python3 -I score.py --summary <app checkout> <graph.db>`). The measures
+are in [`scores.json`](scores.json); without `--summary` the scorer also
+lists every call and what it linked to.
 
 | Measure | Result | Pass |
 |---|---|---|
