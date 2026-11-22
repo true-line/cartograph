@@ -18,9 +18,10 @@ Specialist investigations keep their usage with each saved task.
 
 The pool's **Controls** pause new agent work or limit how many local and cloud
 agent jobs run at once. They apply when a topic-expert question, section draft
-or gap escalation starts: a paused pool or a full mode refuses it with the
-reason, and work already running continues. Specialist investigations keep
-their own runner.
+or gap escalation starts: while the pool is paused or a mode is full, the new
+job waits as queued, in the order it was asked, and starts when a place frees
+or the pool is resumed. Cancel a waiting job from Jobs. Work already running
+continues. Specialist investigations keep their own runner.
 
 Review saved specialist conversations and open their findings. The list uses
 the same saved investigation history as Investigations, including its search,

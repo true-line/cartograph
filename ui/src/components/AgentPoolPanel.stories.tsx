@@ -103,7 +103,7 @@ export const Paused: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByTestId('agent-pool-controls')).toHaveTextContent('New agent work is paused. Work already running continues.');
+    await expect(canvas.getByTestId('agent-pool-controls')).toHaveTextContent('New agent work waits until the pool is resumed. Work already running continues.');
     await expect(canvas.getByRole('button', { name: 'Resume agent work' })).toBeVisible();
     await expect(canvas.getByRole('alert')).toHaveTextContent('store busy');
   },

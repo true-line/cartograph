@@ -628,7 +628,7 @@ pub(crate) async fn run_section_compose(
 ) -> Result<ComposeOutcome, String> {
     let state = app.state::<AppState>();
     let kind = format!("section-compose:{document}:{section}:{scope}:{mode}");
-    let (running, execution) = crate::agent_pool::start_job(&state, &kind)?;
+    let (running, execution) = crate::agent_pool::start_job(&app, &kind).await?;
     crate::emit_job(&app, &running);
     let worker = app.clone();
     let result = crate::off_ui_thread_for_job(execution.clone(), move |execution| {
@@ -873,7 +873,7 @@ pub(crate) async fn run_section_compose_gated(
 ) -> Result<Vec<GatedDraft>, String> {
     let state = app.state::<AppState>();
     let kind = format!("section-compose-gated:{document}:{section}:{scope}:local");
-    let (running, execution) = crate::agent_pool::start_job(&state, &kind)?;
+    let (running, execution) = crate::agent_pool::start_job(&app, &kind).await?;
     crate::emit_job(&app, &running);
     let worker = app.clone();
     let result = crate::off_ui_thread_for_job(execution.clone(), move |execution| {

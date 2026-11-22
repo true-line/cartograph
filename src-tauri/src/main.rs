@@ -5217,7 +5217,8 @@ async fn run_escalation(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<agents::StagedProposal, String> {
-    let (running, execution) = agent_pool::start_job(&state, &format!("escalate:{gap_id}:{mode}"))?;
+    let (running, execution) =
+        agent_pool::start_job(&app, &format!("escalate:{gap_id}:{mode}")).await?;
     emit_job(&app, &running);
     let fail = |error: String| -> String {
         report_failure(&app, &state, &execution, &error);
@@ -5326,7 +5327,7 @@ async fn run_class_escalation(
         return Err("no gap instances to escalate".to_string());
     }
     let (running, execution) =
-        agent_pool::start_job(&state, &format!("escalate-class:{}:{mode}", gap_ids.len()))?;
+        agent_pool::start_job(&app, &format!("escalate-class:{}:{mode}", gap_ids.len())).await?;
     emit_job(&app, &running);
     let fail = |error: String| -> String {
         report_failure(&app, &state, &execution, &error);
