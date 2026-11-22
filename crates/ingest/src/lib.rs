@@ -225,8 +225,15 @@ fn clone_into_new(
         fetch.depth(HISTORY_DEPTH); // shallow per SPEC §10 (local transport can't)
     }
 
+    // Clone without writing the tree, then check it out with the platform's
+    // newline conversion off (#227): Git for Windows sets core.autocrlf=true
+    // system-wide, which rewrote every LF as CRLF and moved each cited byte
+    // offset and content hash away from the committed blob.
+    let mut deferred = git2::build::CheckoutBuilder::new();
+    deferred.dry_run();
     let result = git2::build::RepoBuilder::new()
         .fetch_options(fetch)
+        .with_checkout(deferred)
         .clone(clone_url, destination);
     let repo = match result {
         Ok(repo) => repo,
@@ -234,6 +241,10 @@ fn clone_into_new(
             return Err(classify_git_error(clone_url, e, token.is_some()));
         }
     };
+    repo.config()
+        .and_then(|mut config| config.set_bool("core.autocrlf", false))
+        .and_then(|()| repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())))
+        .map_err(|e| classify_git_error(clone_url, e, token.is_some()))?;
     let commit_sha = repo
         .head()
         .and_then(|h| h.peel_to_commit())

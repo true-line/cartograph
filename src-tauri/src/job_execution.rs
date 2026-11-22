@@ -323,6 +323,7 @@ fn same_entry(a: &cap_std::fs::Metadata, b: &cap_std::fs::Metadata) -> bool {
 }
 
 fn private_dir(parent: &Dir, name: &str) -> Result<Dir, JobTransitionError> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     {

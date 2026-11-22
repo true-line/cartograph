@@ -28,6 +28,8 @@ export const SEA_FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
 export const TARGETS = {
   'universal-apple-darwin': ['darwin-arm64', 'darwin-x64'],
   'x86_64-unknown-linux-gnu': ['linux-x64'],
+  // #227: the unsigned Windows installer (.github/workflows/windows.yml).
+  'x86_64-pc-windows-msvc': ['win-x64'],
 };
 
 /** The pinned Node release; every archive must match its recorded sha256. */
@@ -73,8 +75,20 @@ export function lockedRunners(root = ROOT) {
   return { pi: `pi-agent-core@${pi}`, claude: `claude-agent-sdk@${claude}` };
 }
 
+/** This host's Node release slice: darwin-arm64, linux-x64, win-x64, ... */
+export function hostNodeSlice(platform = process.platform, arch = process.arch) {
+  return `${platform === 'win32' ? 'win' : platform}-${arch}`;
+}
+
 function archiveName(version, slice) {
-  return `node-v${version}-${slice}.${slice.startsWith('linux') ? 'tar.xz' : 'tar.gz'}`;
+  const extension = slice.startsWith('linux') ? 'tar.xz' : slice.startsWith('win') ? 'zip' : 'tar.gz';
+  return `node-v${version}-${slice}.${extension}`;
+}
+
+/** The release's LICENSE text with LF line ends: the Windows archive ships it
+ * with CRLF, so one pinned sha256 covers every slice. */
+function licenseText(file) {
+  return readFileSync(file, 'utf8').replace(/\r\n/gu, '\n');
 }
 
 function sha256(file) {
@@ -101,14 +115,16 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
     throw new Error('signing inputs must be absent while building the agent runtime');
   }
   const mac = target.endsWith('apple-darwin');
-  const host = hostSlice ?? `${process.platform}-${process.arch}`;
+  const windows = target.endsWith('windows-msvc');
+  // Node names its Windows release slices win-*, not win32-* (#227).
+  const host = hostSlice ?? hostNodeSlice();
   if (!slices.includes(host)) throw new Error(`target ${target} must be built on one of ${slices.join(', ')}`);
   const node = pinnedNode(root);
   const runners = lockedRunners(root);
   const claudeCode = pinnedClaudeCode(root);
   const claudeSlice = CLAUDE_CODE_SLICES[target];
   const work = path.join(root, 'target', 'agent-runtime');
-  const output = path.join(work, `cartograph-agent-${target}`);
+  const output = path.join(work, `cartograph-agent-${target}${windows ? '.exe' : ''}`);
   const temporary = `${output}.tmp`;
   // Tool output goes to stderr: stdout carries only the built path, which
   // callers capture with command substitution.
@@ -119,7 +135,9 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
   rmSync(path.join(work, 'NODE-LICENSE'), { force: true });
   rmSync(path.join(work, 'claude-code'), { recursive: true, force: true });
   try {
-    run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { ...options, cwd: path.join(root, 'agent-runtime') });
+    // npm is a .cmd script on Windows, which only a shell can start.
+    run(windows ? 'npm.cmd' : 'npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'],
+      { ...options, cwd: path.join(root, 'agent-runtime'), ...(windows ? { shell: true } : {}) });
     const script = path.join(work, 'cartograph-agent.cjs');
     bundle({ root, entry: path.join(root, 'agent-runtime/src/sea-entry.ts'), outfile: script, runners });
     if (claudeSlice) {
@@ -147,12 +165,13 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
       const extracted = path.join(work, slice);
       rmSync(extracted, { recursive: true, force: true });
       mkdirSync(extracted, { recursive: true });
-      const member = `node-v${node.version}-${slice}/bin/node`;
+      // Windows tar (bsdtar) reads the zip archive too.
+      const member = `node-v${node.version}-${slice}/${windows ? 'node.exe' : 'bin/node'}`;
       const license = `node-v${node.version}-${slice}/LICENSE`;
       run('tar', ['-xf', archive, '-C', extracted, member, license], options);
       // The shipped notices reproduce this text (scripts/generate-notices.mjs
       // --with-agent-runtime reads it from the build output).
-      if (sha256(path.join(extracted, license)) !== node.license_sha256) {
+      if (createHash('sha256').update(licenseText(path.join(extracted, license))).digest('hex') !== node.license_sha256) {
         throw new Error(`Node ${node.version} ${slice} LICENSE does not match its pinned sha256`);
       }
       licenses.push(path.join(extracted, license));
@@ -169,7 +188,7 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
     run(binaries[host], ['--experimental-sea-config', config], options);
     const postject = path.join(root, 'agent-runtime/node_modules/postject/dist/cli.js');
     const built = slices.map((slice) => {
-      const file = path.join(work, `cartograph-agent-${slice}`);
+      const file = path.join(work, `cartograph-agent-${slice}${windows ? '.exe' : ''}`);
       copyFileSync(binaries[slice], file);
       if (mac) run('codesign', ['--remove-signature', file], options);
       run(process.execPath, [postject, file, 'NODE_SEA_BLOB', blob, '--sentinel-fuse', SEA_FUSE,
@@ -182,7 +201,7 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
     } else {
       copyFileSync(built[0], temporary);
     }
-    copyFileSync(licenses[0], path.join(work, 'NODE-LICENSE'));
+    writeFileSync(path.join(work, 'NODE-LICENSE'), licenseText(licenses[0]));
     renameSync(temporary, output);
     return output;
   } finally {

@@ -1,0 +1,5 @@
+# Check text files out with LF on every platform (#227): fixtures, goldens
+# and generated files are compared byte for byte, and byte offsets cite them.
+* text=auto eol=lf
+# Generated; it keeps the upstream license texts' own line endings.
+THIRD-PARTY-NOTICES.md -text

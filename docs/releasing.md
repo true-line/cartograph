@@ -103,6 +103,31 @@ Apple Silicon and uploads artifacts whose names contain `unsigned-dev`. These
 are development artifacts, do not pass Gatekeeper as trusted downloads, and
 must never be promoted as production releases.
 
+## Windows packaging (#227)
+
+Windows is not released yet. `.github/workflows/windows.yml` builds an
+unsigned NSIS installer on `windows-latest` with the MSVC toolchain on every
+push to main, and uploads it as the `Cartograph_<version>_x64_unsigned-dev`
+artifact for manual testing. To build it locally on Windows, with Node, Rust
+and the Visual Studio C++ build tools installed, run:
+
+```powershell
+npm ci; npm --prefix ui ci
+npm run package:windows
+```
+
+`package:windows` builds the MCP relay (`scripts/build-mcp-relay.mjs`) and the
+agent runtime from the pinned, checksum-verified Node `win-x64` release
+(`scripts/build-agent-runtime.mjs x86_64-pc-windows-msvc`). It then bundles
+both sidecars with `src-tauri/tauri.windows-bundle.conf.json`. The installer
+downloads the WebView2 bootstrapper on systems that lack WebView2; Windows 10
+1803 and later already have it. The Windows app does not carry Claude Code:
+only the macOS app stages it (AC-1424).
+
+The installer is not Authenticode signed, so SmartScreen warns on first run.
+Signing, timestamping and a fail-closed release posture like ADR-0016's are
+tracked on #227. Until they land, `release.yml` publishes macOS only.
+
 ## Required GitHub secrets
 
 Add all five repository Actions secrets together. A partial set fails closed:
