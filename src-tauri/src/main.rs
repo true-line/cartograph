@@ -6880,6 +6880,7 @@ fn build_cached_semantic_preview(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_reviewed_semantic_preview(
     provider: &dyn LlmProvider,
@@ -6891,7 +6892,34 @@ fn build_reviewed_semantic_preview(
     precision_floor: f32,
     reviewed: Option<&semantic_evaluation::PreparedEvaluation>,
 ) -> Result<SemanticPreview, String> {
-    let cached = semantic::embedding_cache::CachedProvider::new(provider, cache, lease)
+    build_reviewed_semantic_preview_within(
+        provider,
+        cache,
+        lease,
+        nodes,
+        edges,
+        eval_pairs,
+        precision_floor,
+        reviewed,
+        semantic::embedding_cache::OperationLimits::default(),
+    )
+}
+
+/// [`build_reviewed_semantic_preview`] holding at most `limits` in its one
+/// embedding operation (#1653, AC-1807).
+#[allow(clippy::too_many_arguments)]
+fn build_reviewed_semantic_preview_within(
+    provider: &dyn LlmProvider,
+    cache: Arc<Mutex<semantic::embedding_cache::EmbeddingCache>>,
+    lease: semantic::embedding_cache::Lease,
+    nodes: &[Node],
+    edges: &[Edge],
+    eval_pairs: &[semantic::LabeledPair],
+    precision_floor: f32,
+    reviewed: Option<&semantic_evaluation::PreparedEvaluation>,
+    limits: semantic::embedding_cache::OperationLimits,
+) -> Result<SemanticPreview, String> {
+    let cached = semantic::embedding_cache::CachedProvider::within(provider, cache, lease, limits)
         .map_err(|e| e.to_string())?;
     if !eval_pairs.is_empty()
         && (!(0.0..=1.0).contains(&precision_floor)
@@ -6910,7 +6938,7 @@ fn build_reviewed_semantic_preview(
     let mut over_plan = false;
     if let Some(prepared) = reviewed {
         let planned = prepared.planned_texts()?;
-        if inputs.len().saturating_add(planned.len()) > semantic::embedding_cache::MAX_ROWS {
+        if inputs.len().saturating_add(planned.len()) > cached.limits().max_rows() {
             reviewed = None;
             over_plan = true;
         } else {
@@ -7011,7 +7039,7 @@ async fn semantic_preview(
         };
         let provider = llm::OllamaProvider::local_on_port(saved_ollama_port(&state)?)
             .map_err(|error| error.to_string())?;
-        let preview = build_reviewed_semantic_preview(
+        let preview = build_reviewed_semantic_preview_within(
             &provider,
             worker_cache,
             worker_lease,
@@ -7020,6 +7048,7 @@ async fn semantic_preview(
             &eval_pairs,
             precision_floor,
             reviewed.as_ref(),
+            semantic_operation_limits(&state)?,
         )?;
         Ok::<_, String>((preview, reviewed, unavailable))
     })
@@ -7935,6 +7964,27 @@ fn python_limits(state: &AppState) -> Result<adapters_lang_python::PythonLimits,
         mib(operator_limits::PYTHON_LOCKFILE_MAX_MIB)?,
     )
     .ok_or_else(|| "Saved Python limits are outside the adapter's ceilings.".to_string())
+}
+
+/// Rows and vector MiB one semantic preview's embedding operation may hold
+/// (#1653, AC-1807), from the saved operator limits.
+fn semantic_operation_limits(
+    state: &AppState,
+) -> Result<semantic::embedding_cache::OperationLimits, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    let rows = usize::try_from(limit(operator_limits::SEMANTIC_OPERATION_MAX_ROWS)?)
+        .map_err(|error| error.to_string())?;
+    let bytes = limit(operator_limits::SEMANTIC_OPERATION_MAX_VECTOR_MIB)?
+        .checked_mul(1024 * 1024)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or("Semantic vector bound overflows.")?;
+    semantic::embedding_cache::OperationLimits::within(rows, bytes)
+        .ok_or_else(|| "Saved semantic limits are outside the cache's bounds.".to_string())
 }
 
 /// How many API references a repository may declare and how large each may
@@ -12027,6 +12077,38 @@ export function queueOrder() {
         assert_eq!(
             super::api_doc_limits(&state).unwrap(),
             ingest::api_docs::ApiDocLimits::within(64, 8 << 20).unwrap()
+        );
+    }
+
+    // AC-1807 / #1653: the semantic operation limits a preview reads are the
+    // defaults until saved, then the saved values.
+    #[test]
+    fn a_projects_semantic_operation_limits_reach_the_preview() {
+        use semantic::embedding_cache::OperationLimits;
+        let app_data = tempfile::tempdir().unwrap();
+        let state = crate::registered_source_tests::app_state(app_data.path());
+        assert_eq!(
+            super::semantic_operation_limits(&state).unwrap(),
+            OperationLimits::default()
+        );
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings
+                .set_operator_limit(
+                    crate::operator_limits::SEMANTIC_OPERATION_MAX_ROWS,
+                    Some(65_536),
+                )
+                .unwrap();
+            settings
+                .set_operator_limit(
+                    crate::operator_limits::SEMANTIC_OPERATION_MAX_VECTOR_MIB,
+                    Some(256),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            super::semantic_operation_limits(&state).unwrap(),
+            OperationLimits::within(65_536, 256 << 20).unwrap()
         );
     }
 
