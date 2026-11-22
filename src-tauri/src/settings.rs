@@ -307,7 +307,7 @@ pub fn local_model_name(value: &str) -> bool {
 /// The saved loopback Ollama port, or the default when none is saved (#1653).
 /// Every local model path (investigations, composition, area experts,
 /// escalation, the knowledge phase and the lane probe) reaches Ollama here.
-pub(crate) fn saved_ollama_port(settings: &std::sync::Mutex<SettingsStore>) -> Result<u16, String> {
+pub fn saved_ollama_port(settings: &std::sync::Mutex<SettingsStore>) -> Result<u16, String> {
     Ok(settings
         .lock()
         .map_err(|e| e.to_string())?
@@ -401,7 +401,7 @@ impl SettingsStore {
                  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ) STRICT;",
         )?;
-        crate::agent_pool::initialize(&conn)?;
+        crate::agent_pool_store::initialize(&conn)?;
         crate::operator_limits::initialize(&conn)?;
         for tier in TIERS {
             conn.execute(
@@ -488,7 +488,7 @@ impl SettingsStore {
     }
 
     /// Scalar selection for bounded readers; never materialize the enabled inventory.
-    pub(crate) fn plugin_enabled_exact(
+    pub fn plugin_enabled_exact(
         &self,
         project_root: &str,
         plugin_id: &str,
@@ -503,7 +503,7 @@ impl SettingsStore {
     }
 
     /// Read only the outcome; an arbitrarily large stored report is not copied.
-    pub(crate) fn plugin_gate_passed_exact(
+    pub fn plugin_gate_passed_exact(
         &self,
         plugin_id: &str,
         content_hash: &str,
@@ -655,16 +655,18 @@ impl SettingsStore {
     }
 
     /// The agent pool controls (#252, AC-1704); nothing gated by default.
-    pub fn agent_pool_controls(&self) -> rusqlite::Result<crate::agent_pool::AgentPoolControls> {
-        crate::agent_pool::read(&self.conn)
+    pub fn agent_pool_controls(
+        &self,
+    ) -> rusqlite::Result<crate::agent_pool_store::AgentPoolControls> {
+        crate::agent_pool_store::read(&self.conn)
     }
 
     /// Persist the agent pool controls; an out-of-range limit changes nothing.
     pub fn set_agent_pool_controls(
         &mut self,
-        controls: &crate::agent_pool::AgentPoolControls,
+        controls: &crate::agent_pool_store::AgentPoolControls,
     ) -> Result<(), String> {
-        crate::agent_pool::write(&self.conn, controls)
+        crate::agent_pool_store::write(&self.conn, controls)
     }
 
     /// Every configurable operator limit with the value in effect (#1653).
@@ -1004,13 +1006,13 @@ impl SettingsStore {
     }
 
     /// Test-only: raw SQL on the settings connection, for fault injection.
-    #[cfg(test)]
-    pub(crate) fn execute_batch_for_test(&self, sql: &str) -> rusqlite::Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn execute_batch_for_test(&self, sql: &str) -> rusqlite::Result<()> {
         self.conn.execute_batch(sql)
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

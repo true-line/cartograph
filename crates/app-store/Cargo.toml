@@ -39,6 +39,7 @@ semantic = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 source-capture = { workspace = true }
+source-walk = { workspace = true }
 spec = { workspace = true }
 thiserror = { workspace = true }
 # Test fixtures the app's tests share (test-support only).
