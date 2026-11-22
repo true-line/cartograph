@@ -64,6 +64,7 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
     assert!(guidance("1.3").unwrap().contains("never enumerate routes"));
     // A stated route rests on a cited fact that shows it (#2328).
     assert!(SYSTEM.contains("a route you state must be one a fact you cite shows"));
+    assert!(SYSTEM.contains("A number, count or version you state must appear in a fact you cite"));
     // Areas the section lists are followed, not reinvented.
     assert!(
         guidance("1.3")
@@ -122,6 +123,10 @@ fn a_reply_decodes_to_a_finish_and_out_of_bound_claims_are_left_out() {
     ]));
     let composed = decode(&address(), &text, &citable).unwrap();
     assert_eq!(composed.left_out, 7);
+    // Each left-out claim is counted under the first bound it fails (#2349).
+    assert_eq!(composed.reasons.values().sum::<usize>(), 7);
+    assert_eq!(composed.reasons["citation_not_citable"], 3);
+    assert_eq!(composed.reasons["claim_kind_unknown"], 1);
     assert_eq!(composed.finish.address, address());
     assert_eq!(
         composed.finish.claims,

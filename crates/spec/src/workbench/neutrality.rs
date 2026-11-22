@@ -234,6 +234,8 @@ pub struct CitedText {
     /// Every route any fact of the graph shows, for telling a route
     /// fragment (`custom/new`) from prose such as `and/or` (#2335).
     routes: BTreeSet<String>,
+    /// The cited facts that are Endpoints (#2349).
+    endpoints: BTreeSet<String>,
 }
 
 impl CitedText {
@@ -245,6 +247,7 @@ impl CitedText {
             return Self::default();
         }
         let mut routes = BTreeSet::new();
+        let mut endpoints = BTreeSet::new();
         let shown = |props: &serde_json::Value| {
             let mut props = props.clone();
             if let Some(map) = props.as_object_mut() {
@@ -258,6 +261,9 @@ impl CitedText {
             });
             if cited.contains(&id) {
                 let text = format!("{} {} {}", node.id, node.label, shown(&node.props));
+                if node.label == "Endpoint" {
+                    endpoints.insert(id.clone());
+                }
                 by_citation.insert(id, text);
             }
             routes.extend(route_literals(&node.id).into_iter().map(str::to_owned));
@@ -287,7 +293,39 @@ impl CitedText {
         Self {
             by_citation,
             routes,
+            endpoints,
         }
+    }
+
+    /// The first numeral, count or version `statement` states that no fact
+    /// of `citations` shows, if any (#2349): `17`, `0.0.0.0:7777`, `15s`
+    /// or `v2` must appear in a cited fact, so a figure is never taken
+    /// from the section text around the facts. A section reference
+    /// (`§1.2`, `section 1.3`) is not a figure.
+    pub fn uncited_number<'a>(&self, statement: &'a str, citations: &[String]) -> Option<&'a str> {
+        let cited: Vec<&String> = citations
+            .iter()
+            .filter_map(|id| self.by_citation.get(id))
+            .collect();
+        number_literals(statement).into_iter().find(|literal| {
+            !cited.iter().any(|text| match version(literal) {
+                Some(version) => contains_version(text, version),
+                None => numerals(literal).all(|numeral| contains_numeral(text, numeral)),
+            })
+        })
+    }
+
+    /// Whether `statement` asserts endpoints or routes, by naming them or
+    /// spelling a route, without citing an Endpoint fact (#2349).
+    pub fn endpoint_claim_uncited(&self, statement: &str, citations: &[String]) -> bool {
+        let asserts = !route_literals(statement).is_empty()
+            || statement.split_whitespace().any(|word| {
+                let word = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                matches!(word.as_str(), "endpoint" | "endpoints" | "route" | "routes")
+            });
+        asserts && !citations.iter().any(|id| self.endpoints.contains(id))
     }
 
     /// The first route `statement` spells out that no fact of `citations`
@@ -310,6 +348,105 @@ impl CitedText {
                     .find(|fragment| !cited().any(|text| contains_segments(text, fragment)))
             })
     }
+}
+
+/// The words of `statement` that state a figure: each piece, split on `/`
+/// and `,`, holding an ASCII digit, other than a citation id or a section
+/// reference.
+fn number_literals(statement: &str) -> Vec<&str> {
+    const TRIM: &[char] = &[
+        '"', '\'', '`', '(', ')', '[', ']', ',', '.', ';', ':', '!', '?', '%',
+    ];
+    let mut found = Vec::new();
+    let mut previous = "";
+    for word in statement.split_whitespace() {
+        let section = matches!(
+            previous
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '§')
+                .to_lowercase()
+                .as_str(),
+            "§" | "section" | "sections"
+        );
+        previous = word;
+        // A route is checked as a route (#2328), not as figures.
+        if section || !route_literals(word).is_empty() {
+            continue;
+        }
+        for piece in word.split(['/', ',']) {
+            let piece = piece.trim_matches(TRIM);
+            if piece.starts_with('§') || piece.starts_with("F-") {
+                continue;
+            }
+            if piece.bytes().any(|b| b.is_ascii_digit()) {
+                found.push(piece);
+            }
+        }
+    }
+    found
+}
+
+/// The version a literal such as `v2` or `V3.1` names: its digits.
+fn version(literal: &str) -> Option<&str> {
+    let digits = literal.strip_prefix(['v', 'V'])?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+        .then_some(digits)
+}
+
+/// Whether `text` shows version `digits` as `v<digits>` or `V<digits>`, as a
+/// whole token.
+fn contains_version(text: &str, digits: &str) -> bool {
+    ["v", "V"].iter().any(|prefix| {
+        let token = format!("{prefix}{digits}");
+        text.match_indices(&token).any(|(start, matched)| {
+            let end = start + matched.len();
+            let before = !text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+            // `v2.1` continues `v2`, so it does not show it.
+            let rest = &text.as_bytes()[end..];
+            let after = !(rest.first().is_some_and(u8::is_ascii_digit)
+                || (rest.first() == Some(&b'.') && rest.get(1).is_some_and(u8::is_ascii_digit)));
+            before && after
+        })
+    })
+}
+
+/// The numerals of `literal`: each run of digits, with the `.` and `:`
+/// between digits (`0.0.0.0:7777`, `1.5`).
+fn numerals(literal: &str) -> impl Iterator<Item = &str> {
+    let bytes = literal.as_bytes();
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while at < bytes.len() && !bytes[at].is_ascii_digit() {
+            at += 1;
+        }
+        if at >= bytes.len() {
+            return None;
+        }
+        let start = at;
+        while at < bytes.len()
+            && (bytes[at].is_ascii_digit()
+                || (matches!(bytes[at], b'.' | b':')
+                    && bytes.get(at + 1).is_some_and(u8::is_ascii_digit)))
+        {
+            at += 1;
+        }
+        Some(&literal[start..at])
+    })
+}
+
+/// Whether `text` shows `numeral` whole: not inside a longer number.
+fn contains_numeral(text: &str, numeral: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.match_indices(numeral).any(|(start, matched)| {
+        let end = start + matched.len();
+        let digit = |at: usize| bytes.get(at).is_some_and(u8::is_ascii_digit);
+        let before = start == 0
+            || !(digit(start - 1) || (bytes[start - 1] == b'.' && start >= 2 && digit(start - 2)));
+        let after = !(digit(end) || (bytes.get(end) == Some(&b'.') && digit(end + 1)));
+        before && after
+    })
 }
 
 /// Collect the route literals in every string of `value`.
@@ -722,5 +859,72 @@ mod tests {
             text.uncited_route("It reads and/or writes input/output.", &[c]),
             None
         );
+    }
+
+    /// AC-1317 (T-1317): a figure a statement states must be shown by a fact
+    /// it cites, and a claim about endpoints must cite an Endpoint (#2349).
+    #[test]
+    fn figures_and_endpoint_claims_must_be_shown_by_cited_facts() {
+        let server = Node {
+            id: "service:web".into(),
+            label: "Service".into(),
+            props: json!({"bind": "0.0.0.0:7777", "workers": 2, "timeout": "15s"}),
+        };
+        let custom = Node {
+            id: "endpoint:POST /api/v2/alias/custom/new".into(),
+            label: "Endpoint".into(),
+            props: json!({"path": "/api/v2/alias/custom/new"}),
+        };
+        let capability = Node {
+            id: "cap:alias".into(),
+            label: "Capability".into(),
+            props: json!({"title": "Create alias (API)"}),
+        };
+        let ids = |node: &Node| {
+            citation_id(&FactKey::Node {
+                id: node.id.clone(),
+            })
+        };
+        let (w, k, c) = (ids(&server), ids(&custom), ids(&capability));
+        let cited: BTreeSet<String> = [w.clone(), k.clone(), c.clone()].into();
+        let text = CitedText::of(&[server, custom], &[], &[capability], &cited);
+        let w = std::slice::from_ref(&w);
+        let k = std::slice::from_ref(&k);
+        let c = std::slice::from_ref(&c);
+        // Figures the cited fact shows pass, whole.
+        let served = "It serves on 0.0.0.0:7777 with 2 workers and a 15s timeout.";
+        assert_eq!(text.uncited_number(served, w), None);
+        assert_eq!(text.uncited_number("It runs 27 workers.", w), Some("27"));
+        assert_eq!(text.uncited_number("It binds port 777.", w), Some("777"));
+        // A count the facts do not show is not stated.
+        assert_eq!(
+            text.uncited_number("The system has 17 areas.", c),
+            Some("17")
+        );
+        // A version must be shown as a version.
+        assert_eq!(text.uncited_number("Aliases use v2.", k), None);
+        assert_eq!(
+            text.uncited_number("Custom aliases use v2/v3.", k),
+            Some("v3")
+        );
+        assert_eq!(text.uncited_number("Aliases use v2.", c), Some("v2"));
+        // A longer version does not show a shorter one.
+        assert!(!contains_version("served at /api/v2.1/alias", "2"));
+        assert!(contains_version("served at /api/v2/alias.", "2"));
+        // A section reference and a route are not figures.
+        assert_eq!(
+            text.uncited_number("As section 1.2 says, see §1.3.", c),
+            None
+        );
+        assert_eq!(
+            text.uncited_number("Clients call /api/v2/alias/custom/new.", k),
+            None
+        );
+        // A claim about endpoints or routes cites an Endpoint.
+        let claim = "Aliases are created through dedicated endpoints.";
+        assert!(text.endpoint_claim_uncited(claim, c));
+        assert!(!text.endpoint_claim_uncited(claim, k));
+        assert!(text.endpoint_claim_uncited("It accepts /api/v2/alias/custom/new.", c));
+        assert!(!text.endpoint_claim_uncited("Users create aliases.", c));
     }
 }
