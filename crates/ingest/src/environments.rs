@@ -732,14 +732,18 @@ fn named_values<'a>(files: impl Iterator<Item = (&'a str, Option<String>)>) -> B
         .collect()
 }
 
-/// True when this reader may open `rel`: a Compose file, an environment
+/// True when this reader may open `rel` and a capture retains it: a Compose
 /// file, a kustomization, a Helm chart, helmfile or values file, a YAML file
 /// that may hold a Kubernetes manifest, or a settings file. Every file the
-/// reader opens is one of these.
+/// reader opens is one of these or an env file, which no capture retains: it
+/// holds secrets (AC-0097), and the reader only checks that it is readable.
 pub fn is_environment_file(rel: &str) -> bool {
     let name = rel.rsplit('/').next().unwrap_or(rel);
+    !crate::toolchain::is_env_name(name) && is_read_file(name, rel)
+}
+
+fn is_read_file(name: &str, rel: &str) -> bool {
     compose_file(name)
-        || names_an_environment(name)
         || kustomize::FILE_NAMES.contains(&name)
         || name == "Chart.yaml"
         || helm::HELMFILE_NAMES.contains(&name)
@@ -750,16 +754,25 @@ pub fn is_environment_file(rel: &str) -> bool {
 }
 
 /// [`extract_dir`] over a source capture (AC-1059, #385): `captured` is the
-/// capture's [`is_environment_file`] selection and `read` its bytes. The
-/// checkout is listed for its directories and other files, and never read:
-/// a selected file the capture does not hold is not among the files read,
-/// and a captured file the checkout no longer lists is.
+/// capture's [`is_environment_file`] selection and `captured_read` its
+/// bytes. The checkout is listed for its directories and other files, and
+/// read only to check that an env file is readable: a selected file the
+/// capture does not hold is not among the files read, and a captured file
+/// the checkout no longer lists is.
 pub fn extract_from_capture(
     root: &Path,
     captured: &[String],
-    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    captured_read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
     id: &SourceId,
 ) -> std::io::Result<EnvironmentExtraction> {
+    let read = |rel: &str| {
+        if crate::toolchain::is_env_name(rel.rsplit('/').next().unwrap_or(rel)) {
+            std::fs::read(root.join(rel))
+        } else {
+            captured_read(rel)
+        }
+    };
+    let read: &dyn Fn(&str) -> std::io::Result<Vec<u8>> = &read;
     let held: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
     // A values file a captured helmfile names is selected too, so whether
     // it is read never depends on the checkout.

@@ -1328,7 +1328,8 @@ fn captured_bytes_are_read_instead_of_the_checkout() {
     let paths = environment_paths(dir.path()).unwrap();
     assert!(paths.contains(&"compose.yaml".to_string()));
     assert!(paths.contains(&"deploy/helmfile.yaml".to_string()));
-    assert!(paths.contains(&".env.production".to_string()));
+    // An env file holds secrets: no capture retains it (AC-0097).
+    assert!(!paths.contains(&".env.production".to_string()));
     assert!(!paths.contains(&"src/main.rs".to_string()));
     let captured: std::collections::BTreeMap<String, Vec<u8>> = paths
         .iter()
