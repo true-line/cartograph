@@ -1311,6 +1311,36 @@ mod tests {
         assert!(nodes.iter().any(|node| node.label == "Gap"));
     }
 
+    // AC-1507: a VSCode-scale plan (about 186k candidate symbols in one
+    // family plus their hops) is admitted whole; the next bound still refuses.
+    #[test]
+    fn vscode_scale_embedding_plans_are_admitted() {
+        let candidate = |n: usize| Candidate {
+            node_id: format!("sym:vscode@src/f{n}.ts#f{n}"),
+            kind: HopKind::Call,
+            subtype: None,
+            text: format!("function f{n}"),
+            evidence: vec![],
+            materialized_node: None,
+        };
+        let hop = |n: usize| UnresolvedHop {
+            gap_id: format!("gap:call:vscode@src/c.ts@{n}"),
+            source_id: "sym:vscode@src/c.ts#caller".into(),
+            edge_label: "CALLS".into(),
+            kind: HopKind::Call,
+            subtype: None,
+            query: format!("call g{n}"),
+            evidence: vec![],
+            exclusion: None,
+        };
+        let candidates: Vec<_> = (0..186_000).map(candidate).collect();
+        let hops: Vec<_> = (0..20_000).map(hop).collect();
+        let texts = embedding_inputs(&hops, &candidates, &[]).unwrap();
+        assert_eq!(texts.len(), 206_000);
+        let over: Vec<_> = (0..embedding_cache::MAX_ROWS + 1).map(candidate).collect();
+        assert!(embedding_inputs(&hops, &over, &[]).is_err());
+    }
+
     // AC-0285 (T-0285): conservative look-alikes still enter ANN candidacy
     // and produce proposals.
     #[test]

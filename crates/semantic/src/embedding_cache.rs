@@ -13,11 +13,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const MAX_ROWS: usize = 100_000;
-pub const MAX_VECTOR_BYTES: usize = 256 * 1024 * 1024;
+/// Rows one store and one operation hold: a VSCode-scale plan (about 186k
+/// candidate symbols plus their hops) fits in one pass (#259, AC-1507).
+pub const MAX_ROWS: usize = 262_144;
+/// Vector bytes one store and one operation hold: `MAX_ROWS` vectors of up to
+/// 1,024 f32 dimensions.
+pub const MAX_VECTOR_BYTES: usize = 1024 * 1024 * 1024;
 pub const MAX_DIMENSIONS: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
-pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Plan text bytes: `MAX_ROWS` texts averaging 512 bytes.
+pub const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
 pub const BATCH_COUNT: usize = 128;
 pub const BATCH_BYTES: usize = 1024 * 1024;
 mod lifecycle;
