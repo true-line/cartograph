@@ -1,8 +1,9 @@
 import type { Job } from '../store';
 import type { InvestigationProvider } from '../investigationTypes';
+import type { LocalLaneStatus } from './LocalLane';
 import { stageLabel } from '../stageLabels';
 import {
-  AGENT_POOL_MAX_LIMIT, LANE_LABEL, LANE_OUTPUT, agentPool, controlsLine, providerLine, usageLine, usageTotal,
+  AGENT_POOL_MAX_LIMIT, LANE_LABEL, LANE_OUTPUT, agentPool, controlsLine, localServerLine, providerLine, usageLine, usageTotal,
   type AgentLane, type AgentPoolControls, type AgentWork, type JobUsage,
 } from '../agentPool';
 
@@ -20,6 +21,12 @@ export interface AgentPoolPanelProps {
   /** Set when saving the controls failed. */
   controlsError?: string | null;
   onChangeControls?: (controls: AgentPoolControls) => void;
+  /** The last local model server check (AC-1708); null before one answers. */
+  localServer?: LocalLaneStatus | null;
+  localServerChecking?: boolean;
+  localServerError?: string | null;
+  /** Absent when no backend can run the check. */
+  onCheckLocalServer?: () => void;
   onOpenJobs: () => void;
   onOpenCuration: () => void;
   onViewInvestigation?: (id: string) => void;
@@ -82,7 +89,8 @@ function WorkRow({ item, usage, onViewInvestigation }: {
  * and retry stay on Jobs; decisions stay in curation.
  */
 export function AgentPoolPanel({
-  jobs, providers, awaitingCuration, usage = [], controls = null, controlsError = null, onChangeControls, onOpenJobs, onOpenCuration, onViewInvestigation,
+  jobs, providers, awaitingCuration, usage = [], controls = null, controlsError = null, onChangeControls,
+  localServer = null, localServerChecking = false, localServerError = null, onCheckLocalServer, onOpenJobs, onOpenCuration, onViewInvestigation,
 }: AgentPoolPanelProps) {
   const pool = agentPool(jobs);
   const usageOf = new Map((usage ?? []).map((row) => [row.job_id, row]));
@@ -184,7 +192,21 @@ export function AgentPoolPanel({
                 </li>
               ))}
             </ul>}
-        <p className="muted">From the configuration the host reads; whether a model answers is not checked here.</p>
+        <p className="muted">From the configuration the host reads. Only the local server is checked here; no cloud provider is called.</p>
+        {onCheckLocalServer && (
+          <div className="agent-pool-health">
+            <p role="status" data-testid="agent-pool-local-server">
+              {localServerError
+                ? `The local model server could not be checked: ${localServerError}`
+                : localServer
+                  ? localServerLine(localServer)
+                  : localServerChecking ? 'Checking the local model server…' : 'The local model server has not been checked.'}
+            </p>
+            <button type="button" className="secondary-button" disabled={localServerChecking} onClick={onCheckLocalServer}>
+              {localServerChecking ? 'Checking…' : 'Check local server'}
+            </button>
+          </div>
+        )}
       </section>
 
       <section aria-label="Proposals awaiting curation">

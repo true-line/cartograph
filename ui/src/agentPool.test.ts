@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentPool, agentWorkOf, awaitingCuration, controlsLine, providerLine, usageLine, usageTotal } from './agentPool';
+import { agentPool, agentWorkOf, awaitingCuration, controlsLine, localServerLine, providerLine, usageLine, usageTotal } from './agentPool';
 import type { Job, StagedProposal } from './store';
 
 // AC-1701 (T-1701): the agent pool reads only the job kinds the host writes.
@@ -92,5 +92,18 @@ describe('controlsLine', () => {
   it('names pause first, then each mode limit', () => {
     expect(controlsLine({ paused: true, local_limit: 1, cloud_limit: 1 })).toBe('New agent work waits until the pool is resumed. Work already running continues.');
     expect(controlsLine({ paused: false, local_limit: 0, cloud_limit: 4 })).toBe('New agent work starts with no local limit and at most 4 cloud at a time.');
+  });
+});
+
+// AC-1708 (T-1708): the pool says whether the local server answers, from the local check only.
+describe('localServerLine', () => {
+  const model = (name: string, installed: boolean) => ({ model: name, purpose: 'p', installed, pull_command: installed ? null : `ollama pull ${name}` });
+  it('names a stopped server with its start command, then missing models', () => {
+    expect(localServerLine({ reachable: false, start_command: 'ollama serve', models: [] }))
+      .toBe('The local model server did not answer. Start it with ollama serve.');
+    expect(localServerLine({ reachable: true, start_command: null, models: [model('a', true), model('b', false)] }))
+      .toBe('The local model server is running; 1 of 2 models is missing (see Settings, Local lane).');
+    expect(localServerLine({ reachable: true, start_command: null, models: [model('a', true)] }))
+      .toBe('The local model server is running and every model is installed.');
   });
 });

@@ -7,7 +7,9 @@ agent jobs. It also shows each configured provider and model with its catalog
 availability, and how many staged proposals in the loaded page wait for a
 decision. It reads those records only: a job record does not prove a worker is
 live, a configured provider is not proof a model answers, and agent output is
-never promoted over T0/T1 facts. Use **Open Jobs** to cancel or retry work and
+never promoted over T0/T1 facts. **Check local server** asks the local model
+server on this machine whether it is running and which models are missing; it
+calls no cloud provider. Use **Open Jobs** to cancel or retry work and
 **Open curation** to decide proposals.
 
 Under each topic-expert question and section draft, the pool shows how many
