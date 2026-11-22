@@ -17,4 +17,6 @@ blake3 = { workspace = true }
 core-redact = { workspace = true }
 
 [dev-dependencies]
+# A bound socket that never listens: a refused endpoint no parallel test can take.
+socket2 = "0.6"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
