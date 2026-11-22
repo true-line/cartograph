@@ -153,15 +153,37 @@ impl ReceiptDocument {
             })
     }
 
+    /// The same corpora, in any order: the host lists its selectors in its
+    /// own order, the receipt in the dataset's.
     fn corpora_match(&self, observed: &[ObservedCorpus]) -> bool {
-        self.corpora.len() == observed.len()
-            && self.corpora.iter().zip(observed).all(|(r, o)| {
-                r.corpus_id == o.corpus_id
-                    && r.repo_id == o.repo_id
-                    && r.revision == o.revision
-                    && r.graph_snapshot_hash == o.graph_snapshot_hash
-                    && r.capture_manifest_hash == o.capture_manifest_hash
+        let mut receipt: Vec<_> = self
+            .corpora
+            .iter()
+            .map(|c| {
+                (
+                    &c.corpus_id,
+                    &c.repo_id,
+                    &c.revision,
+                    &c.graph_snapshot_hash,
+                    &c.capture_manifest_hash,
+                )
             })
+            .collect();
+        let mut live: Vec<_> = observed
+            .iter()
+            .map(|c| {
+                (
+                    &c.corpus_id,
+                    &c.repo_id,
+                    &c.revision,
+                    &c.graph_snapshot_hash,
+                    &c.capture_manifest_hash,
+                )
+            })
+            .collect();
+        receipt.sort();
+        live.sort();
+        receipt == live
     }
 }
 
