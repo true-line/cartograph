@@ -341,9 +341,9 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   const rust = job('rust');
   const shards = job('rust-app-tests');
   const complete = job('complete');
-  // The Rust job's groups jointly run every package but app, agents and spec,
-  // each exactly once: the named groups' packages are exactly the ones the
-  // `core` group excludes besides those three (#1924).
+  // The Rust job's groups jointly run every package but app, agents, spec and
+  // job-execution-tests, each exactly once: the named groups' packages are
+  // exactly the ones the `core` group excludes besides those four (#1924).
   assert.match(rust, /env:\n +PACKAGES: \$\{\{ matrix\.packages \}\}\n(?: +#.*\n)* +run: cargo test \$PACKAGES\n/u);
   assert.match(rust, /fail-fast: false/u);
   // Each group is a `- group:` line, then `packages:` and the folded lines
@@ -370,8 +370,9 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.equal(core[0], '--workspace');
   const excluded = core.slice(1).filter((_, index) => index % 2 === 1);
   assert.ok(core.slice(1).every((arg, index) => index % 2 === 1 || arg === '--exclude'));
-  assert.deepEqual(excluded.slice(0, 3), ['app', 'agents', 'spec']);
-  assert.deepEqual([...excluded.slice(3)].sort(), [...named].sort());
+  // job-execution-tests runs on Windows; on Linux app-store runs its tests.
+  assert.deepEqual(excluded.slice(0, 4), ['app', 'agents', 'spec', 'job-execution-tests']);
+  assert.deepEqual([...excluded.slice(4)].sort(), [...named].sort());
   const members = readdirSync(path.join(root, 'crates'));
   for (const name of named) assert.ok(members.includes(name), `${name} is not a workspace crate`);
   assert.ok(condition(shards));
