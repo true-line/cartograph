@@ -99,15 +99,15 @@ pub struct Extraction {
     /// Calls on injected strategies and the classes implementing them
     /// (#2069), linked at directory completion.
     strategies: strategies::Pending,
+    /// Calls through configured instances and lookups of them (#2165),
+    /// linked at directory completion.
+    instances: instances::Pending,
     /// Barrel re-exports (AC-1504), followed at directory completion so a
     /// call through `index.ts` reaches the declaring file.
     reexports: Vec<reexports::ReExport>,
     /// `(file, name)` of each top-level binding a file exports itself; an
     /// `export *` hop only reaches these (AC-1504).
     exported: Vec<(String, String)>,
-    /// Calls through configured instances and lookups of them (#2165),
-    /// linked at directory completion.
-    instances: instances::Pending,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -322,8 +322,8 @@ fn retarget_commit(
     for site in &mut extraction.next_routes {
         site.retarget(commit);
     }
-    extraction.strategies.retarget(commit);
     extraction.instances.retarget(commit);
+    extraction.strategies.retarget(commit);
     Ok(())
 }
 
@@ -358,9 +358,9 @@ impl Extraction {
         self.service_worker_registrations.clear();
         self.next_routes.clear();
         self.strategies = strategies::Pending::default();
+        self.instances = instances::Pending::default();
         self.reexports.clear();
         self.exported.clear();
-        self.instances = instances::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3492,9 +3492,9 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
         .extend(ex.service_worker_registrations);
     out.next_routes.extend(ex.next_routes);
     out.strategies.extend(ex.strategies);
+    out.instances.extend(ex.instances);
     out.reexports.extend(ex.reexports);
     out.exported.extend(ex.exported);
-    out.instances.extend(ex.instances);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
