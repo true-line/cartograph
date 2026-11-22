@@ -1997,7 +1997,7 @@ impl PrimarySourceStore {
         root: &Path,
         layers: &[String],
     ) -> Result<PrimaryInput, String> {
-        self.prepare_at(source, root, layers, None)
+        self.prepare_at(source, root, layers, None, CaptureLimits::default())
     }
 
     /// [`Self::prepare`], reading the selected files from the exact local Git
@@ -2013,6 +2013,7 @@ impl PrimarySourceStore {
         root: &Path,
         layers: &[String],
         commit: Option<&str>,
+        limits: CaptureLimits,
     ) -> Result<PrimaryInput, String> {
         // A managed clone's commit is captured whenever the TS pass runs,
         // including for Pulumi infrastructure alone (AC-1022).
@@ -2035,12 +2036,8 @@ impl PrimarySourceStore {
         let selection = captured::enumerate_selection(root).map_err(|error| format!("Selected TS/JS source could not be captured safely ({error}); recovery was not published."))?;
         let id = source_id(&source.source_id)?;
         let capture_paths = |paths: &[String]| match commit {
-            Some(commit) => {
-                source_capture::capture_git(root, &id, commit, paths, CaptureLimits::default())
-            }
-            None => {
-                source_capture::capture_working_tree(root, &id, paths, CaptureLimits::default())
-            }
+            Some(commit) => source_capture::capture_git(root, &id, commit, paths, limits),
+            None => source_capture::capture_working_tree(root, &id, paths, limits),
         };
         // The Python (AC-1024), Go (AC-1026), Java (AC-1031), Rust (AC-1033)
         // and Kotlin (AC-1035) lanes' files join the same capture. A lane whose files

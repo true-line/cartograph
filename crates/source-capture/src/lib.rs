@@ -19,16 +19,25 @@ pub use store::{
 
 /// Canonical manifest interpretation version.
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
-/// Maximum files explicitly selected for one capture.
+/// Default bound on files explicitly selected for one capture. A host may
+/// choose up to [`HARD_MAX_FILES`] (#1653).
 pub const MAX_FILES: usize = 20_480;
+/// Hard bound on files selected for one capture. The canonical manifest
+/// stays within [`MAX_MANIFEST_BYTES`] whatever the file count, so the read
+/// reservations, which charge the manifest ceiling, do not depend on it.
+pub const HARD_MAX_FILES: usize = 65_536;
 /// Maximum UTF-8 bytes in a logical relative path.
 pub const MAX_PATH_BYTES: usize = 1_024;
 /// Maximum UTF-8 bytes in a host-assigned source identity.
 pub const MAX_SOURCE_ID_BYTES: usize = 256;
 /// Maximum raw bytes per captured file.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-/// Maximum raw bytes per capture, counting every selected file.
+/// Default bound on raw bytes per capture, counting every selected file. A
+/// host may choose up to [`HARD_MAX_CAPTURE_BYTES`] (#1653).
 pub const MAX_CAPTURE_BYTES: u64 = 320 * 1024 * 1024;
+/// Hard bound on raw bytes per capture, half the store's [`MAX_STORE_BYTES`].
+/// Reads load one file or span at a time, each under its own fixed bound.
+pub const HARD_MAX_CAPTURE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Maximum serialized canonical manifest bytes.
 pub const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum nonempty evidence span bytes.
@@ -104,7 +113,9 @@ impl From<SourceId> for String {
     }
 }
 
-/// Acquisition and read bounds; callers may lower but never raise hard maxima.
+/// Acquisition and read bounds. The default is the historical bound; a
+/// caller may lower any field, and may raise the file count and total bytes
+/// up to [`HARD_MAX_FILES`] and [`HARD_MAX_CAPTURE_BYTES`], never further.
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureLimits {
     /// Selected-file count bound; zero permits an explicit empty capture only.
@@ -138,13 +149,24 @@ impl Default for CaptureLimits {
 }
 
 impl CaptureLimits {
+    /// The widest bounds any capture may have been made with. A store checks
+    /// what it retains and reopens against these, so a capture made within a
+    /// host's raised limits stays readable after the host lowers them.
+    pub fn hard() -> Self {
+        Self {
+            max_files: HARD_MAX_FILES,
+            max_total_bytes: HARD_MAX_CAPTURE_BYTES,
+            ..Self::default()
+        }
+    }
+
     /// Reject any requested bound greater than the core's hard maximum.
     pub fn validate(self) -> Result<()> {
-        if self.max_files > MAX_FILES
+        if self.max_files > HARD_MAX_FILES
             || self.max_path_bytes > MAX_PATH_BYTES
             || self.max_source_id_bytes > MAX_SOURCE_ID_BYTES
             || self.max_file_bytes > MAX_FILE_BYTES
-            || self.max_total_bytes > MAX_CAPTURE_BYTES
+            || self.max_total_bytes > HARD_MAX_CAPTURE_BYTES
             || self.max_manifest_bytes > MAX_MANIFEST_BYTES
             || self.max_span_bytes > MAX_SPAN_BYTES
         {

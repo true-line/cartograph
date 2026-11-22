@@ -134,7 +134,7 @@ fn working_capture_rejects_paths_duplicates_and_limits() {
             ..CaptureLimits::default()
         },
         CaptureLimits {
-            max_files: MAX_FILES + 1,
+            max_files: HARD_MAX_FILES + 1,
             ..CaptureLimits::default()
         },
     ] {
@@ -156,7 +156,7 @@ fn working_capture_rejects_paths_duplicates_and_limits() {
     assert_eq!(exact.file("a").unwrap().bytes(), b"1234");
 }
 
-// AC-1510: the hard maxima admit a full VSCode selection (16,180 TS/JS files,
+// AC-1510: the default maxima admit a full VSCode selection (16,180 TS/JS files,
 // about 234 MiB, measured at 733a998) with room to spare, and stop one past.
 #[test]
 fn working_capture_admits_a_vscode_scale_selection() {
@@ -176,6 +176,43 @@ fn working_capture_admits_a_vscode_scale_selection() {
     .unwrap();
     assert_eq!(capture.file(&paths[MAX_FILES - 1]).unwrap().bytes(), b"x");
     assert!(capture_working_tree(dir.path(), &source(), &paths, CaptureLimits::default()).is_err());
+}
+
+// AC-1800 (#1653): a host may raise the file count and total bytes up to the
+// hard ceilings and no further; a capture made past the defaults persists and
+// reloads, because the store checks against the hard ceilings.
+#[test]
+fn raised_capture_limits_stop_at_the_hard_ceilings_and_reload() {
+    const { assert!(HARD_MAX_FILES > MAX_FILES && HARD_MAX_CAPTURE_BYTES > MAX_CAPTURE_BYTES) };
+    assert!(CaptureLimits::hard().validate().is_ok());
+    for limits in [
+        CaptureLimits {
+            max_files: HARD_MAX_FILES + 1,
+            ..CaptureLimits::default()
+        },
+        CaptureLimits {
+            max_total_bytes: HARD_MAX_CAPTURE_BYTES + 1,
+            ..CaptureLimits::default()
+        },
+    ] {
+        assert!(limits.validate().is_err());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<String> = (0..=MAX_FILES).map(|i| format!("f{i:05}")).collect();
+    for path in &paths {
+        std::fs::write(dir.path().join(path), b"x").unwrap();
+    }
+    assert!(capture_working_tree(dir.path(), &source(), &paths, CaptureLimits::default()).is_err());
+    let raised = CaptureLimits {
+        max_files: MAX_FILES + 1,
+        ..CaptureLimits::default()
+    };
+    let capture = capture_working_tree(dir.path(), &source(), &paths, raised).unwrap();
+    let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+    store.persist(&capture).unwrap();
+    let reloaded = store.load(capture.id()).unwrap();
+    assert_eq!(reloaded.id(), capture.id());
+    assert_eq!(reloaded.file(&paths[MAX_FILES]).unwrap().bytes(), b"x");
 }
 
 // AC-0133: final and intermediate symlinks, directories, sockets and FIFOs fail.

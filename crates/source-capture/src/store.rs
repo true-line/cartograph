@@ -156,7 +156,7 @@ impl CaptureStore {
             capture.manifest(),
             CaptureLimits {
                 max_span_bytes: capture.max_span_bytes(),
-                ..CaptureLimits::default()
+                ..CaptureLimits::hard()
             },
         )?;
         let manifest = canonical_manifest(capture.manifest(), MAX_MANIFEST_BYTES)?;
@@ -755,7 +755,7 @@ fn load_manifest(connection: &Connection, id: &str) -> Result<(CaptureManifest, 
     }
     let manifest: CaptureManifest = serde_json::from_slice(&raw)
         .map_err(|_| CaptureError::Corrupt("invalid stored manifest encoding"))?;
-    validate_manifest(&manifest, CaptureLimits::default())?;
+    validate_manifest(&manifest, CaptureLimits::hard())?;
     if canonical_manifest(&manifest, MAX_MANIFEST_BYTES)? != raw {
         return Err(CaptureError::Corrupt("noncanonical stored manifest"));
     }
@@ -779,7 +779,7 @@ fn load_capture(connection: &Connection, id: &str) -> Result<Capture> {
         buffers,
         CaptureLimits {
             max_span_bytes,
-            ..CaptureLimits::default()
+            ..CaptureLimits::hard()
         },
     )?;
     if capture.id() != id {

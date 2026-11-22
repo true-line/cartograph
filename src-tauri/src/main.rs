@@ -5557,7 +5557,13 @@ fn run_ingest<R: tauri::Runtime>(
     let mut on_file = detail_throttle(app, job_id);
     let primary = state
         .primary_sources
-        .prepare(source, root, &[])
+        .prepare_at(
+            source,
+            root,
+            &[],
+            None,
+            capture_limits(state).map_err(&fail)?,
+        )
         .map_err(&fail)?;
     let mut receipts = Vec::new();
     let mut reads = ProducerReads {
@@ -6014,7 +6020,13 @@ fn add_repo_blocking<R: tauri::Runtime>(
     // A managed clone is captured from its cloned commit's Git objects (AC-1022).
     let primary = state
         .primary_sources
-        .prepare_at(&source, root, &[], Some(&cloned.commit_sha))
+        .prepare_at(
+            &source,
+            root,
+            &[],
+            Some(&cloned.commit_sha),
+            capture_limits(&state).map_err(&fail)?,
+        )
         .map_err(&fail)?;
     let mut receipts = Vec::new();
     let mut reads = ProducerReads {
@@ -6342,6 +6354,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 root,
                 &entry.layers,
                 (*remote).then_some(commit.as_str()),
+                capture_limits(&state).map_err(&fail)?,
             )
             .map_err(&fail)?;
         let mut receipts = Vec::new();
@@ -7834,6 +7847,29 @@ fn export_inputs(state: &AppState) -> Result<SpecInputs, String> {
     let mut inputs = read_spec_locked(state)?.inputs(Some(&review));
     inputs.view_caps = spec_view_caps(state)?;
     Ok(inputs)
+}
+
+/// The project's source capture limits (#1653, AC-1800): the saved file
+/// count and MiB, within the capture crate's hard ceilings. A stored value
+/// that no longer validates is an error, not the default.
+fn capture_limits(state: &AppState) -> Result<source_capture::CaptureLimits, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    let files = limit(operator_limits::SOURCE_CAPTURE_MAX_FILES)?;
+    let mib = limit(operator_limits::SOURCE_CAPTURE_MAX_MIB)?;
+    let limits = source_capture::CaptureLimits {
+        max_files: usize::try_from(files).map_err(|error| error.to_string())?,
+        max_total_bytes: mib
+            .checked_mul(1024 * 1024)
+            .ok_or("Source capture MiB overflows.")?,
+        ..source_capture::CaptureLimits::default()
+    };
+    limits.validate().map_err(|error| error.to_string())?;
+    Ok(limits)
 }
 
 /// The project's diagram view caps (#1653). A stored cap that no longer
