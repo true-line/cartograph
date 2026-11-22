@@ -189,7 +189,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
                 _,
             )) => return Ok(false),
-            CompletionInvestigationAction::Finish(_) => {
+            // Not decoded for any offered specialist until the host executes
+            // artifact reads (ADR-0089 step 2).
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::ReadArtifact(_))
+            | CompletionInvestigationAction::Finish(_) => {
                 return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
             }
         };

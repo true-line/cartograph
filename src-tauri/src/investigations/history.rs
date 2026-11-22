@@ -301,6 +301,7 @@ mod tests {
         };
         let ledger = InvestigationInputLedger {
             coverage_reads: vec![],
+            artifact_reads: vec![],
             schema_version: 1,
             coverage: None,
             graph_snapshot_id: snapshot.id().into(),

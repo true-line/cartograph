@@ -983,6 +983,11 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     CompletionInvestigationAction::Read(
                         QualifiedInvestigationAction::SourceOrFinish(action),
                     ) => (Some(action), None, hash),
+                    // Not decoded for any offered specialist until the host
+                    // executes artifact reads (ADR-0089 step 2).
+                    CompletionInvestigationAction::Read(
+                        QualifiedInvestigationAction::ReadArtifact(_),
+                    ) => return Err(Failure::Stop(InvestigationStopReason::InvalidResponse)),
                 }
             } else if let Some(proof) = &context.ledger.coverage {
                 let qualified =
@@ -1004,6 +1009,9 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     }
                     QualifiedInvestigationAction::SourceOrFinish(action) => {
                         (Some(action), None, hash)
+                    }
+                    QualifiedInvestigationAction::ReadArtifact(_) => {
+                        return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
                     }
                 }
             } else {
