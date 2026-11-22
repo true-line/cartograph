@@ -52,12 +52,9 @@ fn semantic_previews(state: &crate::AppState) -> usize {
         .unwrap_or(0)
 }
 
-/// Whether a job kind is a repository recovery, which runs IaC recovery.
-fn is_recovery(kind: &str) -> bool {
-    ["ingest-source-v1:", "ingest:", "add-repo:", "add-system:"]
-        .iter()
-        .any(|prefix| kind.starts_with(prefix))
-}
+/// The job kind prefixes of a repository recovery, which runs IaC recovery.
+/// No prefix is a prefix of another, so a job counts once.
+const RECOVERY_KINDS: [&str; 4] = ["ingest-source-v1:", "ingest:", "add-repo:", "add-system:"];
 
 /// How many runs of work that includes `pass` are in flight now.
 pub(crate) fn active_by_pass(
@@ -67,11 +64,8 @@ pub(crate) fn active_by_pass(
         .jobs
         .lock()
         .map_err(|error| error.to_string())?
-        .list()
-        .map_err(|error| error.to_string())?
-        .iter()
-        .filter(|job| job.status == "running" && is_recovery(&job.kind))
-        .count();
+        .count_running_with_prefix(&RECOVERY_KINDS)
+        .map_err(|error| error.to_string())?;
     let previews = semantic_previews(state);
     Ok(move |pass| match pass {
         PipelinePass::IacGraph => recoveries,
@@ -112,7 +106,10 @@ mod tests {
             assert_eq!(active(PipelinePass::IacGraph), 1);
         }
         assert_eq!(active(PipelinePass::FlowTrace), 0);
-        assert!(is_recovery("ingest:/repo") && is_recovery("add-system:/sys"));
-        assert!(!is_recovery("escalate:gap:local") && !is_recovery("ingestion"));
+        let (_, _near) = crate::start_job(&state, "ingestion").unwrap();
+        let (_, _gap) = crate::start_job(&state, "escalate:gap:local").unwrap();
+        assert_eq!(active(PipelinePass::IacGraph), 1);
+        let (_, _system) = crate::start_job(&state, "add-system:/sys").unwrap();
+        assert_eq!(active(PipelinePass::IacGraph), 2);
     }
 }
