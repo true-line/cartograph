@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 # hcl-edit is the span-preserving parser in the hcl-rs project family
 # (verified at M2 per SPEC-00 §15: actively maintained, 2026 releases).
-hcl-edit = "0.9"
+hcl-edit = "=0.9.8"
 
 [dev-dependencies]
 tempfile = "3"

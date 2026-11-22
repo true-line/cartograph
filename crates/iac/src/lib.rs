@@ -116,6 +116,13 @@ struct CacheRun<'a> {
     active: BTreeSet<String>,
     paths: BTreeSet<String>,
     stats: IncrementalStats,
+    /// Bytes of a repo-relative file: retained capture bytes when the host
+    /// supplies them (AC-1053), else the checkout.
+    read: &'a dyn Fn(&Path, &str) -> std::io::Result<Vec<u8>>,
+}
+
+fn read_checkout(root: &Path, path: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(root.join(path))
 }
 
 fn retarget_props_commit(props: &mut serde_json::Value, commit: &str) {
@@ -158,7 +165,8 @@ fn extract_file_incremental(
     module_ancestors: &[PathBuf],
     run: &mut CacheRun<'_>,
 ) -> Result<Extraction, ExtractError> {
-    let source = std::fs::read_to_string(root.join(path))?;
+    let source = String::from_utf8((run.read)(root, path)?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let source_hash = core_prov::content_hash(source.as_bytes());
     let key = cached_file_key(path, address_prefix, scope);
     run.active.insert(key.clone());
@@ -841,6 +849,66 @@ pub fn extract_dir_incremental_with_progress(
     let root = dunce::canonicalize(root)?;
     let mut files = Vec::new();
     collect_tf_files(&root, &mut files)?;
+    extract_files(&root, id, files, cache, &read_checkout, on_file)
+}
+
+/// Extract the `.tf` files `paths` (repo-relative, the host's capture
+/// selection) from the bytes `read` supplies, so a captured source is parsed
+/// from its retained bytes rather than the checkout (AC-1053, #385). Local
+/// module directories are still listed under `root`, and a module file `read`
+/// does not hold falls back to the checkout; such a file's facts are never
+/// cited as captured. Nothing is cached between runs.
+pub fn extract_dir_from_sources(
+    root: &Path,
+    id: &SourceId,
+    paths: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    let root = dunce::canonicalize(root)?;
+    let wanted: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let read = |root: &Path, path: &str| {
+        if wanted.contains(path) {
+            read(path)
+        } else {
+            read_checkout(root, path)
+        }
+    };
+    let mut files: Vec<String> = paths
+        .iter()
+        .filter(|path| path.ends_with(".tf"))
+        .cloned()
+        .collect();
+    files.dedup();
+    extract_files(
+        &root,
+        id,
+        files,
+        &mut IncrementalCache::default(),
+        &read,
+        on_file,
+    )
+}
+
+/// The `.tf` files a source's capture selects: the same confined,
+/// `.gitignore`-honouring walk extraction uses, sorted (AC-1053).
+pub fn tf_paths(root: &Path) -> std::io::Result<Vec<String>> {
+    let root = dunce::canonicalize(root)?;
+    let mut files = Vec::new();
+    collect_tf_files(&root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn extract_files(
+    root: &Path,
+    id: &SourceId,
+    mut files: Vec<String>,
+    cache: &mut IncrementalCache,
+    read: &dyn Fn(&Path, &str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    let root = root.to_path_buf();
     files.sort(); // deterministic order (US-0014)
     let old_keys = cache.files.keys().cloned().collect::<BTreeSet<_>>();
     let mut run = CacheRun {
@@ -848,6 +916,7 @@ pub fn extract_dir_incremental_with_progress(
         active: BTreeSet::new(),
         paths: BTreeSet::new(),
         stats: IncrementalStats::default(),
+        read,
     };
     let mut out = Extraction::default();
     for rel in &files {
