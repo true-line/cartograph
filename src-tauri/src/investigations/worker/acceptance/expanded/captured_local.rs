@@ -148,10 +148,19 @@ fn configured_provider(
             let provider =
                 llm::OllamaProvider::new(url, model, timeout).map_err(|error| error.to_string())?;
             // Ollama's constructor explicitly disables thinking; only enabled has a setter.
-            std::sync::Arc::new(if enabled {
+            let provider = if enabled {
                 provider.with_thinking_enabled()
             } else {
                 provider
+            };
+            // #1653: the frozen identity names its context window. Without one,
+            // Ollama's server default applies and can silently cut a long
+            // investigation prompt short, so a definition that needs it says so.
+            std::sync::Arc::new(match frozen_context_window(&expected.provider_id, model)? {
+                Some(tokens) => provider
+                    .with_context_window(tokens)
+                    .map_err(|error| error.to_string())?,
+                None => provider,
             })
         }
         "openai" => {
@@ -176,6 +185,88 @@ fn configured_provider(
         return Err("Explicit local configuration differs from frozen identity.".into());
     }
     Ok(provider)
+}
+/// The `num-ctx-N` suffix that a frozen Ollama identity adds after its model,
+/// if it has one. Only text beyond `ollama:<model>` is parsed, so a model tag
+/// that itself looks like a window is never read as one. The window is then
+/// bound twice: by this constructor and by the descriptor equality check.
+fn frozen_context_window(provider_id: &str, model: &str) -> Result<Option<u32>, String> {
+    let Some(suffix) = provider_id
+        .strip_prefix("ollama:")
+        .and_then(|rest| rest.strip_prefix(model))
+    else {
+        return Ok(None);
+    };
+    match suffix.strip_prefix(":num-ctx-") {
+        None => Ok(None),
+        Some(tokens) => tokens
+            .parse()
+            .map(Some)
+            .map_err(|_| "Frozen context window is not one whole number.".into()),
+    }
+}
+// AC-1411 / #1653: a frozen identity with a context window gets exactly that
+// `num_ctx`; one without keeps the historical identity; any other window, a
+// malformed one or a missing one is refused by the descriptor check.
+#[test]
+fn captured_local_ollama_binds_the_frozen_context_window() {
+    let expected = |provider_id: &str| InvestigationProvider {
+        mode: InvestigationProviderMode::Local,
+        provider_id: provider_id.into(),
+        model: "explicit-control-model".into(),
+        endpoint: "http://127.0.0.1:1/api/chat".into(),
+        deployment: None,
+        protocol_version: Some(llm::bounded::PROTOCOL_VERSION.into()),
+        available: true,
+        unavailable_reason: None,
+    };
+    let build = |provider_id: &str| {
+        configured_provider(
+            "ollama",
+            "disabled",
+            "http://127.0.0.1:1/",
+            "explicit-control-model",
+            &expected(provider_id),
+        )
+    };
+    let provider = build("ollama:explicit-control-model:num-ctx-32768").unwrap();
+    assert_eq!(
+        crate::investigations::runtime::descriptor(
+            provider.as_ref(),
+            InvestigationProviderMode::Local
+        )
+        .unwrap()
+        .provider_id,
+        "ollama:explicit-control-model:num-ctx-32768"
+    );
+    assert!(build("ollama:explicit-control-model").is_ok());
+    for refused in [
+        "ollama:explicit-control-model:num-ctx-12345",
+        "ollama:explicit-control-model:num-ctx-big",
+        "ollama:explicit-control-model:num-ctx-8192:num-ctx-8192",
+    ] {
+        assert!(build(refused).is_err(), "{refused}");
+    }
+    // A model whose own tag looks like a window is not read as one.
+    let tagged = InvestigationProvider {
+        provider_id: "ollama:explicit-control-model:num-ctx-8192".into(),
+        model: "explicit-control-model:num-ctx-8192".into(),
+        ..expected("ollama:explicit-control-model:num-ctx-8192")
+    };
+    assert_eq!(
+        frozen_context_window(&tagged.provider_id, &tagged.model),
+        Ok(None)
+    );
+    assert!(
+        configured_provider(
+            "ollama",
+            "disabled",
+            "http://127.0.0.1:1/",
+            "explicit-control-model:num-ctx-8192",
+            &tagged,
+        )
+        .is_ok()
+    );
 }
 // AC-0429: pure constructor/identity checks; no server, model call or attempt.
 #[test]
