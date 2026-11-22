@@ -311,6 +311,17 @@ impl InvestigationCompletionResult {
                     || observation.unmet.is_some()
                     || observation.attempted != observation.last_attempt_outcome.is_some()
                     || (observation.exactly_supplied && !observation.acquired)
+                    || (observation.capacity_disclosed
+                        && (observation.attempted
+                            || observation.acquired
+                            || observation.exactly_supplied
+                            || self.outcome != CompletionOutcome::Supported
+                            || self.withholding.is_some()
+                            || !limitations.iter().any(|text| {
+                                text.contains(super::staged_finish::capacity_name(
+                                    &observation.obligation_id,
+                                ))
+                            })))
             })
             || limitations.is_empty()
         {
@@ -339,7 +350,10 @@ impl InvestigationCompletionResult {
             CompletionOutcome::Supported
                 if !findings.is_empty()
                     && knowledge != KnowledgeCompleteness::InsufficientEvidence
-                    && self.assessment.iter().all(|item| item.exactly_supplied) =>
+                    && self
+                        .assessment
+                        .iter()
+                        .all(|item| item.exactly_supplied || item.capacity_disclosed) =>
             {
                 Ok(())
             }
@@ -650,7 +664,8 @@ impl InvestigationResult {
             || completion.finishing_attempts_hash
                 != completed_attempts_hash_with_policy(attempts, policy)?
             || completion.assessment
-                != super::staged_finish::derive_assessment_for_binding_with_policy_using_consistency(
+                != {
+                    let mut derived = super::staged_finish::derive_assessment_for_binding_with_policy_using_consistency(
                     request_hash,
                     &envelope,
                     task,
@@ -661,7 +676,22 @@ impl InvestigationResult {
                     attempts,
                     policy,
                     consistency,
-                )?
+                )?;
+                    // Only a bound capacity exclusion can re-derive a disclosure;
+                    // without consistency a disclosed observation fails closed.
+                    if completion
+                        .assessment
+                        .iter()
+                        .any(|item| item.capacity_disclosed)
+                    {
+                        super::staged_finish::disclose_capacity(
+                            &mut derived,
+                            &self.limitations,
+                            consistency,
+                        );
+                    }
+                    derived
+                }
         {
             return Err(InvestigationError::InvalidInput);
         }
