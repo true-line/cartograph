@@ -78,6 +78,7 @@ fn fixture(
             exactly_supplied: false,
             unmet: None,
             last_attempt_outcome: Some(CompletionAttemptOutcome::Unavailable),
+            capacity_disclosed: false,
         }],
     };
     disclosure
