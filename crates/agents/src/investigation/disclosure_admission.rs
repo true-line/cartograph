@@ -77,7 +77,13 @@ pub enum ActionRefusalReason {
     CursorOffset,
     QueryLimit,
     QueryPageBudget,
+    /// @29: the tool call did not decode to an action. It is returned to the
+    /// model, not run, at most [`MAX_INVALID_ACTION_REFUSALS`] times a run.
+    InvalidAction,
 }
+/// @29: undecodable tool calls a run returns to the model before the next one
+/// ends it (AC-1420).
+pub const MAX_INVALID_ACTION_REFUSALS: usize = 2;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActionRefusalFeedback {
     #[serde(skip_serializing_if = "Option::is_none")]
