@@ -22,6 +22,7 @@
 
 use crate::investigations::section_drafts::{DraftingOutcome, drafting_address, predecessor};
 use crate::{AppState, JobExecution};
+use agents::claim_review;
 use agents::draft_store::{DraftOrigin, DraftStoreError};
 use agents::gated_compose::{self, GatedInput, GatedStats, StageModel, Workflow};
 use agents::section_compose::{
@@ -77,6 +78,11 @@ pub(crate) struct ComposeOutcome {
     /// What a gated composition did (#2083, AC-0980).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) gated: Option<GatedStats>,
+    /// Whether the claims were reviewed before staging (#2419):
+    /// `reviewed`, `review_unavailable` (the reply was not the schema's) or
+    /// `not_reviewed_cloud` (a cloud consent covers one payload).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review: Option<&'static str>,
 }
 
 impl ComposeOutcome {
@@ -87,6 +93,7 @@ impl ComposeOutcome {
             left_out: 0,
             left_out_reasons: BTreeMap::new(),
             gated: None,
+            review: None,
         }
     }
 }
@@ -717,6 +724,7 @@ fn stage_as(
             left_out,
             left_out_reasons: reasons,
             gated: None,
+            review: None,
         }),
         Err(DraftStoreError::Storage(error)) => Err(error.to_string()),
         Err(_) => Ok(ComposeOutcome {
@@ -771,9 +779,107 @@ fn run_blocking(
         &check,
         Some(execution.id()),
     )? {
-        Ok(composed) => stage(state, &prepared, composed, execution.id()),
+        Ok(composed) => {
+            let (composed, review) = review(
+                state,
+                provider,
+                &prepared,
+                composed,
+                &check,
+                Some(execution.id()),
+            )?;
+            let outcome = if composed.finish.claims.is_empty() {
+                ComposeOutcome {
+                    left_out: composed.left_out,
+                    left_out_reasons: composed.reasons,
+                    ..ComposeOutcome::none("claim_overreaches")
+                }
+            } else {
+                stage(state, &prepared, composed, execution.id())?
+            };
+            Ok(ComposeOutcome {
+                review: Some(review),
+                ..outcome
+            })
+        }
         Err(reason) => Ok(ComposeOutcome::none(reason)),
     }
+}
+
+/// Review the composed claims against the facts they cite (#2419): one
+/// bounded call of `claim-reviewer@1` on a local provider, and each claim it
+/// judges an overreach left out as `claim_overreaches`. A cloud provider is
+/// not called again, since its consent covers the composition's payload
+/// alone; a reply that is not the schema's leaves the claims as they are.
+/// Returns the claims kept and how the review went.
+pub(crate) fn review(
+    state: &AppState,
+    provider: &dyn LlmProvider,
+    prepared: &Prepared,
+    mut composed: Composed,
+    check: &dyn Fn() -> CallDirective,
+    job_id: Option<i64>,
+) -> Result<(Composed, &'static str), String> {
+    if provider.locality() != Locality::Local {
+        return Ok((composed, "not_reviewed_cloud"));
+    }
+    if composed.finish.claims.is_empty() {
+        return Ok((composed, "reviewed"));
+    }
+    let action = review_action(prepared, &composed.finish.claims);
+    let text = complete(state, provider, &action, None, check, job_id)?.text;
+    let Some(verdicts) = claim_review::decode(&text, composed.finish.claims.len()) else {
+        return Ok((composed, "review_unavailable"));
+    };
+    let mut verdicts = verdicts.into_iter();
+    let before = composed.finish.claims.len();
+    composed
+        .finish
+        .claims
+        .retain(|_| verdicts.next() != Some(claim_review::Verdict::Overreach));
+    let dropped = before - composed.finish.claims.len();
+    if dropped > 0 {
+        composed.left_out += dropped;
+        *composed.reasons.entry("claim_overreaches").or_default() += dropped;
+    }
+    Ok((composed, "reviewed"))
+}
+
+/// The reviewer's action for `claims` of `prepared`: each cited fact's
+/// indexed text, and for a rule of the excerpt the capability it is listed
+/// under and the rule in domain terms (#2419).
+fn review_action(prepared: &Prepared, claims: &[Claim]) -> CompletionAction {
+    let cited: BTreeSet<String> = claims
+        .iter()
+        .flat_map(|claim| claim.citations.iter().cloned())
+        .collect();
+    let shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, &cited);
+    let rules = spec::excerpt_rules(&prepared.text);
+    let facts = cited
+        .iter()
+        .map(|id| {
+            let text = match rules.get(id) {
+                Some((capability, rule)) => format!("Rule of capability \"{capability}\": {rule}"),
+                None => shown.text(id).unwrap_or_default().to_owned(),
+            };
+            (id.clone(), text)
+        })
+        .collect();
+    let review: Vec<claim_review::ReviewClaim<'_>> = claims
+        .iter()
+        .map(|claim| claim_review::ReviewClaim {
+            statement: &claim.statement,
+            citations: &claim.citations,
+        })
+        .collect();
+    claim_review::action(
+        &review,
+        &facts,
+        format!(
+            "claim-review:{}:{}:{}",
+            prepared.address.document, prepared.address.section, prepared.address.scope
+        ),
+    )
 }
 
 /// Compose one section as a durable job and stage the draft for review. A
