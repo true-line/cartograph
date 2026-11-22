@@ -661,6 +661,8 @@ impl Drafted<'_, '_> {
 pub(super) struct AreaHeadings<'a> {
     arranged: bool,
     last: Option<Option<&'a str>>,
+    /// A note stated under an area's heading, by area id (AC-1048).
+    notes: BTreeMap<&'a str, String>,
 }
 impl<'a> AreaHeadings<'a> {
     pub(super) fn new(knowledge: &Stories<'a>) -> Self {
@@ -669,7 +671,12 @@ impl<'a> AreaHeadings<'a> {
             // a Capability is in one (#2066).
             arranged: !knowledge.areas.is_empty() || !knowledge.file_areas.is_empty(),
             last: None,
+            notes: BTreeMap::new(),
         }
+    }
+    /// State `note` under `area`'s heading when it is written (AC-1048).
+    pub(super) fn note(&mut self, area: &'a str, note: String) {
+        self.notes.insert(area, note);
     }
     /// Write the area heading when `area` differs from the previous
     /// Capability's, and return the marks of the Capability's own heading.
@@ -687,6 +694,9 @@ impl<'a> AreaHeadings<'a> {
             match area {
                 Some(node) => writeln!(out, "### {}\n", Literal(area_name(node)))?,
                 None => writeln!(out, "### {NO_AREA}\n")?,
+            }
+            if let Some(note) = id.and_then(|id| self.notes.get(id)) {
+                writeln!(out, "{note}\n")?;
             }
         }
         Ok("####")

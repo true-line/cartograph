@@ -516,11 +516,15 @@ fn omission_source(mut node: TsNode<'_>) -> TsNode<'_> {
     node
 }
 
+/// The Gap that ends a file's rule recovery at `at`. `omitted` counts the
+/// exits and effects from `at` on that would each have been considered for
+/// a rule (AC-1048), so a reader knows how much of the file is missing.
 fn omission_gap(
     cx: &FileCx<'_>,
     at: TsNode<'_>,
     owner: &str,
     reason: RuleGapReason,
+    omitted: usize,
     out: &mut Extraction,
 ) {
     let id = format!(
@@ -535,6 +539,7 @@ fn omission_gap(
         "reason_code": reason,
         "reason": reason_description(&reason),
         "scope": "rule_or_remaining_file_analysis",
+        "omitted_rule_sites": omitted,
         "prov": cx.prov_with_confidence(&at, ConfidenceTier::Gap, &format!("Gap {id}")),
     });
     out.nodes.push(Node {
@@ -634,6 +639,34 @@ pub(super) fn extract<'tree>(
                 .or_insert((reason, node));
         }
     }
+    // Exits and effects that would each be considered for a rule, so a Gap
+    // that ends the file's recovery can say how many were not (AC-1048).
+    let exit_site = |exit: TsNode<'tree>| {
+        let (ancestors, limited, recovered) = branches(exit);
+        recovered
+            || (exit.kind() == "throw_statement" && exit_value(exit).is_none())
+            || !ancestors.is_empty()
+            || limited
+            || answers_a_choice(cx, exit)
+    };
+    let effect_site = |at: TsNode<'tree>| {
+        let (ancestors, _, recovered) = branches(at);
+        !recovered && !ancestors.is_empty()
+    };
+    let exits_total = exits
+        .iter()
+        .filter(|(owner, _)| targets.contains(*owner))
+        .flat_map(|(_, sites)| sites.iter().copied())
+        .filter(|exit| exit_site(*exit))
+        .count();
+    let effects_total = effects
+        .iter()
+        .filter(|(owner, _)| targets.contains(*owner))
+        .flat_map(|(_, sites)| sites.iter().map(|(at, _)| *at))
+        .filter(|at| effect_site(*at))
+        .count();
+    let mut exits_seen = 0;
+    let mut effects_seen = 0;
     let mut rule_count = 0;
     let mut file_bytes = 0;
     for (owner_id, owner_exits) in &exits {
@@ -643,12 +676,18 @@ pub(super) fn extract<'tree>(
         }
         for (order, exit) in owner_exits.iter().copied().enumerate() {
             let (ancestors, limited, recovered) = branches(exit);
+            if exit_site(exit) {
+                exits_seen += 1;
+            }
+            // A Gap here omits this exit, every later one and every effect.
+            let exits_left = exits_total + 1 - exits_seen;
             if recovered || (exit.kind() == "throw_statement" && exit_value(exit).is_none()) {
                 omission_gap(
                     cx,
                     omission_source(exit),
                     &owner_id,
                     RuleGapReason::UnsupportedRuleSyntax,
+                    exits_left + effects_total,
                     out,
                 );
                 return;
@@ -658,11 +697,25 @@ pub(super) fn extract<'tree>(
                 continue;
             }
             if rule_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
-                omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
+                omission_gap(
+                    cx,
+                    exit,
+                    &owner_id,
+                    RuleGapReason::AnalysisLimit,
+                    exits_left + effects_total,
+                    out,
+                );
                 return;
             }
             if limited {
-                omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
+                omission_gap(
+                    cx,
+                    exit,
+                    &owner_id,
+                    RuleGapReason::AnalysisLimit,
+                    exits_left + effects_total,
+                    out,
+                );
                 return;
             }
             let rule_id = format!("rule:{}@{}#exit@{}", cx.id.repo, cx.path, exit.start_byte());
@@ -723,6 +776,7 @@ pub(super) fn extract<'tree>(
                         exit,
                         &owner_id,
                         RuleGapReason::UnsupportedRuleSyntax,
+                        exits_left + effects_total,
                         out,
                     );
                     return;
@@ -770,6 +824,7 @@ pub(super) fn extract<'tree>(
                     } else {
                         RuleGapReason::UnsupportedRuleSyntax
                     },
+                    exits_left + effects_total,
                     out,
                 );
                 return;
@@ -779,7 +834,14 @@ pub(super) fn extract<'tree>(
             if canonical.len() > MAX_RULE_BYTES
                 || file_bytes + canonical.len() > MAX_FILE_RULE_BYTES
             {
-                omission_gap(cx, exit, &owner_id, RuleGapReason::AnalysisLimit, out);
+                omission_gap(
+                    cx,
+                    exit,
+                    &owner_id,
+                    RuleGapReason::AnalysisLimit,
+                    exits_left + effects_total,
+                    out,
+                );
                 return;
             }
             file_bytes += canonical.len();
@@ -842,8 +904,16 @@ pub(super) fn extract<'tree>(
             if recovered || ancestors.is_empty() {
                 continue;
             }
+            effects_seen += 1;
             if limited || effect_count == MAX_RULES_PER_FILE || file_bytes >= MAX_FILE_RULE_BYTES {
-                omission_gap(cx, at, &owner_id, RuleGapReason::AnalysisLimit, out);
+                omission_gap(
+                    cx,
+                    at,
+                    &owner_id,
+                    RuleGapReason::AnalysisLimit,
+                    effects_total + 1 - effects_seen,
+                    out,
+                );
                 return;
             }
             let rule_id = format!("rule:{}@{}#effect@{}", cx.id.repo, cx.path, at.start_byte());
@@ -945,6 +1015,7 @@ pub(super) fn extract<'tree>(
                     } else {
                         RuleGapReason::UnsupportedRuleSyntax
                     },
+                    effects_total + 1 - effects_seen,
                     out,
                 );
                 return;
@@ -954,7 +1025,14 @@ pub(super) fn extract<'tree>(
             if canonical.len() > MAX_RULE_BYTES
                 || file_bytes + canonical.len() > MAX_FILE_RULE_BYTES
             {
-                omission_gap(cx, at, &owner_id, RuleGapReason::AnalysisLimit, out);
+                omission_gap(
+                    cx,
+                    at,
+                    &owner_id,
+                    RuleGapReason::AnalysisLimit,
+                    effects_total + 1 - effects_seen,
+                    out,
+                );
                 return;
             }
             file_bytes += canonical.len();

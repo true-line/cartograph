@@ -710,3 +710,40 @@ export class OrderService {
     assert!(shown[4].starts_with("this.orderLineRepository.delete("));
     assert!(found.iter().all(|(_, conditions)| *conditions == 1));
 }
+
+#[test]
+fn a_file_stopped_at_the_rule_cap_counts_what_it_did_not_record() {
+    // AC-1048 (T-1048): the Gap that ends a file's rule recovery counts the
+    // guarded exits and effects from the stop on.
+    let source = |exits: usize| {
+        let guards: String = (0..exits)
+            .map(|i| format!("if (x === {i}) return {i};\n"))
+            .collect();
+        let effects: String = (0..5)
+            .map(|i| format!("if (x > {i}) {{ order.total = {i}; }}\n"))
+            .collect();
+        format!("function run(x: number, order: any) {{\n{guards}{effects}}}")
+    };
+    let small = recover(&source(10));
+    let effects = rules(&small)
+        .iter()
+        .filter(|(node, _)| node.props["observation"] == "guarded_effect")
+        .count();
+    assert!(effects > 0);
+    assert!(
+        !small
+            .nodes
+            .iter()
+            .any(|node| node.props["scope"] == "rule_or_remaining_file_analysis")
+    );
+    let out = recover(&source(MAX_RULES_PER_FILE + 44));
+    assert_eq!(rules(&out).len(), MAX_RULES_PER_FILE);
+    let stops: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|node| node.props["scope"] == "rule_or_remaining_file_analysis")
+        .collect();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].props["reason_code"], "analysis_limit");
+    assert_eq!(stops[0].props["omitted_rule_sites"], 44 + effects);
+}
