@@ -47,6 +47,10 @@ pub(crate) struct BasisAssessment {
     pub current_graph_snapshot_id: Option<String>,
     pub graph_comparison: BasisComparison,
     pub association_comparison: BasisComparison,
+    /// The files the captured evidence cites, at the current associations,
+    /// against the ones the task was made with (#2251). Compared only when
+    /// the associations could be read; `legacy_unverified` otherwise.
+    pub cited_files: BasisComparison,
     pub evidence: Vec<EvidenceAvailability>,
     pub unverified_evidence: usize,
     pub captured_validation_bytes: u64,
@@ -243,6 +247,7 @@ pub(crate) fn assess_observed(
         current_graph_snapshot_id: None,
         graph_comparison: BasisComparison::LegacyUnverified,
         association_comparison: BasisComparison::LegacyUnverified,
+        cited_files: BasisComparison::LegacyUnverified,
         evidence: Vec::new(),
         unverified_evidence: 0,
         captured_validation_bytes: 0,
@@ -368,6 +373,9 @@ pub(crate) fn assess_observed(
                     result.association_comparison = BasisComparison::Changed;
                 }
             }
+            if result.association_comparison != BasisComparison::OperationalFailure {
+                result.cited_files = cited_files(state, basis, &selections, &guards);
+            }
         }
         Err(()) => {
             result.graph_comparison = BasisComparison::OperationalFailure;
@@ -376,6 +384,74 @@ pub(crate) fn assess_observed(
     }
     drop(guards);
     Ok((result, revision))
+}
+
+/// Whether every file the captured evidence cites is byte-identical at the
+/// current source associations (#2251): each origin's fact keeps its digest,
+/// and the receipt its current association names cites the same path with
+/// the same full-file digest. Any read that fails makes it an operational
+/// failure, so nothing is shown unchanged that was not compared.
+fn cited_files(
+    state: &AppState,
+    basis: &TaskSourceBasisV2,
+    selections: &[core_graph::source::FactSourceSelection],
+    guards: &BTreeMap<String, Result<RetentionGuard, PinnedReadError>>,
+) -> BasisComparison {
+    let mut compared = false;
+    for origin in &basis.evidence {
+        let TaskEvidenceKind::CapturedPrimarySource {
+            registered_source_id,
+            captured,
+            ..
+        } = &origin.origin
+        else {
+            continue;
+        };
+        let Some(Ok(guard)) = guards.get(registered_source_id) else {
+            return BasisComparison::OperationalFailure;
+        };
+        let original = basis
+            .selected_facts
+            .iter()
+            .find(|selected| selected.fact == origin.fact);
+        let current = selections
+            .iter()
+            .find(|value| task_fact(&value.fact) == origin.fact)
+            .and_then(|value| selection(value).ok());
+        let (Some(original), Some(current)) = (original, current) else {
+            return BasisComparison::OperationalFailure;
+        };
+        let Some(binding) = &current.binding else {
+            return BasisComparison::Changed;
+        };
+        if current.fact_digest != original.fact_digest {
+            return BasisComparison::Changed;
+        }
+        let receipt = match state.primary_sources.task_receipt(
+            guard,
+            &graph_fact(&origin.fact),
+            &current.fact_digest,
+            &binding.repo_key,
+            &binding.receipt_id,
+        ) {
+            Ok(receipt) => receipt,
+            Err(_) => return BasisComparison::OperationalFailure,
+        };
+        let same = receipt.ranges().iter().any(|range| {
+            range.captured.file.path == captured.file.path
+                && range.captured.file.digest == captured.file.digest
+                && range.captured.file.byte_len == captured.file.byte_len
+        });
+        if !same {
+            return BasisComparison::Changed;
+        }
+        compared = true;
+    }
+    if compared {
+        BasisComparison::Unchanged
+    } else {
+        BasisComparison::LegacyUnverified
+    }
 }
 
 #[tauri::command]
