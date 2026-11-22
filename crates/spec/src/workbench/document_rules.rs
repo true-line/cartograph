@@ -256,7 +256,7 @@ fn rejection<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Opt
 /// as a row beside the rejections: the adapters record an exit with no
 /// branch around it only for these.
 fn choice<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
-    let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+    let parsed = crate::rules::rule_payload(rule).ok()?;
     if !parsed.conditions.is_empty()
         || !matches!(parsed.effect, LocalExit::Return { value: Some(_) })
     {
@@ -267,7 +267,7 @@ fn choice<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option
 
 /// A guarded effect (an assignment or a call statement, #1998) as a row.
 fn effect<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
-    let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+    let parsed = crate::rules::rule_payload(rule).ok()?;
     if parsed.effect.exits() || writes_refusal(&parsed) {
         return None;
     }
@@ -305,7 +305,7 @@ fn guarded<'a>(
     any: bool,
     constant: Constants<'_>,
 ) -> Option<Rejection<'a>> {
-    let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+    let parsed = crate::rules::rule_payload(rule).ok()?;
     let outcome = match &parsed.effect {
         LocalExit::Throw { value } => format!("throws {}", one_line(value.display.as_str())),
         LocalExit::Return { value: Some(value) }
@@ -628,7 +628,7 @@ impl<'a> Index<'a> {
     /// (`status.E502` = “550 …”, matched by name and module stem,
     /// inferred) as the mail's reply (#2027, AC-0916).
     fn mail_reply(&self, rule: &'a Node, owner_id: &str, owner: &'a str) -> Option<Rejection<'a>> {
-        let parsed = GuardedExitEvidence::from_value(rule.props["rule"].clone()).ok()?;
+        let parsed = crate::rules::rule_payload(rule).ok()?;
         let LocalExit::Return { value: Some(value) } = &parsed.effect else {
             return None;
         };
@@ -882,7 +882,7 @@ impl<'a> Index<'a> {
         // followed into that function too (AC-1036): `alias_suffix =
         // check_suffix_signature(signed_suffix)` under `not alias_suffix`.
         let mut scan = row.when.clone();
-        if let Ok(parsed) = GuardedExitEvidence::from_value(row.rule.props["rule"].clone()) {
+        if let Ok(parsed) = crate::rules::rule_payload(row.rule) {
             for definition in parsed.local_definitions.iter().flatten() {
                 // Only a recorded call of a plain name: an unsupported
                 // initializer (`a() if f else b()`) is not one call's value.
@@ -2045,7 +2045,9 @@ function checkQuantity(qty: number) {
     /// The §1.5 rows of one capability whose endpoint `handler_name`
     /// handles, over adapter facts.
     fn rows(nodes: &[Node], edges: &[Edge], handler_name: &str) -> (String, usize) {
-        let nodes: Vec<&Node> = nodes.iter().collect();
+        // Rendered from a compacted base, as an export renders (#2215).
+        let compacted = crate::rules::compacted_for_tests(nodes);
+        let nodes: Vec<&Node> = compacted.iter().collect();
         let edges: Vec<&Edge> = edges.iter().collect();
         let handler = nodes
             .iter()

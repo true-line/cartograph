@@ -7538,7 +7538,7 @@ impl SpecRead {
             .filter(|record| record.decision == agents::AssertionDecision::Rejected)
             .map(|record| record.assertion.provenance.content_hash.clone())
             .collect();
-        let base = core_graph::RevisionedSnapshot {
+        let mut base = core_graph::RevisionedSnapshot {
             revision,
             graph: (nodes, edges),
         };
@@ -7575,6 +7575,9 @@ impl SpecRead {
             }
             None => (CuratedInput::NotRead, None),
         };
+        // The graph basis, flows and projection read the payloads as stored;
+        // from here only the spec compiler reads them, as text (#2215).
+        spec::compact_rule_payloads(&mut base.graph.0);
         SpecInputs {
             base,
             knowledge,

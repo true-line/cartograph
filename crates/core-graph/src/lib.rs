@@ -17,6 +17,7 @@ pub mod placeholder;
 pub mod rules;
 pub mod scoped;
 pub mod source;
+pub mod stored;
 
 pub use bounded::{
     IdentityPassLimits, SnapshotBoundsError, SnapshotReadLimits, SnapshotRow, StreamedSnapshot,

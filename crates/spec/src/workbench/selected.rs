@@ -902,6 +902,12 @@ fn compile_selected(
         Supplied<'_>,
     ),
 ) -> Result<Vec<SelectedArtifactOutcome>, ArtifactSelectionError> {
+    // Every compile under test reads a compacted base, so a reader of a
+    // rule payload that skips `rule_payload` fails (#2215).
+    #[cfg(test)]
+    let compacted = crate::rules::compacted_for_tests(nodes);
+    #[cfg(test)]
+    let nodes = compacted.as_slice();
     let (requested_ids, limits, security, stories, supplied) = selection;
     for (index, id) in requested_ids.iter().enumerate() {
         if !ARTIFACTS.iter().any(|a| a.id == *id) {
@@ -1062,6 +1068,12 @@ pub(super) fn all<A>(
     supplied: Supplied<'_>,
     keep: impl FnMut(SpecArtifact) -> A,
 ) -> Result<SpecBundle<A>, FactIndexError> {
+    // Every compile under test reads a compacted base, so a reader of a
+    // rule payload that skips `rule_payload` fails (#2215).
+    #[cfg(test)]
+    let compacted = crate::rules::compacted_for_tests(nodes);
+    #[cfg(test)]
+    let nodes = compacted.as_slice();
     let projection =
         project(nodes, edges, flows, mode, rejected, None).expect("unbounded ADR derivation");
     let beside = Beside::new(nodes, edges, mode, rejected, supplied);
