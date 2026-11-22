@@ -238,7 +238,7 @@ fn embedding_cache_first_writer_wins_and_dimension_is_pinned() {
         .publish(
             &lease,
             &space,
-            &[(key.clone(), 3, vec![1., 2.])],
+            &[(key.as_str(), 3, &[1., 2.][..])],
             &protected,
             &mut stats,
         )
@@ -247,7 +247,7 @@ fn embedding_cache_first_writer_wins_and_dimension_is_pinned() {
         .publish(
             &lease,
             &space,
-            &[(key.clone(), 3, vec![3., 4.])],
+            &[(key.as_str(), 3, &[3., 4.][..])],
             &protected,
             &mut stats,
         )
@@ -262,7 +262,7 @@ fn embedding_cache_first_writer_wins_and_dimension_is_pinned() {
             .publish(
                 &lease,
                 &space,
-                &[(hash(b"two"), 3, vec![1.])],
+                &[(hash(b"two").as_str(), 3, &[1.][..])],
                 &protected,
                 &mut stats
             )
@@ -394,7 +394,7 @@ fn embedding_cache_eviction_is_sequence_ordered_and_preserves_current_operation(
         .publish(
             &lease,
             &space,
-            &[(new.clone(), 3, vec![2.])],
+            &[(new.as_str(), 3, &[2.][..])],
             &protected,
             &mut stats,
         )
@@ -619,7 +619,7 @@ fn embedding_cache_namespace_capacity_evicts_oldest_unprotected_namespace() {
             .publish(
                 &lease,
                 &space,
-                &[(key.clone(), 3, vec![1.])],
+                &[(key.as_str(), 3, &[1.][..])],
                 &BTreeSet::from([(space.clone(), key.clone())]),
                 &mut stats,
             )
@@ -692,9 +692,11 @@ fn embedding_cache_working_set_accepts_exact_row_limit_and_rejects_next() {
 
 #[test]
 fn vscode_scale_plans_are_cached_and_reused_without_calls() {
-    // AC-1507: a plan past the old 100k bound (VSCode has about 186k candidate
-    // symbols) is embedded once, persisted whole, and a reopened warm pass
-    // makes no embedding call.
+    // AC-1507: a plan past the old 100k bound is embedded once, persisted
+    // whole, and a reopened warm pass makes no embedding call. The whole-VSCode
+    // plan count (about 559k texts) is checked by
+    // `vscode_scale_embedding_plans_are_admitted`; this test stays at 200k
+    // rows to bound suite time.
     let (dir, cache, _) = setup();
     let provider = Scripted::new();
     let texts: Vec<String> = (0..200_000).map(|n| format!("symbol {n:06}")).collect();

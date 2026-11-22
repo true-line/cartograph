@@ -13,20 +13,23 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Rows one store and one operation hold: a VSCode-scale plan (about 186k
-/// candidate symbols plus their hops) fits in one pass (#259, AC-1507).
-pub const MAX_ROWS: usize = 262_144;
+/// Rows one store and one operation hold: a whole-VSCode plan (476,907
+/// candidate symbols plus 81,654 hops, measured 2026-11-22) fits in one pass
+/// with room to spare (#259, AC-1507).
+pub const MAX_ROWS: usize = 1_048_576;
 /// Highest `cache_meta.sequence` a valid store may hold: it reserves one
 /// sequence number for every row a full plan can publish, so sealing never
 /// overflows the counter. A store past it is exhausted and is recovered.
 pub(crate) const SEQUENCE_CEILING: i64 = i64::MAX - MAX_ROWS as i64;
-/// Vector bytes one store and one operation hold: `MAX_ROWS` vectors of up to
-/// 1,024 f32 dimensions.
-pub const MAX_VECTOR_BYTES: usize = 1024 * 1024 * 1024;
+/// Vector bytes one store and one operation hold: a whole-VSCode plan at 1,024
+/// f32 dimensions (about 2.1 GiB) fits. Sealing borrows the retained vectors
+/// and the ANN index consumes the returned ones, so a pass peaks near twice
+/// this, never three times (AC-1507).
+pub const MAX_VECTOR_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_DIMENSIONS: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 /// Plan text bytes: `MAX_ROWS` texts averaging 512 bytes.
-pub const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_INPUT_BYTES: usize = 512 * 1024 * 1024;
 pub const BATCH_COUNT: usize = 128;
 pub const BATCH_BYTES: usize = 1024 * 1024;
 mod lifecycle;
@@ -223,7 +226,7 @@ impl EmbeddingCache {
         &mut self,
         lease: &Lease,
         space: &str,
-        items: &[(String, usize, Embedding)],
+        items: &[(&str, usize, &[f32])],
         protected: &BTreeSet<(String, String)>,
         stats: &mut CacheStats,
     ) -> Result<(), ProviderError> {
@@ -443,21 +446,28 @@ impl<'a> CachedProvider<'a> {
         if let Some(space) = &self.space
             && !state.staged.is_empty()
         {
-            let items: Vec<_> = state
+            // Borrow the retained vectors: publication never copies the set.
+            let op = &mut *state;
+            let items: Vec<(&str, usize, &[f32])> = op
                 .staged
                 .iter()
                 .map(|key| {
-                    let (len, v) = &state.vectors[key];
-                    (key.clone(), *len, v.clone())
+                    let (len, v) = &op.vectors[key];
+                    (key.as_str(), *len, v.as_slice())
                 })
                 .collect();
-            let protected: BTreeSet<_> = state
+            let protected: BTreeSet<_> = op
                 .vectors
                 .keys()
                 .map(|key| (space.clone(), key.clone()))
                 .collect();
-            cache.publish(&self.lease, space, &items, &protected, &mut state.stats)?;
-            for (key, len, _) in items {
+            cache.publish(&self.lease, space, &items, &protected, &mut op.stats)?;
+            let published: Vec<(String, usize)> = items
+                .iter()
+                .map(|(key, len, _)| ((*key).to_owned(), *len))
+                .collect();
+            drop(items);
+            for (key, len) in published {
                 let winning = cache
                     .load(&self.lease, space, &key, len, &mut state.stats)?
                     .ok_or_else(|| error("published vector missing"))?;
