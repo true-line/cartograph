@@ -4334,6 +4334,7 @@ dependencies = [
  "core-prov",
  "core-redact",
  "llm",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

@@ -206,7 +206,10 @@ fn parse_request(bytes: &[u8]) -> Result<Vec<FamilyPolicy>, Code> {
 
 /// The corpus identities the store's frozen corpus documents hash to. In the
 /// locked store those documents are the retained capture itself.
-fn observed(dataset: &Path, bundle: &LoadedFixtureBundle) -> Result<Vec<ObservedCorpus>, Code> {
+pub(super) fn observed(
+    dataset: &Path,
+    bundle: &LoadedFixtureBundle,
+) -> Result<Vec<ObservedCorpus>, Code> {
     bundle
         .inputs()
         .corpora

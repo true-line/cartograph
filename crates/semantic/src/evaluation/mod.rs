@@ -9,3 +9,4 @@ pub mod scoring;
 pub mod reviewed;
 
 pub mod locked;
+pub mod locked_receipt;
