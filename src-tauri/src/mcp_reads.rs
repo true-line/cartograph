@@ -575,7 +575,7 @@ fn context_error(error: ContextError) -> ReadError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;
 
 pub(crate) mod evidence;

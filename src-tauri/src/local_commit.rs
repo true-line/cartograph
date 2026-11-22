@@ -291,7 +291,7 @@ fn is_valid_sha(sha: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 pub(crate) mod tests {
     use super::*;
     use std::fs;
