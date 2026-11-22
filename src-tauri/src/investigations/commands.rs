@@ -32,21 +32,40 @@ fn runnable_for_start(
     id: SpecialistId,
     mode: InvestigationProviderMode,
 ) -> Result<(), InvestigationStartError> {
+    runnable_with(
+        id,
+        mode,
+        id.uses_native_tool_runtime()
+            .then(super::tool_runtime::RuntimeCommand::from_env)
+            .flatten()
+            .as_ref(),
+    )
+}
+
+/// [`runnable_for_start`] against a given runtime: a tool-calling version
+/// needs the runtime, and on Cloud also the pinned Claude Code (AC-1424).
+fn runnable_with(
+    id: SpecialistId,
+    mode: InvestigationProviderMode,
+    runtime: Option<&super::tool_runtime::RuntimeCommand>,
+) -> Result<(), InvestigationStartError> {
     if !id.uses_native_tool_runtime() {
-        Ok(())
-    } else if mode != InvestigationProviderMode::Local {
-        Err(rejected(
-            "invalid_input",
-            "This specialist version runs only on a local model for now.",
-        ))
-    } else if super::tool_runtime::RuntimeCommand::from_env().is_none() {
-        Err(rejected(
+        return Ok(());
+    }
+    let Some(runtime) = runtime else {
+        return Err(rejected(
             "invalid_input",
             "The tool-calling runtime is not installed.",
-        ))
-    } else {
-        Ok(())
+        ));
+    };
+    if mode == InvestigationProviderMode::Cloud && !runtime.has_claude_lane() {
+        return Err(rejected(
+            "invalid_input",
+            "Claude Code is not available for this version on this Mac; \
+             Cloud tool-calling runs need Apple silicon.",
+        ));
     }
+    Ok(())
 }
 
 /// The offered specialists whose desktop runs use the saved run limits
@@ -959,13 +978,15 @@ mod policy_catalog_tests {
         }
     }
 
-    // AC-1429 (ADR-0085): a tool-calling version is refused before anything
-    // runs when its runtime cannot run; bounded-loop versions are unaffected.
+    // AC-1429, AC-1424 (ADR-0085): a tool-calling version is refused before
+    // anything runs when its runtime cannot run; a Cloud one also needs the
+    // pinned Claude Code; bounded-loop versions are unaffected.
     #[test]
-    fn a_tool_calling_start_needs_a_local_model_and_the_runtime() {
-        let refused = |id, mode| {
+    fn a_tool_calling_start_needs_the_runtime_and_for_cloud_claude_code() {
+        use super::super::tool_runtime::RuntimeCommand;
+        let refused = |id, mode, runtime: Option<&RuntimeCommand>| {
             matches!(
-                runnable_for_start(id, mode),
+                runnable_with(id, mode, runtime),
                 Err(InvestigationStartError::Rejected {
                     code: "invalid_input",
                     definitive: true,
@@ -973,22 +994,39 @@ mod policy_catalog_tests {
                 })
             )
         };
-        for mode in [
+        let (local, cloud) = (
             InvestigationProviderMode::Local,
             InvestigationProviderMode::Cloud,
-        ] {
-            assert!(runnable_for_start(SpecialistId::DomainAnalystV28, mode).is_ok());
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::write(&claude, b"checked at spawn").unwrap();
+        let runtime = |claude_code: Option<std::path::PathBuf>| RuntimeCommand {
+            program: "node".into(),
+            args: Vec::new(),
+            claude_code,
+        };
+        let (bare, with_claude) = (runtime(None), runtime(Some(claude)));
+        let missing = runtime(Some(dir.path().join("missing")));
+        for mode in [local, cloud] {
+            assert!(runnable_with(SpecialistId::DomainAnalystV28, mode, None).is_ok());
+            assert!(refused(SpecialistId::DomainAnalystV29, mode, None));
         }
+        assert!(!refused(SpecialistId::DomainAnalystV29, local, Some(&bare)));
+        assert!(refused(SpecialistId::DomainAnalystV29, cloud, Some(&bare)));
         assert!(refused(
             SpecialistId::DomainAnalystV29,
-            InvestigationProviderMode::Cloud
+            cloud,
+            Some(&missing)
+        ));
+        let pinned = cfg!(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64")
         ));
         assert_eq!(
-            refused(
-                SpecialistId::DomainAnalystV29,
-                InvestigationProviderMode::Local
-            ),
-            super::super::tool_runtime::RuntimeCommand::from_env().is_none()
+            refused(SpecialistId::DomainAnalystV29, cloud, Some(&with_claude)),
+            !pinned,
+            "Cloud runs where a Claude Code build is pinned, never on Intel Macs"
         );
     }
 

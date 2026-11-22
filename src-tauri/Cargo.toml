@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 rfd = "0.17"
 tempfile = "3"
+# Checks the bundled Claude Code against its pinned sha256 (AC-1424).
+sha2 = "0.11.1"
 # Already in the dependency graph via tauri/wry; canonicalize without the
 # Windows \\?\ verbatim prefix at the storage boundary (#225).
 dunce = "1"
@@ -62,7 +64,6 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 [dev-dependencies]
 app-store = { workspace = true, features = ["test-support"] }
 rusqlite = { workspace = true, features = ["backup"] }
-sha2 = "0.11.1"
 ring = "0.17.14"
 core-graph = { workspace = true, features = ["test-support"] }
 tauri = { version = "2", features = ["test"] }
