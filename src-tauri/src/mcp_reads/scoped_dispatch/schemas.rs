@@ -131,6 +131,11 @@ pub(in crate::mcp_reads) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits
                 ),
             )
         }
+        // Not offered in scoped sessions (AC-1809); never listed.
+        ReadTool::Query => (
+            "Unavailable in scoped-session mode.",
+            object(json!({}), &[]),
+        ),
     };
     json!({"name":tool.name(),"description":description,"inputSchema":schema,"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
