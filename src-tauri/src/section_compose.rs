@@ -199,6 +199,40 @@ fn attempts(excerpts: usize) -> Vec<(Option<usize>, bool)> {
         .collect()
 }
 
+/// The citation ids of the citable Capability facts, by name (#2416).
+fn capability_ids(facts: &[ComposeFact]) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut ids: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for fact in facts.iter().filter(|fact| fact.label == "Capability") {
+        if let Some(name) = fact.name.as_deref() {
+            ids.entry(name)
+                .or_default()
+                .insert(fact.citation_id.as_str());
+        }
+    }
+    ids
+}
+
+/// Whether `citations` cite, for each excerpt rule among them, a Capability
+/// fact named like one of the capabilities the rule is listed under (#2416).
+/// A rule none of whose capabilities a citable fact is named is not checked.
+fn rule_capability_cited(
+    citations: &[String],
+    rule_capability: &BTreeMap<String, BTreeSet<String>>,
+    capabilities: &BTreeMap<&str, BTreeSet<&str>>,
+) -> bool {
+    citations.iter().all(|id| {
+        let ids: BTreeSet<&str> = rule_capability
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter_map(|capability| capabilities.get(capability.as_str()))
+            .flatten()
+            .copied()
+            .collect();
+        ids.is_empty() || citations.iter().any(|cited| ids.contains(cited.as_str()))
+    })
+}
+
 /// Room kept under the input ceiling for what the call adds around the
 /// payload (#2386).
 const INPUT_MARGIN_BYTES: u64 = 4 * 1024;
@@ -585,8 +619,12 @@ fn stage_as(
     // (#2328), not taken from the section text around it; so must a figure
     // or version, and a claim about endpoints cites one (#2349).
     let shown = spec::CitedText::of(nodes, edges, &prepared.overlay, &cited);
+    // A rule from the excerpt is stated for the capability it is listed
+    // under, so a claim citing it cites that capability too (#2416).
+    let rule_capability = spec::excerpt_rule_capabilities(&prepared.text);
+    let capabilities = capability_ids(&prepared.facts);
     type Check<'a> = (&'static str, &'a dyn Fn(&Claim) -> bool);
-    let checks: [Check<'_>; 5] = [
+    let checks: [Check<'_>; 6] = [
         ("statement_names_source", &|claim| {
             !source.named_in(&claim.statement, &claim.citations)
         }),
@@ -608,6 +646,9 @@ fn stage_as(
             !shown
                 .support(&claim.statement, &claim.citations)
                 .overreaches()
+        }),
+        ("rule_capability_not_cited", &|claim| {
+            rule_capability_cited(&claim.citations, &rule_capability, &capabilities)
         }),
     ];
     for (reason, keep) in checks {
