@@ -12,12 +12,12 @@ use std::sync::Mutex;
 
 const UNAVAILABLE: &str = "registered source unavailable; reconnect or re-run ingestion";
 
-pub(crate) fn with_registered_read<T>(
+pub fn with_registered_read<T>(
     registry: &Mutex<SourceRegistry>,
     repo: &str,
     read: impl FnOnce(&Path) -> Result<T, String>,
 ) -> Result<T, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     registry
         .lock()
         .map_err(|e| e.to_string())?
@@ -69,17 +69,17 @@ enum Reservation {
 
 /// A sorted, try-only lock plan shared by intake, enrichment and ADR relinking.
 /// All guards outlive the entire operation; nested readers reuse this plan.
-pub(crate) struct SourceOperation {
+pub struct SourceOperation {
     sources: BTreeMap<String, RegisteredSource>,
     guards: BTreeMap<String, Guard>,
 }
 
 impl SourceOperation {
-    pub(crate) fn acquire(
+    pub fn acquire(
         registry: &Mutex<SourceRegistry>,
         requested: impl IntoIterator<Item = (RegisteredSource, bool)>,
     ) -> Result<Self, String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         registry
             .lock()
             .map_err(|e| e.to_string())?
@@ -141,7 +141,7 @@ impl SourceOperation {
         Ok(operation)
     }
 
-    pub(crate) fn root(&self, repo: &str) -> Result<&Path, String> {
+    pub fn root(&self, repo: &str) -> Result<&Path, String> {
         let source = self
             .sources
             .get(repo)
@@ -153,7 +153,7 @@ impl SourceOperation {
         }
     }
 
-    pub(crate) fn clone_source(
+    pub fn clone_source(
         &mut self,
         source: &RegisteredSource,
         token: Option<&str>,
@@ -174,11 +174,11 @@ impl SourceOperation {
     /// Release every guard once the operation's work is published, so
     /// readers it excluded can proceed while the caller finishes up. Roots
     /// resolve to the registered sources afterwards.
-    pub(crate) fn release(&mut self) {
+    pub fn release(&mut self) {
         self.guards.clear();
     }
 
-    pub(crate) fn set_writes_ready(
+    pub fn set_writes_ready(
         &self,
         registry: &Mutex<SourceRegistry>,
         ready: bool,

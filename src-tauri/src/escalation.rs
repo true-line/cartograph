@@ -243,7 +243,7 @@ fn est_usd(payload_bytes: u64, input_per_mtok: f64, output_per_mtok: f64) -> f64
 /// escalation at all (#238) — never the raw `AgentError` text, which names
 /// internal validation machinery ("bounded task", "allowlist") a viewer has
 /// no way to act on.
-pub(crate) fn edge_label_unavailable_reason(edge_label: &str) -> String {
+pub fn edge_label_unavailable_reason(edge_label: &str) -> String {
     format!(
         "Cartograph's bounded resolver can't propose a {edge_label} relation yet — this gap \
          needs deterministic extractor support, not escalation."

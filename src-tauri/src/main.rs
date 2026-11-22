@@ -14,8 +14,8 @@ mod curated;
 mod curated_workbench;
 mod drop_intake;
 use app_store::egress;
-mod escalation;
-mod evidence;
+use app_store::escalation;
+use app_store::evidence;
 mod export_save;
 use app_store::findings;
 #[cfg(test)]
@@ -60,7 +60,7 @@ mod semantic_evaluation;
 use app_store::settings;
 #[cfg(test)]
 mod showcase_tests;
-mod source_access;
+use app_store::source_access;
 use app_store::sources;
 mod spec_bundle_file;
 mod system_preflight;
@@ -5186,19 +5186,7 @@ fn emit_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, job: &Job) {
     let _ = app.emit("job://changed", job);
 }
 
-fn claim_job(state: &AppState, plan: &jobs::ClaimPlan) -> Result<(Job, JobExecution), String> {
-    // The plan is owned data: no store mutex spans the OS reservation.
-    let reservation = state
-        .job_execution_locks
-        .try_reserve(plan.lock_target())
-        .map_err(|error| error.to_string())?;
-    state
-        .jobs
-        .lock()
-        .map_err(|error| error.to_string())?
-        .claim_execution(plan, reservation)
-        .map_err(|error| error.to_string())
-}
+use app_store::job_claim::claim_job;
 
 fn start_job(state: &AppState, kind: &str) -> Result<(Job, JobExecution), String> {
     let plan = {
