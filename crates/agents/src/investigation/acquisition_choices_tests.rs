@@ -1781,3 +1781,50 @@ fn auditor14_real_seven_target_correction_fits_both_slots() {
         }
     }
 }
+
+// AC-1420: every choice-step schema the acquisition path produces converts to
+// native tools: pending choices, completed attempts with and without saved
+// queries (replay pairs), FinishOnly, and each eligibility-narrowed form.
+#[test]
+fn every_acquisition_schema_converts_to_native_tools() {
+    use super::super::native_tools::tool_definitions_from_schema;
+    use staged_refusal::CompletionCallMode::{Choice, FinishOnly};
+    let f = Fixture::new();
+    let mut schemas = Vec::new();
+    for ledger in [f.empty(), f.ledger.clone()] {
+        let pending = f.derive(&ledger, &[]).unwrap();
+        let mut complete = pending.clone();
+        complete.entries.clear();
+        complete.blocked.clear();
+        complete.deferred = 0;
+        for choices in [&pending, &complete] {
+            for mode in [Choice, FinishOnly] {
+                let wire = super::super::response_schema::select_acquisition(
+                    mode,
+                    choices,
+                    &ledger,
+                    &f.contract.request_hash,
+                )
+                .unwrap()
+                .unwrap();
+                let eligible = super::super::response_schema::select_eligible_acquisition(
+                    Some(wire.clone()),
+                    mode,
+                    choices,
+                    &ledger,
+                )
+                .unwrap()
+                .unwrap();
+                schemas.push(wire);
+                schemas.push(eligible);
+            }
+        }
+    }
+    assert!(schemas.iter().any(|s| s.contains("\"enum\"")));
+    assert!(schemas.iter().any(|s| s.contains("replay_query")));
+    for schema in &schemas {
+        let tools = tool_definitions_from_schema(schema)
+            .unwrap_or_else(|error| panic!("{error:?} for {schema}"));
+        assert!(!tools.is_empty(), "no tools for {schema}");
+    }
+}

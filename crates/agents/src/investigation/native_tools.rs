@@ -25,16 +25,20 @@ pub enum AgentTool {
     ReplayQuery,
     /// Terminal findings or insufficient evidence.
     Finish,
+    /// The one correction of a refused finish: replace or withdraw only the
+    /// flagged findings.
+    FinishPatch,
 }
 
 impl AgentTool {
     /// Every tool, in vocabulary order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::QueryContext,
         Self::ReadCoverageInventory,
         Self::ReadEvidence,
         Self::ReplayQuery,
         Self::Finish,
+        Self::FinishPatch,
     ];
 
     /// Stable tool name, equal to the bounded action `type`.
@@ -45,6 +49,7 @@ impl AgentTool {
             Self::ReadEvidence => "read_evidence",
             Self::ReplayQuery => "replay_query",
             Self::Finish => "finish",
+            Self::FinishPatch => "finish_patch",
         }
     }
 
@@ -69,6 +74,9 @@ impl AgentTool {
             }
             Self::Finish => {
                 "End the investigation with findings that cite only citations acquired in this run, or with insufficient_evidence and explicit limitations. Refused until the run has read source evidence for any supported finding."
+            }
+            Self::FinishPatch => {
+                "Correct the refused finish once: replace or withdraw only the findings the feedback flagged, by finding_index. Other findings stay as finished."
             }
         }
     }
@@ -129,9 +137,16 @@ pub fn tool_definitions_from_schema(
         .get("$defs")
         .cloned()
         .unwrap_or(Value::Object(Map::new()));
-    let branches = schema["anyOf"]
-        .as_array()
-        .ok_or(InvestigationError::InvalidInput)?;
+    // A finish-patch step offers one bare action object instead of a choice.
+    let single = [schema.clone()];
+    let branches = match schema.get("anyOf") {
+        Some(branches) => branches
+            .as_array()
+            .ok_or(InvestigationError::InvalidInput)?
+            .as_slice(),
+        None if schema["properties"]["type"]["const"] == AgentTool::FinishPatch.name() => &single,
+        None => return Err(InvestigationError::InvalidInput),
+    };
     let mut tools = Vec::new();
     let mut finish = Vec::new();
     for branch in branches {
