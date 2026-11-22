@@ -162,6 +162,9 @@ fn source_settlement_actual_acquired_and_unavailable_use_same_bounded_rows_as_pr
 #[path = "source_settlement_owner_tests.rs"]
 mod owner_tests;
 
+#[path = "read_refusals_tests.rs"]
+mod read_refusal_tests;
+
 #[path = "source_settlement_boundary_tests.rs"]
 mod boundary_tests;
 

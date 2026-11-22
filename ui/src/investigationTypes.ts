@@ -297,7 +297,7 @@ export interface SpecialistActivityPage {
 export type InvestigationEventKind = 'created' | 'preparation_started' |
   'context_prepared' | 'model_started' | 'model_completed' | 'action_admitted' |
   'tool_started' | 'tool_completed' | 'consent_required' | 'consent_approved' |
-  'evidence_validation_reserved' | 'finish_refused' | 'source_replay_refused' | 'capacity_refused' | 'action_refused' | 'query_refused' | 'read_unavailable' |
+  'evidence_validation_reserved' | 'finish_refused' | 'source_replay_refused' | 'capacity_refused' | 'action_refused' | 'query_refused' | 'read_unavailable' | 'read_firewall_refused' |
   'consent_declined' | 'cancel_requested' | 'result_persisted' | 'completed' |
   'failed' | 'cancelled' | 'interrupted' | 'outcome_unknown';
 
