@@ -20,7 +20,7 @@ fn available_archive_bytes(
 impl JobStore {
     /// Read-only preparation ceiling; publication rechecks capacity transactionally.
     /// This measures stored lengths without copying any stored bodies.
-    pub(crate) fn investigation_coverage_archive_capacity(
+    pub fn investigation_coverage_archive_capacity(
         &self,
         task_id: &str,
     ) -> Result<usize, InvestigationStoreError> {
@@ -201,7 +201,7 @@ fn load_with_cancellation_reserve(
 /// a saved witness authenticates cancellation, then releases before archive
 /// acquisition. Other nested task replay remains outside this component.
 #[cfg(unix)]
-pub(crate) fn archive_acquisition_workspace() -> Option<usize> {
+pub fn archive_acquisition_workspace() -> Option<usize> {
     use context_hub::logical::{slots, sum};
     let (_, decode) = InvestigationCoverageArchive::decode_workspace_bytes()?;
     let body = sum(&[

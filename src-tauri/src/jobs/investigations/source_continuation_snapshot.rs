@@ -2,11 +2,11 @@
 //! nor permission to publish, dispatch, retry, or install the candidate.
 use super::*;
 
-pub(crate) enum SourceContinuationOutcome {
+pub enum SourceContinuationOutcome {
     Acquired,
     Unavailable(UnavailableReason),
 }
-pub(crate) struct SourceContinuationSnapshotInput<'a> {
+pub struct SourceContinuationSnapshotInput<'a> {
     pub investigation_id: &'a str,
     pub expected_revision: u64,
     pub request: &'a StagedObligationRequest,
@@ -17,15 +17,15 @@ pub(crate) struct SourceContinuationSnapshotInput<'a> {
 
 /// Owned immutable projections from one saved read transaction. No conversion
 /// to a settlement plan/capability exists; the writer rederives and reseals.
-pub(crate) struct SourceContinuationSnapshot {
+pub struct SourceContinuationSnapshot {
     saved_revision: u64,
     request: StagedObligationRequest,
     base_ledger: InvestigationInputLedger,
     ledger: InvestigationInputLedger,
     detail: InvestigationDetail,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     attempts: Vec<AttemptRecord>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     attempt_ledgers: Vec<InvestigationInputLedger>,
     metadata: ProtectedCompletionMetadata,
     basis: InvestigationTurnBasis,
@@ -36,7 +36,7 @@ pub(crate) struct SourceContinuationSnapshot {
     correction: Option<agents::investigation::acquisition_choices::AuthenticatedCitationCorrection>,
 }
 impl SourceContinuationSnapshot {
-    pub(crate) fn attach_acquisition(
+    pub fn attach_acquisition(
         &self,
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationError> {
@@ -47,47 +47,47 @@ impl SourceContinuationSnapshot {
             None => Ok(input),
         }
     }
-    pub(crate) fn saved_revision(&self) -> u64 {
+    pub fn saved_revision(&self) -> u64 {
         self.saved_revision
     }
-    pub(crate) fn request(&self) -> &StagedObligationRequest {
+    pub fn request(&self) -> &StagedObligationRequest {
         &self.request
     }
-    pub(crate) fn base_ledger(&self) -> &InvestigationInputLedger {
+    pub fn base_ledger(&self) -> &InvestigationInputLedger {
         &self.base_ledger
     }
-    pub(crate) fn ledger(&self) -> &InvestigationInputLedger {
+    pub fn ledger(&self) -> &InvestigationInputLedger {
         &self.ledger
     }
-    pub(crate) fn detail(&self) -> &InvestigationDetail {
+    pub fn detail(&self) -> &InvestigationDetail {
         &self.detail
     }
-    #[cfg(test)]
-    pub(crate) fn attempts(&self) -> &[AttemptRecord] {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attempts(&self) -> &[AttemptRecord] {
         &self.attempts
     }
-    #[cfg(test)]
-    pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
         &self.attempt_ledgers
     }
-    pub(crate) fn metadata(&self) -> &ProtectedCompletionMetadata {
+    pub fn metadata(&self) -> &ProtectedCompletionMetadata {
         &self.metadata
     }
-    pub(crate) fn basis(&self) -> &InvestigationTurnBasis {
+    pub fn basis(&self) -> &InvestigationTurnBasis {
         &self.basis
     }
-    pub(crate) fn mode(&self) -> CompletionCallMode {
+    pub fn mode(&self) -> CompletionCallMode {
         self.mode
     }
-    pub(crate) fn capacity_refusal_count(&self) -> u32 {
+    pub fn capacity_refusal_count(&self) -> u32 {
         self.capacity_refusal_count
     }
-    pub(crate) fn next_action_id(&self) -> &str {
+    pub fn next_action_id(&self) -> &str {
         &self.next_action_id
     }
     // Every successful acquisition clears capacity_feedback. The count remains
     // the saved call's count, checked again by actual settlement validation.
-    pub(crate) fn capacity_feedback(&self) -> Option<&AdmissionCapacityFeedback> {
+    pub fn capacity_feedback(&self) -> Option<&AdmissionCapacityFeedback> {
         None
     }
 }
@@ -115,7 +115,7 @@ pub(super) fn validate_acquisition(
 }
 
 impl JobStore {
-    pub(crate) fn next_source_continuation_snapshot(
+    pub fn next_source_continuation_snapshot(
         &self,
         input: &SourceContinuationSnapshotInput<'_>,
     ) -> Result<SourceContinuationSnapshot, InvestigationStoreError> {
@@ -202,7 +202,7 @@ impl JobStore {
         let prior_len = entries.len();
         entries.extend(projected.attempts);
         let mut attempts = Vec::with_capacity(entries.len());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let mut attempt_ledgers = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             let ledger = if index >= prior_len {
@@ -227,7 +227,7 @@ impl JobStore {
                 return Err(InvestigationStoreError::Invalid);
             }
             attempts.push(entry.record);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             attempt_ledgers.push(ledger);
         }
         if attempts
@@ -256,9 +256,9 @@ impl JobStore {
             base_ledger: core.ledger,
             ledger: input.candidate_ledger.clone(),
             detail: projected.task.detail,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             attempts,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             attempt_ledgers,
             metadata,
             basis,
@@ -285,7 +285,7 @@ impl JobStore {
 impl JobStore {
     /// Narrow live-owner publication route. Terminal/orphan classifications are
     /// deliberately absent from this interface.
-    pub(crate) fn publish_next_prompt_source(
+    pub fn publish_next_prompt_source(
         &mut self,
         execution: &JobExecution,
         revision: u64,

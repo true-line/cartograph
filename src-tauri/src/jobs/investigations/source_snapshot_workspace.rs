@@ -6,7 +6,7 @@ use std::mem::size_of;
 /// Retained returned snapshot and read peak. The normalized request, saved
 /// authority and projected owners conservatively coexist through nested reads.
 /// Caller source/guard/input owners are separate; no allocator/native/RSS claim.
-pub(crate) fn workspace() -> Option<(usize, usize)> {
+pub fn workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let (task, task_load) = next_prompt_task_load_workspace()?;
     let (saved, saved_load) =
@@ -177,7 +177,7 @@ pub(crate) fn workspace() -> Option<(usize, usize)> {
 /// The typed-correction loader keeps the authenticated journal while loading
 /// the selected refusal basis a second time. Compose here, outside the base
 /// journal/history calculators, so this cannot recurse into its own estimate.
-pub(crate) fn correction_workspace() -> Option<usize> {
+pub fn correction_workspace() -> Option<usize> {
     let (journal, journal_peak) = next_prompt_staged_workspace()?;
     let (basis, basis_peak) = result_replay_workspace::completion_basis_workspace()?;
     let policy = &INVESTIGATION_V2_POLICY;

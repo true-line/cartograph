@@ -4,7 +4,7 @@
 use super::*;
 use crate::{job_execution::JobExecutionLocks, jobs::ClaimMode};
 
-pub(crate) struct MetadataHostSeed {
+pub struct MetadataHostSeed {
     pub execution: JobExecution,
     pub detail: InvestigationDetail,
     pub request: StagedObligationRequest,
@@ -12,7 +12,7 @@ pub(crate) struct MetadataHostSeed {
     pub step: PendingInvestigationStep,
 }
 
-pub(crate) fn seed(
+pub fn seed(
     store: &mut JobStore,
     locks: &JobExecutionLocks,
     request: StagedObligationRequest,
@@ -112,7 +112,7 @@ pub(crate) fn seed(
     }
 }
 
-pub(crate) fn prospective(
+pub fn prospective(
     store: &JobStore,
     id: &str,
     response: &InvestigationResponseMeta,
@@ -150,7 +150,7 @@ pub(crate) fn prospective(
     (usage, metadata)
 }
 
-pub(crate) fn inspect(
+pub fn inspect(
     store: &JobStore,
     id: &str,
 ) -> (InvestigationDetail, InvestigationInputLedger, bool) {
@@ -160,7 +160,7 @@ pub(crate) fn inspect(
     (task.detail, ledger, task.phase == Phase::Ready)
 }
 
-pub(crate) fn cancel(store: &mut JobStore, id: &str) -> u64 {
+pub fn cancel(store: &mut JobStore, id: &str) -> u64 {
     let tx = store.conn.transaction().unwrap();
     let mut task = storage::load_next_prompt_task_base(&tx, id).unwrap();
     let revision = task.detail.summary.revision;
@@ -171,6 +171,6 @@ pub(crate) fn cancel(store: &mut JobStore, id: &str) -> u64 {
     task.detail.summary.revision
 }
 
-pub(crate) fn lose_next_ack() {
+pub fn lose_next_ack() {
     super::metadata_admission::lose_next_commit_ack();
 }

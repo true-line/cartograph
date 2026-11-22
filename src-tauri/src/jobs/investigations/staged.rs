@@ -9,7 +9,7 @@ use rusqlite::Transaction;
 #[path = "staged_workspace.rs"]
 mod workspace;
 #[cfg(unix)]
-pub(crate) use workspace::next_prompt_staged_workspace;
+pub use workspace::next_prompt_staged_workspace;
 
 fn schema() -> Vec<String> {
     let mut sql=vec![
@@ -196,9 +196,9 @@ fn bind(
             return Err(InvestigationStoreError::Invalid);
         }
     } else {
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         return Err(InvestigationStoreError::Invalid);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let sources = request.obligations.sources_with_policy(&policy)?;
             let projected = StartInvestigationRequest {
@@ -291,7 +291,7 @@ pub(super) struct JournalEntry {
     pub ledger_revision: u64,
 }
 impl JournalEntry {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::jobs::investigations) fn rehash_for_test(&mut self) {
         self.entry_id = self.content_id().unwrap();
     }
@@ -369,7 +369,7 @@ fn saved_ledger(
     )?
     .ok_or(InvestigationStoreError::Invalid)
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn completed_attempts(
     connection: &Connection,
     id: &str,
@@ -1216,7 +1216,7 @@ pub(super) fn journal_bytes(
     Ok(total)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "staged_tests.rs"]
 mod tests;
 

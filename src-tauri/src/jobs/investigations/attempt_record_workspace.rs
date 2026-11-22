@@ -6,7 +6,7 @@ use std::mem::size_of;
 /// Caller/record acquisition stays live throughout every sequential replay
 /// phase. Saved-call metadata and outer result/task owners remain separate.
 #[cfg(unix)]
-pub(crate) fn next_prompt_attempt_replay_workspace() -> Option<usize> {
+pub fn next_prompt_attempt_replay_workspace() -> Option<usize> {
     let policy = &INVESTIGATION_V2_POLICY;
     // Binding validation admits the whole AttemptRecord before read_action_hash
     // builds its smaller action Value. All action fields come from that record.
@@ -49,7 +49,7 @@ pub(crate) fn next_prompt_attempt_replay_workspace() -> Option<usize> {
     )
 }
 
-pub(crate) fn next_prompt_attempt_acquisition_workspace() -> Option<usize> {
+pub fn next_prompt_attempt_acquisition_workspace() -> Option<usize> {
     // Closed DTO union: only the invocation disclosure has dynamic containers.
     // Other nested fields are inline, with string payload bounded by record wire.
     // Optional serde defaults are None/empty; no default creates owned payload.

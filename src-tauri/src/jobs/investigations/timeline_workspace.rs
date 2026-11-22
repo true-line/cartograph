@@ -6,7 +6,7 @@ use std::mem::size_of;
 
 /// Logical retained Timeline and replay peak, including borrowed task/history.
 /// Excludes read_entries, outer task replay, schema preflight and process RSS.
-pub(crate) fn next_prompt_timeline_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_timeline_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let calls = usize::try_from(policy.limits().model_invocations).ok()?;
     let events = usize::try_from(policy.journal_events()).ok()?;

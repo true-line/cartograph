@@ -2,7 +2,7 @@
 use super::*;
 
 impl CapturedSourceInvocationFixture {
-    pub(crate) fn assert_diagnostic_retention_invariant(
+    pub fn assert_diagnostic_retention_invariant(
         &mut self,
         provider: &dyn llm::LlmProvider,
         firewall: &llm::EgressFirewall,
@@ -83,7 +83,7 @@ impl CapturedSourceInvocationFixture {
         }
     }
 
-    pub(crate) fn assert_partial_after_capture(
+    pub fn assert_partial_after_capture(
         &mut self,
         provider: &dyn llm::LlmProvider,
         firewall: &llm::EgressFirewall,

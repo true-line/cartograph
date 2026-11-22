@@ -16,7 +16,7 @@ pub(super) fn uses_finding_withholding(id: SpecialistId) -> bool {
     id.has(Capability::FindingWithholding)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

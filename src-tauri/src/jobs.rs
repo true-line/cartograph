@@ -15,12 +15,12 @@ mod evaluation;
 #[path = "jobs/execution.rs"]
 mod execution;
 #[path = "jobs/investigations.rs"]
-pub(crate) mod investigations;
+pub mod investigations;
 #[path = "jobs/usage.rs"]
 mod usage;
-pub(crate) use execution::{ClaimMode, ClaimPlan, ExecutionCheck, ExecutionUpdate};
+pub use execution::{ClaimMode, ClaimPlan, ExecutionCheck, ExecutionUpdate};
 pub use usage::{CallUsage, JobUsage};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "jobs/ownership_tests.rs"]
 mod ownership_tests;
 use serde::Serialize;
@@ -160,7 +160,7 @@ impl JobStore {
     }
 
     /// Transition a job to `status`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_status(&mut self, id: i64, status: &str) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE jobs SET status = ?2,
@@ -172,7 +172,7 @@ impl JobStore {
     }
 
     /// Record stage + percent for a running job.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_progress(&mut self, id: i64, stage: &str, progress: f64) -> rusqlite::Result<Job> {
         self.conn.execute(
             "UPDATE jobs SET stage = ?2, progress = ?3,
@@ -187,7 +187,7 @@ impl JobStore {
     /// job still `queued`/`running` transitions — a cancellation that lands
     /// mid-pipeline is never overwritten back to `done` (the returned row
     /// tells the caller which outcome won).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn finish(&mut self, id: i64, artifacts: &[String]) -> rusqlite::Result<Job> {
         let artifacts_json = serde_json::to_string(artifacts).expect("string vec serializes");
         self.conn.execute(
@@ -202,7 +202,7 @@ impl JobStore {
 
     /// Fail a job with its error detail preserved for display. Guarded like
     /// [`Self::finish`]: a concurrent cancel wins over a late failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn fail(&mut self, id: i64, error: &str) -> rusqlite::Result<Job> {
         self.conn.execute(
             "UPDATE jobs SET status = 'failed', error = ?2,
@@ -237,7 +237,7 @@ impl JobStore {
 
     /// Re-queue a failed, cancelled, or interrupted job (clears progress and
     /// error). The caller re-dispatches execution for the job's kind.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn retry(&mut self, id: i64) -> Result<Job, JobTransitionError> {
         let job = self.get(id).map_err(JobTransitionError::Store)?;
         match job.status.as_str() {
@@ -262,7 +262,7 @@ impl JobStore {
 
     /// True when the job was cancelled — checked between pipeline stages so
     /// running work stops at the next safe boundary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_cancelled(&self, id: i64) -> rusqlite::Result<bool> {
         match self.get(id) {
             Ok(job) => Ok(job.status == "cancelled"),
@@ -334,7 +334,7 @@ impl JobStore {
 
     /// Create a legacy record for compatibility tests. Production always writes
     /// a bounded purpose/family summary; historical rows remain readable.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn record_eval(
         &mut self,
         provider: &str,
@@ -521,7 +521,7 @@ fn eval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvalResult> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

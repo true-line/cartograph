@@ -114,7 +114,7 @@ pub(super) fn load(
         .transpose()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::super::semantic_audit_journal::{self as journal, AuditInvocation};
     use super::*;

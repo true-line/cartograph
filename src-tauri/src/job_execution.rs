@@ -13,21 +13,21 @@ use std::sync::Arc;
 use crate::jobs::JobTransitionError;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct ExecutionNamespace {
+pub struct ExecutionNamespace {
     pub(super) value: String,
     pub(super) store_path: PathBuf,
 }
 
 #[derive(Clone)]
-pub(crate) struct JobLockTarget {
+pub struct JobLockTarget {
     pub(super) namespace: ExecutionNamespace,
-    pub(super) id: i64,
+    pub id: i64,
     pub(super) existing: bool,
 }
 
 /// Guard fields and owner identity are intentionally not serializable or Debug.
 #[derive(Clone)]
-pub(crate) struct JobExecution {
+pub struct JobExecution {
     pub(super) inner: Arc<ExecutionIdentity>,
 }
 
@@ -40,7 +40,7 @@ pub(super) struct ExecutionIdentity {
 }
 
 impl JobExecution {
-    pub(crate) fn id(&self) -> i64 {
+    pub fn id(&self) -> i64 {
         self.inner.id
     }
 
@@ -50,7 +50,7 @@ impl JobExecution {
 }
 
 /// Owns one fresh OS handle. Never unlink the file, even after job cleanup.
-pub(crate) struct ExecutionReservation {
+pub struct ExecutionReservation {
     pub(super) target: JobLockTarget,
     file: File,
     storage: Arc<LockStorage>,
@@ -94,13 +94,13 @@ impl Drop for ExecutionReservation {
     }
 }
 
-pub(crate) struct JobExecutionLocks {
+pub struct JobExecutionLocks {
     namespace: ExecutionNamespace,
     storage: Arc<LockStorage>,
 }
 
 impl JobExecutionLocks {
-    pub(crate) fn open(
+    pub fn open(
         app_data: &Path,
         namespace: ExecutionNamespace,
     ) -> Result<Self, JobTransitionError> {
@@ -127,9 +127,9 @@ impl JobExecutionLocks {
             root,
             locks,
             name: namespace.value.clone(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             before_sync: std::sync::Mutex::new(None),
-            #[cfg(all(test, windows))]
+            #[cfg(all(any(test, feature = "test-support"), windows))]
             volume_probe: std::sync::Mutex::new(None),
         });
         storage.verify()?;
@@ -138,7 +138,7 @@ impl JobExecutionLocks {
 
     /// Try once outside every application/database mutex. An earlier attempt
     /// must already have a lock inode; missing storage is not proof of death.
-    pub(crate) fn try_reserve(
+    pub fn try_reserve(
         &self,
         target: &JobLockTarget,
     ) -> Result<ExecutionReservation, JobTransitionError> {
@@ -178,19 +178,19 @@ struct LockStorage {
     root: Dir,
     locks: Dir,
     name: String,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_sync: std::sync::Mutex<Option<SyncHook>>,
-    #[cfg(all(test, windows))]
+    #[cfg(all(any(test, feature = "test-support"), windows))]
     volume_probe: std::sync::Mutex<Option<VolumeProbe>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type SyncHook = Box<dyn FnMut(SyncStep) -> std::io::Result<()> + Send>;
 
-#[cfg(all(test, windows))]
+#[cfg(all(any(test, feature = "test-support"), windows))]
 type VolumeProbe = Box<dyn FnMut() -> std::io::Result<windows::FileSystemName> + Send>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SyncStep {
     File,
@@ -205,18 +205,18 @@ impl LockStorage {
         // inode and every newly-created directory entry before allowing it.
         // Repeat the whole chain even for an existing file: another process or
         // a failed earlier reservation may have created it without finishing sync.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.before_sync(SyncStep::File)?;
         #[cfg(windows)]
         self.require_ntfs(file)?;
         file.sync_all().map_err(lock_error)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.before_sync(SyncStep::Namespace)?;
         self.sync_directory(&self.locks)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.before_sync(SyncStep::Root)?;
         self.sync_directory(&self.root)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.before_sync(SyncStep::AppData)?;
         self.sync_directory(&self.app)?;
         Ok(())
@@ -251,7 +251,7 @@ impl LockStorage {
         &self,
         file: &impl std::os::windows::io::AsRawHandle,
     ) -> Result<(), JobTransitionError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(probe) = self.volume_probe.lock().map_err(lock_error)?.as_mut() {
             return windows::require_ntfs(&probe().map_err(lock_error)?);
         }
@@ -259,7 +259,7 @@ impl LockStorage {
         windows::require_ntfs(&name)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn before_sync(&self, step: SyncStep) -> Result<(), JobTransitionError> {
         if let Some(hook) = self.before_sync.lock().map_err(lock_error)?.as_mut() {
             hook(step).map_err(lock_error)?;
@@ -404,7 +404,7 @@ fn private_file(parent: &Dir, name: &str, create: bool) -> Result<File, JobTrans
     Ok(file)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "job_execution/tests.rs"]
 mod tests;
 

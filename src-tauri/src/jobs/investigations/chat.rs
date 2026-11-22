@@ -8,19 +8,19 @@ pub(super) const MAX_RESULT_REFERENCE_BYTES: usize = 1024;
 pub(super) const RESULT_REFERENCE_SLOT_BYTES: usize = 1536;
 pub(super) const MAX_USER_MESSAGE_BYTES: usize = 16 * 1024;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_AFTER_RESULT_REFERENCE_INSERT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_after_result_reference_insert_once() {
     FAIL_AFTER_RESULT_REFERENCE_INSERT.with(|flag| flag.set(true));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum StoredChatMessage {
+pub enum StoredChatMessage {
     UserQuestion {
         question: String,
     },
@@ -33,7 +33,7 @@ pub(crate) enum StoredChatMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoredChatTranscript {
+pub struct StoredChatTranscript {
     pub chat_id: String,
     pub task_id: String,
     pub producer: StoredChatProducer,
@@ -44,7 +44,7 @@ pub(crate) struct StoredChatTranscript {
 /// current specialist catalog or provider configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoredChatProducer {
+pub struct StoredChatProducer {
     pub specialist_id: SpecialistId,
     pub specialist_version: u32,
     pub prompt_fingerprint: String,
@@ -58,14 +58,14 @@ pub(crate) struct StoredChatProducer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StoredChatAuthor {
+pub enum StoredChatAuthor {
     User,
     Specialist,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoredChatEntry {
+pub struct StoredChatEntry {
     pub id: String,
     pub ordinal: u8,
     pub author: StoredChatAuthor,
@@ -192,7 +192,7 @@ fn insert_message(
         "INSERT INTO investigation_chat_messages(id,chat_id,task_id,ordinal,kind,body,body_hash) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![id, chat_id, task_id, ordinal, kind, body, core_prov::content_hash(&body)],
     )?)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if ordinal == 1 && FAIL_AFTER_RESULT_REFERENCE_INSERT.with(|flag| flag.replace(false)) {
         return Err(InvestigationStoreError::Storage);
     }
@@ -200,7 +200,7 @@ fn insert_message(
 }
 
 /// Bounded test wrapper around the same snapshot validator used by the app read.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn read_for_task(
     connection: &Connection,
     task_id: &str,

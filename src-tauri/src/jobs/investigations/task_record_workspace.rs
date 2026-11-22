@@ -7,7 +7,7 @@ use std::mem::size_of;
 /// Covers derived serde's logical content trees, not allocator/native layout or
 /// RSS. SQL/cache internals, scalar mirrors, pure validation and nested durable
 /// replay are separate. Malformed records are included before family validation.
-pub(crate) fn next_prompt_record_workspace(bytes: usize) -> Option<(usize, usize)> {
+pub fn next_prompt_record_workspace(bytes: usize) -> Option<(usize, usize)> {
     if bytes > MAX_RECORD_BYTES {
         return None;
     }
@@ -54,7 +54,7 @@ pub(crate) fn next_prompt_record_workspace(bytes: usize) -> Option<(usize, usize
 /// caller owns the transaction, indexed access check and outer schema preflight.
 /// Only @10/V2 is covered; native memory and detached-worker admission are not.
 #[cfg(unix)]
-pub(crate) fn next_prompt_task_load_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_task_load_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let (task, decode) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     let row = metadata_history_workspace::row_workspace()?
@@ -147,7 +147,7 @@ pub(crate) fn next_prompt_task_load_workspace() -> Option<(usize, usize)> {
 /// encoding. Historical writes use less memory; reserve the audited path before
 /// enabling it. Transaction/native SQLite storage is admitted separately.
 #[cfg(unix)]
-pub(crate) fn next_prompt_task_write_workspace() -> Option<usize> {
+pub fn next_prompt_task_write_workspace() -> Option<usize> {
     let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     sum(&[
         task.checked_mul(2)?,

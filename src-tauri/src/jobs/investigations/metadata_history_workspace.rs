@@ -7,7 +7,7 @@ use std::mem::size_of;
 /// Retained history, additional metadata projection, and complete load/project
 /// peak including its borrowed task owner. Schema preflight is caller-owned.
 #[cfg(unix)]
-pub(crate) fn next_prompt_metadata_workspace() -> Option<(usize, usize, usize)> {
+pub fn next_prompt_metadata_workspace() -> Option<(usize, usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let calls = usize::try_from(policy.limits().model_invocations).ok()?;
     let attempts = policy.max_completed_attempts();
@@ -154,7 +154,7 @@ pub(super) fn acquisition_choices_workspace() -> Option<usize> {
 /// Metadata candidate snapshot and independent writer derivation. Borrowed
 /// current/candidate inputs and transport owners are charged by the caller.
 #[cfg(unix)]
-pub(crate) fn next_prompt_metadata_continuation_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_metadata_continuation_workspace() -> Option<(usize, usize)> {
     let (history, metadata, load) = next_prompt_metadata_workspace()?;
     let (core, core_load) = next_prompt_saved_call_workspace()?;
     let (ledger, _) = InvestigationInputLedger::decode_workspace_bytes()?;

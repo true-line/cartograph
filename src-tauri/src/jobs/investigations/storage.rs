@@ -395,7 +395,7 @@ pub(super) fn decode_bounded<T: serde::de::DeserializeOwned + Serialize>(
 }
 
 pub(super) fn timestamp(connection: &Connection) -> Result<String, InvestigationStoreError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(value) = super::refusal_diagnostics::fixed_timestamp() {
         return Ok(value);
     }
@@ -469,7 +469,7 @@ pub(super) fn validate_next_prompt_task(task: &StoredTask) -> Result<(), Investi
 /// Pure @10 validation only: borrowed task, row decoding and nested durable
 /// replay remain separate owners. Pairing rejects legacy families first.
 #[cfg(unix)]
-pub(crate) fn next_prompt_contract_workspace() -> Option<usize> {
+pub fn next_prompt_contract_workspace() -> Option<usize> {
     let encoding = MAX_RECORD_BYTES
         .max(MAX_INVOCATION_BYTES)
         .max(MAX_DISCLOSURE_BYTES)
@@ -1607,7 +1607,7 @@ pub(super) fn read_body<T: serde::de::DeserializeOwned + Serialize>(
 /// Next-family saved ledger load, including retained caller/archive through
 /// inventory validation and fingerprinting. Other replay callers remain separate.
 #[cfg(unix)]
-pub(crate) fn next_prompt_ledger_workspace() -> Option<usize> {
+pub fn next_prompt_ledger_workspace() -> Option<usize> {
     use context_hub::logical::{slots, sum};
     let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     let (ledger, decode) = InvestigationInputLedger::decode_workspace_bytes()?;
@@ -1760,7 +1760,7 @@ pub(super) fn load_result(
     Ok(result)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "qualified_storage_tests.rs"]
 mod qualified_storage_tests;
 
@@ -1781,7 +1781,7 @@ pub(super) fn insert_body(
 
 /// Construct an actual old layout for migration fixtures, never for runtime.
 /// Construct an actual old layout for migration fixtures, never for runtime.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn version_two_fixture(connection: &Connection) {
     let foreign_keys: bool = connection
         .pragma_query_value(None, "foreign_keys", |r| r.get(0))
@@ -1834,7 +1834,7 @@ pub(super) fn version_two_fixture(connection: &Connection) {
         .unwrap();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn version_three_fixture(connection: &Connection) {
     let foreign_keys: bool = connection
         .pragma_query_value(None, "foreign_keys", |row| row.get(0))
@@ -1862,7 +1862,7 @@ pub(super) fn version_three_fixture(connection: &Connection) {
         .unwrap();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn version_one_fixture(connection: &Connection) {
     version_two_fixture(connection);
     for (name, kind, _) in super::finding_reviews::schema().into_iter().rev() {
@@ -1887,7 +1887,7 @@ pub(super) fn version_one_fixture(connection: &Connection) {
         .unwrap();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "finding_review_migration_tests.rs"]
 mod finding_review_migration_tests;
 

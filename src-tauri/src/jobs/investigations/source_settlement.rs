@@ -7,13 +7,13 @@ use read_reservations::{Disposition, DispositionKind, SavedRead};
 
 /// Host-classified known outcomes only; owner loss has a separate lock proof.
 #[derive(Clone, Copy)]
-pub(crate) enum KnownSourceDisposition {
+pub enum KnownSourceDisposition {
     ReleasedBeforeRead,
     KnownReadDiscarded,
     BoundInvariantDefect,
 }
 
-pub(crate) struct SourceContinuation<'a> {
+pub struct SourceContinuation<'a> {
     pub size_binding: Option<&'a dyn SourceSizeBinding>,
     pub current: &'a InvestigationInput,
     pub current_prepared: &'a PreparedBoundedCompletion,
@@ -64,11 +64,11 @@ impl SettlementPlan {
     pub(super) fn terminal(&self) -> bool {
         self.projection.task.phase == Phase::Terminal
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn additional_bytes(&self) -> usize {
         self.projection.additional_bytes
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn counts(&self) -> SettlementCounts {
         self.projection.counts
     }
@@ -167,7 +167,7 @@ fn materialize(
     reason: Option<UnavailableReason>,
     active_milliseconds: u64,
 ) -> Result<SettlementProjection, InvestigationStoreError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     let acquired = kind == DispositionKind::Acquired;
     let attempt_outcome = if acquired {
@@ -397,7 +397,7 @@ fn logical_delta(
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "source_settlement_tests.rs"]
 mod tests;
 
@@ -411,7 +411,7 @@ pub(super) use envelope_projection::{
 };
 #[path = "source_settlement_storage.rs"]
 mod storage_writer;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use storage_writer::persist;
 
 #[cfg(unix)]
@@ -424,10 +424,10 @@ pub(super) mod writer_workspace;
 
 #[path = "source_continuation_snapshot.rs"]
 mod source_snapshot;
-pub(crate) use source_snapshot::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
+pub use source_snapshot::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
 
-#[cfg(test)]
-pub(crate) fn fail_next_publication(lost_ack: bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn fail_next_publication(lost_ack: bool) {
     storage_writer::fail_once(if lost_ack {
         storage_writer::SettlementFailure::AfterCommitAck
     } else {
@@ -435,11 +435,11 @@ pub(crate) fn fail_next_publication(lost_ack: bool) {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn take_materializations() -> usize {
     MATERIALIZATIONS.with(|count| count.replace(0))
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use envelope_projection::take_envelope_prefix_sweeps;

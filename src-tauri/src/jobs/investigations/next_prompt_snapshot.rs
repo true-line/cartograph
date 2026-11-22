@@ -4,7 +4,7 @@ use super::*;
 /// The original normalized request is supplied by the live caller and checked
 /// against the saved whole-request hash. It is not reconstructed from redacted
 /// history. Transient payloads and execution ownership are deliberately absent.
-pub(crate) struct NextPromptSnapshot {
+pub struct NextPromptSnapshot {
     request: StagedObligationRequest,
     saved: CompletionPromptSnapshot,
     mode: CompletionCallMode,
@@ -16,48 +16,48 @@ pub(crate) struct NextPromptSnapshot {
 }
 
 impl NextPromptSnapshot {
-    pub(crate) fn patch(&self) -> Option<&agents::investigation::finish_patch::PatchBasis> {
+    pub fn patch(&self) -> Option<&agents::investigation::finish_patch::PatchBasis> {
         self.patch.as_ref()
     }
-    pub(crate) fn request(&self) -> &StagedObligationRequest {
+    pub fn request(&self) -> &StagedObligationRequest {
         &self.request
     }
-    pub(crate) fn detail(&self) -> &InvestigationDetail {
+    pub fn detail(&self) -> &InvestigationDetail {
         self.saved.detail()
     }
-    pub(crate) fn ledger(&self) -> &InvestigationInputLedger {
+    pub fn ledger(&self) -> &InvestigationInputLedger {
         self.saved.ledger()
     }
-    #[cfg(test)]
-    pub(crate) fn attempts(&self) -> &[AttemptRecord] {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attempts(&self) -> &[AttemptRecord] {
         self.saved.attempts()
     }
-    #[cfg(test)]
-    pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
         self.saved.attempt_ledgers()
     }
-    pub(crate) fn metadata(&self) -> &ProtectedCompletionMetadata {
+    pub fn metadata(&self) -> &ProtectedCompletionMetadata {
         self.saved.metadata()
     }
-    pub(crate) fn basis(&self) -> &InvestigationTurnBasis {
+    pub fn basis(&self) -> &InvestigationTurnBasis {
         self.saved.basis()
     }
-    pub(crate) fn mode(&self) -> CompletionCallMode {
+    pub fn mode(&self) -> CompletionCallMode {
         self.mode
     }
-    pub(crate) fn preparation_mode(&self) -> Result<CompletionCallMode, InvestigationStoreError> {
+    pub fn preparation_mode(&self) -> Result<CompletionCallMode, InvestigationStoreError> {
         let policy = super::policy_for_detail(self.detail())?;
         Ok(self
             .metadata()
             .next_call_mode_with_policy(&self.detail().usage, &policy)?)
     }
-    pub(crate) fn capacity_refusal_count(&self) -> u32 {
+    pub fn capacity_refusal_count(&self) -> u32 {
         self.capacity.count
     }
-    pub(crate) fn capacity_feedback(&self) -> Option<&AdmissionCapacityFeedback> {
+    pub fn capacity_feedback(&self) -> Option<&AdmissionCapacityFeedback> {
         self.capacity.feedback.as_ref()
     }
-    pub(crate) fn attach_acquisition(
+    pub fn attach_acquisition(
         &self,
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationStoreError> {
@@ -75,7 +75,7 @@ impl NextPromptSnapshot {
         })
     }
     /// Consent retains this exact sealed step and its matching prepared payload.
-    pub(crate) fn pending_step(&self) -> Option<&PendingInvestigationStep> {
+    pub fn pending_step(&self) -> Option<&PendingInvestigationStep> {
         self.pending.as_ref()
     }
 }
@@ -83,7 +83,7 @@ impl NextPromptSnapshot {
 impl JobStore {
     /// One pinned saved-state snapshot for an internal Ready/Consent task3.
     /// No provider, public history/catalog route, or current graph is consulted.
-    pub(crate) fn investigation_next_prompt_snapshot(
+    pub fn investigation_next_prompt_snapshot(
         &self,
         id: &str,
         request: &StagedObligationRequest,
@@ -186,7 +186,7 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_snapshot_tests.rs"]
 pub(in crate::jobs::investigations) mod tests;
 

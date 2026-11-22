@@ -266,7 +266,7 @@ impl ReadAccounting {
         }
         value
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn add(&mut self, rhs: &Self) -> Result<(), InvestigationStoreError> {
         macro_rules! add { ($($field:ident),*) => { $(self.$field = self.$field.checked_add(rhs.$field)
             .ok_or(InvestigationStoreError::Capacity)?;)* }; }
@@ -670,11 +670,11 @@ pub(super) struct ReadTransaction<'tx> {
     stamp: Option<MutationStamp>,
     present: bool,
     capacity: Option<CapacitySnapshot>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     preflight_runs: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     snapshot_runs: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     validated_reads: usize,
 }
 impl<'tx> ReadTransaction<'tx> {
@@ -692,11 +692,11 @@ impl<'tx> ReadTransaction<'tx> {
             stamp: None,
             present: false,
             capacity: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             preflight_runs: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             snapshot_runs: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             validated_reads: 0,
         };
         value.ensure_preflight()?;
@@ -721,7 +721,7 @@ impl<'tx> ReadTransaction<'tx> {
         self.present = namespace_count(self.connection)? != 0;
         if self.present {
             require_transaction(self.connection)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 self.preflight_runs += 1;
             }
@@ -811,7 +811,7 @@ impl<'tx> ReadTransaction<'tx> {
         insert(self.connection, TABLES[2], task, step, disposition)
     }
     fn derive_capacity(&mut self) -> Result<CapacitySnapshot, InvestigationStoreError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.snapshot_runs += 1;
         }
@@ -852,7 +852,7 @@ impl<'tx> ReadTransaction<'tx> {
             let (task, step) = row?;
             let saved = load_validated(self.connection, &task, &step)?
                 .ok_or(InvestigationStoreError::Invalid)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 self.validated_reads += 1;
             }
@@ -915,14 +915,14 @@ pub(super) fn with_compatibility_scope<T>(
 
 /// Compatibility wrappers create a fresh transaction-bound scope per call.
 /// Production atomic transitions retain ReadTransaction across operations.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn insert_reservation(
     connection: &Connection,
     r: &Reservation,
 ) -> Result<(), InvestigationStoreError> {
     ReadTransaction::compatible(connection)?.insert_reservation(r)
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn insert_charge(
     connection: &Connection,
     task: &str,
@@ -931,7 +931,7 @@ pub(super) fn insert_charge(
 ) -> Result<(), InvestigationStoreError> {
     ReadTransaction::compatible(connection)?.insert_charge(task, step, charge)
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn insert_disposition(
     connection: &Connection,
     task: &str,
@@ -941,7 +941,7 @@ pub(super) fn insert_disposition(
     ReadTransaction::compatible(connection)?.insert_disposition(task, step, disposition)
 }
 /// Actual logical row charges only. Shared storage adds rows and claims once.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn stored_bytes(
     connection: &Connection,
     task: Option<&str>,
@@ -950,7 +950,7 @@ pub(super) fn stored_bytes(
         .capacity_charge(task)?
         .rows)
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn pending_storage_claims(
     connection: &Connection,
     task: Option<&str>,
@@ -971,7 +971,7 @@ pub(super) fn pending_event_claims(
 
 /// Audit deltas for one task, including permanently retained unknown debits.
 /// This is not saved task usage reconciliation or an owner-loss proof.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn task_accounting(
     connection: &Connection,
     task: &str,
@@ -998,7 +998,7 @@ pub(super) fn task_accounting(
     Ok(total)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "read_reservation_tests.rs"]
 mod tests;
 

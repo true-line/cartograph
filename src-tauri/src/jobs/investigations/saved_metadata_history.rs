@@ -407,12 +407,12 @@ impl<'a> SavedMetadataHistory<'a> {
         })
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {static INVOCATION_SWEEPS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};}
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn note_invocation_sweep() {
     INVOCATION_SWEEPS.with(|count| count.set(count.get() + 1));
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "saved_metadata_history_tests.rs"]
 mod tests;

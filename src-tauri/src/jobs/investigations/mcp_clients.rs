@@ -4,7 +4,7 @@ use super::*;
 use std::num::NonZeroUsize;
 
 impl JobStore {
-    pub(crate) fn create_mcp_client(
+    pub fn create_mcp_client(
         &mut self,
         maximum_clients: NonZeroUsize,
     ) -> Result<McpClientId, InvestigationStoreError> {
@@ -38,10 +38,7 @@ impl JobStore {
     }
 
     /// Validate a host selection without loading registry pages or creating it.
-    pub(crate) fn mcp_client_exists(
-        &self,
-        client: &McpClientId,
-    ) -> Result<bool, InvestigationStoreError> {
+    pub fn mcp_client_exists(&self, client: &McpClientId) -> Result<bool, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let exists = tx.query_row(
@@ -55,7 +52,7 @@ impl JobStore {
 
     /// Owner-only keyset page. Creation capacity does not limit reads of already
     /// admitted principals. No grant or credential is stored or returned.
-    pub(crate) fn mcp_clients(
+    pub fn mcp_clients(
         &self,
         after: Option<&McpClientId>,
         limit: NonZeroUsize,
@@ -87,7 +84,7 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

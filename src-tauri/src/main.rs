@@ -21,10 +21,10 @@ use app_store::findings;
 #[cfg(test)]
 mod graph_projection_tests;
 mod investigations;
-mod job_execution;
+use app_store::job_execution;
 #[cfg(test)]
 mod job_execution_host_tests;
-mod jobs;
+use app_store::jobs;
 mod knowledge_phase;
 mod local_commit;
 mod manifest_draft;

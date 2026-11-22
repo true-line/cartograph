@@ -9,7 +9,7 @@ use serde_json::Value;
 /// Implementations must reject a different target or base ledger and resolve
 /// sizes from that held receipt, never from caller-supplied size claims.
 /// This borrow must remain live through reservation and settlement.
-pub(crate) trait SourceSizeBinding {
+pub trait SourceSizeBinding {
     fn sizes_for(
         &self,
         target: &InvestigationInspectionTarget,
@@ -17,7 +17,7 @@ pub(crate) trait SourceSizeBinding {
     ) -> Result<Option<core_redact::DirectSourceJsonContentSizes>, InvestigationError>;
 }
 
-pub(crate) struct SourceAdmission<'a> {
+pub struct SourceAdmission<'a> {
     pub size_binding: Option<&'a dyn SourceSizeBinding>,
     pub response: &'a InvestigationResponseMeta,
     pub original_action: &'a Value,
@@ -33,7 +33,7 @@ pub(crate) struct SourceAdmission<'a> {
 
 /// Only issued after COMMIT acknowledgement. This is not a read permit: the
 /// independent owner-authenticated validation charge and access fence must run.
-pub(crate) struct CommittedSourceReservation {
+pub struct CommittedSourceReservation {
     task_id: String,
     step_id: String,
     reservation_hash: String,
@@ -54,7 +54,7 @@ impl CommittedSourceReservation {
             && self.source_descriptor_hash == saved.source.target_id
             && self.base_ledger_hash == saved.binding.base_ledger_hash)
     }
-    pub(crate) fn basis(&self) -> SourceValidationBasis<'_> {
+    pub fn basis(&self) -> SourceValidationBasis<'_> {
         SourceValidationBasis {
             task_id: &self.task_id,
             step_id: &self.step_id,
@@ -62,22 +62,18 @@ impl CommittedSourceReservation {
             revision: self.detail.summary.revision,
         }
     }
-    pub(crate) fn matches(
-        &self,
-        target: &InvestigationInspectionTarget,
-        ledger_hash: &str,
-    ) -> bool {
+    pub fn matches(&self, target: &InvestigationInspectionTarget, ledger_hash: &str) -> bool {
         target.validate().is_ok()
             && self.source_descriptor_hash == target.target_id
             && self.base_ledger_hash == ledger_hash
     }
-    pub(crate) fn detail(&self) -> &InvestigationDetail {
+    pub fn detail(&self) -> &InvestigationDetail {
         &self.detail
     }
 }
 
 impl JobStore {
-    pub(crate) fn admit_next_prompt_source(
+    pub fn admit_next_prompt_source(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -360,7 +356,7 @@ impl JobStore {
         }
         source_validation::validate_saved_pending(&tx, &task)?;
         save_next_prompt_task(&tx, &task, revision, false)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if FAIL_BEFORE_SOURCE_ADMISSION_COMMIT.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Capacity);
         }
@@ -374,7 +370,7 @@ impl JobStore {
         };
         drop(reads);
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if LOSE_SOURCE_ADMISSION_ACK.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Storage);
         }
@@ -441,17 +437,17 @@ fn count_headroom(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_BEFORE_SOURCE_ADMISSION_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LOSE_SOURCE_ADMISSION_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-pub(crate) fn lose_next_commit_ack() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn lose_next_commit_ack() {
     LOSE_SOURCE_ADMISSION_ACK.with(|flag| flag.set(true));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "source_admission_tests.rs"]
 mod tests;

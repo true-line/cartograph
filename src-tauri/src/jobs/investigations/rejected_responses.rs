@@ -61,7 +61,7 @@ fn initialize(tx: &Transaction<'_>, table: &str) -> Result<(), InvestigationStor
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn insert(
     tx: &Transaction<'_>,
     task: &str,
@@ -103,7 +103,7 @@ fn insert_never_decisive(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn load(
     connection: &Connection,
     task: &str,
@@ -193,7 +193,7 @@ pub(super) fn record_rejected(
 
 /// The completed response the worker last received, held until the task stops.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RejectedCompletion {
+pub struct RejectedCompletion {
     pub step_id: String,
     pub text: String,
     /// The canonical action bytes behind the saved `action_hash`, once the
@@ -202,10 +202,10 @@ pub(crate) struct RejectedCompletion {
 }
 
 // Pilot inspection reads the table directly; the app has no reader yet.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl JobStore {
     /// The saved rejected response of a failed task, if one was kept.
-    pub(crate) fn investigation_rejected_response(
+    pub fn investigation_rejected_response(
         &self,
         id: &str,
     ) -> Result<Option<RejectedResponse>, InvestigationStoreError> {
@@ -217,7 +217,7 @@ impl JobStore {
     }
 
     /// The saved action a task decoded before a host failure, if one was kept.
-    pub(crate) fn investigation_admitted_action(
+    pub fn investigation_admitted_action(
         &self,
         id: &str,
     ) -> Result<Option<AdmittedAction>, InvestigationStoreError> {
@@ -245,7 +245,7 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

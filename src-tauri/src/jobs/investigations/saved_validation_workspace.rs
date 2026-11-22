@@ -5,7 +5,7 @@ use std::mem::size_of;
 
 /// Peaks for validate_saved and validate_pending_consent respectively. Includes
 /// the borrowed task and schema workspace; no source/result replay or RSS claim.
-pub(crate) fn next_prompt_saved_validation_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_saved_validation_workspace() -> Option<(usize, usize)> {
     let row = metadata_history_workspace::row_workspace()?;
     let (_, core_peak) = next_prompt_saved_call_workspace()?;
     let (_, capacity_peak) = next_prompt_capacity_replay_workspace()?;

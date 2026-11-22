@@ -4,7 +4,7 @@ use super::*;
 use llm::bounded::{CompletionLimits, PreparedBoundedCompletion};
 use serde_json::{Value, json};
 
-pub(crate) struct CapturedSourceInvocationFixture {
+pub struct CapturedSourceInvocationFixture {
     inner: completion::InternalFixture,
     target: InvestigationInspectionTarget,
     current: InvestigationInput,
@@ -14,18 +14,16 @@ pub(crate) struct CapturedSourceInvocationFixture {
     action: Value,
 }
 impl CapturedSourceInvocationFixture {
-    pub(crate) fn new(
-        initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
-    ) -> Self {
+    pub fn new(initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData) -> Self {
         Self::with_gated(false, initialize)
     }
-    pub(crate) fn with_gated(
+    pub fn with_gated(
         gated: bool,
         initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
     ) -> Self {
         Self::with_role(gated.then_some(SpecialistId::DomainAnalystV18), initialize)
     }
-    pub(crate) fn with_role(
+    pub fn with_role(
         role: Option<SpecialistId>,
         initialize: impl FnOnce(&std::path::Path) -> SourceValidationInitialData,
     ) -> Self {
@@ -127,7 +125,7 @@ impl CapturedSourceInvocationFixture {
         }
     }
     /// Submit a real finish after the captured source has been published. No transport.
-    pub(crate) fn assert_configuration_refusal_after_capture(
+    pub fn assert_configuration_refusal_after_capture(
         &mut self,
         current: &InvestigationInput,
         prepared: &PreparedBoundedCompletion,
@@ -329,7 +327,7 @@ impl CapturedSourceInvocationFixture {
     }
     /// Negative binding tests only: actual authenticated reservation writer,
     /// scripted retention callback; grants no host source access.
-    pub(crate) fn reserve_for_binding_test(&mut self) -> CommittedSourceReservation {
+    pub fn reserve_for_binding_test(&mut self) -> CommittedSourceReservation {
         let response = self.response.clone();
         self.inner
             .store
@@ -350,10 +348,10 @@ impl CapturedSourceInvocationFixture {
             )
             .unwrap()
     }
-    pub(crate) fn lose_charge_ack(&self) {
+    pub fn lose_charge_ack(&self) {
         source_validation::lose_next_charge_ack();
     }
-    pub(crate) fn cancel_after_charge(&self) -> impl FnOnce() + 'static {
+    pub fn cancel_after_charge(&self) -> impl FnOnce() + 'static {
         let path = self.inner.directory.path().join("state.db");
         let id = self.inner.basis.task_id.clone();
         move || {
@@ -363,19 +361,19 @@ impl CapturedSourceInvocationFixture {
                 .unwrap();
         }
     }
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.inner.basis.task_id
     }
-    pub(crate) fn request(&self) -> &StagedObligationRequest {
+    pub fn request(&self) -> &StagedObligationRequest {
         &self.inner.request
     }
-    pub(crate) fn current(&self) -> &InvestigationInput {
+    pub fn current(&self) -> &InvestigationInput {
         &self.current
     }
-    pub(crate) fn prepared(&self) -> &PreparedBoundedCompletion {
+    pub fn prepared(&self) -> &PreparedBoundedCompletion {
         &self.prepared
     }
-    pub(crate) fn use_measured_proof(&mut self, sizes: core_redact::DirectSourceJsonContentSizes) {
+    pub fn use_measured_proof(&mut self, sizes: core_redact::DirectSourceJsonContentSizes) {
         self.proof = self
             .current
             .certify_measured_unread_source_v9_with_policy(
@@ -393,10 +391,10 @@ impl CapturedSourceInvocationFixture {
             )
             .unwrap();
     }
-    pub(crate) fn proof(&self) -> &UnreadSourcePreviewBound {
+    pub fn proof(&self) -> &UnreadSourcePreviewBound {
         &self.proof
     }
-    pub(crate) fn admission(&self) -> SourceAdmission<'_> {
+    pub fn admission(&self) -> SourceAdmission<'_> {
         SourceAdmission {
             size_binding: None,
             response: &self.response,
@@ -408,13 +406,13 @@ impl CapturedSourceInvocationFixture {
             active_milliseconds: self.response.active_milliseconds,
         }
     }
-    pub(crate) fn execution(&self) -> &JobExecution {
+    pub fn execution(&self) -> &JobExecution {
         &self.inner._execution_guard
     }
-    pub(crate) fn revision(&self) -> u64 {
+    pub fn revision(&self) -> u64 {
         self.inner.task.detail.summary.revision
     }
-    pub(crate) fn cancel(&mut self) -> u64 {
+    pub fn cancel(&mut self) -> u64 {
         self.inner
             .store
             .cancel_next_prompt_investigation(&self.inner.basis.task_id)
@@ -422,7 +420,7 @@ impl CapturedSourceInvocationFixture {
             .summary
             .revision
     }
-    pub(crate) fn disposition_after_reopen(&self) -> String {
+    pub fn disposition_after_reopen(&self) -> String {
         let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
         let tx = reopened.conn.unchecked_transaction().unwrap();
         let read =
@@ -431,7 +429,7 @@ impl CapturedSourceInvocationFixture {
                 .unwrap();
         serde_json::to_string(&read.disposition.unwrap().kind).unwrap()
     }
-    pub(crate) fn publication_after_reopen(&self) -> (u64, usize, usize) {
+    pub fn publication_after_reopen(&self) -> (u64, usize, usize) {
         let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
         let tx = reopened.conn.unchecked_transaction().unwrap();
         let task = load_next_prompt_task(&tx, &self.inner.basis.task_id).unwrap();
@@ -444,7 +442,7 @@ impl CapturedSourceInvocationFixture {
         )
     }
     /// Reopen/authenticate saved authority independently of the AppState handle.
-    pub(crate) fn counts(&self) -> (usize, usize, u64) {
+    pub fn counts(&self) -> (usize, usize, u64) {
         let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
         let tx = reopened.conn.unchecked_transaction().unwrap();
         let task = load_next_prompt_task_base(&tx, &self.inner.basis.task_id).unwrap();

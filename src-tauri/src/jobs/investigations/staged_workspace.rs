@@ -6,7 +6,7 @@ use std::mem::size_of;
 /// Retained journal vector and peak including the borrowed task. No native,
 /// allocator/RSS or legacy-family claim. All row owners use strict preflight
 /// caps before semantic validation; successful-state counts alone are unsafe.
-pub(crate) fn next_prompt_staged_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_staged_workspace() -> Option<(usize, usize)> {
     let policy = &INVESTIGATION_V2_POLICY;
     let (task, task_decode) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     let row = metadata_history_workspace::row_workspace()?;

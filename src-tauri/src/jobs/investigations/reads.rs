@@ -16,25 +16,23 @@ struct HistoryCursor {
 
 /// App-only response extension: never serialized into StoredTask or MCP reads.
 #[derive(Serialize)]
-pub(crate) struct InvestigationDetailRead {
+pub struct InvestigationDetailRead {
     #[serde(flatten)]
-    pub(crate) detail: InvestigationDetail,
+    pub detail: InvestigationDetail,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reported_usage_exact: Option<ReportedTaskUsage>,
+    pub reported_usage_exact: Option<ReportedTaskUsage>,
 }
 
 #[derive(Serialize)]
-pub(crate) struct ReportedTaskUsage {
-    pub(crate) input_tokens: Option<String>,
-    pub(crate) output_tokens: Option<String>,
-    pub(crate) cache_read_tokens: Option<String>,
+pub struct ReportedTaskUsage {
+    pub input_tokens: Option<String>,
+    pub output_tokens: Option<String>,
+    pub cache_read_tokens: Option<String>,
 }
 
 impl InvestigationDetailRead {
     /// Takes the already validated detail without cloning its nested owners.
-    pub(crate) fn from_detail(
-        detail: InvestigationDetail,
-    ) -> Result<Self, InvestigationStoreError> {
+    pub fn from_detail(detail: InvestigationDetail) -> Result<Self, InvestigationStoreError> {
         let base_bytes =
             context_hub::logical::count(&detail).ok_or(InvestigationStoreError::Invalid)?;
         if base_bytes > MAX_RECORD_BYTES {
@@ -64,33 +62,33 @@ impl InvestigationDetailRead {
 
 /// App-only activity attribution projected from the validated saved task.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct SavedActivityProvider {
-    pub(crate) mode: InvestigationProviderMode,
-    pub(crate) provider_id: String,
-    pub(crate) model: String,
+pub struct SavedActivityProvider {
+    pub mode: InvestigationProviderMode,
+    pub provider_id: String,
+    pub model: String,
 }
 
 /// Exact display values, not a price or complete lifetime accounting claim.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ReportedActivityUsage {
-    pub(crate) input_tokens: Option<String>,
-    pub(crate) output_tokens: Option<String>,
+pub struct ReportedActivityUsage {
+    pub input_tokens: Option<String>,
+    pub output_tokens: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct SpecialistActivityItem {
-    pub(crate) summary: InvestigationSummary,
-    pub(crate) saved_provider: SavedActivityProvider,
+pub struct SpecialistActivityItem {
+    pub summary: InvestigationSummary,
+    pub saved_provider: SavedActivityProvider,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reported_usage: Option<ReportedActivityUsage>,
+    pub reported_usage: Option<ReportedActivityUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reported_cache_read_tokens: Option<Option<String>>,
+    pub reported_cache_read_tokens: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct SpecialistActivityPage {
-    pub(crate) items: Vec<SpecialistActivityItem>,
-    pub(crate) next_cursor: Option<String>,
+pub struct SpecialistActivityPage {
+    pub items: Vec<SpecialistActivityItem>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -176,7 +174,7 @@ struct HistoryProjectionPage<T> {
 }
 
 impl JobStore {
-    pub(crate) fn investigation_history(
+    pub fn investigation_history(
         &self,
         conversation_id: Option<&str>,
         cursor: Option<&str>,
@@ -187,7 +185,7 @@ impl JobStore {
     /// The saved specialist, provider mode and status of every in-flight
     /// investigation, read through the active selection for the agent roster
     /// (AC-1408). `None` when more than `max_pages` pages are in flight.
-    pub(crate) fn active_investigation_work(
+    pub fn active_investigation_work(
         &self,
         max_pages: usize,
     ) -> Result<Option<Vec<agents::roster::AgentWork>>, InvestigationStoreError> {
@@ -208,7 +206,7 @@ impl JobStore {
         Ok(None)
     }
 
-    pub(crate) fn search_investigation_history(
+    pub fn search_investigation_history(
         &self,
         query: &str,
         cursor: Option<&str>,
@@ -216,7 +214,7 @@ impl JobStore {
         self.investigation_history_selection(Some(query), false, cursor)
     }
 
-    pub(crate) fn investigation_history_selection(
+    pub fn investigation_history_selection(
         &self,
         search: Option<&str>,
         active_only: bool,
@@ -247,7 +245,7 @@ impl JobStore {
         self.investigation_history_filtered(None, query.as_deref(), active_only, cursor)
     }
 
-    pub(crate) fn specialist_task_activity(
+    pub fn specialist_task_activity(
         &self,
         cursor: Option<&str>,
     ) -> Result<SpecialistActivityPage, InvestigationStoreError> {
@@ -500,7 +498,7 @@ impl JobStore {
         Ok(page)
     }
 
-    pub(crate) fn investigation_events(
+    pub fn investigation_events(
         &self,
         id: &str,
         after_sequence: u64,
@@ -508,7 +506,7 @@ impl JobStore {
         self.investigation_events_access(id, after_sequence, None)
     }
 
-    pub(crate) fn investigation_events_access(
+    pub fn investigation_events_access(
         &self,
         id: &str,
         after_sequence: u64,
@@ -569,7 +567,7 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn investigation_receipt_references(
+    pub fn investigation_receipt_references(
         &self,
         source_id: &str,
     ) -> Result<Vec<InvestigationReceiptUse>, InvestigationStoreError> {
@@ -788,6 +786,6 @@ fn ascii_case_insensitive_contains(haystack: &[u8], needle: &[u8]) -> bool {
         })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "reads_tests.rs"]
 mod tests;

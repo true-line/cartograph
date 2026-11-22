@@ -13,45 +13,45 @@ mod analyst_lineage;
 use analyst_lineage::{uses_finding_withholding, uses_local_finish_generation};
 #[path = "investigations/admission_journal.rs"]
 mod admission_journal;
-pub(crate) use admission_journal::RefusalReason as NextPromptRefusalReason;
+pub use admission_journal::RefusalReason as NextPromptRefusalReason;
 #[path = "investigations/admission_transition.rs"]
 mod admission_transition;
 #[path = "investigations/chat.rs"]
 mod chat;
-pub(crate) use chat::StoredChatTranscript;
+pub use chat::StoredChatTranscript;
 #[path = "investigations/completion.rs"]
 mod completion;
-pub(crate) use completion::NextPromptFinish;
+pub use completion::NextPromptFinish;
 #[path = "investigations/metadata_admission.rs"]
 mod metadata_admission;
-pub(crate) use metadata_admission::{MetadataAdmission, MetadataContinuationRead};
+pub use metadata_admission::{MetadataAdmission, MetadataContinuationRead};
 #[path = "investigations/next_prompt_consent.rs"]
 mod next_prompt_consent;
 #[path = "investigations/next_prompt_initial.rs"]
 mod next_prompt_initial;
 #[path = "investigations/next_prompt_invocation.rs"]
 mod next_prompt_invocation;
-pub(crate) use next_prompt_invocation::NextPromptInvocation;
+pub use next_prompt_invocation::NextPromptInvocation;
 #[path = "investigations/coverage.rs"]
 mod coverage;
 // Constructed once scoped preparation is wired (#1602); until then only tests.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
 #[path = "investigations/graph_snapshot_limit.rs"]
 mod graph_snapshot_limit;
-pub(crate) use graph_snapshot_limit::GraphSnapshotLimit;
-#[cfg(test)]
+pub use graph_snapshot_limit::GraphSnapshotLimit;
+#[cfg(any(test, feature = "test-support"))]
 #[path = "investigations/coverage_tests.rs"]
 mod coverage_tests;
 #[path = "investigations/mcp_clients.rs"]
 mod mcp_clients;
 #[path = "investigations/mcp_start.rs"]
 mod mcp_start;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "investigations/metadata_host_fixture.rs"]
-pub(crate) mod metadata_host_fixture;
+pub mod metadata_host_fixture;
 #[path = "investigations/reads.rs"]
 mod reads;
-pub(crate) use reads::{InvestigationDetailRead, SpecialistActivityPage};
+pub use reads::{InvestigationDetailRead, SpecialistActivityPage};
 // Internal admission foundation; no historical runtime initializes these tables.
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
@@ -59,106 +59,104 @@ mod read_reservations;
 mod source_admission;
 #[path = "investigations/source_settlement.rs"]
 mod source_settlement;
-#[cfg(test)]
-pub(crate) use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
-pub(crate) use source_admission::{CommittedSourceReservation, SourceAdmission, SourceSizeBinding};
+#[cfg(any(test, feature = "test-support"))]
+pub use source_admission::lose_next_commit_ack as lose_next_source_admission_ack;
+pub use source_admission::{CommittedSourceReservation, SourceAdmission, SourceSizeBinding};
 #[cfg(unix)]
-pub(crate) use source_settlement::snapshot_workspace::{
+pub use source_settlement::snapshot_workspace::{
     correction_workspace as next_prompt_correction_workspace,
     workspace as source_snapshot_workspace,
 };
 #[cfg(unix)]
-pub(crate) use source_settlement::writer_workspace::workspace as source_settlement_workspace;
+pub use source_settlement::writer_workspace::workspace as source_settlement_workspace;
 #[path = "investigations/source_validation.rs"]
 mod source_validation;
-pub(crate) use source_validation::{CommittedSourceValidation, SourceValidationBasis};
-#[cfg(test)]
-pub(crate) use source_validation::{SourceValidationInitialData, captured_source_fixture};
+pub use source_validation::{CommittedSourceValidation, SourceValidationBasis};
+#[cfg(any(test, feature = "test-support"))]
+pub use source_validation::{SourceValidationInitialData, captured_source_fixture};
 #[path = "investigations/finding_reviews.rs"]
 mod finding_reviews;
 #[path = "investigations/refusal_diagnostics.rs"]
 mod refusal_diagnostics;
 #[path = "investigations/rejected_responses.rs"]
 mod rejected_responses;
-pub(crate) use rejected_responses::RejectedCompletion;
+pub use rejected_responses::RejectedCompletion;
 #[path = "investigations/staged.rs"]
 mod staged;
 #[path = "investigations/volatile_patch.rs"]
 mod volatile_patch;
-pub(crate) use finding_reviews::{FindingReviewError, ResolvedFinding};
+pub use finding_reviews::{FindingReviewError, ResolvedFinding};
 #[path = "investigations/semantic_audit_journal.rs"]
 mod semantic_audit_journal;
 #[path = "investigations/semantic_audit_receipt.rs"]
 mod semantic_audit_receipt;
 #[path = "investigations/semantic_audit_settlement.rs"]
 mod semantic_audit_settlement;
-pub(crate) use semantic_audit_settlement::SemanticAuditResponse;
+pub use semantic_audit_settlement::SemanticAuditResponse;
 #[path = "investigations/semantic_audit_state.rs"]
 mod semantic_audit_state;
 #[path = "investigations/semantic_audit_workspace.rs"]
 mod semantic_audit_workspace;
 #[path = "investigations/specialist_history.rs"]
 mod specialist_history;
-pub(crate) use semantic_audit_journal::SeparateAuditor;
-pub(crate) use semantic_audit_state::SemanticAuditStart;
+pub use semantic_audit_journal::SeparateAuditor;
+pub use semantic_audit_state::SemanticAuditStart;
 #[cfg(unix)]
-pub(crate) use semantic_audit_workspace::next_prompt_audit_transaction_workspace;
+pub use semantic_audit_workspace::next_prompt_audit_transaction_workspace;
 #[path = "investigations/storage.rs"]
 mod storage;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, test, feature = "test-support"))]
 #[path = "investigations/task_record_workspace.rs"]
 mod task_record_workspace;
-#[cfg(any(unix, test))]
-pub(crate) use task_record_workspace::next_prompt_record_workspace;
+#[cfg(any(unix, test, feature = "test-support"))]
+pub use task_record_workspace::next_prompt_record_workspace;
 #[cfg(unix)]
-pub(crate) use task_record_workspace::{
+pub use task_record_workspace::{
     next_prompt_task_load_workspace, next_prompt_task_write_workspace,
 };
-#[cfg(any(unix, test))]
+#[cfg(any(unix, test, feature = "test-support"))]
 #[path = "investigations/attempt_record_workspace.rs"]
 mod attempt_record_workspace;
-#[cfg(test)]
-pub(crate) use attempt_record_workspace::next_prompt_attempt_acquisition_workspace;
+#[cfg(any(test, feature = "test-support"))]
+pub use attempt_record_workspace::next_prompt_attempt_acquisition_workspace;
 #[cfg(unix)]
-pub(crate) use attempt_record_workspace::next_prompt_attempt_replay_workspace;
+pub use attempt_record_workspace::next_prompt_attempt_replay_workspace;
 #[cfg(unix)]
 #[path = "investigations/metadata_history_workspace.rs"]
 mod metadata_history_workspace;
 #[cfg(unix)]
-pub(crate) use metadata_history_workspace::{
+pub use metadata_history_workspace::{
     next_prompt_metadata_continuation_workspace, next_prompt_metadata_workspace,
 };
 #[cfg(unix)]
 #[path = "investigations/saved_call_workspace.rs"]
 mod saved_call_workspace;
 #[cfg(unix)]
-pub(crate) use admission_journal::refusal_workspace::next_prompt_capacity_replay_workspace;
+pub use admission_journal::refusal_workspace::next_prompt_capacity_replay_workspace;
 #[cfg(unix)]
-pub(crate) use admission_journal::timeline_workspace::next_prompt_timeline_workspace;
+pub use admission_journal::timeline_workspace::next_prompt_timeline_workspace;
 #[cfg(unix)]
-pub(crate) use saved_call_workspace::next_prompt_saved_call_workspace;
+pub use saved_call_workspace::next_prompt_saved_call_workspace;
 #[cfg(unix)]
 #[path = "investigations/saved_validation_workspace.rs"]
 mod saved_validation_workspace;
 #[cfg(unix)]
-pub(crate) use read_reservations::workspace::{
+pub use read_reservations::workspace::{
     next_prompt_pending_source_workspace, next_prompt_source_capacity_workspace,
 };
 #[cfg(unix)]
-pub(crate) use saved_validation_workspace::next_prompt_saved_validation_workspace;
+pub use saved_validation_workspace::next_prompt_saved_validation_workspace;
 #[cfg(unix)]
 #[path = "investigations/result_replay_workspace.rs"]
 mod result_replay_workspace;
 #[cfg(unix)]
-pub(crate) use result_replay_workspace::{
-    completion_basis_workspace, next_prompt_result_workspace,
-};
+pub use result_replay_workspace::{completion_basis_workspace, next_prompt_result_workspace};
 #[cfg(unix)]
-pub(crate) use staged::next_prompt_staged_workspace;
+pub use staged::next_prompt_staged_workspace;
 #[path = "investigations/query_refusal.rs"]
 mod query_refusal;
-pub(crate) use query_refusal::QueryRefusalAdmission;
-#[cfg(test)]
+pub use query_refusal::QueryRefusalAdmission;
+#[cfg(any(test, feature = "test-support"))]
 #[path = "investigations/tests.rs"]
 mod tests;
 #[path = "investigations/transitions.rs"]
@@ -168,10 +166,10 @@ mod turn;
 
 use agents::investigation::{staged_attempt::*, staged_finish::*, staged_refusal::*};
 #[cfg(unix)]
-pub(crate) use coverage::archive_acquisition_workspace;
+pub use coverage::archive_acquisition_workspace;
 use storage::*;
 #[cfg(unix)]
-pub(crate) use storage::{next_prompt_contract_workspace, next_prompt_ledger_workspace};
+pub use storage::{next_prompt_contract_workspace, next_prompt_ledger_workspace};
 
 pub(super) use transitions::{attach_execution, cancel_for_job};
 
@@ -190,9 +188,9 @@ fn with_task_access<T>(
     }
 }
 
-pub(crate) const KIND_PREFIX: &str = "investigation-v1:";
+pub const KIND_PREFIX: &str = "investigation-v1:";
 const MAX_TASKS: usize = 128;
-pub(crate) const MAX_LIVE_TASKS: usize = 2;
+pub const MAX_LIVE_TASKS: usize = 2;
 const TASK_CAPACITY: usize = 2 * 1024 * 1024;
 const TERMINAL_RESERVE: usize = 256 * 1024;
 const STORE_CAPACITY: usize = 256 * 1024 * 1024;
@@ -201,7 +199,7 @@ const STORE_CAPACITY: usize = 256 * 1024 * 1024;
 const MAX_INVOCATION_BYTES: usize = MAX_DISCLOSURE_BYTES + 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InvestigationStoreError {
+pub enum InvestigationStoreError {
     Invalid,
     Missing,
     Conflict,
@@ -234,9 +232,9 @@ impl std::fmt::Display for InvestigationStoreError {
 impl std::error::Error for InvestigationStoreError {}
 impl From<rusqlite::Error> for InvestigationStoreError {
     fn from(error: rusqlite::Error) -> Self {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::record(&error);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let _ = error;
         Self::Storage
     }
@@ -252,7 +250,7 @@ impl From<JobTransitionError> for InvestigationStoreError {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod start_diagnostics {
     use std::cell::Cell;
 
@@ -297,7 +295,7 @@ mod start_diagnostics {
 }
 
 #[derive(Debug)]
-pub(crate) struct InvestigationStart {
+pub struct InvestigationStart {
     pub detail: InvestigationDetail,
     pub created: bool,
 }
@@ -306,7 +304,7 @@ pub(crate) struct InvestigationStart {
 /// exists exclusively in its live worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PendingInvestigationStep {
+pub struct PendingInvestigationStep {
     pub step_id: String,
     pub payload_hash: String,
     pub input_ledger_hash: String,
@@ -318,7 +316,7 @@ pub(crate) struct PendingInvestigationStep {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct InvestigationResponseMeta {
+pub struct InvestigationResponseMeta {
     /// Host-only finish integrity witness: @22+ refusal digest, or @25
     /// partial-projection digest in its distinct domain. Absent historically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,7 +334,7 @@ pub(crate) struct InvestigationResponseMeta {
     pub active_milliseconds: u64,
 }
 
-pub(crate) enum InvestigationTransition {
+pub enum InvestigationTransition {
     InputPrepared {
         coverage_archive: Option<Box<InvestigationCoverageArchive>>,
         ledger: Box<InvestigationInputLedger>,
@@ -397,7 +395,7 @@ pub(crate) enum InvestigationTransition {
 
 /// Closed host boundaries only, never an invalid field or response fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreparationPhase {
+pub enum PreparationPhase {
     Continuation,
     Finish,
     Metadata,
@@ -415,7 +413,7 @@ pub(crate) enum PreparationPhase {
 
 impl PreparationPhase {
     /// The closed, text-free diagnostic boundary for this phase (AC-0725).
-    pub(crate) fn diagnostic_phase(self) -> agents::investigation::InvestigationFailurePhase {
+    pub fn diagnostic_phase(self) -> agents::investigation::InvestigationFailurePhase {
         use agents::investigation::InvestigationFailurePhase as Phase;
         match self {
             Self::Continuation => Phase::Continuation,
@@ -436,7 +434,7 @@ impl PreparationPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostLimitKind {
+pub enum HostLimitKind {
     Unspecified,
     CumulativeQueryAndInventoryBytes,
     QueryPageBudget(agents::investigation::query_refusal::QueryBudgetDiagnostic),
@@ -445,7 +443,7 @@ pub(crate) enum HostLimitKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InvestigationStopReason {
+pub enum InvestigationStopReason {
     Cancelled,
     PreparationFailed,
     PreparationAt(PreparationPhase),
@@ -469,7 +467,7 @@ pub(crate) enum InvestigationStopReason {
         limit: HostLimitKind,
     },
     /// A scoped-preparation snapshot read stopped at a named limit (#1602).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     GraphSnapshotLimit(GraphSnapshotLimit),
     StoreCapacity,
     OutcomeUnknown,
@@ -485,7 +483,7 @@ pub(crate) enum InvestigationStopReason {
 impl InvestigationStopReason {
     // Classification preserves existing terminal/phase semantics; diagnostics
     // retain the closed provider code independently of that classification.
-    pub(crate) fn terminal_class(self) -> Self {
+    pub fn terminal_class(self) -> Self {
         use llm::bounded::{FailureCode as Code, InvocationOutcome};
         match self {
             Self::BoundedProvider(error) if error.outcome == InvocationOutcome::Unknown => {
@@ -512,12 +510,12 @@ impl InvestigationStopReason {
             other => other,
         }
     }
-    #[cfg(test)]
-    pub(crate) fn test_message(self) -> &'static str {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_message(self) -> &'static str {
         self.message()
     }
-    #[cfg(test)]
-    pub(crate) fn is_host_limit_message(message: &str) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_host_limit_message(message: &str) -> bool {
         use PreparationPhase as Phase;
         let phases = [
             Phase::Continuation,
@@ -828,7 +826,7 @@ impl InvestigationStopReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct InvestigationReceiptUse {
+pub struct InvestigationReceiptUse {
     pub investigation_id: String,
     pub source_id: String,
     pub repo_key: String,
@@ -837,7 +835,7 @@ pub(crate) struct InvestigationReceiptUse {
 
 /// Private copied recovery identity. A caller may only try its exact OS target,
 /// outside all application/database mutexes, then return the retained reservation.
-pub(crate) struct InvestigationRecoveryCandidate {
+pub struct InvestigationRecoveryCandidate {
     id: String,
     revision: u64,
     identity: Option<StoredExecution>,
@@ -845,7 +843,7 @@ pub(crate) struct InvestigationRecoveryCandidate {
 }
 
 impl InvestigationRecoveryCandidate {
-    pub(crate) fn lock_target(&self) -> &JobLockTarget {
+    pub fn lock_target(&self) -> &JobLockTarget {
         &self.target
     }
 }
@@ -922,7 +920,7 @@ fn hosted_generation(provider: Option<&InvestigationProvider>) -> bool {
 /// Reconstruct only saved desktop overrides (time, output and parent history);
 /// MCP stays on static policy. A saved hosted allowance is honoured only for
 /// the next-prompt task whose saved provider qualifies, as at start.
-pub(crate) fn policy_for_detail(
+pub fn policy_for_detail(
     detail: &InvestigationDetail,
 ) -> Result<InvestigationPolicy, InvestigationStoreError> {
     let policy = match detail.origin {
@@ -965,7 +963,7 @@ struct McpRequestIdentity {
 
 impl JobStore {
     /// Display metadata only; elapsed time and ownership use separate authorities.
-    pub(crate) fn investigation_timestamp(
+    pub fn investigation_timestamp(
         &self,
         offset_seconds: u32,
     ) -> Result<String, InvestigationStoreError> {
@@ -980,7 +978,7 @@ impl JobStore {
     }
 
     /// Resolve immutable request identity before mutable provider/capacity checks.
-    pub(crate) fn start_investigation(
+    pub fn start_investigation(
         &mut self,
         request: &StartInvestigationRequest,
         provider: Option<&InvestigationProvider>,
@@ -988,7 +986,7 @@ impl JobStore {
         self.start_investigation_access(request, provider, None)
     }
 
-    pub(crate) fn start_investigation_access(
+    pub fn start_investigation_access(
         &mut self,
         request: &StartInvestigationRequest,
         provider: Option<&InvestigationProvider>,
@@ -1076,12 +1074,12 @@ impl JobStore {
             }
         });
         let request_namespace = origin.request_namespace();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("begin_immediate");
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("schema_validate");
         validate(&tx, &self.namespace)?;
         if let Some(identity) = mcp {
@@ -1094,14 +1092,14 @@ impl JobStore {
                 return Err(InvestigationStoreError::Missing);
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("nonce_lookup");
         let prior: Option<Option<String>> = tx.query_row(
             "SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE request_namespace=?2 AND nonce = ?1", params![request.request_nonce,request_namespace], |row| row.get(0),
         ).optional()?;
         if let Some(id) = prior {
             let id = id.ok_or(InvestigationStoreError::Invalid)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             start_diagnostics::stage("nonce_replay");
             let record = if next_prompt {
                 load_next_prompt_task(&tx, &id)?
@@ -1128,7 +1126,7 @@ impl JobStore {
             {
                 return Err(InvestigationStoreError::Conflict);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             start_diagnostics::stage("replay_commit");
             tx.commit()?;
             return Ok(InvestigationStart {
@@ -1162,7 +1160,7 @@ impl JobStore {
             .filter(|p| p.available && p.mode == request.provider_mode)
             .ok_or(InvestigationStoreError::Unavailable)?;
         validate_provider(provider)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("admission_capacity");
         check_start_capacity(&tx, request.conversation_id.is_none())?;
         let conversation_id = match &request.conversation_id {
@@ -1195,7 +1193,7 @@ impl JobStore {
                 }
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("create_records");
         let id = new_id(&tx, "investigation")?;
         let now = timestamp(&tx)?;
@@ -1307,7 +1305,7 @@ impl JobStore {
             action_tool: None,
         };
         reads::validate_specialist_activity_admission(&record)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("persist_task");
         if next_prompt {
             insert_next_prompt_task(&tx, &record)?;
@@ -1341,13 +1339,13 @@ impl JobStore {
         } else {
             save_task(&tx, &record, 0, true)?;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("dispatch_chat");
         chat::insert_dispatch_chat(&tx, &record)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("final_capacity");
         check_task_capacity(&tx, &id, false)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         start_diagnostics::stage("commit");
         tx.commit()?;
         Ok(InvestigationStart {
@@ -1356,16 +1354,13 @@ impl JobStore {
         })
     }
 
-    pub(crate) fn investigation(
-        &self,
-        id: &str,
-    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+    pub fn investigation(&self, id: &str) -> Result<InvestigationDetail, InvestigationStoreError> {
         self.investigation_access(id, None)
     }
 
     /// Read the bounded archival chat and its saved producer identity from one
     /// validated SQLite snapshot. Legacy tasks without chat return `None`.
-    pub(crate) fn investigation_chat(
+    pub fn investigation_chat(
         &self,
         id: &str,
     ) -> Result<Option<StoredChatTranscript>, InvestigationStoreError> {
@@ -1376,7 +1371,7 @@ impl JobStore {
         Ok(transcript)
     }
 
-    pub(crate) fn investigation_access(
+    pub fn investigation_access(
         &self,
         id: &str,
         session: Option<&McpTaskSession>,
@@ -1392,7 +1387,7 @@ impl JobStore {
     }
 
     /// Worker counterpart of the family-aware public read, requiring a live owner.
-    pub(crate) fn investigation_owned_detail(
+    pub fn investigation_owned_detail(
         &self,
         execution: &JobExecution,
         id: &str,
@@ -1402,7 +1397,7 @@ impl JobStore {
     }
 
     /// One validated task snapshot; never consult mutable application settings.
-    pub(crate) fn investigation_owned_runtime(
+    pub fn investigation_owned_runtime(
         &self,
         execution: &JobExecution,
         id: &str,
@@ -1428,7 +1423,7 @@ impl JobStore {
         Ok((task.detail, timeout))
     }
 
-    pub(crate) fn investigation_ledger(
+    pub fn investigation_ledger(
         &self,
         id: &str,
     ) -> Result<Option<InvestigationInputLedger>, InvestigationStoreError> {
@@ -1440,14 +1435,14 @@ impl JobStore {
         Ok(ledger)
     }
 
-    pub(crate) fn investigation_result(
+    pub fn investigation_result(
         &self,
         id: &str,
     ) -> Result<Option<InvestigationResult>, InvestigationStoreError> {
         self.investigation_result_access(id, None)
     }
 
-    pub(crate) fn investigation_result_access(
+    pub fn investigation_result_access(
         &self,
         id: &str,
         session: Option<&McpTaskSession>,
@@ -1464,7 +1459,7 @@ impl JobStore {
     }
 
     /// Owned counterpart for the worker, including next-family consent.
-    pub(crate) fn investigation_owned_pending_step(
+    pub fn investigation_owned_pending_step(
         &self,
         execution: &JobExecution,
         id: &str,
@@ -1487,7 +1482,7 @@ impl JobStore {
         Ok(pending)
     }
 
-    pub(crate) fn investigation_pending_step(
+    pub fn investigation_pending_step(
         &self,
         id: &str,
     ) -> Result<Option<(u64, PendingInvestigationStep, bool)>, InvestigationStoreError> {
@@ -1539,22 +1534,22 @@ fn one(rows: usize) -> Result<(), InvestigationStoreError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "investigations/captured_source_invocation_fixture.rs"]
 mod captured_source_invocation_fixture;
-#[cfg(test)]
-pub(crate) use captured_source_invocation_fixture::CapturedSourceInvocationFixture;
+#[cfg(any(test, feature = "test-support"))]
+pub use captured_source_invocation_fixture::CapturedSourceInvocationFixture;
 
-pub(crate) use source_settlement::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
+pub use source_settlement::{SourceContinuationOutcome, SourceContinuationSnapshotInput};
 
-pub(crate) use source_settlement::{KnownSourceDisposition, SourceContinuation};
+pub use source_settlement::{KnownSourceDisposition, SourceContinuation};
 
-#[cfg(test)]
-pub(crate) use source_settlement::fail_next_publication as fail_next_source_publication;
+#[cfg(any(test, feature = "test-support"))]
+pub use source_settlement::fail_next_publication as fail_next_source_publication;
 
 #[path = "investigations/next_parent_history.rs"]
 mod next_parent_history;
 #[cfg(unix)]
-pub(crate) use next_parent_history::{
+pub use next_parent_history::{
     parent_history_acquisition_workspace, parent_history_projection_workspace,
 };

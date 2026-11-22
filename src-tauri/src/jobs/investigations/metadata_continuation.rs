@@ -2,7 +2,7 @@
 //! This snapshot grants no lease, retention, capacity, seal or dispatch authority.
 use super::*;
 
-pub(crate) struct MetadataContinuationRead<'a> {
+pub struct MetadataContinuationRead<'a> {
     pub request: &'a StagedObligationRequest,
     pub response: &'a InvestigationResponseMeta,
     pub original_action: &'a Value,
@@ -14,7 +14,7 @@ pub(crate) struct MetadataContinuationRead<'a> {
     pub active_milliseconds: u64,
 }
 
-pub(crate) struct MetadataContinuationSnapshot {
+pub struct MetadataContinuationSnapshot {
     policy: InvestigationPolicy,
     revision: u64,
     usage: InvestigationUsage,
@@ -28,7 +28,7 @@ pub(crate) struct MetadataContinuationSnapshot {
     correction: Option<agents::investigation::acquisition_choices::AuthenticatedCitationCorrection>,
 }
 impl MetadataContinuationSnapshot {
-    pub(crate) fn attach_acquisition(
+    pub fn attach_acquisition(
         &self,
         input: InvestigationInput,
     ) -> Result<InvestigationInput, InvestigationError> {
@@ -62,34 +62,34 @@ impl MetadataContinuationSnapshot {
         }
         Ok(())
     }
-    pub(crate) fn revision(&self) -> u64 {
+    pub fn revision(&self) -> u64 {
         self.revision
     }
-    pub(crate) fn usage(&self) -> &InvestigationUsage {
+    pub fn usage(&self) -> &InvestigationUsage {
         &self.usage
     }
-    pub(crate) fn admitted_usage(&self) -> &InvestigationUsage {
+    pub fn admitted_usage(&self) -> &InvestigationUsage {
         &self.admitted_usage
     }
-    pub(crate) fn metadata(&self) -> &ProtectedCompletionMetadata {
+    pub fn metadata(&self) -> &ProtectedCompletionMetadata {
         &self.metadata
     }
-    pub(crate) fn basis(&self) -> &InvestigationTurnBasis {
+    pub fn basis(&self) -> &InvestigationTurnBasis {
         &self.basis
     }
-    pub(crate) fn mode(&self) -> CompletionCallMode {
+    pub fn mode(&self) -> CompletionCallMode {
         self.mode
     }
-    pub(crate) fn capacity_refusal_count(&self) -> u32 {
+    pub fn capacity_refusal_count(&self) -> u32 {
         self.count
     }
-    pub(crate) fn next_action_id(&self) -> &str {
+    pub fn next_action_id(&self) -> &str {
         &self.next_action_id
     }
 }
 
 impl JobStore {
-    pub(crate) fn investigation_metadata_continuation_snapshot(
+    pub fn investigation_metadata_continuation_snapshot(
         &self,
         id: &str,
         expected_revision: u64,
@@ -311,6 +311,6 @@ pub(super) fn derive(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "metadata_continuation_tests.rs"]
 pub(in crate::jobs::investigations) mod tests;

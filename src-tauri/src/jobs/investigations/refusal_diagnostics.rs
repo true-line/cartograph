@@ -12,7 +12,7 @@ pub(super) fn collect(
     // Identities come from the already authenticated refusal/projection. A
     // diagnostic collector cannot veto that independent outcome.
     let collected = input.refusal_diagnostic_sidecar(finish, refusal_hash.clone());
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let collected = if COLLECTOR_REJECTED.get() {
         Err(agents::investigation::InvestigationError::InvalidInput)
     } else {
@@ -27,7 +27,7 @@ pub(super) fn collect(
             omitted_entries: 0, // Unknown: collection may have stopped before traversal.
         },
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let sidecar = if NO_DETAIL_ROOM.get() {
         use agents::investigation::diagnostic_sidecar::{Retention, UnrecordedReason};
         let mut sidecar = sidecar;
@@ -51,9 +51,9 @@ pub(super) fn collect(
     sidecar
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static COLLECTOR_REJECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn with_collector_rejected<T>(run: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -65,10 +65,10 @@ pub(super) fn with_collector_rejected<T>(run: impl FnOnce() -> T) -> T {
     run()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static NO_DETAIL_ROOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn without_detail_room<T>(run: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -80,21 +80,21 @@ pub(super) fn without_detail_room<T>(run: impl FnOnce() -> T) -> T {
     run()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static TEST_TIMESTAMP: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) struct FixedTimestamp(Option<String>);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for FixedTimestamp {
     fn drop(&mut self) {
         TEST_TIMESTAMP.replace(self.0.take());
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fix_timestamp(value: String) -> FixedTimestamp {
     FixedTimestamp(TEST_TIMESTAMP.replace(Some(value)))
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fixed_timestamp() -> Option<String> {
     TEST_TIMESTAMP.with_borrow(Clone::clone)
 }
@@ -189,17 +189,17 @@ pub(super) fn load(
 }
 
 // Development receipts consume the same authenticated snapshot as replay.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl JobStore {
-    pub(crate) fn with_refusal_diagnostic_collector_rejected<T>(run: impl FnOnce() -> T) -> T {
+    pub fn with_refusal_diagnostic_collector_rejected<T>(run: impl FnOnce() -> T) -> T {
         with_collector_rejected(run)
     }
 
-    pub(crate) fn without_refusal_diagnostic_detail<T>(run: impl FnOnce() -> T) -> T {
+    pub fn without_refusal_diagnostic_detail<T>(run: impl FnOnce() -> T) -> T {
         without_detail_room(run)
     }
 
-    pub(crate) fn investigation_refusal_diagnostics(
+    pub fn investigation_refusal_diagnostics(
         &self,
         id: &str,
     ) -> Result<Vec<Sidecar>, InvestigationStoreError> {
@@ -211,7 +211,7 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn project(
     connection: &Connection,
     id: &str,
@@ -257,7 +257,7 @@ pub(super) fn project(
     Ok(sidecars)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     fn sidecar() -> Sidecar {

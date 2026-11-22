@@ -27,9 +27,9 @@ pub(super) mod next_prompt_snapshot;
 
 #[path = "next_prompt_finish.rs"]
 mod next_prompt_finish;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use next_prompt_finish::FinishFixture;
-pub(crate) use next_prompt_finish::NextPromptFinish;
+pub use next_prompt_finish::NextPromptFinish;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -243,7 +243,7 @@ impl CompletionIntent {
         }
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn host_fixture_intent(
     request: &StagedObligationRequest,
 ) -> Result<CompletionIntent, InvestigationStoreError> {
@@ -264,7 +264,7 @@ pub(super) fn initial_detail(intent: &CompletionIntent) -> InvestigationCompleti
 /// Coherent, owned completion inputs from one saved database read snapshot.
 /// This carries no lease/authorization proof, latest-graph claim or transient
 /// source bytes. A later mutation still needs its normal transaction guards.
-pub(crate) struct CompletionPromptSnapshot {
+pub struct CompletionPromptSnapshot {
     query_refusal: Option<agents::investigation::query_refusal::QueryRefusalRecord>,
     detail: InvestigationDetail,
     ledger: InvestigationInputLedger,
@@ -274,33 +274,33 @@ pub(crate) struct CompletionPromptSnapshot {
     basis: InvestigationTurnBasis,
 }
 impl CompletionPromptSnapshot {
-    pub(crate) fn query_refusal(
+    pub fn query_refusal(
         &self,
     ) -> Option<&agents::investigation::query_refusal::QueryRefusalRecord> {
         self.query_refusal.as_ref()
     }
-    pub(crate) fn detail(&self) -> &InvestigationDetail {
+    pub fn detail(&self) -> &InvestigationDetail {
         &self.detail
     }
-    pub(crate) fn ledger(&self) -> &InvestigationInputLedger {
+    pub fn ledger(&self) -> &InvestigationInputLedger {
         &self.ledger
     }
-    pub(crate) fn attempts(&self) -> &[AttemptRecord] {
+    pub fn attempts(&self) -> &[AttemptRecord] {
         &self.attempts
     }
-    pub(crate) fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
+    pub fn attempt_ledgers(&self) -> &[InvestigationInputLedger] {
         &self.attempt_ledgers
     }
-    pub(crate) fn metadata(&self) -> &ProtectedCompletionMetadata {
+    pub fn metadata(&self) -> &ProtectedCompletionMetadata {
         &self.metadata
     }
-    pub(crate) fn basis(&self) -> &InvestigationTurnBasis {
+    pub fn basis(&self) -> &InvestigationTurnBasis {
         &self.basis
     }
 }
 
 impl JobStore {
-    pub(crate) fn start_completion_investigation(
+    pub fn start_completion_investigation(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
@@ -308,15 +308,15 @@ impl JobStore {
         self.start_completion_access(request, provider, false, None)
     }
     /// Default-policy factory for scripted and manually authorized test harnesses.
-    #[cfg(test)]
-    pub(crate) fn start_next_prompt_investigation(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_next_prompt_investigation(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
     ) -> Result<InvestigationStart, InvestigationStoreError> {
         self.start_completion_access(request, provider, true, None)
     }
-    pub(crate) fn start_completion_access(
+    pub fn start_completion_access(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
@@ -344,8 +344,8 @@ impl JobStore {
     }
 
     /// Host-only desktop settings, frozen before the atomic task insertion.
-    #[cfg(test)]
-    pub(crate) fn start_configured_next_prompt_investigation(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_configured_next_prompt_investigation(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
@@ -363,7 +363,7 @@ impl JobStore {
     }
 
     /// Desktop entrypoint: recover saved configuration before selecting new work.
-    pub(crate) fn start_desktop_next_prompt_investigation(
+    pub fn start_desktop_next_prompt_investigation(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
@@ -388,8 +388,8 @@ impl JobStore {
     }
 
     /// Explicit host opt-in; never inferred from current model or settings on reopen.
-    #[cfg(test)]
-    pub(crate) fn start_local_finish_investigation(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_local_finish_investigation(
         &mut self,
         request: &StagedObligationRequest,
         provider: Option<&InvestigationProvider>,
@@ -459,8 +459,8 @@ impl JobStore {
         self.start_investigation_internal(&projected, provider, Some(intent), next_prompt, mcp)
     }
     /// Provider-free acceptance inspection of the already validated frozen pair.
-    #[cfg(test)]
-    pub(crate) fn captured_run_limits(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn captured_run_limits(
         &self,
         id: &str,
     ) -> Result<Option<(u64, u64)>, InvestigationStoreError> {
@@ -474,15 +474,15 @@ impl JobStore {
         Ok(pair)
     }
 
-    #[cfg(test)]
-    pub(crate) fn existing_investigation_completion(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn existing_investigation_completion(
         &self,
         request: &StagedObligationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
         self.existing_investigation_completion_access(request, None)
     }
 
-    pub(crate) fn existing_investigation_completion_access(
+    pub fn existing_investigation_completion_access(
         &self,
         request: &StagedObligationRequest,
         session: Option<&McpTaskSession>,
@@ -501,8 +501,8 @@ impl JobStore {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn existing_local_finish_investigation(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn existing_local_finish_investigation(
         &self,
         request: &StagedObligationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
@@ -513,7 +513,7 @@ impl JobStore {
         )
     }
 
-    pub(crate) fn existing_desktop_investigation_completion(
+    pub fn existing_desktop_investigation_completion(
         &self,
         request: &StagedObligationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
@@ -575,7 +575,7 @@ impl JobStore {
     /// attempts and their ledgers, protected metadata and turn basis coherently.
     /// All loaders run inside this one read-only deferred transaction. This is
     /// a saved-state view, not permission to invoke a provider or publish a read.
-    pub(crate) fn investigation_completion_prompt_snapshot(
+    pub fn investigation_completion_prompt_snapshot(
         &self,
         id: &str,
     ) -> Result<CompletionPromptSnapshot, InvestigationStoreError> {
@@ -586,8 +586,8 @@ impl JobStore {
         tx.commit()?;
         Ok(snapshot)
     }
-    #[cfg(test)]
-    pub(crate) fn investigation_completion_attempts(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn investigation_completion_attempts(
         &self,
         id: &str,
     ) -> Result<Vec<AttemptRecord>, InvestigationStoreError> {
@@ -598,8 +598,8 @@ impl JobStore {
         tx.commit()?;
         Ok(rows.into_iter().map(|entry| entry.record).collect())
     }
-    #[cfg(test)]
-    pub(crate) fn investigation_completion_attempt_ledgers(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn investigation_completion_attempt_ledgers(
         &self,
         id: &str,
     ) -> Result<Vec<InvestigationInputLedger>, InvestigationStoreError> {
@@ -613,7 +613,7 @@ impl JobStore {
         tx.commit()?;
         Ok(ledgers)
     }
-    pub(crate) fn investigation_completion_metadata(
+    pub fn investigation_completion_metadata(
         &self,
         id: &str,
     ) -> Result<ProtectedCompletionMetadata, InvestigationStoreError> {
@@ -779,7 +779,7 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<AttemptEntry>, InvestigationStoreError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ATTEMPT_PREFIX_READS.with(|count| count.set(count.get() + 1));
     let policy = saved_policy(task)?;
     let limit = policy.max_completed_attempts();
@@ -824,7 +824,7 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
             &entry.record.step_id,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ATTEMPT_INVOCATION_READS.with(|count| count.set(count.get() + 1));
         let actual_step: PendingInvestigationStep = read_body(
             connection,
@@ -883,7 +883,7 @@ fn attempts_with_invocation_reread<const FORCE_REREAD: bool>(
                 // No writes or callbacks intervene after actual_step authentication.
                 // A transaction pins this exact row; autocommit keeps its old reread.
                 let matches_input = if FORCE_REREAD || connection.is_autocommit() {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     ATTEMPT_INVOCATION_READS.with(|count| count.set(count.get() + 1));
                     let step: PendingInvestigationStep = read_body(
                         connection,
@@ -1218,7 +1218,7 @@ pub(super) fn append_next_prompt_attempt_at_step(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_attempt_tests.rs"]
 mod next_prompt_attempt_tests;
 
@@ -1467,7 +1467,7 @@ fn raw_next_prompt_invocations(
     connection: &Connection,
     task: &StoredTask,
 ) -> Result<Vec<(u32, PendingInvestigationStep)>, InvestigationStoreError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     saved_metadata_history::note_invocation_sweep();
     if connection.is_autocommit() {
         return Err(InvestigationStoreError::Invalid);
@@ -2322,15 +2322,15 @@ fn exhausted_finish_message(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "completion_error_tests.rs"]
 mod error_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "completion_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use tests::next_prompt_contract_tests::{
     InternalFixture, internal_fixture as internal_next_prompt_fixture,
     internal_fixture_with_initial_ledger, internal_fixture_with_step_preparer,
@@ -2343,35 +2343,35 @@ pub(super) use settlement_projection::{
     size_attempt_event_sequence,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use next_prompt_snapshot::tests::rewrite as rewrite_test_body;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use tests::next_prompt_initial_fixture::{
     InitialFixture, initial_fixture, initial_fixture_with_configured_request,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_recovery_tests.rs"]
 mod next_prompt_recovery_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static ATTEMPT_PREFIX_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn take_attempt_prefix_reads() -> usize {
     ATTEMPT_PREFIX_READS.with(|count| count.replace(0))
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use settlement_projection::{project_observation, with_observation_prefix_reread};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn attempt_prefix_reads() -> usize {
     ATTEMPT_PREFIX_READS.with(|count| count.get())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static ATTEMPT_INVOCATION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn assert_attempt_invocation_reuse(connection: &Connection, task: &StoredTask) {
     let changes = connection.total_changes();
     ATTEMPT_INVOCATION_READS.with(|count| count.set(0));
@@ -2407,7 +2407,7 @@ pub(super) fn assert_attempt_invocation_reuse(connection: &Connection, task: &St
     assert_eq!(connection.total_changes(), changes);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn assert_attempt_invocation_refusal(connection: &Connection, task: &StoredTask) {
     assert!(attempts(connection, task).is_err());
     assert!(attempts_with_invocation_reread::<true>(connection, task).is_err());

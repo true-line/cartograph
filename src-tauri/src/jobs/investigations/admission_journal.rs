@@ -126,7 +126,7 @@ fn preflight(connection: &Connection) -> Result<bool, InvestigationStoreError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum RefusalReason {
+pub enum RefusalReason {
     Capacity(CapacityRefusalReason),
     Action(ActionRefusalReason),
 }
@@ -1465,7 +1465,7 @@ pub(super) fn append_reason(
     Ok(entry)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "admission_journal_tests.rs"]
 pub(super) mod tests;
 

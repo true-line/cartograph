@@ -160,7 +160,7 @@ fn admitted_projection(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

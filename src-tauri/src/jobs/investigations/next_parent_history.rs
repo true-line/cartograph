@@ -2,16 +2,16 @@
 //! represented exactly; neither implies stronger knowledge or source authority.
 use super::*;
 
-pub(crate) struct NextParentHistory {
+pub struct NextParentHistory {
     history: Vec<String>,
 }
 impl NextParentHistory {
-    pub(crate) fn into_history(self) -> Vec<String> {
+    pub fn into_history(self) -> Vec<String> {
         self.history
     }
 
-    #[cfg(test)]
-    pub(crate) fn history(&self) -> &[String] {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn history(&self) -> &[String] {
         &self.history
     }
 }
@@ -20,7 +20,7 @@ impl NextParentHistory {
 /// task/result readers return. Their acquisition/validation and schema peaks
 /// remain separate; the same retained DTO bounds cover either saved family.
 #[cfg(unix)]
-pub(crate) fn parent_history_projection_workspace() -> Option<(usize, usize)> {
+pub fn parent_history_projection_workspace() -> Option<(usize, usize)> {
     use context_hub::logical::{json_bytes, slots, sum};
     let retained = sum(&[
         agents::investigation::PARENT_HISTORY_32768_V1_BYTES,
@@ -48,7 +48,7 @@ pub(crate) fn parent_history_projection_workspace() -> Option<(usize, usize)> {
 /// legacy routing additionally reloads a base task in staged::load, reconstructs
 /// metadata from raw attempts/refusals, or sweeps invocation IDs without intent.
 #[cfg(unix)]
-pub(crate) fn parent_history_acquisition_workspace() -> Option<usize> {
+pub fn parent_history_acquisition_workspace() -> Option<usize> {
     use context_hub::logical::{slots, sum};
     let (task, decode) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     let (_, common) = next_prompt_task_load_workspace()?;
@@ -156,7 +156,7 @@ pub(super) fn load_with_policy(
     encode(&history, policy.supplied_history_bytes())?;
     Ok(NextParentHistory { history })
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn encode_parent_history(
     parent_id: &str,
     summary: &InvestigationSummary,
@@ -207,8 +207,8 @@ fn encode_parent_history_with_limit(
 }
 
 impl JobStore {
-    #[cfg(test)]
-    pub(crate) fn investigation_next_parent_history(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn investigation_next_parent_history(
         &self,
         parent_id: &str,
         conversation_id: &str,
@@ -219,7 +219,7 @@ impl JobStore {
             &INVESTIGATION_V2_POLICY,
         )
     }
-    pub(crate) fn investigation_next_parent_history_with_policy(
+    pub fn investigation_next_parent_history_with_policy(
         &self,
         parent_id: &str,
         conversation_id: &str,
@@ -233,6 +233,6 @@ impl JobStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_parent_history_tests.rs"]
 mod tests;

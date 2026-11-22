@@ -319,7 +319,7 @@ fn unspent_result_reference_reservation_counts_toward_nonterminal_limit() {
 
 // AC-0404: a disposable TEMP trigger fills storage only inside result publication.
 impl JobStore {
-    pub(crate) fn fill_test_finish_capacity(&mut self, id: &str, headroom: usize) {
+    pub fn fill_test_finish_capacity(&mut self, id: &str, headroom: usize) {
         let current = storage::stored_bytes(&self.conn, Some(id)).unwrap();
         let padding = TASK_CAPACITY
             .checked_sub(current + headroom + 64 + 256)
@@ -327,7 +327,7 @@ impl JobStore {
         let id = id.replace('\'', "''");
         self.conn.execute_batch(&format!("CREATE TEMP TRIGGER message_finish_capacity AFTER INSERT ON main.investigation_results WHEN NEW.task_id='{id}' BEGIN INSERT INTO investigation_responses VALUES ('{id}','message-capacity-padding',zeroblob({padding}),'{}'); END", "0".repeat(64))).unwrap();
     }
-    pub(crate) fn assert_test_finish_padding_rolled_back(&self, id: &str) {
+    pub fn assert_test_finish_padding_rolled_back(&self, id: &str) {
         let rows: i64 = self.conn.query_row("SELECT count(*) FROM investigation_responses WHERE task_id=?1 AND step_id='message-capacity-padding'", [id], |row| row.get(0)).unwrap();
         assert_eq!(rows, 0);
     }

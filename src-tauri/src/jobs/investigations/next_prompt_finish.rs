@@ -7,7 +7,7 @@ use serde_json::Value;
 #[path = "withholding_finish.rs"]
 mod withholding_finish;
 
-pub(crate) struct NextPromptFinish<'a> {
+pub struct NextPromptFinish<'a> {
     pub request: &'a StagedObligationRequest,
     pub response: &'a InvestigationResponseMeta,
     /// Canonical original envelope, including any replay_query identity.
@@ -17,8 +17,8 @@ pub(crate) struct NextPromptFinish<'a> {
 }
 
 impl JobStore {
-    #[cfg(test)]
-    pub(crate) fn admit_next_prompt_finish(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admit_next_prompt_finish(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
@@ -34,7 +34,7 @@ impl JobStore {
         )
     }
 
-    pub(crate) fn admit_next_prompt_finish_with_patch(
+    pub fn admit_next_prompt_finish_with_patch(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
@@ -506,12 +506,12 @@ impl JobStore {
         admission_journal::derive_current(&tx, &task)?;
         validate_saved(&tx, &task)?;
         save_next_prompt_task(&tx, &task, expected_revision, task.phase == Phase::Terminal)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if FAIL_BEFORE_FINISH_COMMIT.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Capacity);
         }
         tx.commit()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if LOSE_FINISH_ACK.with(|flag| flag.replace(false)) {
             return Err(InvestigationStoreError::Storage);
         }
@@ -590,15 +590,15 @@ fn finish_refused(
     transitions::sync_terminal_job(tx, task)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_BEFORE_FINISH_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LOSE_FINISH_ACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "next_prompt_finish_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::jobs::investigations) use tests::fixture::Fixture as FinishFixture;
