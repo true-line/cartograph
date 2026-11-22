@@ -7,8 +7,8 @@ fn local(model: &str) -> llm::OllamaProvider {
 
 fn runtime() -> RuntimeCommand {
     RuntimeCommand {
-        node: "node".into(),
-        entry: "agent-runtime/src/main.ts".into(),
+        program: "node".into(),
+        args: vec!["agent-runtime/src/main.ts".into()],
     }
 }
 
@@ -116,8 +116,10 @@ fn the_proxy_targets_the_resolved_providers_own_upstream() {
     );
 }
 
+// AC-1427: the bundled runtime is found next to the app; the environment
+// overrides it with an executable or a script run by Node.
 #[test]
-fn the_runtime_is_named_by_the_environment_and_gets_no_app_secrets() {
+fn the_runtime_is_bundled_or_named_by_the_environment_and_gets_no_app_secrets() {
     let vars = |pairs: &'static [(&'static str, &'static str)]| {
         move |name: &str| {
             pairs
@@ -126,27 +128,77 @@ fn the_runtime_is_named_by_the_environment_and_gets_no_app_secrets() {
                 .map(|(_, value)| OsString::from(value))
         }
     };
-    assert_eq!(RuntimeCommand::from_vars(&vars(&[])), None);
+    let bundled = || {
+        Some(std::path::PathBuf::from(
+            "/App/Contents/MacOS/cartograph-agent",
+        ))
+    };
+    let exe = |program: &str| RuntimeCommand {
+        program: program.into(),
+        args: Vec::new(),
+    };
+    assert_eq!(RuntimeCommand::from_vars(&vars(&[]), None), None);
     assert_eq!(
-        RuntimeCommand::from_vars(&vars(&[("CARTOGRAPH_AGENT_RUNTIME", "")])),
+        RuntimeCommand::from_vars(&vars(&[("CARTOGRAPH_AGENT_RUNTIME", "")]), None),
         None
     );
     assert_eq!(
-        RuntimeCommand::from_vars(&vars(&[("CARTOGRAPH_AGENT_RUNTIME", "/r/main.ts")])),
+        RuntimeCommand::from_vars(&vars(&[]), bundled()),
+        Some(exe("/App/Contents/MacOS/cartograph-agent"))
+    );
+    assert_eq!(
+        RuntimeCommand::from_vars(&vars(&[("CARTOGRAPH_AGENT_RUNTIME", "")]), bundled()),
+        Some(exe("/App/Contents/MacOS/cartograph-agent"))
+    );
+    assert_eq!(
+        RuntimeCommand::from_vars(
+            &vars(&[(
+                "CARTOGRAPH_AGENT_RUNTIME",
+                "/b/cartograph-agent-x86_64-unknown-linux-gnu"
+            )]),
+            bundled()
+        ),
+        Some(exe("/b/cartograph-agent-x86_64-unknown-linux-gnu"))
+    );
+    assert_eq!(
+        RuntimeCommand::from_vars(
+            &vars(&[("CARTOGRAPH_AGENT_RUNTIME", "/r/main.ts")]),
+            bundled()
+        ),
         Some(RuntimeCommand {
-            node: "node".into(),
-            entry: "/r/main.ts".into()
+            program: "node".into(),
+            args: vec!["/r/main.ts".into()],
         })
     );
-    let command = RuntimeCommand {
-        node: "/opt/node".into(),
-        entry: "/r/main.ts".into(),
-    }
-    .command();
-    assert_eq!(command.get_program(), "/opt/node");
-    assert_eq!(command.get_args().collect::<Vec<_>>(), ["/r/main.ts"]);
-    for (key, value) in command.get_envs() {
-        assert_eq!(key, "PATH", "only PATH reaches the runtime");
-        assert!(value.is_some());
+    assert_eq!(
+        RuntimeCommand::from_vars(
+            &vars(&[
+                ("CARTOGRAPH_AGENT_RUNTIME", "/r/agent.cjs"),
+                ("CARTOGRAPH_AGENT_NODE", "/opt/node")
+            ]),
+            None
+        ),
+        Some(RuntimeCommand {
+            program: "/opt/node".into(),
+            args: vec!["/r/agent.cjs".into()],
+        })
+    );
+    for (runtime, expected) in [
+        (
+            RuntimeCommand {
+                program: "/opt/node".into(),
+                args: vec!["/r/main.ts".into()],
+            },
+            vec!["/r/main.ts"],
+        ),
+        (exe("/App/Contents/MacOS/cartograph-agent"), vec![]),
+    ] {
+        let command = runtime.command();
+        assert_eq!(command.get_program(), runtime.program.as_os_str());
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+        for (key, value) in command.get_envs() {
+            assert_eq!(key, "PATH", "only PATH reaches the runtime");
+            assert!(value.is_some());
+        }
     }
 }
