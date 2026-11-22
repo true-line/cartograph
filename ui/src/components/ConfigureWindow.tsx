@@ -1,10 +1,60 @@
 import { useEffect, useState } from 'react';
-import { formatMinutes, parseMinutes, tauriLocalModelApi, toMinutes, type InstalledModel, type LocalModelApi,
-  type LocalModelChoice, type RunLimits, type RunLimitsApi } from '../runLimits';
+import { CONTEXT_WINDOWS, formatContextWindow, formatMinutes, parseMinutes, tauriContextWindowApi, tauriLocalModelApi,
+  toMinutes, type ContextWindowApi, type InstalledModel, type LocalModelApi, type LocalModelChoice, type RunLimits,
+  type RunLimitsApi } from '../runLimits';
 
 export interface ConfigureWindowProps {
   api: RunLimitsApi;
   modelApi?: LocalModelApi;
+  contextApi?: ContextWindowApi;
+}
+
+/** Configure → Context window (#1653): the `num_ctx` new desktop investigations ask Ollama for. */
+function ContextWindowSection({ api }: { api: ContextWindowApi }) {
+  const [current, setCurrent] = useState<number | null | undefined>(undefined);
+  const [selected, setSelected] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const show = (next: number | null) => { setCurrent(next); setSelected(next === null ? '' : String(next)); };
+  useEffect(() => { api.load().then(show, (e: unknown) => setError(String(e))); }, [api]);
+
+  const save = async (tokens: number | null) => {
+    setBusy(true); setError(null); setSaved(null);
+    try {
+      const next = await api.save(tokens);
+      show(next);
+      setSaved(next === null ? "Saved. New investigations leave the context window to Ollama."
+        : `Saved. New investigations ask Ollama for ${formatContextWindow(next)}.`);
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  const chosen = selected === '' ? null : Number(selected);
+
+  return <section className="configure-section" aria-label="Context window">
+    <h2>Context window</h2>
+    <p className="muted">How much text a local model reads per call. Ollama's own default can silently cut a long prompt short;
+      a larger window uses more memory on this Mac. Running investigations keep theirs, and the choice is recorded with each run.</p>
+    {current !== undefined && <form onSubmit={(event) => { event.preventDefault(); void save(chosen); }}>
+      <label className="configure-field">
+        <span>Context window</span>
+        <select value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}>
+          <option value="">Ollama default</option>
+          {CONTEXT_WINDOWS.map((tokens) => <option key={tokens} value={String(tokens)}>{formatContextWindow(tokens)}</option>)}
+        </select>
+      </label>
+      <div className="configure-actions">
+        <button type="submit" disabled={busy || chosen === current}>Use this window</button>
+        <button type="button" className="secondary-button" disabled={busy || current === null}
+          onClick={() => void save(null)}>Use Ollama default</button>
+      </div>
+    </form>}
+    {current === undefined && !error && <p className="muted">Loading…</p>}
+    {current === undefined && error && <button type="button" disabled={busy}
+      onClick={() => void save(null)}>Use Ollama default</button>}
+    {saved && <p className="muted" role="status">{saved}</p>}
+    {error && <p className="error-text" role="alert">{error}</p>}
+  </section>;
 }
 
 /** Configure → Local model (#1643): which installed Ollama model new desktop investigations use. */
@@ -63,7 +113,7 @@ function LocalModelSection({ api }: { api: LocalModelApi }) {
  * Configure → Run Limits (#1633): the two investigation time limits, kept
  * apart from the app Settings page. Every other cap stays fixed.
  */
-export function ConfigureWindow({ api, modelApi = tauriLocalModelApi }: ConfigureWindowProps) {
+export function ConfigureWindow({ api, modelApi = tauriLocalModelApi, contextApi = tauriContextWindowApi }: ConfigureWindowProps) {
   const [limits, setLimits] = useState<RunLimits | null>(null);
   const [task, setTask] = useState('');
   const [call, setCall] = useState('');
@@ -139,5 +189,6 @@ export function ConfigureWindow({ api, modelApi = tauriLocalModelApi }: Configur
     {saved && <p className="muted" role="status">{saved}</p>}
     {error && <p className="error-text" role="alert">{error}</p>}
     <LocalModelSection api={modelApi} />
+    <ContextWindowSection api={contextApi} />
   </main>;
 }

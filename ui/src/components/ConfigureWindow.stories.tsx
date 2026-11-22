@@ -1,5 +1,6 @@
 // AC-0562 (#1633): Configure → Run Limits edits only the two time limits, bounded by [default, max].
 // AC-0564 (#1643): the local completion model is chosen from installed Ollama models.
+// AC-1406 (#1653): the context window is one of a closed set, or Ollama's default.
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
@@ -15,6 +16,7 @@ let stored = shipped;
 let loadFailure: string | null = null;
 const defaultModel: LocalModelChoice = { model: 'qwen3:8b', default_model: 'qwen3:8b', customized: false };
 let model = defaultModel;
+let contextWindow: number | null = null;
 let modelFailure: string | null = null;
 let installed: Array<{ name: string; digest: string }> | string = [
   { name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
@@ -22,7 +24,7 @@ let installed: Array<{ name: string; digest: string }> | string = [
 const meta = {
   title: 'Surfaces/ConfigureWindow', component: ConfigureWindow, args: { api: tauriRunLimitsApi },
   beforeEach: () => {
-    calls = []; stored = shipped; loadFailure = null; model = defaultModel; modelFailure = null;
+    calls = []; stored = shipped; loadFailure = null; model = defaultModel; modelFailure = null; contextWindow = null;
     installed = [{ name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
     mockIPC((command, args) => {
       calls.push([command, args]);
@@ -42,6 +44,8 @@ const meta = {
         return model;
       }
       if (command === 'reset_local_model') { model = defaultModel; modelFailure = null; return model; }
+      if (command === 'get_local_context_window') return contextWindow;
+      if (command === 'set_local_context_window') { contextWindow = (args as { tokens: number | null }).tokens; return contextWindow; }
       throw new Error(`unexpected command ${command}`);
     });
     return () => clearMocks();
@@ -178,5 +182,24 @@ export const InvalidStoredModelCanBeReset: Story = {
     await userEvent.click(c.getByRole('button', { name: 'Use default model' }));
     await waitFor(() => expect(c.getByLabelText(/Completion model/)).toHaveValue('qwen3:8b'));
     await expect(calls.some(([command]) => command === 'reset_local_model')).toBe(true);
+  },
+};
+
+export const ChooseContextWindowThenDefault: Story = {
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    const section = within(await c.findByRole('region', { name: 'Context window' }));
+    const select = await section.findByLabelText('Context window');
+    await expect(select).toHaveValue('');
+    await expect(section.getByRole('button', { name: 'Use this window' })).toBeDisabled();
+    await expect(section.getByRole('button', { name: 'Use Ollama default' })).toBeDisabled();
+    await userEvent.selectOptions(select, '32768');
+    await userEvent.click(section.getByRole('button', { name: 'Use this window' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('ask Ollama for 32K tokens'));
+    await expect(calls).toContainEqual(['set_local_context_window', { tokens: 32768 }]);
+    await userEvent.click(section.getByRole('button', { name: 'Use Ollama default' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('leave the context window to Ollama'));
+    await expect(select).toHaveValue('');
+    await expect(calls).toContainEqual(['set_local_context_window', { tokens: null }]);
   },
 };
