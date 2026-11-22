@@ -9,6 +9,7 @@ use core_graph::{Edge, Node};
 use flowtracer::Flow;
 
 mod adr;
+pub mod bundle_file;
 mod contract;
 mod documents;
 mod front_doors;
