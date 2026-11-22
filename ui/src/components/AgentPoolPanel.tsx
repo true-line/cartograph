@@ -3,8 +3,8 @@ import type { InvestigationProvider } from '../investigationTypes';
 import type { LocalLaneStatus } from './LocalLane';
 import { stageLabel } from '../stageLabels';
 import {
-  AGENT_POOL_MAX_LIMIT, LANE_LABEL, LANE_OUTPUT, agentPool, controlsLine, localServerLine, providerLine, usageLine, usageTotal,
-  type AgentLane, type AgentPoolControls, type AgentWork, type JobUsage,
+  AGENT_POOL_MAX_LIMIT, LANE_LABEL, LANE_OUTPUT, agentPool, chatSessionLine, controlsLine, localServerLine, providerLine, usageLine, usageTotal,
+  type AgentLane, type AgentPoolControls, type AgentWork, type ChatSession, type JobUsage,
 } from '../agentPool';
 
 export interface AgentPoolPanelProps {
@@ -27,6 +27,11 @@ export interface AgentPoolPanelProps {
   localServerError?: string | null;
   /** Absent when no backend can run the check. */
   onCheckLocalServer?: () => void;
+  /** Chat sessions in the loaded task history (AC-1710); null while it is
+   *  loading or could not be read. Absent hides the section. */
+  chats?: ChatSession[] | null;
+  /** Opens a session's newest turn in Agent chats. */
+  onOpenChat?: (investigationId: string) => void;
   onOpenJobs: () => void;
   onOpenCuration: () => void;
   onViewInvestigation?: (id: string) => void;
@@ -90,7 +95,7 @@ function WorkRow({ item, usage, onViewInvestigation }: {
  */
 export function AgentPoolPanel({
   jobs, providers, awaitingCuration, usage = [], controls = null, controlsError = null, onChangeControls,
-  localServer = null, localServerChecking = false, localServerError = null, onCheckLocalServer, onOpenJobs, onOpenCuration, onViewInvestigation,
+  localServer = null, localServerChecking = false, localServerError = null, onCheckLocalServer, chats, onOpenChat, onOpenJobs, onOpenCuration, onViewInvestigation,
 }: AgentPoolPanelProps) {
   const pool = agentPool(jobs);
   const usageOf = new Map((usage ?? []).map((row) => [row.job_id, row]));
@@ -154,6 +159,43 @@ export function AgentPoolPanel({
             ))}
           </ul>}
       </section>
+
+      {chats !== undefined && (
+        <section aria-label="Chat sessions">
+          <h3>Chat sessions</h3>
+          {chats === null
+            ? <p className="muted">Saved chats have not loaded.</p>
+            : chats.length === 0
+              ? <p className="muted" data-testid="agent-pool-chats">No chat session is in the loaded history.</p>
+              : <>
+                <p data-testid="agent-pool-chats">
+                  {chats.length} {chats.length === 1 ? 'session' : 'sessions'} in the loaded history, {chats.filter((chat) => chat.active).length} with a turn in progress.
+                </p>
+                <ul className="agent-pool-rows">
+                  {chats.map((chat) => (
+                    <li key={chat.conversation_id} className={`agent-pool-row${chat.active ? ' job-running' : ''}`} data-testid={`agent-pool-chat-${chat.conversation_id}`}>
+                      <div>
+                        <p className="agent-pool-row-title">
+                          <strong>{chat.latest.question}</strong>
+                          {chat.open && <span className="agent-pool-mode">open in a pane</span>}
+                        </p>
+                        <p className="muted"><code>{chat.latest.specialist_id}</code> · {chatSessionLine(chat)}</p>
+                      </div>
+                      {onOpenChat && (
+                        <button type="button" className="secondary-button" onClick={() => onOpenChat(chat.latest.investigation_id)}>
+                          Open chat
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </>}
+          <p className="muted">
+            Each turn of a chat is a specialist investigation and counts against the pool
+            controls like the work above. Read from the saved history shown in Agent chats.
+          </p>
+        </section>
+      )}
 
       {pool.recent.length > 0 && (
         <section aria-label="Recently finished agent work">

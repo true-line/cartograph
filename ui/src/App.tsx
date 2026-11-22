@@ -51,7 +51,7 @@ import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { AgentPoolPanel } from './components/AgentPoolPanel';
 import {
-  awaitingCuration, loadAgentPoolControls, loadJobUsage, saveAgentPoolControls,
+  awaitingCuration, chatSessions, loadAgentPoolControls, loadJobUsage, saveAgentPoolControls,
   type AgentPoolControls, type JobUsage,
 } from './agentPool';
 import type { LocalLaneStatus } from './components/LocalLane';
@@ -237,6 +237,8 @@ export default function App() {
   // Provider-reported usage per agent job (#252, AC-1703), read for the agent pool.
   // Null when the host could not read it, so stale counts are never shown.
   const [jobUsage, setJobUsage] = useState<JobUsage[] | null>([]);
+  // AC-1710: chats open in a pane are marked in the pool.
+  const chatDocks = useAgentChatDockStore((state) => state.docks);
   // The host's agent pool controls (AC-1704); null until read.
   const [poolControls, setPoolControls] = useState<AgentPoolControls | null>(null);
   const [poolControlsError, setPoolControlsError] = useState<string | null>(null);
@@ -869,6 +871,9 @@ export default function App() {
             localServerChecking={localServerChecking}
             localServerError={localServerError}
             onCheckLocalServer={backend === 'up' ? checkLocalServer : undefined}
+            chats={investigations.historyError || (investigations.historyLoading && investigations.history.length === 0)
+              ? null : chatSessions(investigations.history, chatDocks.map((item) => item.turn.conversation_id))}
+            onOpenChat={(id) => useAgentChatDockStore.getState().open(id)}
             awaitingCuration={stagedError || (stagedLoading && stagedProposals.length === 0) ? null : awaitingCuration(stagedProposals)}
             onOpenJobs={() => navigate('jobs')}
             onOpenCuration={() => navigate('gaps')}
