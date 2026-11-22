@@ -115,6 +115,12 @@ pub fn derive_business_flows(
     base: &RevisionedSnapshot,
     limits: TraceLimits,
 ) -> Result<BusinessFlowReport, BusinessFlowOmission> {
+    // Every derivation under test reads a compacted base, as the knowledge
+    // phase reads it (#2215).
+    #[cfg(test)]
+    let compacted = crate::workbench::compacted_snapshot_for_tests(base);
+    #[cfg(test)]
+    let base = &compacted;
     let flows = flowtracer::trace_bounded(&base.graph.0, &base.graph.1, limits)
         .map_err(BusinessFlowOmission::Trace)?;
     let mut remaining = limits.max_output_bytes;

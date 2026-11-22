@@ -212,7 +212,8 @@ pub(crate) const PROPS_UNREAD: [&str; 1] = ["BusinessRule"];
 
 /// The bounded base the phase reads, streamed under the same admission as
 /// [`SqliteGraphStore::read_snapshot_with_revision_bounded`] and in its row
-/// order, without holding the props of [`PROPS_UNREAD`] labels (AC-1202).
+/// order, without holding the props of [`PROPS_UNREAD`] labels (AC-1202),
+/// and with each fact's `prov` held as text (`spec::compact_node`, AC-1209).
 fn read_base(
     graph: &SqliteGraphStore,
     limits: SnapshotReadLimits,
@@ -224,9 +225,15 @@ fn read_base(
                 if PROPS_UNREAD.contains(&node.label.as_str()) {
                     node.props = serde_json::Value::Object(serde_json::Map::new());
                 }
+                // Each fact's `prov` is held as its text as the row is read,
+                // so the whole graph is never decoded at once (#2215).
+                spec::compact_node(&mut node);
                 nodes.push(node);
             }
-            core_graph::SnapshotRow::Edge(edge) => edges.push(edge),
+            core_graph::SnapshotRow::Edge(mut edge) => {
+                spec::compact_edge(&mut edge);
+                edges.push(edge);
+            }
         }
         Ok::<_, core_graph::GraphError>(())
     })?;
@@ -623,8 +630,9 @@ pub(crate) fn source_sections(
         Vec<(&str, core_prov::EvidenceRef, String)>,
     > = std::collections::BTreeMap::new();
     for node in sections {
-        let Ok(prov) = serde_json::from_value::<core_prov::Provenance>(node.props["prov"].clone())
-        else {
+        let Ok(prov) = <core_prov::Provenance as serde::Deserialize>::deserialize(
+            &*core_graph::stored::stored_prov(&node.props),
+        ) else {
             continue;
         };
         let [evidence] = prov.evidence.as_slice() else {

@@ -130,6 +130,12 @@ fn domain_provenance(evidence: Vec<EvidenceRef>, identity: &[u8]) -> Provenance 
 /// and SQLAlchemy DataEntity facts. The class name is display text, not the
 /// eligibility signal; each candidate maps explicitly to its persistence row.
 pub fn derive_orm_domain_entities(base: &RevisionedSnapshot) -> DomainEntityReport {
+    // Every derivation under test reads a compacted base, as the knowledge
+    // phase reads it (#2215).
+    #[cfg(test)]
+    let compacted = crate::workbench::compacted_snapshot_for_tests(base);
+    #[cfg(test)]
+    let base = &compacted;
     let mut by_id: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
     for node in &base.graph.0 {
         by_id
@@ -303,6 +309,12 @@ struct Group {
 /// not database authenticity or publication currency; OverlayStore owns those.
 /// Unsupported/ambiguous pairs are omitted, never converted to business claims.
 pub fn derive_graphql_resolver_capabilities(base: &RevisionedSnapshot) -> CapabilityReport {
+    // Every derivation under test reads a compacted base, as the knowledge
+    // phase reads it (#2215).
+    #[cfg(test)]
+    let compacted = crate::workbench::compacted_snapshot_for_tests(base);
+    #[cfg(test)]
+    let base = &compacted;
     let mut nodes: BTreeMap<&str, Option<&Node>> = BTreeMap::new();
     for node in &base.graph.0 {
         nodes
