@@ -39,6 +39,8 @@ CLAUDE.md   @qwts
 /src-tauri/capabilities/ @qwts
 /src-tauri/tauri.conf.json @qwts
 /src-tauri/tauri.macos.conf.json @qwts
+# The desktop executable: the build and signed-release entrypoint (#1227).
+/src-tauri/src/bin/app.rs @qwts
 # Host-side egress and consent: cloud-provider construction and consent-grant
 # conversion, sealed into their own module by #457 so the rest of the host
 # tree (most app-shell changes) is not gated behind owner review.
