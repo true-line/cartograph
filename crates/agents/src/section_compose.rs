@@ -62,7 +62,8 @@ into one statement; do not restate each table row. Every statement rests only on
 facts it cites. Never write a file path, a file name or a code identifier (a function, \
 class, module or variable name): those stay in the citations. URL routes, HTTP methods \
 and statuses, field names and user-facing messages are part of the observable contract \
-and may be stated. Choose each claim's kind honestly: implemented_behavior for what the \
+and may be stated, but a route you state must be one a fact you cite shows: cite its \
+endpoint. Choose each claim's kind honestly: implemented_behavior for what the \
 code does, documented_intent only for what the target's own documentation or test \
 scenario names say is intended, inferred_interpretation for a reading across facts. \
 Reply with the JSON object the response schema describes and nothing else.";

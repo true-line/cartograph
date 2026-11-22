@@ -499,6 +499,22 @@ fn stage_as(
             ..ComposeOutcome::none("statement_names_source")
         });
     }
+    // A route a statement spells out must be shown by a fact it cites
+    // (#2328), not taken from the section text around it.
+    let shown = spec::CitedText::of(nodes, edges, &prepared.overlay, &cited);
+    let before = finish.claims.len();
+    finish.claims.retain(|claim| {
+        shown
+            .uncited_route(&claim.statement, &claim.citations)
+            .is_none()
+    });
+    left_out += before - finish.claims.len();
+    if finish.claims.is_empty() {
+        return Ok(ComposeOutcome {
+            left_out,
+            ..ComposeOutcome::none("route_not_cited")
+        });
+    }
     let cited: BTreeSet<String> = finish
         .claims
         .iter()
