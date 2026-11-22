@@ -176,10 +176,16 @@ jobs:
         with:
           tool: cargo-about@0.9.1
 
+      # ADR-0085, AC-1427: built before the notices, which reproduce the
+      # licenses it bundles. No signing input is visible yet, and the build
+      # refuses to run if one is.
+      - name: Build agent runtime sidecar
+        run: node scripts/build-agent-runtime.mjs universal-apple-darwin
+
       - name: Generate third-party notices
         run: |
           cargo fetch --locked
-          node scripts/generate-notices.mjs
+          node scripts/generate-notices.mjs --with-agent-runtime
 
       - name: Select signing mode
         id: signing
@@ -316,6 +322,16 @@ jobs:
           lipo "$relay" -verify_arch arm64
           lipo "$relay" -verify_arch x86_64
           codesign --verify --strict --verbose=2 "$relay"
+          # AC-1427: the agent runtime sidecar ships signed, universal, and
+          # starts under the hardened runtime (it needs allow-jit to print ready).
+          agent="$app/Contents/MacOS/cartograph-agent"
+          test -x "$agent"
+          lipo "$agent" -verify_arch arm64
+          lipo "$agent" -verify_arch x86_64
+          codesign --verify --strict --verbose=2 "$agent"
+          ready=$("$agent" < /dev/null | head -n 1)
+          printf '%s\n' "$ready"
+          printf '%s' "$ready" | grep -q '"type":"ready"'
           test -n "$dmg"
           test -f "$dmg"
           echo "app=$app" >> "$GITHUB_OUTPUT"

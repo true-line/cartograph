@@ -166,6 +166,24 @@ jobs:
       - name: Version and workflow tooling tests
         run: npm run test:version
 
+      # ADR-0085, AC-1427: the tool-calling sidecar is checked from its
+      # lockfile, then built the way the app ships it (one Node single
+      # executable from the pinned, checksum-verified Node) and the same
+      # process tests run against that executable.
+      - name: Agent runtime typecheck and tests
+        working-directory: agent-runtime
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck
+          npm test
+
+      - name: Agent runtime packaged executable
+        run: |
+          set -euo pipefail
+          agent=$(node scripts/build-agent-runtime.mjs x86_64-unknown-linux-gnu)
+          CARTOGRAPH_AGENT_EXECUTABLE="$agent" node --test agent-runtime/test/process.test.ts
+
       # Validates docs/help only; the wiki never gates a PR. The post-merge
       # help-wiki-sync workflow mirrors main to the wiki (#470).
       - name: Help mirror source check

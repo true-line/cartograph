@@ -1,19 +1,26 @@
 #!/usr/bin/env node
 // Generate THIRD-PARTY-NOTICES.md (#222): the attribution + license texts for
-// every third-party dependency Cartograph ships — Rust crates (via cargo-about)
-// and the production npm packages in ui/.
+// every third-party dependency Cartograph ships — Rust crates (via cargo-about),
+// the production npm packages in ui/, and the agent runtime sidecar's npm
+// packages and Node.js (agent-runtime/, ADR-0085).
 //
 // Output is DETERMINISTIC (no timestamps, sorted) so CI can regenerate and diff
 // it against the committed copy to catch drift. Also emits a code-split TS
 // module the app imports for its in-app "Open-source licenses" view.
 //
-// Usage:  node scripts/generate-notices.mjs [--check]
+// Usage:  node scripts/generate-notices.mjs [--check] [--with-agent-runtime]
 //   (no flag)  write the files
 //   --check    regenerate in memory and fail if the committed files are stale
+//   --with-agent-runtime
+//              also cover the agent runtime sidecar (ADR-0085). The package
+//              workflow passes it when it regenerates the notices it ships;
+//              the committed copy leaves that section out.
 //
 // Requires: cargo-about on PATH, and `npm ci` already run in ui/ (the JS
-// collector derives the inventory from ui/package-lock.json but reads each
-// package's license text from the installed copy).
+// collector derives the inventory from the lockfile but reads each license
+// text from the installed copy). --with-agent-runtime also needs the sidecar
+// built (scripts/build-agent-runtime.mjs), which installs agent-runtime/'s
+// locked packages and leaves the pinned Node release's verified LICENSE.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -25,7 +32,11 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const NOTICES_PATH = join(ROOT, 'THIRD-PARTY-NOTICES.md');
 const TS_PATH = join(ROOT, 'ui', 'src', 'generated', 'thirdPartyNotices.ts');
 const LOCK_PATH = join(ROOT, 'ui', 'package-lock.json');
+// Not in the packaged sidecar yet: the Claude lane ships with AC-1424, and
+// these join the notices then.
+export const AGENT_UNBUNDLED = ['@anthropic-ai/claude-agent-sdk', '@modelcontextprotocol/sdk'];
 const check = process.argv.includes('--check');
+const withAgentRuntime = process.argv.includes('--with-agent-runtime');
 
 function run(cmd, args, cwd) {
   return execFileSync(cmd, args, {
@@ -57,14 +68,14 @@ function rustNotices() {
 // machine, and their installed copy never feeds the output (see
 // readJsLicense), keeping regeneration byte-identical across OSes and npm
 // majors.
-export function collectJsPackages(lockJson) {
+export function collectJsPackages(lockJson, { exclude = [] } = {}) {
   const packages = lockJson.packages ?? {};
   const root = packages[''] ?? {};
   const rootNames = [
     ...Object.keys(root.dependencies ?? {}),
     ...Object.keys(root.optionalDependencies ?? {}),
     ...Object.keys(root.peerDependencies ?? {}),
-  ];
+  ].filter((name) => !exclude.includes(name));
 
   // Resolve `name` required by the package at `fromKey` the way npm does:
   // nearest node_modules ancestor first. Lockfile keys are ui/-relative
@@ -139,16 +150,10 @@ export function readJsLicense(pkg, baseDir = join(ROOT, 'ui')) {
   return { spdx, text, platformGated: false };
 }
 
-function jsNotices() {
-  const pkgs = collectJsPackages(JSON.parse(readFileSync(LOCK_PATH, 'utf8')));
-  const lines = [
-    'Cartograph bundles the following npm packages in its web UI. Each is used',
-    'under the terms of its declared license. This list is generated from the',
-    'production dependency tree of `ui/package-lock.json`; do not edit by hand.',
-    '',
-  ];
+function packageNotices(pkgs, baseDir, intro) {
+  const lines = [...intro, ''];
   for (const pkg of pkgs) {
-    const { spdx, text, platformGated } = readJsLicense(pkg);
+    const { spdx, text, platformGated } = readJsLicense(pkg, baseDir);
     lines.push(`## ${pkg.name} ${pkg.version}`, '', `License: ${spdx}`, '');
     if (platformGated) {
       lines.push(
@@ -164,7 +169,34 @@ function jsNotices() {
   return lines.join('\n').trimEnd();
 }
 
-function build() {
+function jsNotices() {
+  return packageNotices(collectJsPackages(JSON.parse(readFileSync(LOCK_PATH, 'utf8'))), join(ROOT, 'ui'), [
+    'Cartograph bundles the following npm packages in its web UI. Each is used',
+    'under the terms of its declared license. This list is generated from the',
+    'production dependency tree of `ui/package-lock.json`; do not edit by hand.',
+  ]);
+}
+
+// The `cartograph-agent` sidecar (ADR-0085) is one Node.js single executable:
+// the pinned Node release plus the bundled npm packages. The build verifies
+// Node's LICENSE against its pin and leaves it in target/agent-runtime/.
+export function agentNotices(root = ROOT) {
+  const dir = join(root, 'agent-runtime');
+  const pin = JSON.parse(readFileSync(join(root, 'scripts', 'agent-runtime-node.json'), 'utf8'));
+  const licensePath = join(root, 'target', 'agent-runtime', 'NODE-LICENSE');
+  if (!existsSync(licensePath)) throw new Error('build the agent runtime (scripts/build-agent-runtime.mjs) before its notices');
+  const node = readFileSync(licensePath, 'utf8').trimEnd();
+  const lock = JSON.parse(readFileSync(join(dir, 'package-lock.json'), 'utf8'));
+  const packages = packageNotices(collectJsPackages(lock, { exclude: AGENT_UNBUNDLED }), dir, [
+    'The agent runtime sidecar (`cartograph-agent`) bundles the following npm',
+    'packages. Each is used under the terms of its declared license. This list is',
+    'generated from the production dependency tree of',
+    '`agent-runtime/package-lock.json`; do not edit by hand.',
+  ]);
+  return [`## Node.js ${pin.version}`, '', 'License: MIT (with the bundled licenses below)', '', '```', node, '```', '', packages].join('\n');
+}
+
+function build({ agentRuntime = false } = {}) {
   const body = [
     '# Third-Party Notices',
     '',
@@ -187,6 +219,7 @@ function build() {
     '',
     jsNotices(),
     '',
+    ...(agentRuntime ? ['---', '', '# Agent runtime (Node.js and npm packages)', '', agentNotices(), ''] : []),
   ].join('\n');
   return body;
 }
@@ -210,7 +243,7 @@ export function tsModule(markdown) {
 // collector (same pattern as scripts/version.mjs).
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 if (process.argv[1] && resolve(process.argv[1]) === SCRIPT_PATH) {
-  const notices = build();
+  const notices = build({ agentRuntime: withAgentRuntime });
   const ts = tsModule(notices);
 
   if (check) {
