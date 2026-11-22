@@ -886,7 +886,8 @@ fn remote_outside_and_symlinked_modules_remain_leaf_nodes() {
 module "outside" {{ source = "{}" }}
 module "remote" {{ source = "terraform-aws-modules/eventbridge/aws" }}
 "#,
-            outside.path().display()
+            // An HCL string escapes a Windows path's backslashes (#227).
+            outside.path().display().to_string().replace('\\', "\\\\")
         ),
     )
     .unwrap();

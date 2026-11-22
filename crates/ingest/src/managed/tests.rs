@@ -11,6 +11,11 @@ const SECOND: &str = "src_33333333333333333333333333333333";
 /// holds a lock: CLOEXEC closes that inherited handle only when exec occurs.
 /// Open this fixture's locks after exec in an otherwise isolated test process.
 fn run_in_isolated_process(test_name: &str) -> bool {
+    run_isolated_with_env(test_name, &[])
+}
+
+/// [`run_in_isolated_process`], with `env` set in the child.
+fn run_isolated_with_env(test_name: &str, env: &[(&str, &std::ffi::OsStr)]) -> bool {
     const ISOLATED_CASE: &str = "CARTOGRAPH_MANAGED_ISOLATED_TEST_CASE";
     let exact = format!("managed::tests::{test_name}");
     if std::env::var(ISOLATED_CASE).is_ok_and(|value| value == exact) {
@@ -21,6 +26,7 @@ fn run_in_isolated_process(test_name: &str) -> bool {
             .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
             .env(ISOLATED_CASE, &exact)
             .env_remove("CARTOGRAPH_MANAGED_LOCK_TEST_CHILD_PATH")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -70,6 +76,33 @@ fn app_dir(root: &Path) -> PathBuf {
     let path = root.join("application");
     fs::create_dir(&path).unwrap();
     dunce::canonicalize(path).unwrap()
+}
+
+/// A managed checkout holds the committed bytes even where the user's Git
+/// config converts newlines, as Git for Windows does system-wide (#227).
+#[test]
+fn managed_checkout_keeps_committed_newlines_under_autocrlf() {
+    // libgit2 reads the user's global config from HOME.
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        home.path().join(".gitconfig"),
+        "[core]\n\tautocrlf = true\n",
+    )
+    .unwrap();
+    let home = home.path().as_os_str();
+    if run_isolated_with_env(
+        "managed_checkout_keeps_committed_newlines_under_autocrlf",
+        &[("HOME", home), ("XDG_CONFIG_HOME", home)],
+    ) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let origin = mirror(&dir.path().join("mirror.git"), b"one\ntwo\n");
+    let app = app_dir(dir.path());
+    let checkout = ManagedCheckout::new(&app, REGISTRY, FIRST).unwrap();
+    let mut guard = checkout.try_write().unwrap();
+    let cloned = guard.clone_from(&origin, None).unwrap();
+    assert_eq!(fs::read(cloned.path.join("app.ts")).unwrap(), b"one\ntwo\n");
 }
 
 #[test]
