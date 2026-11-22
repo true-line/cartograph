@@ -556,9 +556,9 @@ mod tests {
 
     const INPUT: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.input.json");
     /// The v1 file of `INPUT` (AC-0740).
-    const V1: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.expected.json");
+    const V1: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.v1.json");
     /// The v2 file of `INPUT` (ADR-0086).
-    const V2: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.v2.expected.json");
+    const V2: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.expected.json");
 
     fn fixture_bundle() -> SpecBundle {
         let fixture: Fixture = serde_json::from_str(INPUT).expect("fixture parses");

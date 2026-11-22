@@ -1,0 +1,213 @@
+{
+  "mode": "best-effort",
+  "artifacts": [
+    {
+      "id": "readme",
+      "file_name": "README.md",
+      "title": "Overview",
+      "format": "markdown",
+      "schema": "cartograph.spec/readme@1",
+      "content_id": "b3:aa11",
+      "content": "# Acme shop — recovered spec\n\nTabs\there, \"quotes\", back\\slash, </script>, café, 🚀, line separator, control \u0001\u001f.\n",
+      "content_truncated": false,
+      "content_byte_len": 117,
+      "assertions": [
+        {
+          "id": "a-orders-route",
+          "subject_id": "endpoint:POST /orders",
+          "subject_kind": "Endpoint",
+          "summary": "POST /orders is served by `createOrder`",
+          "provenance": {
+            "tier": "Deterministic",
+            "confidence_tier": "Confirmed",
+            "evidence": [
+              {
+                "repo": "acme/shop",
+                "path": "src/routes/orders.ts",
+                "byte_start": 120,
+                "byte_end": 188,
+                "commit_sha": "9f1c2d3e4b5a69788796a5b4c3d2e1f00112233"
+              }
+            ],
+            "extractor_id": "adapters-fw-express",
+            "content_hash": "b3:01ab",
+            "method": {
+              "kind": "rule",
+              "rule": "express-route",
+              "version": "3"
+            },
+            "basis": {
+              "kind": "source"
+            }
+          }
+        }
+      ],
+      "assertions_truncated": false,
+      "assertions_total": 1
+    },
+    {
+      "id": "flow-dossiers",
+      "file_name": "flow-dossiers.md",
+      "title": "Flow dossiers",
+      "format": "mermaid",
+      "schema": "cartograph.spec/flow-dossiers@1",
+      "content_id": "b3:bb22",
+      "content": "flowchart LR\n  A[POST /orders] --> B[(orders)]\n  B -. inferred .-> C{{queue}}\n",
+      "content_truncated": false,
+      "content_byte_len": 78,
+      "assertions": [
+        {
+          "id": "a-orders-route",
+          "subject_id": "endpoint:POST /orders",
+          "subject_kind": "Endpoint",
+          "summary": "POST /orders is served by `createOrder`",
+          "provenance": {
+            "tier": "Deterministic",
+            "confidence_tier": "Confirmed",
+            "evidence": [
+              {
+                "repo": "acme/shop",
+                "path": "src/routes/orders.ts",
+                "byte_start": 120,
+                "byte_end": 188,
+                "commit_sha": "9f1c2d3e4b5a69788796a5b4c3d2e1f00112233"
+              }
+            ],
+            "extractor_id": "adapters-fw-express",
+            "content_hash": "b3:01ab",
+            "method": {
+              "kind": "rule",
+              "rule": "express-route",
+              "version": "3"
+            },
+            "basis": {
+              "kind": "source"
+            }
+          }
+        },
+        {
+          "id": "a-orders-writes",
+          "subject_id": "svc:orders WRITES table:orders",
+          "subject_kind": "WRITES",
+          "summary": "orders writes \"orders\" — inferred from naming",
+          "provenance": {
+            "tier": "Semantic",
+            "confidence_tier": "InferredWeak",
+            "evidence": [],
+            "extractor_id": "semantic-namer",
+            "content_hash": "b3:02cd",
+            "method": {
+              "kind": "model",
+              "model": "local-small"
+            }
+          },
+          "edge_label": "WRITES"
+        }
+      ],
+      "assertions_truncated": false,
+      "assertions_total": 2
+    },
+    {
+      "id": "gap-register",
+      "file_name": "gap_register.json",
+      "title": "Gap register",
+      "format": "json",
+      "schema": "cartograph.spec/gap-register@1",
+      "content_id": "b3:cc33",
+      "content": "{\n  \"gaps\": [\n    {\n      \"id\": \"a-gap-queue\",\n      \"reason\": \"QUEUE_URL → unset\"\n    },\n    {\n      \"id\": \"a-gap-queue\",\n      \"reason\": \"QUEUE_URL → unset\"\n    },\n    {\n      \"id\": \"a-gap-queue\",\n      \"reason\": \"QUEUE_URL → unset\"\n    }\n  ]\n}",
+      "content_truncated": false,
+      "content_byte_len": 252,
+      "assertions": [
+        {
+          "id": "a-gap-queue",
+          "subject_id": "gap:queue/événements",
+          "subject_kind": "Gap",
+          "summary": "Queue target unresolved: env var `QUEUE_URL` (not set)",
+          "provenance": {
+            "tier": "Deterministic",
+            "confidence_tier": "Gap",
+            "evidence": [],
+            "extractor_id": "flowtracer",
+            "content_hash": "b3:03ef"
+          },
+          "edge_label": "PUBLISHES",
+          "omission": {
+            "class": "missing_input",
+            "seam": "interpretation",
+            "detail": "environment variable QUEUE_URL has no recorded value"
+          }
+        },
+        {
+          "id": "a-gap-queue",
+          "subject_id": "gap:queue/événements",
+          "subject_kind": "Gap",
+          "summary": "Queue target unresolved: env var `QUEUE_URL` (not set)",
+          "provenance": {
+            "tier": "Deterministic",
+            "confidence_tier": "Gap",
+            "evidence": [],
+            "extractor_id": "flowtracer",
+            "content_hash": "b3:03ef"
+          },
+          "edge_label": "PUBLISHES",
+          "omission": {
+            "class": "missing_input",
+            "seam": "interpretation",
+            "detail": "environment variable QUEUE_URL has no recorded value"
+          }
+        },
+        {
+          "id": "a-gap-queue",
+          "subject_id": "gap:queue/événements",
+          "subject_kind": "Gap",
+          "summary": "Queue target unresolved: env var `QUEUE_URL` (not set)",
+          "provenance": {
+            "tier": "Deterministic",
+            "confidence_tier": "Gap",
+            "evidence": [],
+            "extractor_id": "flowtracer",
+            "content_hash": "b3:03ef"
+          },
+          "edge_label": "PUBLISHES",
+          "omission": {
+            "class": "missing_input",
+            "seam": "interpretation",
+            "detail": "environment variable QUEUE_URL has no recorded value"
+          }
+        }
+      ],
+      "assertions_truncated": false,
+      "assertions_total": 3
+    }
+  ],
+  "assertion_count": 6,
+  "gap_count": 3,
+  "drift_count": 0,
+  "security_count": 1,
+  "graph_basis": {
+    "content_hash": "b3:graph",
+    "sources": [
+      {
+        "repo": "acme/shop",
+        "commit": "9f1c2d3e4b5a69788796a5b4c3d2e1f00112233"
+      }
+    ]
+  },
+  "curated_basis": {
+    "revision": "cur-7",
+    "counts": {
+      "accepted": 2,
+      "eligible": 1,
+      "unverified": 1,
+      "unresolvable": 0,
+      "stale": 0,
+      "already_covered": 0,
+      "conflicted": 0
+    }
+  },
+  "files": {
+    "README.md": "# Acme shop — recovered spec\n\nTabs\there, \"quotes\", back\\slash, </script>, café, 🚀, line separator, control \u0001\u001f.\n",
+    "flow-dossiers.md": "flowchart LR\n  A[POST /orders] --> B[(orders)]\n  B -. inferred .-> C{{queue}}\n",
+    "gap_register.json": "{\n  \"gaps\": [\n    {\n      \"id\": \"a-gap-queue\",\n      \"reason\": \"QUEUE_URL → unset\"\n    },\n    {\n      \"id\": \"a-gap-queue\",\n      \"reason\": \"QUEUE_URL → unset\"\n    },\n    {\n      \"id\": \"a-gap-queue\",\n      \"reason\": \"QUEUE_URL → unset\"\n    }\n  ]\n}"
+  }
+}
