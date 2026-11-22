@@ -363,7 +363,7 @@ pub fn predict(
             continue;
         };
         let retrieve = family.neighbors;
-        let hop = crate::UnresolvedHop {
+        let mut hop = crate::UnresolvedHop {
             gap_id: case.hop.gap_id.clone(),
             source_id: case.hop.source_id.clone(),
             edge_label: match case.hop.edge_label {
@@ -394,6 +394,9 @@ pub fn predict(
                 materialized_node: None,
             })
             .collect();
+        // The live rule (AC-1513): a query naming two or more candidates of
+        // its family is a name collision and is never proposed.
+        crate::exclude_name_collisions(std::slice::from_mut(&mut hop), &candidates);
         let ranked = crate::propose(provider, &[hop], &candidates, retrieve)
             .map_err(|error| error.to_string())?;
         if ranked.iter().any(|p| {
