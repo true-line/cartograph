@@ -23,7 +23,7 @@ use std::sync::Arc;
 #[path = "context_metadata_admission.rs"]
 pub(super) mod metadata_admission;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "context_metadata_admission_tests.rs"]
 mod metadata_admission_tests;
 
@@ -358,7 +358,7 @@ pub(crate) fn task_graph_limits(mcp_started: bool) -> SnapshotReadLimits {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod graph_limit_tests {
     use super::*;
 
@@ -1551,10 +1551,10 @@ fn context_error(error: context_hub::ContextError) -> HostError {
 }
 pub(super) use app_store::investigation_host::bounded_json;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "context_coverage_tests.rs"]
 mod coverage_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "context_preparation_tests.rs"]
 mod preparation_tests;

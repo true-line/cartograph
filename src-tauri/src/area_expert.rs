@@ -359,6 +359,6 @@ pub(crate) async fn run_area_ask(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "area_expert_tests.rs"]
 mod tests;
