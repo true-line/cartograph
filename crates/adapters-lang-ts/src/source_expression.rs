@@ -11,7 +11,7 @@ use core_graph::rules::{
     SanitizedDisplay, SourceExpression, SourceRedaction,
 };
 use core_prov::EvidenceRef;
-use core_redact::{SecretKind, is_sensitive_name, is_token_shaped, recognized_secrets};
+use core_redact::{SecretKind, is_sensitive_name, recognized_secrets, rule_literal_token_shaped};
 use tree_sitter::Node as TsNode;
 
 const MAX_EXPRESSION_BYTES: usize = 16 * 1024;
@@ -305,7 +305,7 @@ fn secret_reasons(value: &str) -> Vec<RedactionReason> {
         .into_iter()
         .map(redaction_reason)
         .collect();
-    if is_token_shaped(value) {
+    if rule_literal_token_shaped(value) {
         reasons.push(RedactionReason::TokenShaped);
     }
     reasons
@@ -792,11 +792,33 @@ mod tests {
         }
     }
 
+    // AC-1044 (T-1044): a returned dotted lowercase message key is stated as
+    // written; a token after a dotted prefix is still withheld.
+    #[test]
+    fn a_returned_message_key_is_kept_and_a_dotted_token_is_withheld() {
+        let (kept, redactions) =
+            returned("'message.cannot-transition-to-payment-when-order-is-empty'");
+        assert_eq!(kept.capture, ExpressionCapture::CompleteSyntax);
+        assert!(redactions.is_empty(), "{redactions:?}");
+        assert!(
+            kept.display
+                .as_str()
+                .contains("message.cannot-transition-to-payment-when-order-is-empty")
+        );
+        let (withheld, redactions) = returned("'message.3f9a0c7be12d4e5f60718293a4b5c6d7e8f90123'");
+        assert_eq!(withheld.capture, ExpressionCapture::Redacted);
+        assert!(
+            redactions
+                .iter()
+                .any(|redaction| redaction.reason == RedactionReason::TokenShaped)
+        );
+    }
+
     #[test]
     fn conservative_shape_withholding_is_typed_and_deterministic() {
         // AC-0124: long business identifiers can be withheld conservatively,
         // but string type and references survive without invented semantics.
-        let raw = "'message.cannot-start-action-without-required-context'";
+        let raw = "'ORDER_STATE_TRANSITION_REQUIRES_CONTEXT_CHECK_V2'";
         let first = returned(raw);
         let second = returned(raw);
         assert_eq!(first, second);

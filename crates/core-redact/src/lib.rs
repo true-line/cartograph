@@ -214,9 +214,86 @@ pub fn is_token_shaped(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '_' | '-' | '=' | '.'))
 }
 
+/// Whether a rule-evidence literal is withheld as token-shaped (AC-1044):
+/// [`is_token_shaped`], except a dotted lowercase message key.
+pub fn rule_literal_token_shaped(value: &str) -> bool {
+    is_token_shaped(value) && !is_message_key(value)
+}
+
+/// Whether a string is a dotted lowercase i18n message key such as
+/// `message.cannot-transition-to-payment-when-order-is-empty` (AC-1044).
+/// Rule evidence states such a key instead of withholding it as
+/// token-shaped: it is product text naming a rule's outcome. The toolchain's
+/// [`is_token_shaped`] policy is unchanged.
+///
+/// It has at least two `.`-separated segments, each made of `-`-separated
+/// words, and at least four words. Every word is either lowercase ASCII
+/// letters with a vowel, at most 20 of them, or at most four digits. Nothing
+/// uppercase, no `_ + / =`, no word that mixes letters and digits and no long
+/// run without a vowel is admitted, so base64, hex, AWS, GitHub and JWT
+/// shapes, alone or after a dotted prefix, stay token-shaped.
+pub fn is_message_key(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    let mut words = 0;
+    for segment in segments {
+        for word in segment.split('-') {
+            let letters = (1..=20).contains(&word.len())
+                && word.bytes().all(|b| b.is_ascii_lowercase())
+                && word.bytes().any(|b| b"aeiouy".contains(&b));
+            let number = (1..=4).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_digit());
+            if !letters && !number {
+                return false;
+            }
+            words += 1;
+        }
+    }
+    words >= 4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-1044 (T-1044): a dotted lowercase message key is product text, not
+    // a token; real token shapes stay token-shaped, alone or after a dotted
+    // prefix.
+    #[test]
+    fn a_dotted_message_key_is_not_token_shaped_and_real_tokens_still_are() {
+        for key in [
+            "message.cannot-transition-to-payment-when-order-is-empty",
+            "message.cannot-transition-order-contains-products-which-are-unavailable",
+            "error.stockonhand-cannot-be-negative-for-this-product-variant",
+            "errors.order.limit-of-100-items-reached-for-this-order",
+        ] {
+            assert!(key.len() >= 40, "{key}");
+            assert!(is_message_key(key), "{key}");
+            assert!(!rule_literal_token_shaped(key), "{key}");
+        }
+        for token in [
+            // AWS access key id and secret access key.
+            "AKIAIOSFODNN7EXAMPLE.AKIAIOSFODNN7EXAMPLEKEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            // GitHub token.
+            "ghp_1234567890abcdefghijklmnopqrstuvwxyzAB",
+            // JWT.
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+            // Generic high-entropy: hex, lowercase base32 and mixed words.
+            "3f9a0c7be12d4e5f60718293a4b5c6d7e8f90123",
+            "message.3f9a0c7be12d4e5f60718293a4b5c6d7e8f90123",
+            "message.ghp_1234567890abcdefghijklmnopqrstuvwx",
+            "message.cannot-transition.AKIAIOSFODNN7EXAMPLE",
+            "message.qzxkvbnmlkjhgfdsrtpwc-cannot-transition",
+            "message.abcdefghijklmnopqrstuvwxyzab-transition",
+            "message.k8s9d7f6-cannot-transition-to-payment",
+            "mnbvcxzlkjhgfdsapoiuytrewqmnbvcxzlkjhgfdsa",
+        ] {
+            assert!(!is_message_key(token), "{token}");
+            assert!(rule_literal_token_shaped(token), "{token}");
+        }
+    }
 
     #[test]
     fn typed_recognition_reports_categories_without_changing_replacement_policy() {
