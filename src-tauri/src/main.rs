@@ -14729,6 +14729,103 @@ export function App() {
     }
 
     #[test]
+    fn a_managed_source_and_its_manifest_inputs_never_share_an_identity() {
+        // AC-1068 (ADR-0072 slice 2, decision 4 manifest-local, #385): a
+        // manifest with a managed `file://` Git entry and its `state_json`
+        // and `otel_jsonl` captures the inputs under the source's own input
+        // identity (ADR-0080), apart from the repository's captures; each
+        // input keeps its own path and digest, and observed evidence never
+        // borrows the repository commit.
+        use tauri::Manager;
+        const STATE: &str = r#"{"format_version":"1.0","values":{"root_module":{"resources":[
+            {"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{"url":"https://sqs.example/jobs"},"sensitive_values":{}}]}}}"#;
+        const TRACE: &str = "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[{\"traceId\":\"t\",\"spanId\":\"s\",\"name\":\"send\",\"attributes\":[{\"key\":\"messaging.system\",\"value\":{\"stringValue\":\"aws_sqs\"}}]}]}]}]}\n";
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        std::fs::create_dir_all(&system).unwrap();
+        let bare = preflight_bare_repo(
+            dir.path(),
+            "infra",
+            &[(
+                "main.tf",
+                "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+            )],
+        );
+        std::fs::write(system.join("state.json"), STATE).unwrap();
+        std::fs::write(system.join("trace.otlp.jsonl"), TRACE).unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            format!(
+                "[[repos]]\nurl = \"file://{}\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\notel_jsonl = [\"trace.otlp.jsonl\"]\n",
+                bare.display()
+            ),
+        )
+        .unwrap();
+        let commit = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&bare)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle).unwrap();
+        let source = state.sources.lock().unwrap().list().unwrap().remove(0);
+        assert!(source.is_managed());
+        let input = format!("input/{}", source.source_id);
+
+        let fact = core_graph::FactKey::Node {
+            id: format!("res:{}@aws_sqs_queue.jobs", source.repo_key),
+        };
+        let observed = super::primary_source::describe_observed(&state, &fact).unwrap();
+        assert_eq!(observed.source_id, input);
+        assert_ne!(observed.repo_key, input);
+        let node = state
+            .graph
+            .lock()
+            .unwrap()
+            .get_node(&format!("res:{}@aws_sqs_queue.jobs", source.repo_key))
+            .unwrap()
+            .unwrap();
+        let cited = &node.props["observed_prov"]["evidence"][0];
+        assert_eq!(cited["repo"], input.as_str());
+        assert_eq!(cited["path"], "state.json");
+        assert_ne!(cited["commit_sha"], commit.as_str());
+        assert_ne!(cited["repo"], source.repo_key.as_str());
+
+        let retained = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert_eq!(retained.input_capture_ids.len(), 1);
+        assert!(!retained.capture_ids.is_empty());
+        assert!(
+            retained
+                .input_capture_ids
+                .iter()
+                .all(|id| !retained.capture_ids.contains(id))
+        );
+        let captures = state.primary_sources.captures.lock().unwrap();
+        let inputs = captures.load(&retained.input_capture_ids[0]).unwrap();
+        assert_eq!(inputs.manifest().source_id.as_str(), input);
+        let state_file = inputs.file("state.json").unwrap();
+        let trace_file = inputs.file("trace.otlp.jsonl").unwrap();
+        assert_eq!(state_file.bytes(), STATE.as_bytes());
+        assert_eq!(trace_file.bytes(), TRACE.as_bytes());
+        assert_ne!(state_file.reference().digest, trace_file.reference().digest);
+        for id in &retained.capture_ids {
+            let repo = captures.load(id).unwrap();
+            assert_eq!(repo.manifest().source_id.as_str(), source.source_id);
+            assert!(repo.file("state.json").is_err());
+        }
+    }
+
+    #[test]
     fn manifest_observation_input_captures_are_retained_and_forgotten_with_their_source() {
         // AC-1043 (ADR-0080 slice 2a, #385): a recovered system retains each
         // repo's captured observation inputs beside its own captures; the

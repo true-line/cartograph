@@ -4514,3 +4514,231 @@ fn a_java_only_source_is_captured_and_its_symbols_read_back() {
         assert!(read.text.contains("total"));
     }
 }
+
+/// Receipts the production TS lane mints from `capture` (ADR-0072 slice 2).
+fn receipts_from(
+    state: &AppState,
+    source: &RegisteredSource,
+    commit: &str,
+    capture: &source_capture::Capture,
+) -> Vec<Receipt> {
+    let layers = vec!["client".to_string()];
+    let mut receipts = Vec::new();
+    let mut caches = state.extraction_caches.lock().unwrap();
+    let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+    extract_tree_with_primary(
+        source.root(),
+        &source.repo_key,
+        commit,
+        &layers,
+        &BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
+        None,
+        None,
+        &[],
+        cache,
+        &[],
+        &mut |_| {},
+        Some(capture),
+        &mut receipts,
+        &mut crate::ProducerReads::default(),
+    )
+    .unwrap();
+    assert!(!receipts.is_empty());
+    receipts
+        .iter()
+        .map(|receipt| receipt.to_receipt().unwrap())
+        .collect()
+}
+
+// AC-1068 (ADR-0072 slice 2, #385): with an EOL rule and a checkout filter,
+// the checkout bytes differ from the blob bytes. A working-tree capture and a
+// Git-object capture of the same path get different digests and capture ids,
+// every receipt names the capture it parsed, a commit id never makes a
+// working-tree capture a Git one, capture never runs the filter, and a record
+// staged from the checkout bytes is `changed` against the blob recapture.
+#[test]
+fn checkout_bytes_and_blob_bytes_never_stand_in_for_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "repo");
+    let marker = dir.path().join("filter-ran");
+    git(&["init", "-q", "-b", "main"], &root);
+    let filter = format!("sh -c 'touch \"{}\"; cat'", marker.display());
+    git(&["config", "filter.mark.clean", &filter], &root);
+    git(&["config", "filter.mark.smudge", &filter], &root);
+    std::fs::write(
+        root.join(".gitattributes"),
+        "*.ts text eol=crlf filter=mark\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    git(&["add", "."], &root);
+    git(&["commit", "-q", "-m", "init"], &root);
+    let commit = git(&["rev-parse", "HEAD"], &root);
+    // A fresh checkout applies the EOL rule (and the filter) to the blob.
+    std::fs::remove_file(root.join("source.ts")).unwrap();
+    git(&["checkout", "--", "source.ts"], &root);
+    let checkout = std::fs::read(root.join("source.ts")).unwrap();
+    assert_eq!(checkout, STABLE_A.replace('\n', "\r\n").as_bytes());
+    std::fs::remove_file(&marker).unwrap();
+
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let prepare = |commit: Option<&str>| {
+        state
+            .primary_sources
+            .prepare_at(
+                &source,
+                source.root(),
+                &layers,
+                commit,
+                source_capture::CaptureLimits::default(),
+                adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            )
+            .unwrap()
+    };
+    let working = prepare(None);
+    let working = working.capture.as_ref().unwrap();
+    let blob = prepare(Some(&commit));
+    let blob = blob.capture.as_ref().unwrap();
+    assert_eq!(
+        working.manifest().kind,
+        source_capture::CaptureKind::WorkingTree
+    );
+    assert!(matches!(
+        blob.manifest().kind,
+        source_capture::CaptureKind::Git { .. }
+    ));
+    let working_file = working.file("source.ts").unwrap();
+    let blob_file = blob.file("source.ts").unwrap();
+    assert_eq!(working_file.bytes(), checkout.as_slice());
+    assert_eq!(blob_file.bytes(), STABLE_A.as_bytes());
+    assert_ne!(working.id(), blob.id());
+    assert_ne!(
+        working_file.reference().digest,
+        blob_file.reference().digest
+    );
+
+    // The commit id passed to the producer does not make the working-tree
+    // capture a Git capture: its receipts name the working-tree capture.
+    for (capture, file) in [(working, working_file), (blob, blob_file)] {
+        for receipt in receipts_from(&state, &source, &commit, capture) {
+            assert_eq!(receipt.file().capture_id, capture.id());
+            assert_eq!(receipt.file().digest, file.reference().digest);
+        }
+    }
+    assert!(!marker.exists(), "capture ran the checkout filter");
+
+    // A record staged from the checkout bytes does not reconcile against the
+    // blob recapture of the same path and range.
+    let span = 0..checkout.len().min(STABLE_A.len());
+    let staged = agents::EvidenceBasis {
+        id: "source".into(),
+        source: core_prov::EvidenceRef {
+            repo: source.repo_key.clone(),
+            path: "source.ts".into(),
+            byte_start: 0,
+            byte_end: span.end as u64,
+            commit_sha: commit.clone(),
+        },
+        text_hash: core_prov::content_hash(&checkout[span.clone()]),
+        text_bytes: span.len(),
+    };
+    let reference = blob_file.reference();
+    let recaptured = agents::reconciliation::RecapturedItem::Range {
+        origin: agents::reconciliation::ReconciledOrigin {
+            receipt_id: format!("ts-primary-v3:{}", "0".repeat(64)),
+            receipt_inventory_index: 0,
+            captured: agents::TaskCaptureSpanRef {
+                file: agents::TaskCaptureFileRef {
+                    source_id: reference.source_id.as_str().to_owned(),
+                    capture_id: reference.capture_id.clone(),
+                    path: reference.path.clone(),
+                    digest: reference.digest.clone(),
+                    byte_len: reference.byte_len,
+                },
+                byte_start: 0,
+                byte_end: span.end as u64,
+            },
+            input_closure: agents::InputClosureStatus::InputClosureNotEstablished,
+        },
+        fact_digest: "node-v1:unchanged",
+        bytes: &blob_file.bytes()[span],
+    };
+    assert_eq!(
+        agents::reconciliation::compare_captured(&staged, "node-v1:unchanged", recaptured).0,
+        agents::reconciliation::ItemOutcome::Changed {
+            reason: agents::reconciliation::ChangedReason::SpanBytesDiffer
+        }
+    );
+}
+
+// AC-1068 (ADR-0072 slice 2, #385): a main worktree and a linked worktree of
+// one repository at one commit, with one file different, are distinct
+// sources with distinct captures; an unchanged file has equal digests in both,
+// and neither source accepts the other's receipts.
+#[test]
+fn linked_worktrees_are_distinct_sources_and_refuse_each_others_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let main = directory(dir.path(), "main");
+    std::fs::write(main.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(main.join("shared.ts"), ORIGINAL).unwrap();
+    git(&["init", "-q", "-b", "main"], &main);
+    git(&["add", "."], &main);
+    git(&["commit", "-q", "-m", "init"], &main);
+    let linked_path = dir.path().join("linked");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked_path.to_str().unwrap(),
+            "HEAD",
+        ],
+        &main,
+    );
+    let linked = crate::paths::canonicalize(&linked_path).unwrap();
+    std::fs::write(linked.join("source.ts"), STABLE_B).unwrap();
+
+    let state = app_state(&app_data);
+    let main_source = register_local_source(&state, &main).unwrap();
+    let linked_source = register_local_source(&state, &linked).unwrap();
+    assert_ne!(main_source.source_id, linked_source.source_id);
+    assert_ne!(main_source.repo_key, linked_source.repo_key);
+    let first = parse(&state, &main_source, || {});
+    let second = parse(&state, &linked_source, || {});
+    let (a, b) = (
+        first.input.capture.as_ref().unwrap(),
+        second.input.capture.as_ref().unwrap(),
+    );
+    assert_ne!(a.id(), b.id());
+    let digest = |capture: &source_capture::Capture, path: &str| {
+        capture.file(path).unwrap().reference().digest.clone()
+    };
+    assert_eq!(digest(a, "shared.ts"), digest(b, "shared.ts"));
+    assert_ne!(digest(a, "source.ts"), digest(b, "source.ts"));
+    for (parsed, source) in [(&first, &main_source), (&second, &linked_source)] {
+        for receipt in &parsed.receipts {
+            assert_eq!(receipt.repo_key(), source.repo_key);
+            assert_eq!(
+                receipt.file().capture_id,
+                parsed.input.capture.as_ref().unwrap().id()
+            );
+        }
+    }
+    // Each source refuses the other's receipts and accepts its own.
+    for (parsed, other) in [(&first, &linked_source), (&second, &main_source)] {
+        assert!(
+            state
+                .primary_sources
+                .persist(&parsed.input, other, &parsed.receipts)
+                .is_err()
+        );
+    }
+    publish(&state, &main_source, &first);
+    publish(&state, &linked_source, &second);
+}
