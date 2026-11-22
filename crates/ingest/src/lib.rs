@@ -11,6 +11,7 @@
 pub mod adapter_lookup;
 pub mod adapter_packet;
 pub mod api_docs;
+mod captured_walk;
 pub mod coverage;
 pub mod entry_points;
 pub mod environments;

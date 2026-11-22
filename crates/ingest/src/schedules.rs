@@ -111,15 +111,62 @@ pub fn extract_dir(
     id: &SourceId,
     symbols: &BTreeSet<String>,
 ) -> std::io::Result<ScheduleExtraction> {
-    let walked = source_walk::files(
-        root,
-        &crate::preflight::skip_dir,
-        source_walk::Gitignores::Honor,
-    )?;
+    let walked = crate::captured_walk::walk(root)?;
+    let text = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
+    Ok(extract_walked(&walked, &text, id, symbols))
+}
+
+/// True when the schedule reader may open `rel` and a capture retains it: a
+/// YAML file (a yacron file, a workflow or a `CronJob` manifest) other than
+/// an env file, a crontab, a Python script a job runs or imports, or the
+/// root `Dockerfile`.
+pub fn is_schedule_file(rel: &str) -> bool {
+    // An env file holds secrets: no capture retains it (AC-0097).
+    !crate::toolchain::is_env_name(rel.rsplit('/').next().unwrap_or(rel)) && is_read_file(rel)
+}
+
+fn is_read_file(rel: &str) -> bool {
+    rel.ends_with(".yml")
+        || rel.ends_with(".yaml")
+        || crontab_kind(rel).is_some()
+        || rel.ends_with(".py")
+        || rel == "Dockerfile"
+}
+
+/// The files [`extract_dir`] may open under `root`, in path order: a source
+/// capture retains them (AC-1061).
+pub fn schedule_paths(root: &Path) -> std::io::Result<Vec<String>> {
+    crate::captured_walk::selected(root, is_schedule_file)
+}
+
+/// [`extract_dir`] over a source capture (AC-1061, #385): `captured` is the
+/// capture's [`is_schedule_file`] selection and `read` its bytes. The
+/// checkout is listed for its directories and other files, and never read.
+pub fn extract_from_capture(
+    root: &Path,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+) -> std::io::Result<ScheduleExtraction> {
+    let walked = crate::captured_walk::listing(root, captured, is_schedule_file)?;
+    let text = |rel: &str| {
+        is_schedule_file(rel)
+            .then(|| read(rel).ok())
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    Ok(extract_walked(&walked, &text, id, symbols))
+}
+
+fn extract_walked(
+    walked: &[source_walk::WalkedFile],
+    text: &dyn Fn(&str) -> Option<String>,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+) -> ScheduleExtraction {
     let files: BTreeSet<String> = walked.iter().map(|file| file.rel.clone()).collect();
-    let container = std::fs::read_to_string(root.join("Dockerfile"))
-        .ok()
-        .and_then(|text| container_root(&text));
+    let container = text("Dockerfile").and_then(|text| container_root(&text));
     let mut out = ScheduleExtraction::default();
     let mut emitted_files = BTreeSet::new();
     let mut sources: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -131,7 +178,7 @@ pub fn extract_dir(
         let mut read = |rel: &str| {
             sources
                 .entry(rel.to_string())
-                .or_insert_with(|| std::fs::read_to_string(root.join(rel)).ok())
+                .or_insert_with(|| text(rel))
                 .clone()
         };
         let Some(source) = read(rel) else {
@@ -172,9 +219,9 @@ pub fn extract_dir(
                 .ok_or("dispatched function not emitted by the Python adapter")
         }))
     };
-    for file in &walked {
+    for file in walked {
         let jobs = if file.name.ends_with(".yml") || file.name.ends_with(".yaml") {
-            let Ok(text) = std::fs::read_to_string(&file.path) else {
+            let Some(text) = text(&file.rel) else {
                 continue;
             };
             if workflow_file(&file.rel) {
@@ -188,7 +235,7 @@ pub fn extract_dir(
                 }
             }
         } else if let Some(system) = crontab_kind(&file.rel) {
-            let Ok(text) = std::fs::read_to_string(&file.path) else {
+            let Some(text) = text(&file.rel) else {
                 continue;
             };
             crontab_jobs(&text, system)
@@ -213,7 +260,7 @@ pub fn extract_dir(
             );
         }
     }
-    Ok(out)
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
