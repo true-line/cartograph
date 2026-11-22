@@ -38,6 +38,10 @@ pub struct ActivePlugin {
     /// The gate key over the artifact and its exact corpus bytes; it enters
     /// the coverage basis, so a corpus edit stales recorded inventories.
     pub gate_key: String,
+    /// The project's sandbox bounds for each call (AC-1803). A fuel, memory
+    /// or table refusal is a function of them, so non-default bounds enter
+    /// the coverage basis.
+    pub limits: adapters_plugin_host::PluginLimits,
 }
 
 /// One repo currently contributing facts to the unified graph (#162).
@@ -103,7 +107,20 @@ pub fn coverage_config_hash(plugins: &[ActivePlugin], registries: &Registries) -
             // claims change the basis even when the artifact did not.
             let pinned =
                 adapters_plugin_host::pinned_extractor_id(&plugin.plugin_id, &plugin.content_hash);
-            format!("{pinned}#{}", plugin.gate_key)
+            let mut pinned = format!("{pinned}#{}", plugin.gate_key);
+            // Default bounds keep the pre-existing basis, so recorded
+            // inventories stay current until a project changes them.
+            if plugin.limits != adapters_plugin_host::PluginLimits::default() {
+                let limits = plugin.limits;
+                pinned.push_str(&format!(
+                    "#limits:{}:{}:{}:{}",
+                    limits.max_fuel,
+                    limits.max_memory_bytes,
+                    limits.max_table_elements,
+                    limits.deadline.as_millis()
+                ));
+            }
+            pinned
         })
         .collect();
     pinned.sort();

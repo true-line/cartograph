@@ -38,6 +38,11 @@ pub const CAPTURE_STORE_MAX_CAPTURES: &str = "capture_store_max_captures";
 /// Directory entries one TS/JS selection walk may examine (AC-1802).
 pub const TS_SELECTION_MAX_VISITED_ENTRIES: &str = "ts_selection_max_visited_entries";
 
+/// Sandbox bounds for each plugin extraction call (AC-0070, AC-1803).
+pub const PLUGIN_MAX_FUEL_BILLIONS: &str = "plugin_max_fuel_billions";
+pub const PLUGIN_MAX_MEMORY_MIB: &str = "plugin_max_memory_mib";
+pub const PLUGIN_DEADLINE_SECONDS: &str = "plugin_deadline_seconds";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -112,6 +117,30 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: adapters_lang_ts::captured::HARD_MAX_VISITED_ENTRIES as u64,
         advanced: true,
         description: "Directory entries, including ignored ones, one recovery may examine when selecting TS/JS source. Larger values let big trees finish selection but take longer.",
+    },
+    LimitSpec {
+        key: PLUGIN_MAX_FUEL_BILLIONS,
+        default: 10,
+        min: 1,
+        max: 100,
+        advanced: true,
+        description: "Billions of fuel units (roughly wasm instructions) one plugin call may use per file. Raising it lets a slow or looping plugin hold the ingest longer; only raise it for plugins you trust.",
+    },
+    LimitSpec {
+        key: PLUGIN_MAX_MEMORY_MIB,
+        default: 64,
+        min: 16,
+        max: 1024,
+        advanced: true,
+        description: "MiB of memory one plugin call may grow to. Raising it lets an untrusted plugin take more of this machine's memory; only raise it for plugins you trust.",
+    },
+    LimitSpec {
+        key: PLUGIN_DEADLINE_SECONDS,
+        default: 5,
+        min: 1,
+        max: 60,
+        advanced: true,
+        description: "Seconds one plugin call may run on one file before the whole plugin pass fails. Raising it lets a stuck plugin hold the ingest longer; only raise it for plugins you trust.",
     },
 ];
 
@@ -350,6 +379,31 @@ mod tests {
                 TS_SELECTION_MAX_VISITED_ENTRIES,
                 Some(entries.max + 1)
             ),
+            Err(OperatorLimitError::OutOfRange { .. })
+        ));
+    }
+
+    // AC-1803 / #1653: the plugin sandbox keys default to the host's
+    // AC-0070 bounds, so an untouched project runs plugins exactly as before.
+    #[test]
+    fn plugin_sandbox_keys_default_to_the_host_bounds() {
+        let defaults = adapters_plugin_host::PluginLimits::default();
+        let fuel = spec(PLUGIN_MAX_FUEL_BILLIONS).unwrap();
+        let memory = spec(PLUGIN_MAX_MEMORY_MIB).unwrap();
+        let deadline = spec(PLUGIN_DEADLINE_SECONDS).unwrap();
+        assert_eq!(fuel.default * 1_000_000_000, defaults.max_fuel);
+        assert_eq!(memory.default * MIB, defaults.max_memory_bytes as u64);
+        assert_eq!(deadline.default, defaults.deadline.as_secs());
+        for key in [fuel, memory, deadline] {
+            assert!(key.advanced);
+            assert!(
+                key.description
+                    .contains("only raise it for plugins you trust")
+            );
+        }
+        let conn = conn();
+        assert!(matches!(
+            write(&conn, PLUGIN_MAX_MEMORY_MIB, Some(memory.max + 1)),
             Err(OperatorLimitError::OutOfRange { .. })
         ));
     }

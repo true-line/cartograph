@@ -680,6 +680,7 @@ fn active_plugins_in(
     let root_key = root.display().to_string();
     let discovered = adapters_plugin_host::discovery::discover(&[root.to_path_buf()], user_dir);
     let settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+    let limits = plugin_limits(&settings_store)?;
     let mut active = Vec::new();
     for plugin in discovered {
         let settings_root = plugin_settings_root(&plugin);
@@ -720,9 +721,35 @@ fn active_plugins_in(
             cells,
             languages,
             gate_key,
+            limits,
         });
     }
     Ok(active)
+}
+
+/// The project's plugin sandbox bounds (#1653, AC-1803): fuel, linear
+/// memory and per-file deadline from the saved operator limits. The table
+/// bound stays fixed. The conformance gate keeps the defaults, so a verdict
+/// never depends on a project's settings.
+fn plugin_limits(
+    settings: &settings::SettingsStore,
+) -> Result<adapters_plugin_host::PluginLimits, String> {
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    Ok(adapters_plugin_host::PluginLimits {
+        max_fuel: limit(operator_limits::PLUGIN_MAX_FUEL_BILLIONS)?
+            .checked_mul(1_000_000_000)
+            .ok_or("Plugin fuel overflows.")?,
+        max_memory_bytes: usize::try_from(limit(operator_limits::PLUGIN_MAX_MEMORY_MIB)?)
+            .ok()
+            .and_then(|mib| mib.checked_mul(1024 * 1024))
+            .ok_or("Plugin memory overflows.")?,
+        deadline: std::time::Duration::from_secs(limit(operator_limits::PLUGIN_DEADLINE_SECONDS)?),
+        ..adapters_plugin_host::PluginLimits::default()
+    })
 }
 
 #[tauri::command]
@@ -2627,7 +2654,7 @@ fn extract_tree_packed(
                 root,
                 &plugin.extensions,
                 &plugin_source,
-                adapters_plugin_host::PluginLimits::default(),
+                plugin.limits,
             )
             .map_err(|e| e.to_string())?;
             let plugin_facts = claimed.facts;
@@ -13983,6 +14010,7 @@ export function App() {
             cells: vec![],
             languages: Default::default(),
             gate_key: gate_key.into(),
+            limits: adapters_plugin_host::PluginLimits::default(),
         };
         let registries = crate::Registries::builtin();
         let first = super::coverage_config_hash(&[plugin("gate-1")], registries);
@@ -14003,6 +14031,11 @@ export function App() {
             super::coverage_config_hash(&[], registries),
             core_prov::content_hash(none.to_string().as_bytes())
         );
+        // AC-1803: non-default sandbox bounds change the basis; the default
+        // bounds keep it.
+        let mut tight = plugin("gate-1");
+        tight.limits.max_fuel = 1_000_000_000;
+        assert_ne!(first, super::coverage_config_hash(&[tight], registries));
     }
 
     #[test]
@@ -15548,6 +15581,7 @@ export function App() {
             cells: Vec::new(),
             languages: std::collections::BTreeMap::new(),
             gate_key: "gate".into(),
+            limits: adapters_plugin_host::PluginLimits::default(),
         }];
         let pinned = format!("t0.plugin-refusing@{}", &hash[..12]);
         let repo = "acme/refused";
@@ -15705,6 +15739,78 @@ export function App() {
             inventory_json,
             serde_json::to_string(&coverage_again).unwrap()
         );
+    }
+
+    #[test]
+    fn a_projects_plugin_bounds_reach_each_extraction_call() {
+        // AC-1803 (#1653): the bounds an active plugin carries are the ones
+        // each call runs under. Under a fuel bound too small for any call,
+        // every claimed file is refused as bound-exceeded and none of its
+        // facts join the graph; the default bounds read every file.
+        const REFUSING_ADAPTER: &[u8] =
+            include_bytes!("../../crates/adapters-plugin-host/tests/fixtures/refusing-adapter.wat");
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("a.zz"), "fine").unwrap();
+        std::fs::write(project.join("b.zz"), "fine too").unwrap();
+        let artifact = dir.path().join("t0.plugin-refusing.wasm");
+        std::fs::write(&artifact, REFUSING_ADAPTER).unwrap();
+        let root = super::paths::canonicalize(&project).unwrap();
+        let run = |limits| {
+            let active = [super::ActivePlugin {
+                plugin_id: "t0.plugin-refusing".into(),
+                path: artifact.clone(),
+                content_hash: core_prov::content_hash(REFUSING_ADAPTER),
+                extensions: vec!["zz".into()],
+                cells: Vec::new(),
+                languages: std::collections::BTreeMap::new(),
+                gate_key: "gate".into(),
+                limits,
+            }];
+            let mut reads = super::ProducerReads::default();
+            super::extract_tree_with_primary(
+                &root,
+                "acme/bounded",
+                "workdir",
+                &[],
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeSet::new(),
+                None,
+                None,
+                &[],
+                &mut super::RepoExtractionCache::default(),
+                &active,
+                &mut |_| {},
+                None,
+                &mut Vec::new(),
+                &mut reads,
+            )
+            .expect("bound refusals do not fail the ingest");
+            reads.plugins.remove(0)
+        };
+        let starved = run(adapters_plugin_host::PluginLimits {
+            max_fuel: 1,
+            ..adapters_plugin_host::PluginLimits::default()
+        });
+        assert_eq!(starved.count.files, 0);
+        assert_eq!(starved.count.nodes, 0);
+        assert_eq!(
+            starved.refused,
+            [
+                (
+                    "a.zz".to_string(),
+                    ingest::coverage::RefusalReason::BoundExceeded
+                ),
+                (
+                    "b.zz".to_string(),
+                    ingest::coverage::RefusalReason::BoundExceeded
+                ),
+            ]
+        );
+        let read = run(adapters_plugin_host::PluginLimits::default());
+        assert_eq!(read.count.files, 2);
+        assert!(read.refused.is_empty());
     }
 
     #[test]
