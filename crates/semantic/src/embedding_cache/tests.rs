@@ -723,6 +723,13 @@ fn operation_limits_bound_the_working_set_and_never_raise_it() {
     wrapper.embed(&["final allowed key".into()]).unwrap();
     assert!(wrapper.embed(&["one key too many".into()]).is_err());
 
+    // Repeated texts count once per input, so they cannot pass the row bound.
+    let repeated = vec!["same text".to_string(); rows + 1];
+    let wrapper = CachedProvider::within(&p, cache.clone(), lease.clone(), limits).unwrap();
+    assert!(wrapper.embed(&repeated).is_err());
+    let wrapper = CachedProvider::within(&p, cache.clone(), lease.clone(), limits).unwrap();
+    assert_eq!(wrapper.embed(&repeated[..rows]).unwrap().len(), rows);
+
     let bytes = OperationLimits::within(MAX_ROWS, OperationLimits::MIN_VECTOR_BYTES).unwrap();
     let wrapper = CachedProvider::within(&p, cache, lease, bytes).unwrap();
     wrapper.state.lock().unwrap().vector_bytes = OperationLimits::MIN_VECTOR_BYTES - 4;

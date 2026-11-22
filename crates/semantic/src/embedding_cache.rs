@@ -599,7 +599,7 @@ impl LlmProvider for CachedProvider<'_> {
 }
 impl CachedProvider<'_> {
     fn embed_inner(&self, batch: &[String]) -> Result<Vec<Embedding>, ProviderError> {
-        if batch.len() > MAX_ROWS
+        if batch.len() > self.limits.max_rows
             || batch.iter().any(|t| t.len() > MAX_TEXT_BYTES)
             || batch
                 .iter()
