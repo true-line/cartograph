@@ -189,6 +189,58 @@ fn the_same_tree_yields_the_same_read() {
     assert_eq!(both(dir.path()), both(dir.path()));
 }
 
+#[test]
+fn a_large_declared_reference_keeps_the_decision_bound() {
+    // AC-1804 (T-1804): a project may allow API references past 1 MiB, but
+    // one that is also a decision record is still too large to be an ADR
+    // (AC-0685); it stays a document with its API reference role.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let path = "docs/adr/ADR-0001-api.md";
+    let text = format!(
+        "# Orders API\n\n- Status: Accepted\n\n{}\n",
+        "x".repeat(crate::adr::MAX_FOUND_ADR_BYTES as usize)
+    );
+    write(root, path, text.as_bytes());
+    let references = [declared(path, &text)];
+    let read = read_documentation(
+        root,
+        "local/shop",
+        "c1",
+        &DocumentationCases {
+            documents: true,
+            api_references: &references,
+            decisions: Some(&candidate),
+        },
+    )
+    .unwrap();
+    assert!(read.decisions.facts.nodes.is_empty());
+    assert_eq!(read.decisions.files, 0);
+    assert_eq!(
+        read.decisions.unread,
+        [crate::UnreadAdr {
+            path: path.into(),
+            reason: crate::UnreadAdrReason::TooLarge,
+        }]
+    );
+    let document = read
+        .documents
+        .nodes
+        .iter()
+        .find(|node| node.id == format!("doc:local/shop@{path}"))
+        .expect("the reference is a document");
+    assert_eq!(
+        document.props["roles"],
+        serde_json::json!([ROLE_API_REFERENCE, ROLE_DECISION_RECORD])
+    );
+    assert!(
+        read.documents
+            .edges
+            .iter()
+            .all(|edge| edge.label != "RECORDS")
+    );
+}
+
 fn declared(path: &str, contents: &str) -> crate::DeclaredApiDoc {
     crate::DeclaredApiDoc {
         path: path.into(),
