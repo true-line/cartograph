@@ -13,6 +13,8 @@ pub struct SourceContinuationSnapshotInput<'a> {
     pub candidate_ledger: &'a InvestigationInputLedger,
     pub outcome: SourceContinuationOutcome,
     pub active_milliseconds: u64,
+    /// The same firewall decision the settlement will use (#679).
+    pub refusal: Option<completion::read_refusals::ReadDecider<'a>>,
 }
 
 /// Owned immutable projections from one saved read transaction. No conversion
@@ -180,7 +182,12 @@ impl JobStore {
             kind,
             reason,
             input.active_milliseconds,
+            input.refusal,
         )?;
+        let mut projected = projected;
+        if let Some(refusal) = projected.refusal.take() {
+            projected.attempts.extend(refusal.entries);
+        }
         let suffix = projected
             .attempts
             .iter()

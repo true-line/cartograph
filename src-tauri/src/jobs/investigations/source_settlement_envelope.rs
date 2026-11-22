@@ -163,6 +163,8 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
                     kind,
                     reason.clone(),
                     active_bound,
+                    // Refusal rows are outside the settlement claim (#679).
+                    None,
                 )?;
                 // One cancellation/owner-loss barrier can advance the revision.
                 // Reserve full SQL integer widths and the pinned journal ceiling,
