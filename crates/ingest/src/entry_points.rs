@@ -238,6 +238,48 @@ pub fn extract_dir(
             ));
         }
     }
+    // A Rust binary that only calls its own package's library is a desktop
+    // app when the library function it calls builds a `tauri::Builder`
+    // (AC-1009, #1227).
+    for start in &mut starts {
+        if !matches!(start.kind.kind, "command" | "process") || start.how != "fn main" {
+            continue;
+        }
+        let rel = start.declared_in.clone();
+        if !rust::candidate(&rel) {
+            continue;
+        }
+        let Some(dir) = rust::package_dir(&rel) else {
+            continue;
+        };
+        let Some((krate, name)) =
+            read(&rel).and_then(|text| rust::delegated_call(&text, start.span))
+        else {
+            continue;
+        };
+        let manifest = format!("{dir}Cargo.toml");
+        if !files.contains(&manifest) {
+            continue;
+        }
+        let Some((lib_name, lib_path)) = read(&manifest).and_then(|text| rust::library(&text))
+        else {
+            continue;
+        };
+        let lib_rel = format!("{dir}{lib_path}");
+        if lib_name != krate
+            || lib_rel == rel
+            || !files.contains(&lib_rel)
+            || !rust::candidate(&lib_rel)
+        {
+            continue;
+        }
+        if let Some(at) = read(&lib_rel).and_then(|text| rust::desktop_function(&text, &name)) {
+            start.kind = Kind {
+                kind: "desktop-app",
+                evidence: Some((lib_rel, at)),
+            };
+        }
+    }
     let mut out = EntryPointExtraction::default();
     let declaring: BTreeSet<&str> = starts.iter().map(|s| s.declared_in.as_str()).collect();
     out.files = declaring.len() as u64;

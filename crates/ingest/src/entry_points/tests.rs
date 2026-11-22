@@ -786,6 +786,27 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
                 "#[tokio::main]\nasync fn main() {\n    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await.unwrap();\n    axum::serve(listener, app()).await.unwrap();\n}\n",
             ),
             ("cli/src/bin/migrate.rs", "fn main() { run(); }\n"),
+            // A binary that only calls its own package's library (#1227).
+            (
+                "desk/Cargo.toml",
+                "[package]\nname = \"desk-shell\"\n\n[lib]\npath = \"src/shell.rs\"\n",
+            ),
+            (
+                "desk/src/shell.rs",
+                "// tauri::Builder in a comment states nothing.\npub fn helper() {}\n\npub fn run() {\n    tauri::Builder::default().run(tauri::generate_context!()).unwrap();\n}\n",
+            ),
+            (
+                "desk/src/bin/desk.rs",
+                "fn main() {\n    desk_shell::run();\n}\n",
+            ),
+            (
+                "desk/src/bin/tool.rs",
+                "fn main() { desk_shell::helper(); }\n",
+            ),
+            (
+                "desk/src/bin/other.rs",
+                "fn main() { other_shell::run(); }\n",
+            ),
             (
                 "worker/src/main.rs",
                 "// axum::serve(listener, app) is for later.\nfn main() { let s = \"HttpServer::new(\"; work(s); }\n",
@@ -839,6 +860,14 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
         entry(&out, "worker/src/main.rs", "main").props["kind"],
         "process"
     );
+    // A binary whose `main` only calls its package library's Tauri
+    // function is the desktop app, shown by that function (#1227).
+    let delegated = entry(&out, "desk/src/bin/desk.rs", "main");
+    assert_eq!(delegated.props["kind"], "desktop-app");
+    assert_eq!(delegated.props["kind_evidence"], "desk/src/shell.rs");
+    for bin in ["desk/src/bin/tool.rs", "desk/src/bin/other.rs"] {
+        assert_eq!(entry(&out, bin, "main").props["kind"], "command", "{bin}");
+    }
     // A helper `main` never calls does not decide its kind.
     assert_eq!(
         entry(&out, "daemon/src/main.rs", "main").props["kind"],
@@ -850,7 +879,7 @@ fn rust_mains_tauri_commands_and_tonic_methods_are_starts() {
         .filter(|n| n.label == "EntryPoint")
         .map(|n| n.id.as_str())
         .collect();
-    assert_eq!(entries.len(), 9, "{entries:?}");
+    assert_eq!(entries.len(), 12, "{entries:?}");
 }
 
 /// AC-1104: Kotlin mains (Spring Boot and Ktor), listeners, `@Scheduled`

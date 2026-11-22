@@ -3,9 +3,11 @@
 //!
 //! - a top-level `fn main()` in a binary root (`main.rs`, or a file
 //!   directly under a `bin/` directory) is a process start. It is a desktop
-//!   application when it builds a `tauri::Builder`, a gRPC server when it
-//!   builds a `tonic` `Server::builder()`, an HTTP server when it serves
-//!   axum, actix-web, hyper or warp; a command under `bin/` or an operator
+//!   application when it builds a `tauri::Builder` (or only calls a
+//!   top-level function of its own package's library that does, read in
+//!   `entry_points.rs`), a gRPC server when it builds a `tonic`
+//!   `Server::builder()`, an HTTP server when it serves axum, actix-web,
+//!   hyper or warp; a command under `bin/` or an operator
 //!   directory; otherwise a process;
 //! - a function annotated `#[tauri::command]` (or `#[command]` with
 //!   `tauri::command` imported) is an IPC command the desktop front end
@@ -59,6 +61,82 @@ fn rust_parser() -> Parser {
 
 fn span(node: TsNode) -> (u64, u64) {
     (node.start_byte() as u64, node.end_byte() as u64)
+}
+
+/// The call a binary's `main` delegates to: `fn main() { krate::name(); }`
+/// with nothing else in the body gives `(krate, name)`.
+pub(super) fn delegated_call(text: &str, span: (u64, u64)) -> Option<(String, String)> {
+    let tree = rust_parser().parse(text, None)?;
+    let code = code_only(text, tree.root_node());
+    let function = code.get(span.0 as usize..span.1 as usize)?;
+    let body = function.split_once('{')?.1.trim_end().strip_suffix('}')?;
+    let call = body.trim().strip_suffix(';').unwrap_or(body.trim()).trim();
+    let call = call.strip_suffix("()")?.trim_end();
+    let (krate, name) = call.split_once("::")?;
+    let ident = |part: &str| {
+        !part.is_empty()
+            && part.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+            && !part.starts_with(|c: char| c.is_ascii_digit())
+    };
+    (ident(krate) && ident(name) && !matches!(krate, "crate" | "self" | "super"))
+        .then(|| (krate.to_string(), name.to_string()))
+}
+
+/// The package directory of a binary root (`<pkg>/src/main.rs` or
+/// `<pkg>/src/bin/<name>.rs`), with a trailing `/` unless it is the root.
+pub(super) fn package_dir(rel: &str) -> Option<&str> {
+    rel.strip_suffix("src/main.rs")
+        .or_else(|| {
+            let (dir, _) = rel.rsplit_once("/")?;
+            dir.strip_suffix("src/bin")
+        })
+        .filter(|dir| dir.is_empty() || dir.ends_with('/'))
+}
+
+/// The library crate a `Cargo.toml` declares: its name (`[lib] name`, else
+/// the package name with `-` as `_`) and its root relative to the manifest
+/// (`[lib] path`, else `src/lib.rs`).
+pub(super) fn library(manifest: &str) -> Option<(String, String)> {
+    let value: toml::Value = toml::from_str(manifest).ok()?;
+    let lib = value.get("lib");
+    let name = lib
+        .and_then(|lib| lib.get("name"))
+        .and_then(|name| name.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("package")?
+                .get("name")?
+                .as_str()
+                .map(|name| name.replace('-', "_"))
+        })?;
+    let path = lib
+        .and_then(|lib| lib.get("path"))
+        .and_then(|path| path.as_str())
+        .unwrap_or("src/lib.rs")
+        .trim_start_matches("./")
+        .to_string();
+    Some((name, path))
+}
+
+/// The span of the top-level `pub fn <name>` in a library root when its
+/// body builds a `tauri::Builder`.
+pub(super) fn desktop_function(text: &str, name: &str) -> Option<(u64, u64)> {
+    let tree = rust_parser().parse(text, None)?;
+    let root = tree.root_node();
+    let code = code_only(text, root);
+    let mut walk = root.walk();
+    let found = root.named_children(&mut walk).find(|node| {
+        node.kind() == "function_item"
+            && node
+                .child_by_field_name("name")
+                .is_some_and(|n| &text[n.byte_range()] == name)
+            && node
+                .named_child(0)
+                .is_some_and(|first| first.kind() == "visibility_modifier")
+            && code[node.byte_range()].contains("tauri::Builder")
+    })?;
+    Some(span(found))
 }
 
 /// Every start a Rust file declares.
