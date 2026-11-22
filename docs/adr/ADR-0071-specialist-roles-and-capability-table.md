@@ -163,6 +163,11 @@ acceptance freeze names.
   mark retired versions in the table; the catalog
   stops offering them; the reopened run shows its original id and offers no
   new work under it (decision 2).
+  As built (AC-1062, #1751): every version that is not current is retired
+  except domain-analyst@27 (AC-0589 freeze) and domain-analyst@29
+  (ADR-0085 runtime). The history and run detail label a retired run; its
+  only host actions were cancel and follow-up, and a follow-up already
+  required an explicit offered version.
 - **(c) Backend catalog serves roles and capabilities.** The
   `investigation_specialists` command returns roles, each with its current
   version and the capability rows the UI needs. The UI deletes its hand
