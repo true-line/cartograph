@@ -57,7 +57,7 @@ mod section_review;
 #[cfg(test)]
 mod semantic_cache_tests;
 mod semantic_evaluation;
-mod settings;
+use app_store::settings;
 #[cfg(test)]
 mod showcase_tests;
 mod source_access;
