@@ -53,14 +53,17 @@ test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   assert.match(workflow, /git diff-tree -p HEAD \| git patch-id --stable/u);
   assert.match(workflow, /git diff-tree -p "\$open_sha" \| git patch-id --stable/u);
   assert.match(workflow, /skipping the force-push/u);
-  // Draft PR events start no Actions jobs: the version PR is opened as draft
-  // and a ready one returns to draft before its head is refreshed, so the
-  // complete suite runs once, when the owner marks the cut ready.
-  assert.match(workflow, /gh pr create --draft --base main --head "\$BRANCH"/u);
-  assert.match(workflow, /gh pr ready "\$open_ready" --undo/u);
+  // The version PR opens ready for review, so its complete suite runs with
+  // no manual undraft, and is never sent back to draft. Only a draft this
+  // workflow's own bot made is readied, so an owner's draft hold is kept.
+  assert.match(workflow, /gh pr create --base main --head "\$BRANCH"/u);
+  assert.doesNotMatch(workflow, /--draft/u);
+  assert.doesNotMatch(workflow, /gh pr ready [^\n]*--undo/u);
+  assert.match(workflow, /select\(\.event == "convert_to_draft"\) \| \.actor\.login/u);
+  assert.match(workflow, /if \[ "\$drafted_by" = "trueline-chores-dumb\[bot\]" \]; then\n\s+gh pr ready "\$open_draft"/u);
   assert.ok(
-    workflow.indexOf('gh pr ready "$open_ready" --undo') < workflow.indexOf('node scripts/version-commit.mjs publish'),
-    'the version PR returns to draft before the new head is published',
+    workflow.indexOf('gh pr ready "$open_draft"') < workflow.indexOf('skipping the force-push'),
+    'a workflow-made draft is readied even when the release patch is unchanged',
   );
   // checkout removes its credentials, so the open-PR fetch must authenticate
   // per command and never wait on a prompt (#667).
