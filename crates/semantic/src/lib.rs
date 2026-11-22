@@ -1325,8 +1325,9 @@ mod tests {
         assert!(nodes.iter().any(|node| node.label == "Gap"));
     }
 
-    // AC-1507: a VSCode-scale plan (about 186k candidate symbols in one
-    // family plus their hops) is admitted whole; the next bound still refuses.
+    // AC-1507: a whole-VSCode plan (476,907 candidate symbols and 81,654 hops,
+    // measured 2026-11-22, all in one family here) is admitted whole; the next
+    // bound still refuses.
     #[test]
     fn vscode_scale_embedding_plans_are_admitted() {
         let candidate = |n: usize| Candidate {
@@ -1347,21 +1348,21 @@ mod tests {
             evidence: vec![],
             exclusion: None,
         };
-        let candidates: Vec<_> = (0..186_000).map(candidate).collect();
-        let hops: Vec<_> = (0..20_000).map(hop).collect();
+        let candidates: Vec<_> = (0..476_907).map(candidate).collect();
+        let hops: Vec<_> = (0..81_654).map(hop).collect();
         let texts = embedding_inputs(&hops, &candidates, &[]).unwrap();
-        assert_eq!(texts.len(), 206_000);
+        assert_eq!(texts.len(), 558_561);
         let over: Vec<_> = (0..embedding_cache::MAX_ROWS + 1).map(candidate).collect();
         let message = embedding_inputs(&hops, &over, &[]).unwrap_err().to_string();
         assert!(
-            message.contains("262145 candidates (max 262144)"),
+            message.contains("1048577 candidates (max 1048576)"),
             "{message}"
         );
         // A combined plan past the row bound names the counts that tripped,
         // never a text (#258).
-        let wide: Vec<_> = (0..250_000).map(candidate).collect();
+        let wide: Vec<_> = (0..1_040_000).map(candidate).collect();
         let message = embedding_inputs(&hops, &wide, &[]).unwrap_err().to_string();
-        assert!(message.contains("270000 texts (max 262144)"), "{message}");
+        assert!(message.contains("1121654 texts (max 1048576)"), "{message}");
         assert!(!message.contains("function f"), "{message}");
     }
 

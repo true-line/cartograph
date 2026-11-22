@@ -13,20 +13,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Rows one store and one operation hold: a VSCode-scale plan (about 186k
-/// candidate symbols plus their hops) fits in one pass (#259, AC-1507).
-pub const MAX_ROWS: usize = 262_144;
+/// Rows one store and one operation hold: a whole-VSCode plan (476,907
+/// candidate symbols plus 81,654 hops, measured 2026-11-22) fits in one pass
+/// with room to spare (#259, AC-1507).
+pub const MAX_ROWS: usize = 1_048_576;
 /// Highest `cache_meta.sequence` a valid store may hold: it reserves one
 /// sequence number for every row a full plan can publish, so sealing never
 /// overflows the counter. A store past it is exhausted and is recovered.
 pub(crate) const SEQUENCE_CEILING: i64 = i64::MAX - MAX_ROWS as i64;
 /// Vector bytes one store and one operation hold: `MAX_ROWS` vectors of up to
 /// 1,024 f32 dimensions.
-pub const MAX_VECTOR_BYTES: usize = 1024 * 1024 * 1024;
+pub const MAX_VECTOR_BYTES: usize = 4 * 1024 * 1024 * 1024;
 pub const MAX_DIMENSIONS: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 /// Plan text bytes: `MAX_ROWS` texts averaging 512 bytes.
-pub const MAX_INPUT_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_INPUT_BYTES: usize = 512 * 1024 * 1024;
 pub const BATCH_COUNT: usize = 128;
 pub const BATCH_BYTES: usize = 1024 * 1024;
 mod lifecycle;

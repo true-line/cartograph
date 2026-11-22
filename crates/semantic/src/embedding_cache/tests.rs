@@ -692,9 +692,11 @@ fn embedding_cache_working_set_accepts_exact_row_limit_and_rejects_next() {
 
 #[test]
 fn vscode_scale_plans_are_cached_and_reused_without_calls() {
-    // AC-1507: a plan past the old 100k bound (VSCode has about 186k candidate
-    // symbols) is embedded once, persisted whole, and a reopened warm pass
-    // makes no embedding call.
+    // AC-1507: a plan past the old 100k bound is embedded once, persisted
+    // whole, and a reopened warm pass makes no embedding call. The whole-VSCode
+    // plan count (about 559k texts) is checked by
+    // `vscode_scale_embedding_plans_are_admitted`; this test stays at 200k
+    // rows to bound suite time.
     let (dir, cache, _) = setup();
     let provider = Scripted::new();
     let texts: Vec<String> = (0..200_000).map(|n| format!("symbol {n:06}")).collect();
