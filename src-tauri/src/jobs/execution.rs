@@ -31,6 +31,15 @@ impl ClaimPlan {
     pub(crate) fn lock_target(&self) -> &JobLockTarget {
         &self.target
     }
+    /// AC-1709: the lock a held waiter created for this never-claimed job.
+    /// Only an existing file can prove that waiter stopped; a missing one is
+    /// never created by recovery.
+    pub(crate) fn held_lock_target(&self) -> JobLockTarget {
+        JobLockTarget {
+            existing: true,
+            ..self.target.clone()
+        }
+    }
 }
 
 pub(crate) struct RecoveryCandidate {
@@ -346,6 +355,37 @@ impl JobStore {
         }
         one(tx.execute("UPDATE jobs SET status = 'interrupted', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1 AND status = 'running' AND EXISTS (SELECT 1 FROM job_attempts a WHERE a.job_id = jobs.id AND a.generation = ?2 AND a.owner = ?3)", params![candidate.id(), candidate.plan.attempt.generation, candidate.plan.attempt.owner])?)?;
         let job = read_job(&tx, candidate.id())?;
+        tx.commit()?;
+        Ok(Some(job))
+    }
+
+    /// AC-1709: end a queued, never-claimed job whose held waiter stopped,
+    /// proven by `reservation` on its existing lock. Nothing ran, so it is
+    /// interrupted with that reason and never replayed.
+    pub(crate) fn interrupt_held(
+        &mut self,
+        plan: &ClaimPlan,
+        reservation: ExecutionReservation,
+        reason: &str,
+    ) -> Result<Option<Job>, JobTransitionError> {
+        if reservation.target.namespace != self.namespace
+            || reservation.target.id != plan.job.id
+            || !reservation.target.existing
+            || plan.attempt.generation != 0
+        {
+            return Err(JobTransitionError::ForeignStore);
+        }
+        reservation.verify()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate(&tx, &self.namespace)?;
+        if !matches_plan(&tx, plan)? || plan.job.status != "queued" {
+            tx.commit()?;
+            return Ok(None);
+        }
+        one(tx.execute("UPDATE jobs SET status = 'interrupted', error = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1 AND status = 'queued'", params![plan.job.id, reason])?)?;
+        let job = read_job(&tx, plan.job.id)?;
         tx.commit()?;
         Ok(Some(job))
     }
