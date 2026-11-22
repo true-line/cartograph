@@ -45,6 +45,21 @@ pub(in crate::jobs::investigations) fn persist(
         transitions::persist_input_rows(tx, &p.task, ledger)?;
     }
     completion::persist_projected_entries(tx, id, p.attempt_offset, &p.attempts)?;
+    // Refusal rows are measured apart from the reservation's settlement claim
+    // and bounded by the task and store capacity below, as in slice 2a.
+    let mut refusal_bytes = 0;
+    if let Some(refusal) = &p.refusal {
+        let before_refusal = actual_stored_bytes(tx, Some(id))?;
+        persist_event(tx, &refusal.event)?;
+        completion::read_refusals::insert_planned_observations(tx, id, &refusal.planned)?;
+        completion::persist_projected_entries(
+            tx,
+            id,
+            p.attempt_offset + p.attempts.len(),
+            &refusal.entries,
+        )?;
+        refusal_bytes = actual_stored_bytes(tx, Some(id))?.saturating_sub(before_refusal);
+    }
     if p.task.phase == Phase::Terminal {
         transitions::sync_terminal_job(tx, &p.task)?;
     }
@@ -66,9 +81,15 @@ pub(in crate::jobs::investigations) fn persist(
         (task_before, actual_stored_bytes(tx, Some(id))?),
         (global_before, actual_stored_bytes(tx, None)?),
     ] {
-        if after.saturating_sub(before) > claim.settlement_bytes {
+        if after.saturating_sub(before).saturating_sub(refusal_bytes) > claim.settlement_bytes {
             return Err(InvestigationStoreError::Capacity);
         }
+    }
+    if p.refusal.is_some()
+        && (actual_stored_bytes(tx, Some(id))? > TASK_CAPACITY - TERMINAL_RESERVE
+            || actual_stored_bytes(tx, None)? > STORE_CAPACITY)
+    {
+        return Err(InvestigationStoreError::Capacity);
     }
     #[cfg(test)]
     inject_failure(SettlementFailure::AfterTaskSave)?;
