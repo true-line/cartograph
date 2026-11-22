@@ -950,8 +950,14 @@ pub(crate) fn review(
     let claims = composed.finish.claims.len();
     let mut samples = Vec::with_capacity(claim_review::REVIEW_SAMPLES);
     for _ in 0..claim_review::REVIEW_SAMPLES {
-        let text = complete(state, provider, &action, None, check, job_id)?.text;
-        samples.push(claim_review::decode(&text, claims).unwrap_or_default());
+        // A failed call is an unreadable sample, unless the job was
+        // cancelled or lost.
+        let sample = match complete(state, provider, &action, None, check, job_id) {
+            Ok(completion) => claim_review::decode(&completion.text, claims),
+            Err(error) if check() != CallDirective::Continue => return Err(error),
+            Err(_) => None,
+        };
+        samples.push(sample.unwrap_or_default());
     }
     let Some(overreaching) = claim_review::overreaching(&samples, claims) else {
         return Ok((composed, "review_unavailable"));
