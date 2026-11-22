@@ -6,13 +6,13 @@ use tauri::Manager;
 
 const TEST_ARCHIVE_CAPACITY: usize = 1024 * 1024;
 
-struct Fixture {
+pub(super) struct Fixture {
     _directory: tempfile::TempDir,
-    state: AppState,
-    scope: Vec<ScopedRepo>,
+    pub(super) state: AppState,
+    pub(super) scope: Vec<ScopedRepo>,
 }
 impl Fixture {
-    fn new(nodes: usize) -> Self {
+    pub(super) fn new(nodes: usize) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let private = directory.path().join("private");
         std::fs::create_dir(&private).unwrap();
@@ -39,7 +39,7 @@ impl Fixture {
         fixture.publish(1, "job:1", 0);
         fixture
     }
-    fn publish(&self, index: usize, job: &str, nodes: usize) {
+    pub(super) fn publish(&self, index: usize, job: &str, nodes: usize) {
         self.publish_padded(index, job, nodes, 0);
     }
     fn publish_padded(&self, index: usize, job: &str, nodes: usize, padding: usize) {
@@ -79,7 +79,10 @@ impl Fixture {
                 .unwrap()
         );
     }
-    fn prepare(&self, request: &StartInvestigationRequest) -> Result<FrozenContext, HostError> {
+    pub(super) fn prepare(
+        &self,
+        request: &StartInvestigationRequest,
+    ) -> Result<FrozenContext, HostError> {
         FrozenContext::prepare_qualified_with_scope(
             &self.state,
             request,
@@ -89,7 +92,7 @@ impl Fixture {
         )
     }
 }
-fn request() -> StartInvestigationRequest {
+pub(super) fn request() -> StartInvestigationRequest {
     serde_json::from_value(
         json!({"schema_version":3,"request_nonce":"qualified-context",
         "specialist_id":"domain-analyst@6","question":"What limits this scope?",
@@ -108,9 +111,9 @@ fn query() -> InvestigationQuery {
     }
 }
 #[derive(Default)]
-struct Sink {
-    usage: InvestigationUsage,
-    publications: usize,
+pub(super) struct Sink {
+    pub(super) usage: InvestigationUsage,
+    pub(super) publications: usize,
 }
 impl AcquisitionSink for Sink {
     fn usage(&self) -> &InvestigationUsage {
@@ -422,7 +425,7 @@ fn qualified_preparation_is_bounded_and_legacy_wire_is_unchanged() {
     ));
 }
 
-fn inventory_request(context: &FrozenContext, repo: &str) -> InvestigationCoverageRead {
+pub(super) fn inventory_request(context: &FrozenContext, repo: &str) -> InvestigationCoverageRead {
     let proof = context.ledger.coverage.as_ref().unwrap();
     let repo = proof
         .qualification

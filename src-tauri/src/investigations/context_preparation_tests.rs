@@ -96,6 +96,9 @@ impl Fixture {
         kind: PreparedContextReadKind,
     ) -> PreparedContextRead {
         match kind {
+            PreparedContextReadKind::Artifact => {
+                unreachable!("artifact reads are tested separately")
+            }
             PreparedContextReadKind::Query => context.prepare_query(&self.state, query()).unwrap(),
             PreparedContextReadKind::Inventory => {
                 context.prepare_inventory(self.inventory(context)).unwrap()
@@ -191,6 +194,9 @@ fn prepared_context_reads_do_not_publish_or_mutate_and_match_existing_wrappers()
         assert_eq!(reopened, expected_ledger);
         let mut old_sink = Sink::default();
         match kind {
+            PreparedContextReadKind::Artifact => {
+                unreachable!("artifact reads are tested separately")
+            }
             PreparedContextReadKind::Query => {
                 assert_eq!(context.query_pages, vec![expected_raw]);
                 assert!(context.inventory_details.is_empty());
@@ -454,6 +460,9 @@ fn prepared_context_reads_require_exactly_one_manifest_extension() {
             match corruption {
                 0 => candidate.ledger.revision += 1,
                 1 => match kind {
+                    PreparedContextReadKind::Artifact => {
+                        unreachable!("artifact reads are tested separately")
+                    }
                     PreparedContextReadKind::Query => {
                         candidate.ledger.queries.pop();
                     }
@@ -462,6 +471,9 @@ fn prepared_context_reads_require_exactly_one_manifest_extension() {
                     }
                 },
                 2 => match kind {
+                    PreparedContextReadKind::Artifact => {
+                        unreachable!("artifact reads are tested separately")
+                    }
                     PreparedContextReadKind::Query => {
                         candidate.ledger.queries[0].response_hash = content_hash(b"changed")
                     }
@@ -470,6 +482,9 @@ fn prepared_context_reads_require_exactly_one_manifest_extension() {
                     }
                 },
                 3 => match kind {
+                    PreparedContextReadKind::Artifact => {
+                        unreachable!("artifact reads are tested separately")
+                    }
                     PreparedContextReadKind::Query => candidate
                         .ledger
                         .queries
@@ -481,11 +496,17 @@ fn prepared_context_reads_require_exactly_one_manifest_extension() {
                 },
                 _ => {
                     let opposite = match kind {
+                        PreparedContextReadKind::Artifact => {
+                            unreachable!("artifact reads are tested separately")
+                        }
                         PreparedContextReadKind::Query => PreparedContextReadKind::Inventory,
                         PreparedContextReadKind::Inventory => PreparedContextReadKind::Query,
                     };
                     let other = fixture.candidate(&context, opposite);
                     match kind {
+                        PreparedContextReadKind::Artifact => {
+                            unreachable!("artifact reads are tested separately")
+                        }
                         PreparedContextReadKind::Query => {
                             candidate.ledger.coverage_reads = other.ledger.coverage_reads
                         }
@@ -540,6 +561,9 @@ fn prospective_context_borrows_exact_candidate_and_rejects_changed_basis() {
             assert!(std::ptr::eq(*borrowed, original.as_str()));
         }
         match kind {
+            PreparedContextReadKind::Artifact => {
+                unreachable!("artifact reads are tested separately")
+            }
             PreparedContextReadKind::Query => {
                 assert_eq!(view.query_pages.len(), context.query_pages.len() + 1);
                 assert_eq!(
