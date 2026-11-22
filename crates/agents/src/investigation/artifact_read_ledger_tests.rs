@@ -45,7 +45,7 @@ fn artifact_reads_are_charged_ledger_manifests_with_their_own_turn() {
             .get("artifact_reads")
             .is_none()
     );
-    let content_id = "c".repeat(64);
+    let content_id = format!("spec-artifact-v1:{}", "c".repeat(64));
     let raw = page_raw(&proof.context_id, &content_id, 0, "# Gaps\n", 20);
     let request = InvestigationArtifactRead {
         context_id: proof.context_id.clone(),
@@ -68,7 +68,8 @@ fn artifact_reads_are_charged_ledger_manifests_with_their_own_turn() {
     wrong_end.next_offset = Some(8);
     assert!(wrong_end.admit_response(&proof, &raw).is_err());
     let mut other_content = manifest.clone();
-    other_content.request.expected_content_id = Some("d".repeat(64));
+    other_content.request.expected_content_id =
+        Some(format!("spec-artifact-v1:{}", "d".repeat(64)));
     other_content.request.offset = 7;
     assert!(other_content.validate(&proof).is_err());
 

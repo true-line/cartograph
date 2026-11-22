@@ -37,7 +37,7 @@ impl InvestigationArtifactRead {
             && self.offset <= MAX_ARTIFACT_OFFSET
             && match &self.expected_content_id {
                 None => self.offset == 0,
-                Some(content) => crate::source_basis::hash(content),
+                Some(content) => content_id(content),
             }
     }
 }
@@ -64,7 +64,7 @@ impl InvestigationArtifactReadManifest {
     pub fn validate(&self, proof: &CoverageProof) -> Result<(), InvestigationError> {
         if self.request.context_id != proof.context_id
             || !self.request.validate_shape()
-            || !crate::source_basis::hash(&self.content_id)
+            || !content_id(&self.content_id)
             || self
                 .request
                 .expected_content_id
@@ -143,6 +143,13 @@ pub struct InvestigationArtifactPage {
     pub content: String,
 }
 
+/// `SpecArtifact::compute_content_id` identities: `spec-artifact-v1:<hex>`.
+fn content_id(value: &str) -> bool {
+    value
+        .strip_prefix("spec-artifact-v1:")
+        .is_some_and(crate::source_basis::hash)
+}
+
 fn artifact_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_ARTIFACT_ID_BYTES
@@ -170,11 +177,12 @@ mod tests {
     // AC-1812: a first read starts at zero; a continuation names its content.
     #[test]
     fn artifact_read_shape_binds_continuations_to_content() {
-        let content = "c".repeat(64);
+        let content = format!("spec-artifact-v1:{}", "c".repeat(64));
         assert!(read(0, None).validate_shape());
         assert!(!read(10, None).validate_shape());
         assert!(read(10, Some(&content)).validate_shape());
-        assert!(!read(10, Some("short")).validate_shape());
+        assert!(!read(10, Some(&"c".repeat(64))).validate_shape());
+        assert!(!read(10, Some("spec-artifact-v1:short")).validate_shape());
         for bad in ["", "Gap", "../x", "-a", "a-", &"a".repeat(65)] {
             let mut request = read(0, None);
             request.artifact_id = bad.into();

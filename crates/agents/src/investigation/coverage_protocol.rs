@@ -255,7 +255,7 @@ mod tests {
         );
         let mut continued = first.clone();
         continued["offset"] = json!(10);
-        continued["expected_content_id"] = json!("c".repeat(64));
+        continued["expected_content_id"] = json!(format!("spec-artifact-v1:{}", "c".repeat(64)));
         assert!(decode(&continued, on).is_ok());
         let mut missing = first.clone();
         missing
