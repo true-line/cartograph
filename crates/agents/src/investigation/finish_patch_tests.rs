@@ -454,6 +454,20 @@ fn a_capacity_gap_is_disclosed_inside_the_patch() {
         .err(),
         Some(PatchRejection::InvalidIndex)
     );
+    // A withdraw of a slot the finish does not have removes nothing (D1, v0.76.0).
+    let phantom = merged(json!({"type":"finish_patch",
+        "limitations":{"5":{"withdraw":true}},"disclosures":{name.clone():"Not read."}}))
+    .unwrap();
+    let InvestigationAction::Finish { limitations, .. } = &phantom.finish.action else {
+        panic!()
+    };
+    assert_eq!(
+        limitations,
+        &[
+            "Only selected evidence was assessed.".to_string(),
+            format!("{name}: Not read.")
+        ]
+    );
     // Gaps sharing a 12-char name cannot be told apart: whole answer.
     let mut twins = record.clone();
     let mut other = gap.clone();
