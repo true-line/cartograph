@@ -32,6 +32,7 @@ core-graph = { workspace = true }
 core-prov = { workspace = true }
 core-redact = { workspace = true }
 dunce = "1"
+iac = { workspace = true }
 ingest = { workspace = true }
 llm = { workspace = true }
 rusqlite = { workspace = true, features = ["backup"] }
@@ -42,6 +43,7 @@ source-capture = { workspace = true }
 source-walk = { workspace = true }
 spec = { workspace = true }
 thiserror = { workspace = true }
+work-packets = { workspace = true }
 # Test fixtures the app's tests share (test-support only).
 tempfile = { version = "3", optional = true }
 

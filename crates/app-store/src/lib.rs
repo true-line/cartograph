@@ -17,10 +17,16 @@
 
 #[path = "../../../src-tauri/src/agent_pool_store.rs"]
 pub mod agent_pool_store;
+#[path = "../../../src-tauri/src/app_state.rs"]
+pub mod app_state;
+#[path = "../../../src-tauri/src/curated_settlements.rs"]
+pub mod curated_settlements;
 #[path = "../../../src-tauri/src/edge_merge.rs"]
 pub mod edge_merge;
 #[path = "../../../src-tauri/src/egress.rs"]
 pub mod egress;
+#[path = "../../../src-tauri/src/extraction_cache.rs"]
+pub mod extraction_cache;
 #[path = "../../../src-tauri/src/findings.rs"]
 pub mod findings;
 #[path = "../../../src-tauri/src/ingest_basis.rs"]
@@ -39,6 +45,8 @@ pub mod metrics;
 pub mod observation_inputs;
 #[path = "../../../src-tauri/src/operator_limits.rs"]
 pub mod operator_limits;
+#[path = "../../../src-tauri/src/packet_runtime.rs"]
+pub mod packet_runtime;
 #[path = "../../../src-tauri/src/paths.rs"]
 pub mod paths;
 #[path = "../../../src-tauri/src/primary_source.rs"]
