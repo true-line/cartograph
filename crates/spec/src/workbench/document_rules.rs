@@ -3272,37 +3272,40 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
     return orderProcess;
 }
 ";
-        let facts = adapters_lang_ts::extract_source(
-            source.as_bytes(),
-            "src/config/order/default-order-process.ts",
-            &adapters_lang_ts::SourceId {
-                repo: "repo",
-                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
-            },
-        )
-        .unwrap();
-        let (held_nodes, held_edges) =
-            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
-        let nodes: Vec<&Node> = held_nodes.iter().collect();
-        let edges: Vec<&Edge> = held_edges.iter().collect();
-        let knowledge = Stories {
-            included: Vec::new(),
-            filtered: 0,
-            areas: BTreeMap::new(),
-            file_areas: BTreeMap::new(),
+        let render = |source: &str| -> String {
+            let facts = adapters_lang_ts::extract_source(
+                source.as_bytes(),
+                "src/config/order/default-order-process.ts",
+                &adapters_lang_ts::SourceId {
+                    repo: "repo",
+                    commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+                },
+            )
+            .unwrap();
+            let (held_nodes, held_edges) =
+                crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+            let nodes: Vec<&Node> = held_nodes.iter().collect();
+            let edges: Vec<&Edge> = held_edges.iter().collect();
+            let knowledge = Stories {
+                included: Vec::new(),
+                filtered: 0,
+                areas: BTreeMap::new(),
+                file_areas: BTreeMap::new(),
+            };
+            let budget = Budget::new(None).unwrap();
+            let mut assertions = Assertions::new(&budget);
+            let mut asserted = BTreeSet::new();
+            let mut out = Text::new(&budget, "").unwrap();
+            rules_per_capability(
+                (&nodes, &edges),
+                &knowledge,
+                (&mut assertions, &mut asserted),
+                &mut out,
+            )
+            .unwrap();
+            out.finish()
         };
-        let budget = Budget::new(None).unwrap();
-        let mut assertions = Assertions::new(&budget);
-        let mut asserted = BTreeSet::new();
-        let mut out = Text::new(&budget, "").unwrap();
-        rules_per_capability(
-            (&nodes, &edges),
-            &knowledge,
-            (&mut assertions, &mut asserted),
-            &mut out,
-        )
-        .unwrap();
-        let text = out.finish();
+        let text = render(source);
         assert!(
             text.contains(
                 "Here the available variants are the product variants that are not deleted and whose product is not deleted, among the variant ids."
@@ -3310,6 +3313,19 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             "{text}"
         );
         assert!(!text.contains("deletedAt"), "{text}");
+        // An inner join also drops variants with no product, and a second
+        // `where` replaces the earlier conditions: neither is read.
+        for changed in [
+            source.replace(".leftJoin(", ".innerJoin("),
+            source.replace(
+                ".andWhere('product.deletedAt IS NULL')",
+                ".where('product.deletedAt IS NULL')",
+            ),
+        ] {
+            assert_ne!(changed, source);
+            let text = render(&changed);
+            assert!(!text.contains("Here the available variants"), "{text}");
+        }
     }
 
     // AC-0951: a state machine is stated under the area of the file that

@@ -2649,22 +2649,28 @@ fn query_noun(
     let mut own: Vec<String> = Vec::new();
     let mut joined: Vec<String> = Vec::new();
     let mut among: Vec<String> = Vec::new();
+    let mut predicates = 0;
     for (method, texts) in &steps {
         match (method.as_str(), &texts[..]) {
             ("createQueryBuilder", [name]) if alias.is_none() && plain_word(name) => {
                 alias = Some(name.clone());
             }
-            (
-                "leftJoin" | "innerJoin" | "leftJoinAndSelect" | "innerJoinAndSelect",
-                [path, name],
-            ) => {
+            // An inner join also drops the records without the relation,
+            // which this reading does not state, so only left joins are read.
+            ("leftJoin" | "leftJoinAndSelect", [path, name]) => {
                 let (from, relation) = path.split_once('.')?;
                 if Some(from) != alias.as_deref() || !plain_word(relation) || !plain_word(name) {
                     return None;
                 }
                 joins.push((name.clone(), relation.to_owned()));
             }
+            // A later `where` replaces every earlier condition, so only a
+            // first `where` followed by `andWhere`s is read.
             ("where" | "andWhere", [condition, ..]) => {
+                if (method == "where") != (predicates == 0) {
+                    return None;
+                }
+                predicates += 1;
                 let (target, column, test) = query_condition(condition)?;
                 if Some(target.as_str()) == alias.as_deref() {
                     match test {
