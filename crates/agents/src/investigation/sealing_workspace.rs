@@ -146,7 +146,8 @@ fn disclosure_construction(policy: &InvestigationPolicy) -> Option<usize> {
         facts,
         queries.checked_mul(2)?,
         sources.checked_mul(2)?,
-        queries.checked_mul(2)?,
+        queries.checked_mul(2)?, // coverage-detail representation/body hashes
+        queries.checked_mul(2)?, // artifact-page representation/body hashes
         12,
     ])?;
     // Do not use MAX_DISCLOSURE_BYTES here: the final validator enforces it
