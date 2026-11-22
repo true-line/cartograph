@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
@@ -390,7 +390,7 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.deepEqual(entries, expected);
   const [, target] =
     shards.match(/run: node scripts\/rust-test-shard\.mjs "\$SHARD\/\$SHARDS" --group "\$GROUP" -- (.*)\n/u) ?? [];
-  assert.equal(target, '-p app --bin app');
+  assert.equal(target, '-p app --lib');
   assert.match(shards, /name: Rust app tests \(\$\{\{ matrix\.group \}\} \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.shards \}\}\)/u);
   assert.match(shards, /GROUP: \$\{\{ matrix\.group \}\}\n +SHARD: \$\{\{ matrix\.shard \}\}\n +SHARDS: \$\{\{ matrix\.shards \}\}\n/u);
   // Every shard keeps its listed and selected tests, and the coverage job,
@@ -426,13 +426,20 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   assert.doesNotMatch(rust, /cargo clippy/u);
   assert.match(complete, /needs: \[.*\brust-clippy\b.*\]/u);
   assert.match(complete, /test "\$RUST_CLIPPY" = success/u);
-  // `app` has no library, integration-test or doc-test target the exclusion
-  // could drop: its tests are the binary's unit tests.
+  // `app` has no integration-test or doc-test target the exclusion could
+  // drop: its tests are the library's unit tests, and its one executable only
+  // calls `app::run()` (#1227, ADR-0088).
   const manifest = readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8');
   assert.match(manifest, /^name = "app"$/mu);
-  assert.doesNotMatch(manifest, /^\[lib\]|^\[\[(?:test|bin|example|bench)\]\]/mu);
+  assert.match(manifest, /^\[lib\]\npath = "src\/main\.rs"\ndoctest = false\n\n\[\[bin\]\]\nname = "app"\npath = "src\/bin\/app\.rs"$/mu);
+  assert.equal(manifest.match(/^\[\[bin\]\]/gmu).length, 1);
+  assert.doesNotMatch(manifest, /^\[\[(?:test|example|bench)\]\]/mu);
   assert.deepEqual(readdirSync(path.join(root, 'src-tauri')).filter((entry) => ['tests', 'examples', 'benches'].includes(entry)), []);
-  assert.deepEqual(readdirSync(path.join(root, 'src-tauri/src')).filter((entry) => entry === 'lib.rs' || entry === 'bin'), []);
+  assert.equal(existsSync(path.join(root, 'src-tauri/src/lib.rs')), false);
+  assert.deepEqual(readdirSync(path.join(root, 'src-tauri/src/bin')), ['app.rs']);
+  const executable = readFileSync(path.join(root, 'src-tauri/src/bin/app.rs'), 'utf8');
+  assert.match(executable, /^fn main\(\) \{\n    app::run\(\);\n\}$/mu);
+  assert.doesNotMatch(executable, /#\[cfg\(test\)\]|\bmod\b/u);
 });
 
 test('real-model acceptance is explicit, bounded, and retains evidence after failures', () => {
@@ -807,7 +814,7 @@ test('the app crate compiles incrementally from state main saves, and only main 
   assert.match(seed, /if: "!cancelled\(\) && github\.event_name == 'push' && needs\.ci-image\.result == 'success'"/u);
   assert.match(seed, /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
   assert.match(seed, /group: \[acceptance, core\]/u);
-  assert.match(seed, /APP_TEST_GROUP: \$\{\{ matrix\.group \}\}\n +run: cargo test -p app --bin app --no-run/u);
+  assert.match(seed, /APP_TEST_GROUP: \$\{\{ matrix\.group \}\}\n +run: cargo test -p app --lib --no-run/u);
   assert.match(seed, /save-if: false/u);
   // Each hour saves a new key, so the job deletes the older entries.
   assert.match(seed, /actions: write/u);
@@ -936,7 +943,7 @@ test('scheduled real-repository lanes stay off pull requests and share one Mac s
   // #1770: the whole workspace on macOS, app in four processes (#1621).
   const mac = jobs['macos-tests'];
   assert.ok(mac.includes('cargo test --locked --workspace --exclude app'));
-  assert.ok(mac.includes('node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --bin app'));
+  assert.ok(mac.includes('node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --lib'));
   // #1812: the ignored determinism test, exactly, at the pinned commit.
   assert.match(mac, /DETERMINISM_COMMIT: [0-9a-f]{40}\n/u);
   assert.ok(mac.includes('-- --ignored --exact \\\n            registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash'));
