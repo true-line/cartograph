@@ -71,6 +71,23 @@ impl TryFrom<&AcquisitionRequest> for AcquisitionRequest {
     }
 }
 
+/// `evidence` without the withheld reads, borrowed when none are withheld.
+pub(super) fn supplied<'a>(
+    evidence: &'a [AgentEvidence],
+    withheld: &std::collections::BTreeSet<String>,
+) -> std::borrow::Cow<'a, [AgentEvidence]> {
+    if withheld.is_empty() {
+        return std::borrow::Cow::Borrowed(evidence);
+    }
+    std::borrow::Cow::Owned(
+        evidence
+            .iter()
+            .filter(|evidence| !withheld.contains(&evidence.id))
+            .cloned()
+            .collect(),
+    )
+}
+
 /// One owner holds the original raw graph for exact comparisons and the frozen
 /// authorized query projection. Nothing is rebuilt from live context mid-task.
 pub(super) struct FrozenContext {
@@ -79,6 +96,9 @@ pub(super) struct FrozenContext {
     pub(super) ledger: InvestigationInputLedger,
     pub(super) query_pages: Vec<String>,
     pub(super) evidence: Vec<AgentEvidence>,
+    /// Acquired reads the firewall refused toward a cloud provider (#679).
+    /// Their evidence stays here for ordinals and limits; prompts withhold it.
+    pub(super) withheld: std::collections::BTreeSet<String>,
     pub(super) coverage_archive: Option<InvestigationCoverageArchive>,
     pub(super) inventory_details: Vec<String>,
     qualified: Option<CoverageContext>,
@@ -358,6 +378,11 @@ mod graph_limit_tests {
 }
 
 impl FrozenContext {
+    /// The evidence a prompt may supply: every acquired read except those the
+    /// firewall refused (#679). Borrowed when nothing is withheld.
+    pub(super) fn supplied_evidence(&self) -> std::borrow::Cow<'_, [AgentEvidence]> {
+        supplied(&self.evidence, &self.withheld)
+    }
     #[cfg(test)]
     pub(super) fn completion_acquisition_request(
         request: &obligations::StagedObligationRequest,
@@ -865,6 +890,7 @@ impl FrozenContext {
             ledger,
             query_pages: vec![],
             evidence: vec![],
+            withheld: Default::default(),
             coverage_archive: None,
             inventory_details: vec![],
             qualified: None,
