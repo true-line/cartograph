@@ -217,7 +217,7 @@ export const ChooseOllamaPortThenDefault: Story = {
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     const section = within(await c.findByRole('region', { name: 'Ollama port' }));
-    const input = await section.findByLabelText('Port');
+    const input = await section.findByLabelText(/^Port/);
     await expect(input).toHaveValue(11434);
     await expect(section.getByRole('button', { name: 'Use this port' })).toBeDisabled();
     await expect(section.getByRole('button', { name: 'Use default port' })).toBeDisabled();
