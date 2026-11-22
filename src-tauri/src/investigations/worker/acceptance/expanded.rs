@@ -13,6 +13,8 @@ mod captured_auditor;
 pub(super) mod captured_local;
 #[path = "expanded/cloud_run.rs"]
 mod cloud_run;
+#[path = "expanded/estate.rs"]
+mod estate;
 #[path = "expanded/negative_cases.rs"]
 mod negative_cases;
 #[path = "expanded/start_timing.rs"]
