@@ -257,16 +257,25 @@ fn tool(
 /// the name matches a detector — cheap on non-config files. This is the
 /// single source of truth for Preflight AND the graph (#215).
 pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
+    detect_in_text(name, rel, &|| std::fs::read_to_string(path).ok())
+}
+
+/// A file's text, read only when a detector needs it; `None` when it cannot
+/// be read as UTF-8.
+type Text<'a> = &'a dyn Fn() -> Option<String>;
+
+/// [`detect_in_file`] over a file whose text `text` supplies (AC-1063).
+pub fn detect_in_text(name: &str, rel: &str, text: Text<'_>) -> Detection {
     let mut detection = Detection::default();
     match name {
-        "package.json" => detect_package_json(rel, path, &mut detection),
+        "package.json" => detect_package_json(rel, text, &mut detection),
         "go.mod" => {
             detection.framework_labels.push("Go module".into());
-            detect_go_mod(rel, path, &mut detection);
+            detect_go_mod(rel, text, &mut detection);
         }
         "pyproject.toml" => {
             detection.framework_labels.push("Python project".into());
-            detect_pyproject(rel, path, &mut detection);
+            detect_pyproject(rel, text, &mut detection);
         }
         "requirements.txt" => {
             detection.framework_labels.push("Python project".into());
@@ -301,11 +310,8 @@ pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
                 BTreeMap::new(),
             ));
         }
-        "Cargo.toml" => detect_cargo_toml(rel, path, &mut detection),
-        "manifest.json"
-            if std::fs::read_to_string(path)
-                .is_ok_and(|text| text.contains("\"manifest_version\"")) =>
-        {
+        "Cargo.toml" => detect_cargo_toml(rel, text, &mut detection),
+        "manifest.json" if text().is_some_and(|text| text.contains("\"manifest_version\"")) => {
             detection.framework_labels.push(WEBEXTENSION_LABEL.into());
         }
         _ => {}
@@ -314,7 +320,7 @@ pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
         || name == "jsconfig.json"
         || (name.starts_with("tsconfig.") && name.ends_with(".json"))
     {
-        detect_tsconfig(rel, path, &mut detection);
+        detect_tsconfig(rel, text, &mut detection);
     }
     if let Some((_, tool_name, display)) = LOCKFILES.iter().find(|(file, _, _)| file == &name) {
         let mut settings = BTreeMap::new();
@@ -329,25 +335,25 @@ pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
         ));
     }
     if name == "Dockerfile" || name.starts_with("Dockerfile.") {
-        detect_dockerfile(rel, path, &mut detection);
+        detect_dockerfile(rel, text, &mut detection);
     }
     // Compose files include the common override/profile variants:
     // `docker-compose.override.yml`, `compose.prod.yaml`, … (#216 review).
     if (name.starts_with("docker-compose") || name.starts_with("compose."))
         && (name.ends_with(".yml") || name.ends_with(".yaml"))
     {
-        detect_compose(rel, path, &mut detection);
+        detect_compose(rel, text, &mut detection);
     }
     if (rel.starts_with(".github/workflows/") || rel.starts_with(".github\\workflows\\"))
         && (name.ends_with(".yml") || name.ends_with(".yaml"))
     {
-        detect_workflow(rel, path, &mut detection);
+        detect_workflow(rel, text, &mut detection);
     }
     if name.ends_with(".tf") {
         detection.framework_labels.push("Terraform".into());
     }
     if is_env_name(name) {
-        detect_env(rel, path, &mut detection);
+        detect_env(rel, text, &mut detection);
     }
     detect_code_config(name, rel, &mut detection);
     detection
@@ -355,8 +361,8 @@ pub fn detect_in_file(name: &str, rel: &str, path: &Path) -> Detection {
 
 /// `package.json`: the manifest itself (scripts/engines/type as settings)
 /// plus one tool per known dependency, each cited at its declaring line.
-fn detect_package_json(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_package_json(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -437,8 +443,8 @@ fn detect_package_json(rel: &str, path: &Path, detection: &mut Detection) {
 
 /// `tsconfig.json`/`jsconfig.json`: the compiler options #213's module
 /// resolution consumes — parsed once here, cited from this fact.
-fn detect_tsconfig(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_tsconfig(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     // Parse-once seam (#213): the exact same parse the TS adapter's module
@@ -461,8 +467,8 @@ fn detect_tsconfig(rel: &str, path: &Path, detection: &mut Detection) {
 }
 
 /// `Cargo.toml`: package name/edition (or workspace members).
-fn detect_cargo_toml(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_cargo_toml(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let Ok(value) = text.parse::<toml::Value>() else {
@@ -504,8 +510,8 @@ fn detect_cargo_toml(rel: &str, path: &Path, detection: &mut Detection) {
 }
 
 /// `pyproject.toml`: project name, Python requirement, build backend.
-fn detect_pyproject(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_pyproject(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let mut settings = BTreeMap::new();
@@ -543,8 +549,8 @@ fn detect_pyproject(rel: &str, path: &Path, detection: &mut Detection) {
 }
 
 /// `go.mod`: module path and Go version from the two directive lines.
-fn detect_go_mod(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_go_mod(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let mut settings = BTreeMap::new();
@@ -573,8 +579,8 @@ fn detect_go_mod(rel: &str, path: &Path, detection: &mut Detection) {
 
 /// `Dockerfile`: base images (`FROM`) and exposed ports (`EXPOSE`) by
 /// deterministic line scan.
-fn detect_dockerfile(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_dockerfile(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let mut base_images = Vec::new();
@@ -615,8 +621,8 @@ fn detect_dockerfile(rel: &str, path: &Path, detection: &mut Detection) {
 
 /// `docker-compose.yml`: service names and images by indentation scan —
 /// enough for evidence without a YAML dependency.
-fn detect_compose(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_compose(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let mut services = Vec::new();
@@ -661,8 +667,8 @@ fn detect_compose(rel: &str, path: &Path, detection: &mut Detection) {
 
 /// `.github/workflows/*.yml`: workflow name, triggers, and job names by
 /// indentation scan.
-fn detect_workflow(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_workflow(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let mut settings = BTreeMap::new();
@@ -858,8 +864,8 @@ fn closing_quote(text: &str, quote: char) -> Option<usize> {
 /// `.env*`: key names ONLY (AC-0097, fail closed). Preflight and every
 /// other caller of [`detect_in_file`] see no value; only
 /// [`extract_dir_reading`] adds the values of allowlisted keys.
-fn detect_env(rel: &str, path: &Path, detection: &mut Detection) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn detect_env(rel: &str, text: Text<'_>, detection: &mut Detection) {
+    let Some(text) = text() else {
         return;
     };
     let keys: Vec<serde_json::Value> = env_keys(&text)
@@ -918,6 +924,143 @@ pub fn extract_dir_reading(
     env_read: &std::collections::BTreeSet<String>,
     on_file: &mut dyn FnMut(&str),
 ) -> std::io::Result<ToolExtraction> {
+    // The same walk as Preflight (#248), so the two never disagree about
+    // what is part of the system.
+    let walked = source_walk::files(
+        root,
+        &crate::preflight::skip_dir,
+        source_walk::Gitignores::Honor,
+    )?;
+    let checkout = Checkout(root);
+    Ok(extract_walked(&walked, &checkout, id, env_read, on_file))
+}
+
+/// True when the toolchain reader may open `rel` and a capture retains it:
+/// every file a detector names, other than an env file, which holds secrets
+/// (AC-0097) and is never retained.
+pub fn is_toolchain_file(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    !is_env_name(name) && detector_names(name, rel)
+}
+
+/// True for every file [`detect_in_text`] has a detector for, by name.
+fn detector_names(name: &str, rel: &str) -> bool {
+    let yaml = name.ends_with(".yml") || name.ends_with(".yaml");
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    matches!(
+        name,
+        "package.json"
+            | "go.mod"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "Cargo.toml"
+            | "manifest.json"
+            | "tsconfig.json"
+            | "jsconfig.json"
+    ) || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+        || LOCKFILES.iter().any(|(file, _, _)| *file == name)
+        || name == "Dockerfile"
+        || name.starts_with("Dockerfile.")
+        || ((name.starts_with("docker-compose") || name.starts_with("compose.")) && yaml)
+        || ((rel.starts_with(".github/workflows/") || rel.starts_with(".github\\workflows\\"))
+            && yaml)
+        || name.ends_with(".tf")
+        || CODE_CONFIG_STEMS
+            .iter()
+            .any(|(config, _, _)| *config == stem)
+}
+
+/// The files [`extract_dir`] may open under `root`, in path order: a source
+/// capture retains them (AC-1063).
+pub fn toolchain_paths(root: &Path) -> std::io::Result<Vec<String>> {
+    // Every detector reads only its own file, so the facts cite no file
+    // beyond the selection.
+    crate::captured_walk::selected(root, is_toolchain_file, || Ok((Vec::new(), Vec::new())))
+}
+
+/// [`extract_dir_reading`] over a source capture (AC-1063, #385):
+/// `captured` is the capture's [`is_toolchain_file`] selection and
+/// `captured_read` its bytes. The reader lists the capture's own paths, and
+/// lists and reads the checkout only for env files, which no capture retains.
+pub fn extract_from_capture(
+    root: &Path,
+    captured: &[String],
+    captured_read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    env_read: &std::collections::BTreeSet<String>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<ToolExtraction> {
+    // The capture's own paths, and the checkout's env files, which no
+    // capture retains (AC-0097).
+    let mut walked = crate::captured_walk::listing(root, captured);
+    walked.extend(
+        crate::captured_walk::walk(root)?
+            .into_iter()
+            .filter(|file| is_env_name(&file.name)),
+    );
+    walked.sort_by(|a, b| a.rel.cmp(&b.rel));
+    let captured = Captured {
+        root,
+        read: captured_read,
+    };
+    Ok(extract_walked(&walked, &captured, id, env_read, on_file))
+}
+
+/// Where the toolchain reader's bytes come from, by repo-relative path.
+trait Bytes {
+    fn bytes(&self, rel: &str) -> Option<Vec<u8>>;
+    fn len(&self, rel: &str) -> u64;
+    fn text(&self, rel: &str) -> Option<String> {
+        String::from_utf8(self.bytes(rel)?).ok()
+    }
+}
+
+struct Checkout<'a>(&'a Path);
+
+impl Bytes for Checkout<'_> {
+    fn bytes(&self, rel: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.0.join(rel)).ok()
+    }
+    fn len(&self, rel: &str) -> u64 {
+        std::fs::metadata(self.0.join(rel)).map_or(0, |meta| meta.len())
+    }
+}
+
+/// A capture's bytes, and the checkout's for an env file.
+struct Captured<'a> {
+    root: &'a Path,
+    read: &'a dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+}
+
+impl Bytes for Captured<'_> {
+    fn bytes(&self, rel: &str) -> Option<Vec<u8>> {
+        if is_env_name(rel.rsplit('/').next().unwrap_or(rel)) {
+            Checkout(self.root).bytes(rel)
+        } else if is_toolchain_file(rel) {
+            (self.read)(rel).ok()
+        } else {
+            None
+        }
+    }
+    fn len(&self, rel: &str) -> u64 {
+        if is_env_name(rel.rsplit('/').next().unwrap_or(rel)) {
+            Checkout(self.root).len(rel)
+        } else {
+            self.bytes(rel).map_or(0, |bytes| bytes.len() as u64)
+        }
+    }
+}
+
+fn extract_walked(
+    walked: &[source_walk::WalkedFile],
+    source: &dyn Bytes,
+    id: &SourceId,
+    env_read: &std::collections::BTreeSet<String>,
+    on_file: &mut dyn FnMut(&str),
+) -> ToolExtraction {
     // One declaring proof: (config path, span start, span end).
     type Proof = (String, u64, u64);
     // Env-file tool name → the line spans of its allowlisted values.
@@ -927,20 +1070,13 @@ pub fn extract_dir_reading(
     let mut tools: BTreeMap<String, (DetectedTool, Vec<Proof>)> = BTreeMap::new();
     let mut config_files: BTreeMap<String, u64> = BTreeMap::new();
 
-    // The same walk as Preflight (#248), so the two never disagree about
-    // what is part of the system.
-    let walked = source_walk::files(
-        root,
-        &crate::preflight::skip_dir,
-        source_walk::Gitignores::Honor,
-    )?;
-    for source_walk::WalkedFile { rel, path, name } in walked {
-        let mut detection = detect_in_file(&name, &rel, &path);
+    for source_walk::WalkedFile { rel, name, .. } in walked {
+        let mut detection = detect_in_text(name, rel, &|| source.text(rel));
         if detection.tools.is_empty() {
             continue;
         }
-        if !env_read.is_empty() && is_env_file(&rel) {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if !env_read.is_empty() && is_env_file(rel) {
+            let text = source.text(rel).unwrap_or_default();
             let values = env_values(&text, env_read);
             if let Some(env) = detection
                 .tools
@@ -955,14 +1091,14 @@ pub fn extract_dir_reading(
                 }
                 env.settings
                     .insert("values".into(), serde_json::Value::Object(map));
-                if core_redact::is_env_template(&name) {
+                if core_redact::is_env_template(name) {
                     env.settings
                         .insert("template".into(), serde_json::Value::Bool(true));
                 }
             }
         }
-        on_file(&rel);
-        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        on_file(rel);
+        let file_len = source.len(rel);
         config_files.entry(rel.clone()).or_insert(file_len);
         for detected in detection.tools {
             let proof = (
@@ -1106,7 +1242,7 @@ pub fn extract_dir_reading(
             });
         }
     }
-    Ok(extraction)
+    extraction
 }
 
 /// Edge from an observed resource to an env file declaring its key.
@@ -1689,5 +1825,88 @@ mod tests {
         assert_eq!(detection.framework_labels, vec!["Express", "React"]);
         // And the same call produced the graph-fact tools.
         assert!(detection.tools.iter().any(|t| t.name == "react"));
+    }
+
+    // AC-1063 (T-1063, #385): over a source capture the toolchain reader
+    // reads every config file from the captured bytes and never the
+    // checkout, except env files, which no capture retains (AC-0097). The
+    // selection covers every file a detector proves something in.
+    #[test]
+    fn captured_config_files_are_read_instead_of_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            (
+                "package.json",
+                "{\"name\":\"shop\",\"dependencies\":{\"react\":\"^18\"}}",
+            ),
+            ("tsconfig.json", "{\"compilerOptions\":{\"strict\":true}}"),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"shop\"\nedition = \"2021\"\n",
+            ),
+            ("go.mod", "module github.com/acme/shop\n\ngo 1.23\n"),
+            ("pyproject.toml", "[project]\nname = \"shop\"\n"),
+            ("requirements.txt", "flask\n"),
+            ("pom.xml", "<project/>\n"),
+            ("Dockerfile", "FROM node:22-alpine\nEXPOSE 3000\n"),
+            (
+                "docker-compose.yml",
+                "services:\n  web:\n    image: shop:1\n",
+            ),
+            (
+                ".github/workflows/ci.yml",
+                "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n",
+            ),
+            ("pnpm-lock.yaml", "lockfileVersion: 9\n"),
+            ("main.tf", "resource \"x\" \"y\" {}\n"),
+            ("vite.config.ts", "export default {}\n"),
+            ("ext/manifest.json", "{\"manifest_version\": 3}"),
+            (".env", "PORT=3000\nAPI_KEY=hunter2\n"),
+            ("README.md", "notes\n"),
+        ];
+        for (rel, text) in files {
+            write(dir.path(), rel, text);
+        }
+        let id = SourceId {
+            repo: "local/tools",
+            commit: "c0ffee",
+        };
+        let allow: std::collections::BTreeSet<String> = ["PORT".to_string()].into();
+        let facts = |out: &ToolExtraction| format!("{:?} {:?} {}", out.nodes, out.edges, out.files);
+        let checkout = extract_dir_reading(dir.path(), &id, &allow, &mut |_| {}).unwrap();
+        let before = facts(&checkout);
+
+        let paths = toolchain_paths(dir.path()).unwrap();
+        // Every file a detector proved something in is selected, but an env
+        // file is never retained.
+        for node in checkout.nodes.iter().filter(|node| node.label == "File") {
+            let rel = node.props["path"].as_str().unwrap();
+            assert_eq!(paths.contains(&rel.to_string()), rel != ".env", "{rel}");
+        }
+        assert!(!paths.contains(&"README.md".to_string()));
+        let captured: BTreeMap<String, Vec<u8>> = paths
+            .iter()
+            .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+            .collect();
+
+        // After capture: edits, a deletion and a new config file.
+        write(dir.path(), "package.json", "{\"name\":\"other\"}");
+        write(dir.path(), "Dockerfile", "FROM python:3.12\n");
+        write(dir.path(), "yarn.lock", "# yarn\n");
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let read = |rel: &str| {
+            captured
+                .get(rel)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("not captured"))
+        };
+        let keys: Vec<String> = captured.keys().cloned().collect();
+        let after =
+            extract_from_capture(dir.path(), &keys, &read, &id, &allow, &mut |_| {}).unwrap();
+        assert_eq!(facts(&after), before);
+        assert_ne!(
+            facts(&extract_dir_reading(dir.path(), &id, &allow, &mut |_| {}).unwrap()),
+            before
+        );
     }
 }
