@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": ["../target/mcp-relay/cartograph-mcp", "../target/agent-runtime/cartograph-agent"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
+    }
+  }
+}
