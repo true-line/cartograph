@@ -279,6 +279,10 @@ impl CitedText {
                 );
                 by_citation.insert(id, text);
             }
+            for end in [&edge.src, &edge.label, &edge.dst] {
+                routes.extend(route_literals(end).into_iter().map(str::to_owned));
+            }
+            routes_in(&edge.props, &mut routes);
         }
         Self {
             by_citation,
@@ -700,6 +704,18 @@ mod tests {
         assert_eq!(
             text.uncited_route("It uses stom/new.", std::slice::from_ref(&c)),
             None
+        );
+        // A route only an edge shows is indexed too (#2335).
+        let calls = Edge {
+            src: "fn:client".into(),
+            label: "CALLS".into(),
+            dst: "http:POST /api/mailbox/verify".into(),
+            props: json!({}),
+        };
+        let only_edge = CitedText::of(&[], &[calls], &[], &cited);
+        assert_eq!(
+            only_edge.uncited_route("It sends mailbox/verify.", std::slice::from_ref(&c)),
+            Some("mailbox/verify")
         );
         // Prose that matches no route of the graph is not a route.
         assert_eq!(
