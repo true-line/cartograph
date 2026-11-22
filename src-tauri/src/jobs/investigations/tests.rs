@@ -19,6 +19,9 @@ mod chat_tests;
 #[path = "held_recovery_tests.rs"]
 mod held_recovery_tests;
 
+#[path = "run_runtimes_tests.rs"]
+mod run_runtimes_tests;
+
 struct Fixture {
     store: JobStore,
     locks: JobExecutionLocks,
