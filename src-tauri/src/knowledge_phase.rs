@@ -16,8 +16,9 @@ use core_graph::overlay::{
 use core_graph::{RevisionedSnapshot, SnapshotReadLimits, SqliteGraphStore};
 use llm::LlmProvider;
 use semantic::embedding_cache::EmbeddingCache;
-use semantic::knowledge_ingest::{self, PhaseOutcome, SectionText};
+use semantic::knowledge_ingest::{self, CommitText, PhaseOutcome, SectionText};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Versioned phase recipe recorded in the overlay basis; [`recipe_name`]
@@ -70,6 +71,12 @@ pub(crate) struct KnowledgeReport {
     /// Admitted sections embedded by heading alone: the source was busy,
     /// moved or unreadable, or the span no longer matches the graph.
     pub sections_unread: usize,
+    /// Commits read from the ingested repositories' first-parent history
+    /// and embedded as units (AC-1516).
+    pub commits_read: usize,
+    /// Named sources the provider phase could not read: issue text always,
+    /// since no tracker is read (AC-1516).
+    pub source_omissions: Vec<&'static str>,
     /// Test-only census of producer nodes in a successfully published full set.
     /// Zero for a moved base, refusal fallback or a phase that never derived.
     #[cfg(test)]
@@ -159,7 +166,37 @@ pub(crate) fn run_with_sections(
     provider: Option<&dyn LlmProvider>,
     sections: &SectionReader<'_>,
 ) -> Result<KnowledgeReport, String> {
-    run_within(graph, cache, overlay, provider, PHASE_LIMITS, sections)
+    run_with_sources(graph, cache, overlay, provider, sections, &no_history)
+}
+
+/// Reads the first-parent history of each ingested repository at the
+/// commit its base was ingested from, given as repository key to commit
+/// (AC-1516). Commits never enter the graph, so the phase asks the host.
+pub(crate) type HistoryReader<'a> = dyn Fn(&BTreeMap<String, String>) -> Vec<CommitText> + 'a;
+
+/// No source access: no commit is a unit.
+pub(crate) fn no_history(_: &BTreeMap<String, String>) -> Vec<CommitText> {
+    Vec::new()
+}
+
+/// [`run_with_sections`] with the host's history reader (AC-1516).
+pub(crate) fn run_with_sources(
+    graph: &Mutex<SqliteGraphStore>,
+    cache: &Arc<Mutex<EmbeddingCache>>,
+    overlay: &Arc<Mutex<OverlayStore>>,
+    provider: Option<&dyn LlmProvider>,
+    sections: &SectionReader<'_>,
+    history: &HistoryReader<'_>,
+) -> Result<KnowledgeReport, String> {
+    run_within(
+        graph,
+        cache,
+        overlay,
+        provider,
+        PHASE_LIMITS,
+        sections,
+        history,
+    )
 }
 
 /// Run the phase as the T2 setting allows (#1782). With T2 off no provider is
@@ -173,22 +210,38 @@ pub(crate) fn run_for_setting(
     semantic: bool,
     provider: impl FnOnce() -> Option<Box<dyn LlmProvider>>,
 ) -> Result<KnowledgeReport, String> {
-    run_for_setting_with_sections(graph, cache, overlay, semantic, provider, &no_sections)
+    run_for_setting_with_sources(
+        graph,
+        cache,
+        overlay,
+        semantic,
+        provider,
+        &no_sections,
+        &no_history,
+    )
 }
 
-/// [`run_for_setting`] with the host's section reader, which is only asked
-/// when the provider phase runs (AC-1505).
-pub(crate) fn run_for_setting_with_sections(
+/// [`run_for_setting`] with the host's section and history readers, which
+/// are only asked when the provider phase runs (AC-1505, AC-1516).
+pub(crate) fn run_for_setting_with_sources(
     graph: &Mutex<SqliteGraphStore>,
     cache: &Arc<Mutex<EmbeddingCache>>,
     overlay: &Arc<Mutex<OverlayStore>>,
     semantic: bool,
     provider: impl FnOnce() -> Option<Box<dyn LlmProvider>>,
     sections: &SectionReader<'_>,
+    history: &HistoryReader<'_>,
 ) -> Result<KnowledgeReport, String> {
     if semantic {
         let provider = provider();
-        return run_with_sections(graph, cache, overlay, provider.as_deref(), sections);
+        return run_with_sources(
+            graph,
+            cache,
+            overlay,
+            provider.as_deref(),
+            sections,
+            history,
+        );
     }
     let mut report = run(graph, cache, overlay, None)?;
     if report.omission == Some(knowledge_ingest::NO_PROVIDER) {
@@ -260,6 +313,7 @@ fn run_within(
     provider: Option<&dyn LlmProvider>,
     limits: SnapshotReadLimits,
     sections: &SectionReader<'_>,
+    history: &HistoryReader<'_>,
 ) -> Result<KnowledgeReport, String> {
     let _phase = PHASE.lock().map_err(|e| e.to_string())?;
     let (snapshot, lease) = {
@@ -297,15 +351,24 @@ fn run_within(
     // Section text is read only when it can be embedded, and outside the
     // graph lock (AC-1505).
     let admitted = knowledge_ingest::admitted_sections(&snapshot.graph.0, &flows);
-    let section_text = if provider.is_some_and(|p| p.capabilities().embeddings) {
+    let embeds = provider.is_some_and(|p| p.capabilities().embeddings);
+    let section_text = if embeds {
         sections(&admitted)
     } else {
         SectionText::new()
+    };
+    // History is read the same way: only when it can be embedded, outside
+    // the graph lock, at the commit each repository's base came from.
+    let commits = if embeds {
+        history(&ingested_heads(&snapshot.graph.0))
+    } else {
+        Vec::new()
     };
     let (recipe, mut report) = match knowledge_ingest::run(
         &snapshot.graph.0,
         &flows,
         &section_text,
+        &commits,
         provider,
         Arc::clone(cache),
         lease,
@@ -330,6 +393,8 @@ fn run_within(
             .filter(|node| section_text.contains_key(&node.id))
             .count();
         report.sections_unread = admitted.len() - report.sections_read;
+        report.commits_read = knowledge_ingest::cited_commits(&snapshot.graph.0, &commits).count();
+        report.source_omissions = vec![knowledge_ingest::NO_ISSUE_SOURCE];
     }
     report.oversized = derived.oversized;
     report.producer_omissions = derived.omissions;
@@ -489,6 +554,8 @@ fn report(embedded: usize, omitted: usize, omission: Option<&'static str>) -> Kn
         published: false,
         sections_read: 0,
         sections_unread: 0,
+        commits_read: 0,
+        source_omissions: Vec::new(),
         derived: 0,
         oversized: 0,
         derived_omission: None,
@@ -697,6 +764,122 @@ pub(crate) fn source_sections(
     texts
 }
 
+/// The commit each repository's base was ingested from: the one commit its
+/// `File` facts cite, when they all cite the same full object id. A
+/// repository ingested from a working tree, or whose files cite several
+/// commits, has none.
+pub(crate) fn ingested_heads(nodes: &[core_graph::Node]) -> BTreeMap<String, String> {
+    let mut seen: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for node in nodes.iter().filter(|node| node.label == "File") {
+        let Ok(prov) = <core_prov::Provenance as serde::Deserialize>::deserialize(
+            &*core_graph::stored::stored_prov(&node.props),
+        ) else {
+            continue;
+        };
+        for evidence in &prov.evidence {
+            let full = matches!(evidence.commit_sha.len(), 40 | 64)
+                && evidence.commit_sha.bytes().all(|b| b.is_ascii_hexdigit());
+            let slot = seen
+                .entry(evidence.repo.clone())
+                .or_insert_with(|| full.then(|| evidence.commit_sha.clone()));
+            if !full || slot.as_deref() != Some(evidence.commit_sha.as_str()) {
+                *slot = None;
+            }
+        }
+    }
+    seen.into_iter()
+        .filter_map(|(repo, commit)| Some((repo, commit?)))
+        .collect()
+}
+
+/// Read the first-parent history of each repository from its commit, under
+/// one read-only source operation released before anything is embedded
+/// (AC-1516): at most [`knowledge_ingest::MAX_COMMIT_UNITS`] commits per
+/// repository, newest first, each with its message and up to
+/// [`knowledge_ingest::MAX_COMMIT_PATHS`] paths its tree changed from its
+/// first parent. Author names and emails are never read. A source that is
+/// busy, unregistered, not a repository root or missing the commit gives
+/// no commits.
+pub(crate) fn source_history(
+    registry: &Mutex<crate::sources::SourceRegistry>,
+    heads: &BTreeMap<String, String>,
+) -> Vec<CommitText> {
+    let mut commits = Vec::new();
+    if heads.is_empty() {
+        return commits;
+    }
+    let Ok(listed) = registry
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.list())
+    else {
+        return commits;
+    };
+    let wanted = listed
+        .into_iter()
+        .filter(|source| heads.contains_key(&source.repo_key))
+        .map(|source| (source, false));
+    let Ok(operation) = crate::source_access::SourceOperation::acquire(registry, wanted) else {
+        return commits;
+    };
+    for (repo, head) in heads {
+        let Ok(root) = operation.root(repo) else {
+            continue;
+        };
+        if let Ok(read) = repository_history(root, repo, head) {
+            commits.extend(read);
+        }
+    }
+    drop(operation);
+    commits
+}
+
+fn repository_history(
+    root: &std::path::Path,
+    repo: &str,
+    head: &str,
+) -> Result<Vec<CommitText>, git2::Error> {
+    // The source root itself must be the repository: a discovered parent
+    // repository's paths would not be the base's paths.
+    let git = git2::Repository::open_ext(
+        root,
+        git2::RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&std::ffi::OsStr>(),
+    )?;
+    let mut walk = git.revwalk()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL)?;
+    walk.simplify_first_parent()?;
+    walk.push(git2::Oid::from_str(head)?)?;
+    let mut out = Vec::new();
+    for oid in walk.take(knowledge_ingest::MAX_COMMIT_UNITS) {
+        let commit = git.find_commit(oid?)?;
+        let parent = commit
+            .parents()
+            .next()
+            .map(|parent| parent.tree())
+            .transpose()?;
+        let diff = git.diff_tree_to_tree(parent.as_ref(), Some(&commit.tree()?), None)?;
+        let mut paths = std::collections::BTreeSet::new();
+        for delta in diff.deltas() {
+            for file in [delta.old_file(), delta.new_file()] {
+                if let Some(path) = file.path().and_then(|path| path.to_str()) {
+                    paths.insert(path.replace('\\', "/"));
+                }
+            }
+        }
+        out.push(CommitText {
+            repo: repo.to_string(),
+            sha: commit.id().to_string(),
+            message: String::from_utf8_lossy(commit.message_bytes()).into_owned(),
+            paths: paths
+                .into_iter()
+                .take(knowledge_ingest::MAX_COMMIT_PATHS)
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
 pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::{Emitter, Manager};
     {
@@ -719,7 +902,7 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                 return;
             };
             drain(&WORKER, || {
-                let status = KnowledgeStatus::from(run_for_setting_with_sections(
+                let status = KnowledgeStatus::from(run_for_setting_with_sources(
                     &state.graph,
                     cache,
                     overlay,
@@ -729,6 +912,7 @@ pub(crate) fn spawn_after_ingest<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                         local_provider(port).map(|p| Box::new(p) as Box<dyn LlmProvider>)
                     },
                     &|sections| source_sections(&state.sources, sections),
+                    &|heads| source_history(&state.sources, heads),
                 ));
                 remember(&status);
                 let _ = app.emit("knowledge-phase", status);
