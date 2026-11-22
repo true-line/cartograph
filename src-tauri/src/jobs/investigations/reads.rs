@@ -21,6 +21,9 @@ pub struct InvestigationDetailRead {
     pub detail: InvestigationDetail,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reported_usage_exact: Option<ReportedTaskUsage>,
+    /// ADR-0085: the tool-calling runtime the run executed on, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<super::RunRuntime>,
 }
 
 #[derive(Serialize)]
@@ -51,12 +54,22 @@ impl InvestigationDetailRead {
         let mut read = Self {
             detail,
             reported_usage_exact,
+            runtime: None,
         };
         let bytes = context_hub::logical::count(&read).ok_or(InvestigationStoreError::Invalid)?;
         if bytes > MAX_RECORD_BYTES {
             read.reported_usage_exact = None;
         }
         Ok(read)
+    }
+
+    /// Adds the run's runtime identity when the read stays within its cap.
+    pub fn with_runtime(mut self, runtime: Option<super::RunRuntime>) -> Self {
+        self.runtime = runtime;
+        if context_hub::logical::count(&self).is_none_or(|bytes| bytes > MAX_RECORD_BYTES) {
+            self.runtime = None;
+        }
+        self
     }
 }
 

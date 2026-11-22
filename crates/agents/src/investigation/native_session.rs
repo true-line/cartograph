@@ -166,6 +166,9 @@ pub struct RuntimeIdentity {
     pub runtime: String,
     /// Runtime protocol version.
     pub version: String,
+    /// The harness package that drives the loop for this session's lane and
+    /// its installed version, such as `pi-agent-core@0.73.1`.
+    pub runner: String,
 }
 
 /// One step's result.
@@ -240,7 +243,8 @@ impl<L: RuntimeLink> NativeSession<L> {
         }
     }
 
-    /// The identity the current runtime reported.
+    /// The identity the run's first runtime reported; every restart must
+    /// report the same one.
     pub fn identity(&self) -> Option<&RuntimeIdentity> {
         self.identity.as_ref()
     }
@@ -373,17 +377,38 @@ impl<L: RuntimeLink> NativeSession<L> {
             LinkPoll::Empty => return Err(not_sent(FailureCode::DeadlineExceeded)),
             _ => return Err(not_sent(FailureCode::Transport)),
         };
-        let field = |name: &str| {
-            ready
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
+        let lane = match self.config.lane {
+            RuntimeLane::Pi => "pi",
+            RuntimeLane::Claude => "claude",
         };
-        self.identity = Some(RuntimeIdentity {
-            runtime: field("runtime"),
-            version: field("version"),
-        });
+        let field = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let (Some(runtime), Some(version), Some(runner)) = (
+            field(ready.get("runtime")),
+            field(ready.get("version")),
+            field(ready.get("runners").and_then(|runners| runners.get(lane))),
+        ) else {
+            return Err(not_sent(FailureCode::Transport));
+        };
+        let identity = RuntimeIdentity {
+            runtime,
+            version,
+            runner,
+        };
+        // A run keeps the runtime it started on: a restart that reports a
+        // different identity fails before anything is sent to it.
+        if self
+            .identity
+            .as_ref()
+            .is_some_and(|first| *first != identity)
+        {
+            return Err(not_sent(FailureCode::Transport));
+        }
+        self.identity = Some(identity);
         let proxy = self.proxy.config();
         let base_url = self
             .proxy
@@ -392,7 +417,7 @@ impl<L: RuntimeLink> NativeSession<L> {
         let mut start = json!({
             "type": "start",
             "run_id": proxy.run_id,
-            "lane": match self.config.lane { RuntimeLane::Pi => "pi", RuntimeLane::Claude => "claude" },
+            "lane": lane,
             "model": proxy.model,
             "base_url": base_url,
             "token": proxy.token,

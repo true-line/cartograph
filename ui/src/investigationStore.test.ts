@@ -1729,6 +1729,33 @@ describe('persisted investigation chat UI binding (AC-0378)', () => {
     expect(useInvestigationStore.getState().detail?.reported_usage_exact).toEqual(current.reported_usage_exact);
   });
 
+  // AC-1423: the runtime a tool-calling run executed on is shown only when well formed.
+  it('accepts a well-formed runtime identity and rejects any other', async () => {
+    for (const value of [null, {}, { lane: 'codex', runtime: 'cartograph-agent', version: '1', runner: 'pi-agent-core@0.73.1' },
+      { lane: 'pi', runtime: 'cartograph-agent', version: '1', runner: '' }, { lane: 'pi', runtime: 'cartograph agent', version: '1', runner: 'pi-agent-core@0.73.1' },
+      { lane: 'pi', runtime: 'cartograph-agent', version: '1', runner: 'pi-agent-core@0.73.1', extra: 1 }, { lane: 'pi', runtime: 'cartograph-agent', version: '1' }]) {
+      for (const completion of [false, true]) {
+        const detail = completion ? specWriterDetail('runtime') : investigationDetail('runtime');
+        detail.runtime = value as never;
+        const result = completion ? specWriterResult(detail.investigation_id) : investigationResult(detail.investigation_id);
+        taskTransport(detail, result, savedChat(detail, result));
+        await useInvestigationStore.getState().open(detail.investigation_id);
+        expect(useInvestigationStore.getState().error).not.toBeNull();
+        expect(useInvestigationStore.getState().detail).toBeNull();
+      }
+    }
+    const runtime = { lane: 'pi' as const, runtime: 'cartograph-agent', version: '1', runner: 'pi-agent-core@0.73.1' };
+    for (const completion of [false, true]) {
+      const detail = completion ? specWriterDetail('runtime-ok') : investigationDetail('runtime-ok');
+      detail.runtime = runtime;
+      const result = completion ? specWriterResult(detail.investigation_id) : investigationResult(detail.investigation_id);
+      taskTransport(detail, result, savedChat(detail, result));
+      await useInvestigationStore.getState().open(detail.investigation_id);
+      expect(useInvestigationStore.getState().error).toBeNull();
+      expect(useInvestigationStore.getState().detail?.runtime).toEqual(runtime);
+    }
+  });
+
   it('loads pending user-authored question and completed saved specialist reference', async () => {
     const pending = investigationDetail('pending-chat-ui', { status: 'running', has_result: false,
       actions: { can_cancel: true, can_follow_up: false } });

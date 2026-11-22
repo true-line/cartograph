@@ -343,7 +343,7 @@ fn run_inner<R: tauri::Runtime>(
         };
         // ADR-0085: a tool-calling version gets its own runtime for this run;
         // the runtime process ends when the run's provider is dropped.
-        let provider = super::tool_runtime::provider_for_run(
+        let run = super::tool_runtime::provider_for_run(
             request.specialist_id,
             &id,
             &provider,
@@ -351,7 +351,7 @@ fn run_inner<R: tauri::Runtime>(
         )
         .map_err(|_| HostError::InvalidInput)?;
         let result = worker
-            .execute_inner(&request, completion_request.as_ref(), provider.as_ref())
+            .execute_inner(&request, completion_request.as_ref(), run.provider.as_ref())
             .map_err(|failure| {
                 failure.preparation_after_call(
                     request.specialist_id,
@@ -359,6 +359,13 @@ fn run_inner<R: tauri::Runtime>(
                 )
             });
         rejected = worker.last_completion.take();
+        // AC-1423: name the runtime the run executed on. Attribution only:
+        // a failed write never changes the run's outcome.
+        if let Some(runtime) = run.runtime()
+            && let Ok(mut jobs) = state.jobs.lock()
+        {
+            let _ = jobs.record_investigation_runtime(&id, &runtime);
+        }
         result
     })();
     if let Err(failure) = outcome

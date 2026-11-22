@@ -56,12 +56,15 @@ fn query_arguments() -> Value {
 
 /// A stand-in runtime: it posts each model call through the proxy the way Pi
 /// does and plays `answers` in order. Tool results it receives go to `seen`.
-fn runtime(answers: Vec<Answer>, seen: Arc<Mutex<Vec<Value>>>) -> FakeLink {
+fn runtime(answers: Vec<Answer>, seen: Arc<Mutex<Vec<Value>>>, runner: &'static str) -> FakeLink {
     let (to_runtime, inbox) = channel::<Value>();
     let (outbox, from_runtime) = channel::<Value>();
     std::thread::spawn(move || {
         outbox
-            .send(json!({"type": "ready", "runtime": "fake-agent", "version": "1"}))
+            .send(
+                json!({"type": "ready", "runtime": "fake-agent", "version": "1",
+                "runners": {"pi": runner, "claude": "claude-agent-sdk@0"}}),
+            )
             .unwrap();
         let Ok(start) = inbox.recv() else { return };
         assert_eq!(start["type"], "start");
@@ -167,6 +170,15 @@ struct Harness {
 
 /// A session whose n-th runtime start plays `scripts[n]`.
 fn harness(scripts: Vec<Vec<Answer>>) -> Harness {
+    let runners = vec![PI; scripts.len()];
+    harness_with(scripts, runners)
+}
+
+const PI: &str = "pi-agent-core@0.73.1";
+
+/// As [`harness`], with the n-th runtime reporting `runners[n]` as its Pi
+/// runner.
+fn harness_with(scripts: Vec<Vec<Answer>>, runners: Vec<&'static str>) -> Harness {
     let (url, hits) = upstream();
     let proxy = ModelProxy::bind(ProxyConfig {
         run_id: "run-9".into(),
@@ -192,7 +204,11 @@ fn harness(scripts: Vec<Vec<Answer>>) -> Harness {
         config,
         Box::new(move || {
             let index = count.fetch_add(1, Ordering::SeqCst);
-            Ok(runtime(scripts[index].clone(), results.clone()))
+            Ok(runtime(
+                scripts[index].clone(),
+                results.clone(),
+                runners[index],
+            ))
         }),
     );
     Harness {
@@ -248,9 +264,13 @@ fn a_step_is_one_model_call_that_returns_the_next_tool_call() {
     assert_eq!(first.usage.as_ref().unwrap().input_tokens, Some(11));
     assert_eq!(first.usage.as_ref().unwrap().output_tokens, Some(7));
     assert_eq!(
-        h.session.identity().unwrap().runtime,
-        "fake-agent",
-        "the run names the runtime it ran on"
+        h.session.identity().unwrap(),
+        &RuntimeIdentity {
+            runtime: "fake-agent".into(),
+            version: "1".into(),
+            runner: PI.into(),
+        },
+        "the run names the runtime and the lane's runner it ran on"
     );
     let second = h
         .session
@@ -313,6 +333,32 @@ fn an_answer_without_a_tool_call_fails_the_step_and_the_next_one_restarts() {
     assert_eq!(h.hits.load(Ordering::SeqCst), 2);
 }
 
+// AC-1423: a restart must report the identity the run started on; a
+// different runner fails the step before anything is sent, and the run keeps
+// its first identity.
+#[test]
+fn a_restart_on_a_different_runner_is_refused() {
+    let mut h = harness_with(
+        vec![vec![Answer::Text], vec![Answer::Calls(1)]],
+        vec![PI, "pi-agent-core@0.74.0"],
+    );
+    assert_eq!(
+        h.session.step(&payload(1), &LIMITS, soon(), &go, &|_| true),
+        Err(answered(FailureCode::EmptyCompletion))
+    );
+    assert_eq!(
+        h.session.step(&payload(2), &LIMITS, soon(), &go, &|_| true),
+        Err(not_sent(FailureCode::Transport))
+    );
+    assert_eq!(h.spawns.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.hits.load(Ordering::SeqCst),
+        1,
+        "nothing reached the model"
+    );
+    assert_eq!(h.session.identity().unwrap().runner, PI);
+}
+
 #[test]
 fn a_cancelled_or_unrecorded_step_sends_nothing() {
     let mut h = harness(vec![vec![Answer::Calls(1)], vec![Answer::Calls(1)]]);
@@ -352,12 +398,13 @@ fn a_process_link_speaks_one_json_object_per_line() {
     let mut command = Command::new("sh");
     command.args([
         "-c",
-        r#"printf '{"type":"ready","runtime":"sh","version":"1"}\n'; read line; printf '%s\n' "$line"; printf 'not json\n'; sleep 30"#,
+        r#"printf '{"type":"ready","runtime":"sh","version":"1","runners":{"pi":"pi-agent-core@0"}}\n'; read line; printf '%s\n' "$line"; printf 'not json\n'; sleep 30"#,
     ]);
     let mut link = ProcessLink::spawn(command).unwrap();
     assert_eq!(
         link.recv(soon()),
-        LinkPoll::Message(json!({"type": "ready", "runtime": "sh", "version": "1"}))
+        LinkPoll::Message(json!({"type": "ready", "runtime": "sh", "version": "1",
+            "runners": {"pi": "pi-agent-core@0"}}))
     );
     link.send(&json!({"type": "cancel"})).unwrap();
     assert_eq!(

@@ -141,6 +141,27 @@ fn token() -> Result<String, ToolRuntimeError> {
         .ok_or(ToolRuntimeError::Preparation)
 }
 
+/// The provider one run uses, and its runtime when it has one.
+pub(crate) struct RunProvider {
+    /// What the worker calls.
+    pub provider: Arc<dyn LlmProvider>,
+    native: Option<Arc<NativeToolProvider<ProcessLink>>>,
+}
+
+impl RunProvider {
+    /// The runtime this run executed on, once it has reported its identity
+    /// (AC-1423). A bounded-loop run has none.
+    pub(crate) fn runtime(&self) -> Option<crate::jobs::investigations::RunRuntime> {
+        let identity = self.native.as_ref()?.runtime_identity()?;
+        Some(crate::jobs::investigations::RunRuntime {
+            lane: "pi".into(),
+            runtime: identity.runtime,
+            version: identity.version,
+            runner: identity.runner,
+        })
+    }
+}
+
 /// The provider `specialist` runs on for run `run_id`: `provider` itself for
 /// a bounded-loop version, otherwise `provider` driven by a fresh runtime.
 pub(crate) fn provider_for_run(
@@ -148,9 +169,12 @@ pub(crate) fn provider_for_run(
     run_id: &str,
     provider: &Arc<dyn LlmProvider>,
     runtime: Option<&RuntimeCommand>,
-) -> Result<Arc<dyn LlmProvider>, ToolRuntimeError> {
+) -> Result<RunProvider, ToolRuntimeError> {
     if !specialist.uses_native_tool_runtime() {
-        return Ok(provider.clone());
+        return Ok(RunProvider {
+            provider: provider.clone(),
+            native: None,
+        });
     }
     let runtime = runtime.ok_or(ToolRuntimeError::NotInstalled)?;
     let profile = provider
@@ -189,9 +213,14 @@ pub(crate) fn provider_for_run(
         },
         Box::new(move || ProcessLink::spawn(runtime.command())),
     );
-    let wrapped = NativeToolProvider::new(provider.clone(), session)
-        .map_err(|_| ToolRuntimeError::Preparation)?;
-    Ok(Arc::new(wrapped))
+    let wrapped = Arc::new(
+        NativeToolProvider::new(provider.clone(), session)
+            .map_err(|_| ToolRuntimeError::Preparation)?,
+    );
+    Ok(RunProvider {
+        provider: wrapped.clone(),
+        native: Some(wrapped),
+    })
 }
 
 #[cfg(test)]

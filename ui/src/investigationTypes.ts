@@ -239,6 +239,11 @@ export interface ReportedTaskUsage {
   input_tokens: string | null; output_tokens: string | null; cache_read_tokens: string | null;
 }
 
+/** ADR-0085: the tool-calling runtime a run executed on (app-only read). */
+export interface RunRuntime {
+  lane: 'pi' | 'claude'; runtime: string; version: string; runner: string;
+}
+
 /** Definition/provider are the saved identities, not the current catalog entries. */
 export type AdvisoryAuditSubject =
   | { kind: 'finding'; finding_index: number }
@@ -254,6 +259,7 @@ export type AdvisoryAudit =
 export interface InvestigationDetail extends InvestigationSummary {
   advisory_audit?: AdvisoryAudit;
   reported_usage_exact?: ReportedTaskUsage;
+  runtime?: RunRuntime;
   completion?: InvestigationCompletionDetail;
   coverage_context?: InvestigationCoverageContext;
   context_owner: string;

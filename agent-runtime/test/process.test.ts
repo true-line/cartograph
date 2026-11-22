@@ -101,6 +101,8 @@ async function runProcess(answer: (res: any, step: number) => void, extra: objec
   await once(child, "exit");
   proxy.close();
   assert.equal(received[0].type, "ready");
+  assert.match(received[0].runners.pi, /^pi-agent-core@\d/, "the ready line names the installed Pi runner");
+  assert.match(received[0].runners.claude, /^claude-agent-sdk@\d/);
   assert.deepEqual(received.filter((m) => m.type === "tool_call").map((m) => m.name), ["query_context", "finish"]);
   assert.equal(done.reason, "finished");
   assert.equal(requests.length, 2, "one model request per turn, none after the admitted finish");

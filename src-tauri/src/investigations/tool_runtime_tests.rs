@@ -18,7 +18,8 @@ fn runtime() -> RuntimeCommand {
 fn only_a_tool_calling_version_runs_on_the_runtime() {
     let provider: Arc<dyn LlmProvider> = Arc::new(local("qwen3:30b-a3b"));
     let same = provider_for_run(SpecialistId::DomainAnalystV28, "inv_1", &provider, None).unwrap();
-    assert!(Arc::ptr_eq(&same, &provider));
+    assert!(Arc::ptr_eq(&same.provider, &provider));
+    assert_eq!(same.runtime(), None, "a bounded-loop run names no runtime");
     assert_eq!(
         provider_for_run(SpecialistId::DomainAnalystV29, "inv_1", &provider, None).err(),
         Some(ToolRuntimeError::NotInstalled),
@@ -31,9 +32,14 @@ fn only_a_tool_calling_version_runs_on_the_runtime() {
         Some(&runtime()),
     )
     .unwrap();
-    assert!(!Arc::ptr_eq(&wrapped, &provider));
+    assert!(!Arc::ptr_eq(&wrapped.provider, &provider));
     assert_eq!(
-        wrapped.bounded_profile().unwrap(),
+        wrapped.runtime(),
+        None,
+        "the runtime is named only once it has reported itself"
+    );
+    assert_eq!(
+        wrapped.provider.bounded_profile().unwrap(),
         provider.bounded_profile().unwrap(),
         "the run's provider identity is unchanged"
     );

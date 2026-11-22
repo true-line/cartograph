@@ -52,6 +52,9 @@ pub mod metadata_host_fixture;
 #[path = "investigations/reads.rs"]
 mod reads;
 pub use reads::{InvestigationDetailRead, SpecialistActivityPage};
+#[path = "investigations/run_runtimes.rs"]
+mod run_runtimes;
+pub use run_runtimes::RunRuntime;
 // Internal admission foundation; no historical runtime initializes these tables.
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
