@@ -670,7 +670,9 @@ test('only the agent runtime holds allow-jit, signed before notarization (ADR-00
   const requirement = script.split('\n').find((line) => line.startsWith('claude_requirement='))
     .slice('claude_requirement="'.length, -1).replaceAll('\\"', '"').replace('$claude_team', 'Q6L2SF6YDW');
   assert.equal(requirement, claudeCodeRequirement('Q6L2SF6YDW'));
-  assert.match(script, /codesign --verify --strict -R="=\$claude_requirement" "\$bundle\/Contents\/Resources\/claude-code\/claude"/u);
+  // `-R="=…"` would reach codesign as "==…" and fail to parse (v0.74.0 release).
+  assert.match(script, /codesign --verify --strict -R "=\$claude_requirement" "\$bundle\/Contents\/Resources\/claude-code\/claude"/u);
+  assert.doesNotMatch(script, /-R=/u);
   const result = spawnSync('bash', ['-n', path.join(root, 'scripts/macos-sign-agent-runtime.sh')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 });
