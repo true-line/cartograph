@@ -7,13 +7,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildAgentRuntime, lockedRunners, pinnedNode, SEA_FUSE, SIGNING_INPUTS } from './build-agent-runtime.mjs';
+import { buildAgentRuntime, claudeCodeRequirement, lockedRunners, pinnedClaudeCode, pinnedNode, SEA_FUSE, SIGNING_INPUTS } from './build-agent-runtime.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const archive = (slice) => `node archive ${slice}`;
 const digest = (text) => createHash('sha256').update(text).digest('hex');
 
-function fixture(t, { pi = '0.73.1' } = {}) {
+function fixture(t, { pi = '0.73.1', sdk = '0.3.330', claude = 'claude code' } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cartograph-agent-package-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(path.join(root, 'scripts'));
@@ -24,8 +24,17 @@ function fixture(t, { pi = '0.73.1' } = {}) {
     license_sha256: digest('node license'),
   }));
   writeFileSync(path.join(root, 'agent-runtime/package-lock.json'), JSON.stringify({
-    packages: pi ? { 'node_modules/@mariozechner/pi-agent-core': { version: pi } } : {},
+    packages: {
+      ...(pi ? { 'node_modules/@mariozechner/pi-agent-core': { version: pi } } : {}),
+      'node_modules/@anthropic-ai/claude-agent-sdk': { version: sdk },
+    },
   }));
+  writeFileSync(path.join(root, 'scripts/agent-runtime-claude.json'), JSON.stringify({
+    sdk_version: '0.3.330', team_id: 'Q6L2SF6YDW', sha256: { 'darwin-arm64': digest('claude code') },
+  }));
+  const native = path.join(root, 'agent-runtime/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64');
+  mkdirSync(native, { recursive: true });
+  writeFileSync(path.join(native, 'claude'), claude);
   return root;
 }
 
@@ -64,7 +73,13 @@ test('mac: locked install, verified Node slices, one blob, injected and merged i
   assert.equal(output, path.join(root, 'target/agent-runtime/cartograph-agent-universal-apple-darwin'));
   assert.equal(readFileSync(output, 'utf8'), 'universal');
   assert.equal(existsSync(`${output}.tmp`), false);
-  assert.deepEqual(bundled.runners, { pi: 'pi-agent-core@0.73.1', claude: '' });
+  assert.deepEqual(bundled.runners, { pi: 'pi-agent-core@0.73.1', claude: 'claude-agent-sdk@0.3.330' });
+  // AC-1424: the pinned Claude Code is staged byte for byte and its Anthropic
+  // signature checked as the app checks it.
+  const staged = path.join(root, 'target/agent-runtime/claude-code/claude');
+  assert.equal(readFileSync(staged, 'utf8'), 'claude code');
+  assert.deepEqual(calls.find(([command, first]) => command === 'codesign' && first === '--verify'),
+    ['codesign', '--verify', '--strict', '-R', `=${claudeCodeRequirement('Q6L2SF6YDW')}`, staged]);
   assert.deepEqual(calls[0], ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund']);
   const curls = calls.filter(([command]) => command === 'curl').map((call) => call.at(-1));
   assert.deepEqual(curls, ['darwin-arm64.tar.gz', 'darwin-x64.tar.gz'].map((tail) => `https://nodejs.org/dist/v22.23.5/node-v22.23.5-${tail}`));
@@ -85,6 +100,7 @@ test('linux: one slice, no Mach-O steps', (t) => {
   assert.equal(readFileSync(output, 'utf8'), 'node');
   assert.equal(readFileSync(path.join(root, 'target/agent-runtime/NODE-LICENSE'), 'utf8'), 'node license', 'the verified LICENSE feeds the shipped notices');
   assert.equal(calls.some(([command]) => command === 'codesign' || command === 'lipo'), false);
+  assert.equal(existsSync(path.join(root, 'target/agent-runtime/claude-code')), false, 'only the macOS app carries Claude Code');
   assert.equal(calls.find((call) => call.includes('NODE_SEA_BLOB')).includes('--macho-segment-name'), false);
 });
 
@@ -106,6 +122,15 @@ test('a Node archive that does not match its pin fails the build and leaves noth
   const output = path.join(root, 'target/agent-runtime/cartograph-agent-universal-apple-darwin');
   assert.equal(existsSync(output), false);
   assert.equal(existsSync(`${output}.tmp`), false);
+});
+
+test('a Claude Code off its pin, or a pin for another SDK version, fails the build', (t) => {
+  const mac = (root) => () => buildAgentRuntime({ root, target: 'universal-apple-darwin', env: {}, hostSlice: 'darwin-arm64',
+    run: tools(root, []), bundle: () => {} });
+  const tampered = fixture(t, { claude: 'tampered' });
+  assert.throws(mac(tampered), /Claude Code for darwin-arm64 does not match its pinned sha256/u);
+  assert.equal(existsSync(path.join(tampered, 'target/agent-runtime/claude-code/claude')), false);
+  assert.throws(mac(fixture(t, { sdk: '0.3.331' })), /pinned for claude-agent-sdk 0\.3\.330, the lockfile has 0\.3\.331/u);
 });
 
 test('a Node release whose LICENSE differs from its pin fails the build', (t) => {
@@ -131,6 +156,10 @@ test('the repository pins exact Node and Pi versions and packages the sidecar on
   for (const slice of ['darwin-arm64', 'darwin-x64', 'linux-x64']) assert.match(node.sha256[slice], /^[0-9a-f]{64}$/u);
   assert.match(node.license_sha256, /^[0-9a-f]{64}$/u);
   assert.match(lockedRunners(ROOT).pi, /^pi-agent-core@\d+\.\d+\.\d+$/u);
+  assert.match(lockedRunners(ROOT).claude, /^claude-agent-sdk@\d+\.\d+\.\d+$/u);
+  const claude = pinnedClaudeCode(ROOT);
+  assert.equal(claude.team_id, 'Q6L2SF6YDW', 'Anthropic PBC');
+  assert.match(claude.sha256['darwin-arm64'], /^[0-9a-f]{64}$/u);
   const manifest = JSON.parse(readFileSync(path.join(ROOT, 'agent-runtime/package.json'), 'utf8'));
   for (const [name, version] of Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })) {
     assert.match(version, /^\d+\.\d+\.\d+(-[\w.]+)?$/u, `${name} is pinned exactly`);
