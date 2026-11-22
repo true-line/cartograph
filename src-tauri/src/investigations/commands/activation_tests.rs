@@ -1082,3 +1082,72 @@ fn desktop_analyst26_command_rejects_creation_but_recovers_saved_nonce() {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     });
 }
+
+fn set_pool(app: &tauri::AppHandle<tauri::test::MockRuntime>, paused: bool, local_limit: u32) {
+    app.state::<AppState>()
+        .settings
+        .lock()
+        .unwrap()
+        .set_agent_pool_controls(&crate::agent_pool::AgentPoolControls {
+            paused,
+            local_limit,
+            cloud_limit: 0,
+        })
+        .unwrap();
+}
+
+// AC-1706 (T-1706): a specialist investigation the agent pool does not
+// admit stays queued without a provider call, then runs when resumed.
+#[test]
+fn a_held_investigation_runs_when_the_pool_is_resumed() {
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+        set_pool(app, true, 0);
+        let started =
+            completion_start::start_access(request, app.clone(), Instant::now(), None, None, None)
+                .unwrap();
+        assert_eq!(started.status, InvestigationStatus::Queued);
+        std::thread::sleep(Duration::from_millis(600));
+        let held = detail(app, &started.investigation_id);
+        assert_eq!(held.summary.status, InvestigationStatus::Queued);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        set_pool(app, false, 1);
+        let saved = finished(app, &started.investigation_id);
+        assert_eq!(
+            saved.summary.status,
+            InvestigationStatus::Completed,
+            "{:?}",
+            saved.error
+        );
+        assert!(provider.calls.load(Ordering::SeqCst) > 0);
+    });
+}
+
+// AC-1706 (T-1706): a held investigation stays cancellable from Jobs; cancelling it
+// ends the wait, it never calls the provider, and its live place is freed.
+#[test]
+fn a_held_investigation_can_be_cancelled_before_it_starts() {
+    let provider = Arc::new(PublicProvider::new(false));
+    worker::with_public_start_fixture(provider.clone(), false, |app, request, _| {
+        let state = app.state::<AppState>();
+        state
+            .investigations
+            .set_test_provider(InvestigationProviderMode::Local, provider.clone());
+        set_pool(app, true, 0);
+        let started =
+            completion_start::start_access(request, app.clone(), Instant::now(), None, None, None)
+                .unwrap();
+        // Cancelled from Jobs, as a held job is.
+        state.jobs.lock().unwrap().cancel(started.job_id).unwrap();
+        let saved = finished(app, &started.investigation_id);
+        assert_eq!(saved.summary.status, InvestigationStatus::Cancelled);
+        wait(|| state.investigations.insert(&started.investigation_id).ok());
+        set_pool(app, false, 0);
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    });
+}

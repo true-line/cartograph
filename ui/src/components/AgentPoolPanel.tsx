@@ -118,9 +118,9 @@ export function AgentPoolPanel({
         {controls && <p data-testid="agent-pool-controls">{controlsLine(controls)}</p>}
         {controlsError && <p className="job-error" role="alert">{controlsError}</p>}
         <p className="muted">
-          Topic expert questions, section drafts and gap escalations that the controls do not
-          admit yet wait as queued, in order, and start when a place frees or the pool is
-          resumed. Cancel a waiting one from Jobs. Specialist investigations keep their own runner.
+          Specialist investigations, topic expert questions, section drafts and gap escalations
+          that the controls do not admit yet wait as queued, in order, and start when a place
+          frees or the pool is resumed. Cancel a waiting one from Jobs.
         </p>
       </section>
 
