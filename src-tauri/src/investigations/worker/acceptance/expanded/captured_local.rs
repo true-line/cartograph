@@ -156,7 +156,7 @@ fn configured_provider(
             // #1653: the frozen identity names its context window. Without one,
             // Ollama's server default applies and can silently cut a long
             // investigation prompt short, so a definition that needs it says so.
-            std::sync::Arc::new(match frozen_context_window(&expected.provider_id)? {
+            std::sync::Arc::new(match frozen_context_window(&expected.provider_id, model)? {
                 Some(tokens) => provider
                     .with_context_window(tokens)
                     .map_err(|error| error.to_string())?,
@@ -186,20 +186,23 @@ fn configured_provider(
     }
     Ok(provider)
 }
-/// The `num-ctx-N` segment of a frozen Ollama identity, if it has one. The
-/// window is then bound twice: by this constructor and by the descriptor
-/// equality check that follows it.
-fn frozen_context_window(provider_id: &str) -> Result<Option<u32>, String> {
-    let mut windows = provider_id
-        .split(':')
-        .filter_map(|segment| segment.strip_prefix("num-ctx-"));
-    match (windows.next(), windows.next()) {
-        (None, _) => Ok(None),
-        (Some(tokens), None) => tokens
+/// The `num-ctx-N` suffix that a frozen Ollama identity adds after its model,
+/// if it has one. Only text beyond `ollama:<model>` is parsed, so a model tag
+/// that itself looks like a window is never read as one. The window is then
+/// bound twice: by this constructor and by the descriptor equality check.
+fn frozen_context_window(provider_id: &str, model: &str) -> Result<Option<u32>, String> {
+    let Some(suffix) = provider_id
+        .strip_prefix("ollama:")
+        .and_then(|rest| rest.strip_prefix(model))
+    else {
+        return Ok(None);
+    };
+    match suffix.strip_prefix(":num-ctx-") {
+        None => Ok(None),
+        Some(tokens) => tokens
             .parse()
             .map(Some)
-            .map_err(|_| "Frozen context window is not a whole number.".into()),
-        (Some(_), Some(_)) => Err("Frozen identity names two context windows.".into()),
+            .map_err(|_| "Frozen context window is not one whole number.".into()),
     }
 }
 // AC-1411 / #1653: a frozen identity with a context window gets exactly that
@@ -244,6 +247,26 @@ fn captured_local_ollama_binds_the_frozen_context_window() {
     ] {
         assert!(build(refused).is_err(), "{refused}");
     }
+    // A model whose own tag looks like a window is not read as one.
+    let tagged = InvestigationProvider {
+        provider_id: "ollama:explicit-control-model:num-ctx-8192".into(),
+        model: "explicit-control-model:num-ctx-8192".into(),
+        ..expected("ollama:explicit-control-model:num-ctx-8192")
+    };
+    assert_eq!(
+        frozen_context_window(&tagged.provider_id, &tagged.model),
+        Ok(None)
+    );
+    assert!(
+        configured_provider(
+            "ollama",
+            "disabled",
+            "http://127.0.0.1:1/",
+            "explicit-control-model:num-ctx-8192",
+            &tagged,
+        )
+        .is_ok()
+    );
 }
 // AC-0429: pure constructor/identity checks; no server, model call or attempt.
 #[test]
