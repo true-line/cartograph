@@ -154,9 +154,14 @@ impl<'a> SavedMetadataHistory<'a> {
             let [prior] = prior.as_slice() else {
                 return Err(InvestigationStoreError::Invalid);
             };
-            if agents::investigation::finish_patch::PatchBasis::from_refusal(
+            if agents::investigation::finish_patch::PatchBasis::from_refusal_for(
                 &prior.record,
                 patch.finding_count,
+                self.task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .patches_whole_finish(),
             )
             .map_err(|_| InvestigationStoreError::Invalid)?
                 != *patch

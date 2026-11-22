@@ -1127,6 +1127,7 @@ fn completion_policy_reservation_covers_serialized_large_refusal_shape() {
             exactly_supplied: false,
             unmet: Some(RefusalReason::AcquiredNotSupplied),
             last_attempt_outcome: Some(CompletionAttemptOutcome::Acquired),
+            capacity_disclosed: false,
         })
         .collect();
     journal.record.feedback.unmet = journal
