@@ -694,8 +694,20 @@ impl LlmProvider for NextProvider {
                 .find(|branch| branch["properties"]["type"]["const"] == "replay_query")
                 .expect("the admitted schema must offer an authenticated replay");
             let fields = &offered["properties"];
-            json!({"type":"replay_query","context_id":fields["context_id"]["const"],
-                "query_index":fields["query_index"]["const"],"query_id":fields["query_id"]["const"]}).to_string()
+            if fields["query_id"]["const"].is_null() {
+                // Older families offer an open replay selector; the model
+                // names the reference from its own query history.
+                let prompts = self.observed.prompts.lock().unwrap();
+                let prompt = prompts.last().unwrap();
+                let reference =
+                    &prompt["compact_context"]["query_history"]["latest_query"]["reference"];
+                json!({"type":"replay_query","context_id":prompt["context_id"],
+                    "query_index":reference["query_index"],"query_id":reference["query_id"]})
+                .to_string()
+            } else {
+                json!({"type":"replay_query","context_id":fields["context_id"]["const"],
+                    "query_index":fields["query_index"]["const"],"query_id":fields["query_id"]["const"]}).to_string()
+            }
         } else if self.duplicate_metadata_recovery
             && (call == 2 || (call > 2 && self.ignore_duplicate_finish))
         {
@@ -2260,6 +2272,30 @@ fn next_prompt_exact_repeated_query_stops_with_repeated_query_limit() {
     let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
     assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
     assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
+}
+
+// AC-1412 (#1352): an authenticated replay_query names an answered query on
+// purpose, so @17 (no acquisition choices) runs it instead of stopping.
+#[test]
+fn desktop_v17_authenticated_query_replay_is_not_a_repeated_query() {
+    let mut scripted = NextProvider::new(false);
+    scripted.metadata_order = Some([false, true]);
+    scripted.replay_metadata_query = true;
+    let provider = Arc::new(scripted);
+    let f = NextFixture::new(provider.as_ref(), SpecialistId::DomainAnalystV17);
+    f.run(provider.clone());
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs.investigation(&f.id).unwrap();
+    assert_eq!(
+        detail.summary.status,
+        InvestigationStatus::Completed,
+        "{:?}",
+        detail.error
+    );
+    let ledger = jobs.investigation_ledger(&f.id).unwrap().unwrap();
+    assert_eq!(ledger.queries.len(), 2);
+    assert_eq!(ledger.queries[1].query, ledger.queries[0].query);
 }
 
 // AC-1412 (#1352): @18 has closed action feedback, so an exact repeat is

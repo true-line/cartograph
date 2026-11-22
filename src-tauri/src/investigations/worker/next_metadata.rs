@@ -68,7 +68,10 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 // nothing. Acquisition-choice specialists are refused earlier as
                 // repeated_read and continue; a specialist without that closed
                 // feedback is stopped before it spends the query bytes again.
+                // An authenticated replay_query decodes to the same query on
+                // purpose; it is an offered, charged action, not a repeat.
                 if !self.detail.summary.specialist_id.uses_acquisition_choices()
+                    && original["type"] != "replay_query"
                     && current
                         .ledger()
                         .queries
