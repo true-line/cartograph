@@ -645,6 +645,19 @@ impl<'a> Index<'a> {
                         .unwrap_or(value)
                         .starts_with(&push)
                         .then_some(())?;
+                    // The push's list is this definition's binding, not a
+                    // shadowing list of the same name.
+                    parsed
+                        .dependencies
+                        .iter()
+                        .any(|d| {
+                            matches!(
+                                &d.resolution,
+                                core_graph::rules::DependencyResolution::Binding { binding_id, .. }
+                                    if *binding_id == definition.binding_id
+                            )
+                        })
+                        .then_some(())?;
                     let stated = super::statements::statement(
                         &parsed,
                         owner,
@@ -3645,6 +3658,10 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             Cancelled: { to: [] },
         },
         async onTransitionStart(fromState, toState, { ctx, order }) {
+            if (toState === 'Cancelled') {
+                const variantsWithInsufficientStock: ProductVariant[] = [];
+                variantsWithInsufficientStock.push(order.code);
+            }
             if (toState === 'ArrangingPayment') {
                 const variantsWithInsufficientStock: ProductVariant[] = [];
                 for (const line of order.lines) {
@@ -3720,6 +3737,12 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             ),
             "{text}"
         );
+        // A shadowing list of the same name is not what the guard tests.
+        assert!(
+            !text.contains("start empty, and when the to state is “Cancelled”"),
+            "{text}"
+        );
+        assert!(!text.contains("stock; and"), "{text}");
         assert_eq!(
             text.matches(
                 "the line's product variant is added to the variants with insufficient stock."
