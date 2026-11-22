@@ -80,31 +80,51 @@ pub(crate) enum ToolRuntimeError {
 }
 
 /// The upstream a local provider's profile names: its base URL, server type
-/// and frozen Ollama context window.
+/// and frozen Ollama context window. The runtime runs with thinking off, so a
+/// provider frozen with thinking on has no tool-calling lane.
 fn upstream(
     provider_id: &str,
-    model: &str,
     endpoint: &str,
 ) -> Result<(String, ProxyBackend, Option<u32>), ToolRuntimeError> {
+    if provider_id.contains(":thinking-enabled") {
+        return Err(ToolRuntimeError::UnsupportedProvider);
+    }
     if let Some(base) = endpoint.strip_suffix("/api/chat") {
-        let window = match provider_id
-            .strip_prefix("ollama:")
-            .and_then(|rest| rest.strip_prefix(model))
-            .and_then(|rest| rest.strip_prefix(":num-ctx-"))
-        {
-            Some(tokens) => Some(
-                tokens
-                    .parse()
-                    .map_err(|_| ToolRuntimeError::UnsupportedProvider)?,
-            ),
-            None => None,
-        };
-        return Ok((base.to_owned(), ProxyBackend::Ollama, window));
+        return Ok((
+            base.to_owned(),
+            ProxyBackend::Ollama,
+            frozen_window(provider_id)?,
+        ));
     }
     if let Some(base) = endpoint.strip_suffix("/v1/chat/completions") {
         return Ok((base.to_owned(), ProxyBackend::OpenAiCompatible, None));
     }
     Err(ToolRuntimeError::UnsupportedProvider)
+}
+
+/// The `:num-ctx-N` window an Ollama identity carries, wherever it sits: the
+/// id may name separate embedding and completion models
+/// (`ollama:<embedding>+<completion>`) and other suffixes. A window that is
+/// present but unreadable is refused, never dropped.
+fn frozen_window(provider_id: &str) -> Result<Option<u32>, ToolRuntimeError> {
+    const MARK: &str = ":num-ctx-";
+    let mut found = provider_id.match_indices(MARK);
+    let Some((at, _)) = found.next() else {
+        return Ok(None);
+    };
+    if found.next().is_some() {
+        return Err(ToolRuntimeError::UnsupportedProvider);
+    }
+    let digits = provider_id[at + MARK.len()..]
+        .split(':')
+        .next()
+        .unwrap_or_default();
+    digits
+        .parse()
+        .ok()
+        .filter(|tokens| llm::OllamaProvider::CONTEXT_WINDOWS.contains(tokens))
+        .map(Some)
+        .ok_or(ToolRuntimeError::UnsupportedProvider)
 }
 
 /// The per-run bearer token: 32 bytes from SQLite's OS-seeded randomness,
@@ -140,11 +160,7 @@ pub(crate) fn provider_for_run(
     if profile.locality != llm::Locality::Local {
         return Err(ToolRuntimeError::UnsupportedProvider);
     }
-    let (upstream, backend, context_window) = upstream(
-        &profile.provider_id,
-        &profile.requested_model,
-        &profile.endpoint_id,
-    )?;
+    let (upstream, backend, context_window) = upstream(&profile.provider_id, &profile.endpoint_id)?;
     let run_path: String = run_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')

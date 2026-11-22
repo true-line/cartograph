@@ -39,43 +39,65 @@ fn only_a_tool_calling_version_runs_on_the_runtime() {
     );
 }
 
+// AC-1429: the proxy keeps the start's upstream and its frozen window,
+// whichever models the Ollama identity names.
 #[test]
 fn the_proxy_targets_the_resolved_providers_own_upstream() {
-    let windowed = local("qwen3:30b-a3b").with_context_window(32768).unwrap();
-    let profile = windowed.bounded_profile().unwrap();
-    assert_eq!(
-        upstream(
-            &profile.provider_id,
-            &profile.requested_model,
-            &profile.endpoint_id
-        ),
+    let profile = |provider: &dyn LlmProvider| {
+        let profile = provider.bounded_profile().unwrap();
+        upstream(&profile.provider_id, &profile.endpoint_id)
+    };
+    let ollama = |window| {
         Ok((
             "http://127.0.0.1:1".to_owned(),
             ProxyBackend::Ollama,
-            Some(32768)
+            window,
         ))
-    );
-    let plain = local("qwen3:30b-a3b").bounded_profile().unwrap();
-    assert_eq!(
-        upstream(
-            &plain.provider_id,
-            &plain.requested_model,
-            &plain.endpoint_id
-        )
+    };
+    let windowed = local("qwen3:30b-a3b").with_context_window(32768).unwrap();
+    assert_eq!(profile(&windowed), ollama(Some(32768)));
+    assert_eq!(profile(&local("qwen3:30b-a3b")), ollama(None));
+    // The desktop provider names separate embedding and completion models.
+    let split = llm::OllamaProvider::with_models(
+        "http://127.0.0.1:1/",
+        "nomic-embed-text",
+        "qwen3:30b-a3b",
+        Duration::from_secs(5),
+    )
+    .unwrap()
+    .with_context_window(65536)
+    .unwrap();
+    assert!(split.bounded_profile().unwrap().provider_id.contains('+'));
+    assert_eq!(profile(&split), ollama(Some(65536)));
+    // The runtime runs with thinking off, so a thinking identity is refused.
+    let thinking = local("qwen3:30b-a3b")
+        .with_context_window(32768)
         .unwrap()
-        .2,
-        None
+        .with_thinking_enabled();
+    assert_eq!(
+        profile(&thinking),
+        Err(ToolRuntimeError::UnsupportedProvider)
     );
+    for unreadable in [
+        "ollama:m:num-ctx-",
+        "ollama:m:num-ctx-1234",
+        "ollama:m:num-ctx-32768:num-ctx-8192",
+    ] {
+        assert_eq!(
+            upstream(unreadable, "http://127.0.0.1:1/api/chat"),
+            Err(ToolRuntimeError::UnsupportedProvider),
+            "{unreadable}"
+        );
+    }
     let vllm = llm::openai_compatible::OpenAiCompatibleProvider::new(
         "http://127.0.0.1:8000/",
         "glm-5.3-flash",
         Duration::from_secs(5),
     )
     .unwrap()
-    .bounded_profile()
-    .unwrap();
+    .with_thinking_disabled();
     assert_eq!(
-        upstream(&vllm.provider_id, &vllm.requested_model, &vllm.endpoint_id),
+        profile(&vllm),
         Ok((
             "http://127.0.0.1:8000".to_owned(),
             ProxyBackend::OpenAiCompatible,
@@ -83,7 +105,7 @@ fn the_proxy_targets_the_resolved_providers_own_upstream() {
         ))
     );
     assert_eq!(
-        upstream("anthropic:x", "x", "https://api.anthropic.com/v1/messages"),
+        upstream("anthropic:x", "https://api.anthropic.com/v1/messages"),
         Err(ToolRuntimeError::UnsupportedProvider)
     );
 }
