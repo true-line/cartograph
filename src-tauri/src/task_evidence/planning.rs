@@ -50,6 +50,7 @@ pub(super) fn plan(
     edges: &[Edge],
     gap_id: &str,
     action_id: &str,
+    context_hops: u32,
 ) -> Result<TaskPlan, String> {
     let gap = nodes
         .iter()
@@ -80,7 +81,7 @@ pub(super) fn plan(
         .map(|edge| edge.label.as_str())
         .or_else(|| gap.props["edge_label"].as_str())
         .unwrap_or("CALLS");
-    let subgraph = semantic::context::khop_subgraph(nodes, edges, gap_id, 2);
+    let subgraph = semantic::context::khop_subgraph(nodes, edges, gap_id, context_hops);
     let in_context: BTreeSet<_> = subgraph
         .nodes
         .iter()
@@ -194,7 +195,7 @@ mod tests {
                 "READS_CONFIG",
             ),
         ];
-        let plan = plan(&nodes, &edges, "gap:call", "escalate:test").unwrap();
+        let plan = plan(&nodes, &edges, "gap:call", "escalate:test", 2).unwrap();
         assert_eq!(plan.source_id, "sym:caller");
         assert_eq!(candidate_ids(&plan), ["sym:helper"]);
         assert_eq!(plan.unplanned_candidates, 0);
@@ -221,10 +222,32 @@ mod tests {
             edges.push(edge("sym:caller", &id, "CALLS"));
         }
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
-        let plan = plan(&nodes, &edges, "gap:call", "escalate:test").unwrap();
+        let plan = plan(&nodes, &edges, "gap:call", "escalate:test", 2).unwrap();
         let candidates = candidate_ids(&plan);
         assert_eq!(candidates.len(), MAX_REQUESTS - 2);
         assert!(candidates.iter().all(|id| id.starts_with("sym:helper_")));
         assert_eq!(plan.unplanned_candidates, 3);
+    }
+
+    // AC-1418 (#1653): the saved T3 search radius bounds which facts are
+    // candidates: a fact three hops from the gap is a candidate at radius 3
+    // and not at the default radius 2.
+    #[test]
+    fn context_hops_bound_the_candidate_neighbourhood() {
+        let nodes = vec![
+            node("gap:call", "Gap", "Gap"),
+            node("sym:a", "Symbol", "Confirmed"),
+            node("sym:b", "Symbol", "Confirmed"),
+            node("sym:c", "Symbol", "Confirmed"),
+        ];
+        let edges = vec![
+            edge("sym:a", "gap:call", "CALLS"),
+            edge("sym:a", "sym:b", "CALLS"),
+            edge("sym:b", "sym:c", "CALLS"),
+        ];
+        let near = plan(&nodes, &edges, "gap:call", "escalate:test", 2).unwrap();
+        assert_eq!(candidate_ids(&near), ["sym:b"]);
+        let far = plan(&nodes, &edges, "gap:call", "escalate:test", 3).unwrap();
+        assert_eq!(candidate_ids(&far), ["sym:b", "sym:c"]);
     }
 }

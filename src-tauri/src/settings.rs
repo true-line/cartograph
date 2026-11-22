@@ -402,6 +402,7 @@ impl SettingsStore {
              ) STRICT;",
         )?;
         crate::agent_pool::initialize(&conn)?;
+        crate::operator_limits::initialize(&conn)?;
         for tier in TIERS {
             conn.execute(
                 "INSERT OR IGNORE INTO tier_settings (tier, enabled, provider, consented)
@@ -664,6 +665,34 @@ impl SettingsStore {
         controls: &crate::agent_pool::AgentPoolControls,
     ) -> Result<(), String> {
         crate::agent_pool::write(&self.conn, controls)
+    }
+
+    /// Every configurable operator limit with the value in effect (#1653).
+    pub fn operator_limits(
+        &self,
+    ) -> Result<
+        Vec<crate::operator_limits::OperatorLimit>,
+        crate::operator_limits::OperatorLimitError,
+    > {
+        crate::operator_limits::list(&self.conn)
+    }
+
+    /// The value in effect for one operator limit (#1653).
+    pub fn operator_limit(
+        &self,
+        key: &str,
+    ) -> Result<u64, crate::operator_limits::OperatorLimitError> {
+        crate::operator_limits::read(&self.conn, key)
+    }
+
+    /// Save one operator limit, or clear it with `None` (#1653).
+    pub fn set_operator_limit(
+        &mut self,
+        key: &str,
+        value: Option<u64>,
+    ) -> Result<crate::operator_limits::OperatorLimit, crate::operator_limits::OperatorLimitError>
+    {
+        crate::operator_limits::write(&self.conn, key, value)
     }
 
     /// The persisted "Ingest parallelism" setting (#236); Auto by default.
