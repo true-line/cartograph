@@ -910,7 +910,7 @@ fn source_selection_reader_preflights_sql_types_and_utf8_byte_lengths() {
             &ae
         };
         assert!(matches!(
-            load_selection_binding(&connection, fact).unwrap(),
+            load_selection_binding(&connection, BindingRole::Primary, fact).unwrap(),
             SelectionBinding::Present(binding) if &binding == original
         ));
         for column in ["repo_key", "receipt_id", "emitted_fact_digest"] {
@@ -919,7 +919,7 @@ fn source_selection_reader_preflights_sql_types_and_utf8_byte_lengths() {
                     .execute(&format!("UPDATE {table} SET {column} = {expression}"), [])
                     .unwrap();
                 assert!(matches!(
-                    load_selection_binding(&connection, fact).unwrap(),
+                    load_selection_binding(&connection, BindingRole::Primary, fact).unwrap(),
                     SelectionBinding::Invalid
                 ));
                 let binding = if table == "source_node_bindings" {
@@ -929,7 +929,7 @@ fn source_selection_reader_preflights_sql_types_and_utf8_byte_lengths() {
                 };
                 connection.execute(&format!("UPDATE {table} SET repo_key = ?1, receipt_id = ?2, emitted_fact_digest = ?3"), params![binding.repo_key, binding.receipt_id, binding.emitted_fact_digest]).unwrap();
                 assert!(matches!(
-                    load_selection_binding(&connection, fact).unwrap(),
+                    load_selection_binding(&connection, BindingRole::Primary, fact).unwrap(),
                     SelectionBinding::Present(binding) if &binding == original
                 ));
             }
@@ -942,7 +942,7 @@ fn source_selection_reader_preflights_sql_types_and_utf8_byte_lengths() {
             )
             .unwrap();
         assert!(matches!(
-            load_selection_binding(&connection, fact).unwrap(),
+            load_selection_binding(&connection, BindingRole::Primary, fact).unwrap(),
             SelectionBinding::Invalid
         ));
     }

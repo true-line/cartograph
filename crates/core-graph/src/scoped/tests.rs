@@ -761,3 +761,52 @@ fn scoped_window_json_accounting_preserves_duplicate_property_values() {
     assert_eq!(duplicate.json_values, normalized.json_values + 1);
     assert!(duplicate.raw_bytes > normalized.raw_bytes);
 }
+
+#[test]
+fn selected_facts_read_the_requested_binding_role() {
+    // AC-1051 (ADR-0079): the same revision-bound selection reads a fact's
+    // observed binding when asked for the observed role, and its primary one
+    // otherwise; a fact with only an observed binding is Absent as primary.
+    let mut store = SqliteGraphStore::open_in_memory().unwrap();
+    store.put_node(&node("a")).unwrap();
+    let observed = SourceBinding {
+        fact: FactKey::from_node(&node("a")),
+        repo_key: "repo/a".into(),
+        receipt_id: format!("obs-input-v1:{}", "c".repeat(64)),
+        emitted_fact_digest: node_digest(&node("a")).unwrap(),
+    };
+    let snapshot = store.read_snapshot().unwrap();
+    assert!(
+        store
+            .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+                &snapshot,
+                &GraphPatch::default(),
+                "repo/a",
+                &[],
+                std::slice::from_ref(&observed),
+                None,
+                crate::source::SourceOmissions::NONE,
+            )
+            .unwrap()
+    );
+    let revision = store.read_revision().unwrap();
+    let keys = [observed.fact.clone()];
+    let as_observed = store
+        .read_selected_facts_at_revision_as(
+            &keys,
+            &revision,
+            limits(1),
+            crate::source::BindingRole::Observed,
+        )
+        .unwrap();
+    assert!(
+        matches!(&as_observed.selections[0].state, FactSourceState::Present { binding, .. } if binding == &observed)
+    );
+    let as_primary = store
+        .read_selected_facts_at_revision(&keys, &revision, limits(1))
+        .unwrap();
+    assert!(matches!(
+        as_primary.selections[0].state,
+        FactSourceState::Absent { .. }
+    ));
+}
