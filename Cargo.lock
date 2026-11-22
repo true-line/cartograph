@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "adapters-artifact-jvm"
+version = "0.76.0"
+dependencies = [
+ "core-graph",
+ "core-prov",
+ "serde_json",
+ "sha2 0.11.1",
+ "source-walk",
+ "tempfile",
+]
+
+[[package]]
 name = "adapters-fw"
 version = "0.76.0"
 dependencies = [
@@ -232,6 +244,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 name = "app"
 version = "0.76.0"
 dependencies = [
+ "adapters-artifact-jvm",
  "adapters-fw",
  "adapters-lang-go",
  "adapters-lang-java",
@@ -281,6 +294,7 @@ dependencies = [
 name = "app-store"
 version = "0.76.0"
 dependencies = [
+ "adapters-artifact-jvm",
  "adapters-fw",
  "adapters-lang-go",
  "adapters-lang-java",
