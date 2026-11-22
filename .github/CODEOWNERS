@@ -32,6 +32,8 @@ CLAUDE.md   @qwts
 /crates/llm/ @qwts
 # Every crate handed a live LlmProvider can call it directly, past the firewall.
 /crates/agents/ @qwts
+# ADR-0085: the agent harness sidecar runs model loops beside the host.
+/agent-runtime/ @qwts
 /crates/semantic/ @qwts
 /crates/adapters-plugin-host/ @qwts
 /src-tauri/capabilities/ @qwts

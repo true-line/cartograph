@@ -1,0 +1,23 @@
+{
+  "name": "@cartograph/agent-runtime",
+  "private": true,
+  "version": "0.0.0",
+  "description": "cartograph-agent sidecar: Pi (local models) and Claude Agent SDK runners behind the host's tools and egress firewall (ADR-0085)",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.330",
+    "@mariozechner/pi-agent-core": "0.73.1",
+    "@mariozechner/pi-ai": "0.73.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "typescript": "5.9.3"
+  }
+}
