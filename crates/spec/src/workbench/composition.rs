@@ -221,7 +221,15 @@ fn generated_heading(depth: usize, heading: &str) -> bool {
 /// fact is citable and a claim about what a capability enforces can cite
 /// it. `None` for another section, or when 1.5 states no such rule.
 pub fn rule_excerpt(document: &str, number: &str) -> Option<String> {
+    rule_excerpt_within(document, number, usize::MAX)
+}
+
+/// [`rule_excerpt`] within at most `bytes` of rule rows, so a composition
+/// whose request is near its input ceiling reads a shorter excerpt
+/// (#2386).
+pub fn rule_excerpt_within(document: &str, number: &str, bytes: usize) -> Option<String> {
     let (_, budget) = RULE_EXCERPTS.iter().find(|(n, _)| *n == number)?;
+    let budget = &(*budget).min(bytes);
     let rules = section_text(document, "1.5")?;
     let mut by_capability: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
     let mut current: Option<usize> = None;
