@@ -163,6 +163,7 @@ dependencies = [
  "core-prov",
  "core-redact",
  "llm",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
