@@ -244,7 +244,9 @@ fn local_definitions_reject_tdz_control_captures_and_non_const_bindings() {
             vec![],
         ),
         (
-            "function run(){ while(enabled){ const value = true; if(value) return false; } }",
+            // A loop between the definition and its use (AC-1052 allows
+            // only a loop around both).
+            "function run(){ const value = true; while(enabled){ if(value) return false; } }",
             "definition_scope_unsupported",
             vec![],
         ),
