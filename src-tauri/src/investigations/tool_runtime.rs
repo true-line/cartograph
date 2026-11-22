@@ -72,7 +72,9 @@ impl RuntimeCommand {
                 .and_then(|exe| Some(exe.parent()?.join(name)))
                 .filter(|path| path.is_file())
         };
-        let mut command = Self::from_vars(&|name| std::env::var_os(name), beside(BUNDLED_RUNTIME))?;
+        // The Windows bundle installs it as cartograph-agent.exe (#227).
+        let bundled = format!("{BUNDLED_RUNTIME}{}", std::env::consts::EXE_SUFFIX);
+        let mut command = Self::from_vars(&|name| std::env::var_os(name), beside(&bundled))?;
         command.claude_code = std::env::var_os("CARTOGRAPH_CLAUDE_CODE")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from)

@@ -1,0 +1,256 @@
+# Advisory Windows lanes (#227, ADR-0018). These jobs run the standard Rust
+# gates on windows-latest with the MSVC toolchain, and build an unsigned NSIS
+# installer. Nothing here gates a pull request or the merge queue: ci.yml's
+# complete suite does not need these jobs, so an unknown in the C++
+# dependencies (usearch, vendored libgit2 and OpenSSL, the tree-sitter
+# grammars, bundled SQLite) cannot wedge merges. Promote the gates to required
+# once they have stayed green on main for a week.
+#
+# They run on every push to main, on demand, and on a pull request that
+# changes this workflow or the Windows packaging inputs. The per-PR Windows
+# gate stays ci.yml's Windows job ownership. The installer is unsigned:
+# Authenticode signing and its fail-closed release posture are tracked on
+# #227.
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/windows.yml
+      - scripts/build-agent-runtime.mjs
+      - scripts/build-mcp-relay.mjs
+      - scripts/agent-runtime-node.json
+      - src-tauri/tauri.windows-bundle.conf.json
+      # The installer job's manifests, lockfiles and bundled runtime.
+      - package.json
+      - package-lock.json
+      - ui/package.json
+      - ui/package-lock.json
+      - agent-runtime/**
+  workflow_dispatch:
+
+# One run per pull request, and one for main that a newer push queues behind
+# rather than cancels, so main always finishes a run.
+concurrency:
+  group: windows-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Action Policy
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Authorize direct workflow event
+        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          authorization-only: 'true'
+
+  gates:
+    name: Windows ${{ matrix.lane }}
+    needs: policy
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    # The Linux Rust lane's three test groups, plus fmt and clippy. The app
+    # unit tests stay on Linux (ci.yml's app shards); clippy still compiles
+    # the app and its tests here.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: lint
+          - lane: adapters
+            packages: -p adapters-lang-ts -p adapters-lang-python -p adapters-lang-java -p adapters-lang-kotlin
+          - lane: ingest
+            packages: -p ingest -p work-packets -p adapters-lang-go -p app-store
+          - lane: core
+            packages: >-
+              --workspace --exclude app --exclude adapters-lang-ts --exclude adapters-lang-python
+              --exclude adapters-lang-java --exclude adapters-lang-kotlin --exclude ingest
+              --exclude work-packets --exclude adapters-lang-go --exclude app-store
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        shell: pwsh
+        run: |
+          $configuration = Get-Content rust-toolchain.toml -Raw
+          $channel = [regex]::Match($configuration, '(?m)^channel\s*=\s*"(\d+\.\d+\.\d+)"\s*$')
+          if (-not $channel.Success) { throw 'Expected a pinned Rust release in rust-toolchain.toml' }
+          "channel=$($channel.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install pinned Rust toolchain
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install pinned Windows Rust toolchain
+          executable: rustup.exe
+          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--component","rustfmt","--component","clippy"]'
+          timeout-seconds: '300'
+
+      # cache-bin off for the reason ci.yml's Windows job ownership gives.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-${{ matrix.lane }}
+          cache-bin: "false"
+
+      # Tests open state.db in temporary directories, and Windows cannot
+      # delete an open file (#1307); runner.temp is emptied after every job.
+      - name: Keep test temporary files in the job's temp directory
+        shell: pwsh
+        run: |
+          $temp = Join-Path $env:RUNNER_TEMP 'tests'
+          New-Item -ItemType Directory -Force -Path $temp | Out-Null
+          "TMP=$temp" >> $env:GITHUB_ENV
+          "TEMP=$temp" >> $env:GITHUB_ENV
+
+      - name: Enable Rust problem matcher
+        shell: pwsh
+        run: '"::add-matcher::.github/rust-problem-matcher.json"'
+
+      - name: Placeholder frontend dist
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path ui/dist | Out-Null
+
+      - name: Format
+        if: matrix.lane == 'lint'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        if: matrix.lane == 'lint'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test
+        if: matrix.lane != 'lint'
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        # PACKAGES is a list of cargo arguments: split it on spaces.
+        run: cargo test --locked $PACKAGES
+
+  # An unsigned NSIS installer with both sidecars, as an artifact for manual
+  # testing. It is never published: release.yml ships macOS only until the
+  # Windows signing posture exists (#227).
+  installer:
+    name: Windows unsigned installer
+    needs: policy
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        shell: pwsh
+        run: |
+          $configuration = Get-Content rust-toolchain.toml -Raw
+          $channel = [regex]::Match($configuration, '(?m)^channel\s*=\s*"(\d+\.\d+\.\d+)"\s*$')
+          if (-not $channel.Success) { throw 'Expected a pinned Rust release in rust-toolchain.toml' }
+          "channel=$($channel.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install pinned Windows Rust toolchain
+          executable: rustup.exe
+          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--target","x86_64-pc-windows-msvc"]'
+          timeout-seconds: '300'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-installer
+          cache-bin: "false"
+
+      # npm is a .cmd script on Windows, which only a shell can start, so the
+      # bounded command runs it through pwsh.
+      - name: Install locked root dependencies
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked root dependencies
+          executable: pwsh.exe
+          arguments-json: '["-NoProfile","-Command","npm ci"]'
+          timeout-seconds: '600'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      - name: Install locked UI dependencies
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked UI dependencies
+          executable: pwsh.exe
+          arguments-json: '["-NoProfile","-Command","npm ci"]'
+          working-directory: ui
+          timeout-seconds: '600'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      # No signing input exists in this workflow; the build scripts refuse to
+      # run if one is set.
+      - name: Build unsigned installer
+        run: npm run package:windows
+
+      - name: Verify installer and sidecars
+        id: installer
+        shell: pwsh
+        run: |
+          $bundle = 'target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $setup = @(Get-ChildItem -Path $bundle -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { throw "Expected one NSIS installer in $bundle, found $($setup.Count)" }
+          $relay = 'target/x86_64-pc-windows-msvc/release/cartograph-mcp.exe'
+          $agent = 'target/x86_64-pc-windows-msvc/release/cartograph-agent.exe'
+          foreach ($sidecar in @($relay, $agent)) {
+            if (-not (Test-Path $sidecar)) { throw "Missing sidecar $sidecar" }
+          }
+          # AC-1427: the agent runtime starts and announces itself.
+          $ready = '' | & $agent | Select-Object -First 1
+          "agent runtime: $ready"
+          if ($ready -notmatch '"type":"ready"') { throw 'The agent runtime did not print its ready line' }
+          $signature = Get-AuthenticodeSignature $setup[0].FullName
+          "installer signature: $($signature.Status)"
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          "name=Cartograph_${version}_x64_unsigned-dev" >> $env:GITHUB_OUTPUT
+          "path=$($setup[0].FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload unsigned installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.installer.outputs.name }}
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
