@@ -383,6 +383,18 @@ pub(crate) fn compacted_for_tests(nodes: &[Node], edges: &[Edge]) -> (Vec<Node>,
     (nodes, edges)
 }
 
+/// A compacted copy of a test's snapshot ([`compact_base`]).
+#[cfg(test)]
+pub(crate) fn compacted_snapshot_for_tests(
+    base: &core_graph::RevisionedSnapshot,
+) -> core_graph::RevisionedSnapshot {
+    let (nodes, edges) = compacted_for_tests(&base.graph.0, &base.graph.1);
+    core_graph::RevisionedSnapshot {
+        revision: base.revision.clone(),
+        graph: (nodes, edges),
+    }
+}
+
 /// The validated provenance of a fact, or the explicit-Gap fallback when a
 /// fact carries none. Public for the same reason as the register predicates
 /// (#116): tier tallies must count with one definition on every surface.

@@ -171,6 +171,12 @@ fn actor(node: &Node, site: &PermissionSite, assumption: &str) -> OverlayFact {
 /// consistency, not source authenticity, runtime policy or current overlay currency.
 /// The caller admits input/aggregate output; rendering the assumption is separate.
 pub fn derive_permission_actors(base: &RevisionedSnapshot) -> ActorReport {
+    // Every derivation under test reads a compacted base, as the knowledge
+    // phase reads it (#2215).
+    #[cfg(test)]
+    let compacted = crate::workbench::compacted_snapshot_for_tests(base);
+    #[cfg(test)]
+    let base = &compacted;
     let mut nodes = BTreeMap::new();
     for n in &base.graph.0 {
         nodes
