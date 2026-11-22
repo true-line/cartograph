@@ -93,7 +93,7 @@ pub(super) fn read(
     Ok(Some(summary))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     use semantic::evaluation::report::{

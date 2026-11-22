@@ -13,28 +13,28 @@ const ATTEMPTS_DDL: &str = "CREATE TABLE job_attempts (job_id INTEGER PRIMARY KE
 pub(super) const JOB_SELECT: &str = "SELECT j.id, j.kind, j.status, j.stage, j.progress, j.error, j.artifacts, j.created_at, j.updated_at, a.generation, CASE WHEN typeof(a.owner) = 'text' AND length(CAST(a.owner AS BLOB)) = 32 THEN a.owner ELSE NULL END, a.job_id, a.owner IS NULL, (SELECT CASE WHEN typeof(i.id)='text' AND length(CAST(i.id AS BLOB))<=128 THEN i.id END FROM investigation_tasks i WHERE i.job_id=j.id) FROM jobs j LEFT JOIN job_attempts a ON a.job_id = j.id";
 
 #[derive(Clone, Copy)]
-pub(crate) enum ClaimMode {
+pub enum ClaimMode {
     StartQueued,
     RetryTerminal,
 }
 
-pub(crate) struct ClaimPlan {
+pub struct ClaimPlan {
     job: Job,
     attempt: Attempt,
     target: JobLockTarget,
 }
 
 impl ClaimPlan {
-    pub(crate) fn job(&self) -> &Job {
+    pub fn job(&self) -> &Job {
         &self.job
     }
-    pub(crate) fn lock_target(&self) -> &JobLockTarget {
+    pub fn lock_target(&self) -> &JobLockTarget {
         &self.target
     }
     /// AC-1709: the lock a held waiter created for this never-claimed job.
     /// Only an existing file can prove that waiter stopped; a missing one is
     /// never created by recovery.
-    pub(crate) fn held_lock_target(&self) -> JobLockTarget {
+    pub fn held_lock_target(&self) -> JobLockTarget {
         JobLockTarget {
             existing: true,
             ..self.target.clone()
@@ -42,28 +42,28 @@ impl ClaimPlan {
     }
 }
 
-pub(crate) struct RecoveryCandidate {
+pub struct RecoveryCandidate {
     plan: ClaimPlan,
 }
 
 impl RecoveryCandidate {
-    pub(crate) fn id(&self) -> i64 {
+    pub fn id(&self) -> i64 {
         self.plan.job.id
     }
-    pub(crate) fn lock_target(&self) -> &JobLockTarget {
+    pub fn lock_target(&self) -> &JobLockTarget {
         &self.plan.target
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ExecutionCheck {
+pub enum ExecutionCheck {
     Running,
     Cancelled,
     Terminal,
 }
 
 #[derive(Debug)]
-pub(crate) enum ExecutionUpdate {
+pub enum ExecutionUpdate {
     Applied(Job),
     Unchanged(Job),
 }
@@ -211,15 +211,11 @@ fn matches_plan(conn: &Connection, plan: &ClaimPlan) -> Result<bool, JobTransiti
 }
 
 impl JobStore {
-    pub(crate) fn execution_namespace(&self) -> ExecutionNamespace {
+    pub fn execution_namespace(&self) -> ExecutionNamespace {
         self.namespace.clone()
     }
 
-    pub(crate) fn claim_plan(
-        &self,
-        id: i64,
-        mode: ClaimMode,
-    ) -> Result<ClaimPlan, JobTransitionError> {
+    pub fn claim_plan(&self, id: i64, mode: ClaimMode) -> Result<ClaimPlan, JobTransitionError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let (job, attempt) = read_state(&tx, id).map_err(missing)?;
@@ -251,7 +247,7 @@ impl JobStore {
         Ok(plan(&self.namespace, job, attempt))
     }
 
-    pub(crate) fn claim_execution(
+    pub fn claim_execution(
         &mut self,
         plan: &ClaimPlan,
         reservation: ExecutionReservation,
@@ -312,7 +308,7 @@ impl JobStore {
         reservation.verify()
     }
 
-    pub(crate) fn recovery_candidates(&self) -> Result<Vec<RecoveryCandidate>, JobTransitionError> {
+    pub fn recovery_candidates(&self) -> Result<Vec<RecoveryCandidate>, JobTransitionError> {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let candidates = {
@@ -339,7 +335,7 @@ impl JobStore {
         Ok(candidates)
     }
 
-    pub(crate) fn recover_reserved(
+    pub fn recover_reserved(
         &mut self,
         candidate: &RecoveryCandidate,
         reservation: ExecutionReservation,
@@ -363,7 +359,7 @@ impl JobStore {
     /// proven by `reservation` on its existing lock. Nothing ran and the
     /// request that started it is gone, so it is cancelled with that reason:
     /// a terminal row that clears, never resumed or replayed.
-    pub(crate) fn cancel_held(
+    pub fn cancel_held(
         &mut self,
         plan: &ClaimPlan,
         reservation: ExecutionReservation,
@@ -391,7 +387,7 @@ impl JobStore {
         Ok(Some(job))
     }
 
-    pub(crate) fn check_execution(
+    pub fn check_execution(
         &self,
         execution: &JobExecution,
     ) -> Result<ExecutionCheck, JobTransitionError> {
@@ -417,7 +413,7 @@ impl JobStore {
         execution.verify()
     }
 
-    pub(crate) fn progress_execution(
+    pub fn progress_execution(
         &mut self,
         execution: &JobExecution,
         stage: &str,
@@ -432,7 +428,7 @@ impl JobStore {
         )
     }
 
-    pub(crate) fn finish_execution(
+    pub fn finish_execution(
         &mut self,
         execution: &JobExecution,
         artifacts: &[String],
@@ -441,7 +437,7 @@ impl JobStore {
         self.update_execution(execution, Update::Finish(&json))
     }
 
-    pub(crate) fn fail_execution(
+    pub fn fail_execution(
         &mut self,
         execution: &JobExecution,
         error: &str,
