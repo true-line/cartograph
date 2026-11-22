@@ -57,7 +57,7 @@ export function validCompletionResult(value: InvestigationCompletionResult | und
 export function validCompletionSummary(value: InvestigationSummary): boolean {
   const family = completionFamily(value.schema_version);
   if (!fields(value, ['schema_version', 'investigation_id', 'conversation_id', 'parent_id', 'job_id', 'specialist_id', 'question', 'scope', 'provider_mode', 'status', 'revision', 'cancel_requested', 'invocation_pending', 'actions', 'graph_snapshot_id', 'last_event_sequence', 'has_result', 'created_at', 'updated_at', 'obligation_status'],
-      ['completion_outcome', 'completion', 'coverage_context', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error', 'reported_usage_exact']) ||
+      ['completion_outcome', 'completion', 'coverage_context', 'context_owner', 'origin', 'specialist', 'provider', 'scope_snapshot_id', 'limits', 'usage', 'citations', 'error', 'reported_usage_exact', 'runtime']) ||
       !['queued', 'preparing', 'running', 'awaiting_consent', 'completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(value.status) ||
       (!family || !family.specialistIds.some((id) => id === value.specialist_id)) ||
       !['not_assessed', 'satisfied', 'unmet'].includes(value.obligation_status ?? '') ||
