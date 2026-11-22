@@ -156,6 +156,7 @@ fn refused_finish_record_case(bound: bool) {
     let rejected = RejectedCompletion {
         step_id: f.response.step_id.clone(),
         text: text.clone(),
+        action: None,
     };
     let detail = f.publish_keeping(Some(&rejected)).unwrap();
     assert_eq!(detail.summary.status, InvestigationStatus::Failed);

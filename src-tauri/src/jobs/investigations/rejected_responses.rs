@@ -144,21 +144,19 @@ pub(super) fn record_on_stop(
     }
 }
 
-/// The action the held response decoded to, as the canonical bytes the saved
-/// `action_hash` covers (AC-1405). A response that is not plain JSON keeps
-/// nothing.
+/// The action the held response decoded to, as the exact canonical bytes the
+/// worker hashed into the saved `action_hash` (AC-1405). The store never
+/// re-serializes the response: a typed action and a JSON map can order fields
+/// differently. A stop before the worker hashed an action keeps nothing.
 fn record_admitted(
     tx: &Transaction<'_>,
     task: &StoredTask,
     held: &RejectedCompletion,
 ) -> Result<(), InvestigationStoreError> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&held.text) else {
+    let Some(canonical) = held.action.as_deref() else {
         return Ok(());
     };
-    let Ok(canonical) = encode(&value, MAX_ACTION_BYTES) else {
-        return Ok(());
-    };
-    let Ok(record) = AdmittedAction::capture(&held.step_id, &canonical) else {
+    let Ok(record) = AdmittedAction::capture(&held.step_id, canonical) else {
         return Ok(());
     };
     let Ok(body) = record.bytes() else {
@@ -198,6 +196,9 @@ pub(super) fn record_rejected(
 pub(crate) struct RejectedCompletion {
     pub step_id: String,
     pub text: String,
+    /// The canonical action bytes behind the saved `action_hash`, once the
+    /// worker has decoded and hashed the response (AC-1405).
+    pub action: Option<Vec<u8>>,
 }
 
 // Pilot inspection reads the table directly; the app has no reader yet.

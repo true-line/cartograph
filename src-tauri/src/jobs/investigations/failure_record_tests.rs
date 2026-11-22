@@ -148,6 +148,7 @@ fn rejected_response_stop_keeps_bounded_redacted_record() {
                     rejected: RejectedCompletion {
                         step_id: "step-1".into(),
                         text: response.into(),
+                        action: None,
                     },
                 },
             )
@@ -216,6 +217,7 @@ fn unstorable_rejected_response_still_stops() {
                 rejected: RejectedCompletion {
                     step_id: "step-1".into(),
                     text: "not an action".into(),
+                    action: None,
                 },
             },
         )
@@ -235,18 +237,22 @@ fn unstorable_rejected_response_still_stops() {
     assert_eq!(fixture.store.investigation(&id).unwrap(), detail);
 }
 
-// AC-1405: a host failure after a decoded action keeps the action's canonical
-// body, which hashes to the saved action hash; a body with a secret keeps only
-// its size and hash, and the terminal outcome is a plain stop's.
+// AC-1405: a host failure after a decoded action keeps the exact canonical
+// bytes the worker hashed into the saved action hash, even where a JSON map
+// would order the fields differently; a body with a secret keeps only its size
+// and hash; a stop before any action was hashed keeps nothing. The terminal
+// outcome is a plain stop's in every case.
 #[test]
 fn host_failure_stop_keeps_canonical_admitted_action() {
     use agents::investigation::admitted_action::{ActionRetention, ActionWithheldReason};
-    let clean = "{ \"type\": \"query_context\", \"query\": {\"kind\": \"entity\", \"labels\": [\"Alias\"], \"max_facts\": 8} }";
+    let response = "{ \"type\": \"query_context\", \"query\": {\"kind\": \"entity\"} }";
+    // Typed order: `type` before `query`, unlike a sorted map.
+    let typed = "{\"type\":\"query_context\",\"query\":{\"kind\":\"entity\"}}";
     let secret = "{\"type\":\"query_context\",\"labels\":[\"AKIA0000000000000000\"]}";
     let cases = [
         (
             InvestigationStopReason::PreparationAt(PreparationPhase::Query),
-            clean,
+            Some(typed),
             None,
         ),
         (
@@ -254,11 +260,16 @@ fn host_failure_stop_keeps_canonical_admitted_action() {
                 phase: PreparationPhase::Inventory,
                 limit: HostLimitKind::Unspecified,
             },
-            secret,
+            Some(secret),
             Some(ActionWithheldReason::Sensitive),
         ),
+        (
+            InvestigationStopReason::PreparationAt(PreparationPhase::Query),
+            None,
+            None,
+        ),
     ];
-    for (index, (reason, response, withheld)) in cases.into_iter().enumerate() {
+    for (index, (reason, action, withheld)) in cases.into_iter().enumerate() {
         let mut fixture = Fixture::new();
         let (id, execution) = fixture.start(
             &format!("admitted-action-{index}"),
@@ -277,6 +288,7 @@ fn host_failure_stop_keeps_canonical_admitted_action() {
                     rejected: RejectedCompletion {
                         step_id: "step-2".into(),
                         text: response.into(),
+                        action: action.map(|bytes| bytes.as_bytes().to_vec()),
                     },
                 },
             )
@@ -285,22 +297,22 @@ fn host_failure_stop_keeps_canonical_admitted_action() {
         assert_eq!(detail.error.as_deref(), Some(reason.test_message()));
         let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
         assert_eq!(reopened.investigation_rejected_response(&id).unwrap(), None);
-        let kept = reopened
-            .investigation_admitted_action(&id)
-            .unwrap()
-            .unwrap();
-        let canonical = encode(
-            &serde_json::from_str::<serde_json::Value>(response).unwrap(),
-            MAX_ACTION_BYTES,
-        )
-        .unwrap();
+        let kept = reopened.investigation_admitted_action(&id).unwrap();
+        let Some(canonical) = action else {
+            assert_eq!(kept, None);
+            continue;
+        };
+        let kept = kept.unwrap();
         assert_eq!(kept.step_id, "step-2");
-        assert_eq!(kept.action_hash, core_prov::content_hash(&canonical));
+        assert_eq!(
+            kept.action_hash,
+            core_prov::content_hash(canonical.as_bytes())
+        );
         match withheld {
             None => assert_eq!(
                 kept.retention,
                 ActionRetention::Body {
-                    json: String::from_utf8(canonical).unwrap()
+                    json: canonical.into()
                 }
             ),
             Some(reason) => assert_eq!(kept.retention, ActionRetention::Withheld { reason }),
