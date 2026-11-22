@@ -21,16 +21,47 @@ pub struct LimitSpec {
 /// Graph hops around a gap that T3 escalation searches for candidates.
 pub const T3_CONTEXT_HOPS: &str = "t3_context_hops";
 
+/// Nodes, edges and flows a diagram view sends for rendering (#488, #591).
+pub const SPEC_VIEW_MAX_NODES: &str = "spec_view_max_nodes";
+pub const SPEC_VIEW_MAX_EDGES: &str = "spec_view_max_edges";
+pub const SPEC_VIEW_MAX_FLOWS: &str = "spec_view_max_flows";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
-pub const REGISTRY: &[LimitSpec] = &[LimitSpec {
-    key: T3_CONTEXT_HOPS,
-    default: 2,
-    min: 1,
-    max: 4,
-    advanced: false,
-    description: "Graph hops around a gap that escalation searches for candidate facts.",
-}];
+pub const REGISTRY: &[LimitSpec] = &[
+    LimitSpec {
+        key: T3_CONTEXT_HOPS,
+        default: 2,
+        min: 1,
+        max: 4,
+        advanced: false,
+        description: "Graph hops around a gap that escalation searches for candidate facts.",
+    },
+    LimitSpec {
+        key: SPEC_VIEW_MAX_NODES,
+        default: spec::SPEC_VIEW_MAX_NODES as u64,
+        min: 100,
+        max: 20_000,
+        advanced: true,
+        description: "Nodes a diagram view shows before it is truncated. Large values slow rendering.",
+    },
+    LimitSpec {
+        key: SPEC_VIEW_MAX_EDGES,
+        default: spec::SPEC_VIEW_MAX_EDGES as u64,
+        min: 100,
+        max: 40_000,
+        advanced: true,
+        description: "Edges a diagram view shows before it is truncated. Large values slow rendering.",
+    },
+    LimitSpec {
+        key: SPEC_VIEW_MAX_FLOWS,
+        default: spec::SPEC_VIEW_MAX_FLOWS as u64,
+        min: 10,
+        max: 2_000,
+        advanced: true,
+        description: "Flows the flow view shows before it is truncated.",
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorLimitError {
