@@ -24,6 +24,7 @@ pub use decision_selection::{
     SelectedAssertionDecision,
 };
 pub mod area_expert;
+pub mod claim_review;
 pub mod curated;
 pub mod draft_store;
 pub mod finding_curation;
