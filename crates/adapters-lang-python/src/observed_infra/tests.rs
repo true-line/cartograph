@@ -1845,3 +1845,57 @@ except Exception:
         assert_eq!(defaults(key), None, "{key}");
     }
 }
+
+// AC-1055: over supplied sources, every file and every followed module is
+// read through the supplied bytes, never the checkout, and an identity is
+// not followed into a module outside the supplied paths. (T-1055)
+#[test]
+fn supplied_sources_are_observed_instead_of_the_checkout() {
+    let files: BTreeMap<&str, &str> = [
+        ("app/__init__.py", ""),
+        ("app/config.py", CONFIG),
+        ("app/db.py", DB),
+        (
+            "app/cache.py",
+            "import redis\nclient = redis.Redis.from_url(\"redis://cache.internal:6379/0\")\n",
+        ),
+    ]
+    .into();
+    let id = SourceId {
+        repo: REPO,
+        commit: "workdir",
+    };
+    let read = |path: &str| {
+        files
+            .get(path)
+            .map(|body| body.as_bytes().to_vec())
+            .ok_or_else(|| std::io::Error::other(format!("not supplied: {path}")))
+    };
+    let all: Vec<String> = files.keys().map(|path| path.to_string()).collect();
+    let observed =
+        extract_from_sources_with_sites(&all, &read, &id, Registries::builtin()).unwrap();
+    assert_eq!(
+        uses(&observed.edges, "db.py"),
+        vec![res("sql-database:env:DB_URI")]
+    );
+    assert_eq!(
+        uses(&observed.edges, "cache.py"),
+        vec![res("redis:redis://cache.internal:6379")]
+    );
+    // Without `app/config.py` among the paths, the constant is not followed.
+    let without: Vec<String> = all
+        .iter()
+        .filter(|path| *path != "app/config.py")
+        .cloned()
+        .collect();
+    let observed =
+        extract_from_sources_with_sites(&without, &read, &id, Registries::builtin()).unwrap();
+    assert_ne!(
+        uses(&observed.edges, "db.py"),
+        vec![res("sql-database:env:DB_URI")]
+    );
+    assert_eq!(
+        uses(&observed.edges, "cache.py"),
+        vec![res("redis:redis://cache.internal:6379")]
+    );
+}

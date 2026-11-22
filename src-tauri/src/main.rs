@@ -2001,9 +2001,28 @@ fn extract_tree_packed(
         // code proves it talks to (boto3, redis, smtplib, SQLAlchemy), and
         // `requests`/`httpx`/`aiohttp` calls as fetch sites (AC-0424, AC-0496), and boto3 /
         // kafka-python calls as event sites (AC-0458).
-        let observed = adapters_lang_python::observed_infra::extract_dir_with_sites(
-            root, &python_id, registries,
-        )
+        // A capture holding the Python selection is read here too, so these
+        // facts come from the same retained bytes as the lane's (AC-1055).
+        let observed = match primary {
+            Some(capture) if !captured_python.is_empty() => {
+                adapters_lang_python::observed_infra::extract_from_sources_with_sites(
+                    &captured_python,
+                    &|path| {
+                        capture
+                            .file(path)
+                            .map(|file| file.bytes().to_vec())
+                            .map_err(|_| {
+                                std::io::Error::other("captured Python file is unavailable")
+                            })
+                    },
+                    &python_id,
+                    registries,
+                )
+            }
+            _ => adapters_lang_python::observed_infra::extract_dir_with_sites(
+                root, &python_id, registries,
+            ),
+        }
         .map_err(|error| error.to_string())?;
         extraction.fetch_sites.extend(observed.fetch_sites);
         extraction.event_sites.extend(observed.event_sites);

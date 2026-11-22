@@ -3465,6 +3465,71 @@ fn the_selection_walk_follows_the_projects_capture_and_entry_limits() {
     assert_eq!(input.capture.as_ref().unwrap().manifest().files.len(), 2);
 }
 
+// AC-1055: the Python observed-infrastructure pass reads the same captured
+// bytes as the Python lane, so a checkout edit after capture changes neither.
+#[test]
+fn python_observed_infrastructure_is_read_from_the_capture() {
+    const PYTHON: &str =
+        "import redis\nclient = redis.Redis.from_url(\"redis://captured.internal:6379/0\")\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("app.py"), PYTHON).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    std::fs::write(
+        root.join("app.py"),
+        "import redis\nclient = redis.Redis.from_url(\"redis://checkout.internal:6379/0\")\n",
+    )
+    .unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let resources: Vec<&str> = extraction
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Resource")
+        .map(|node| node.id.as_str())
+        .collect();
+    assert!(
+        resources
+            .iter()
+            .any(|id| id.contains("redis://captured.internal:6379")),
+        "{resources:?}"
+    );
+    assert!(
+        !resources.iter().any(|id| id.contains("checkout.internal")),
+        "{resources:?}"
+    );
+}
+
 // AC-1024: a source's `.py` files join its capture; the Python pass parses
 // the retained bytes, not the checkout, and each surviving Python fact whose
 // provenance lies in one captured file gets a provenance-only Python receipt
