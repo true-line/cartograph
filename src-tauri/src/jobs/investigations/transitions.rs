@@ -870,6 +870,42 @@ impl JobStore {
         Ok(candidates)
     }
 
+    /// AC-1707: live tasks the agent pool held and never claimed. A held
+    /// waiter keeps its job's lock file reserved while it waits, so only an
+    /// existing, free lock proves the waiting process stopped; a task whose
+    /// lock file does not exist yet stays queued and cancellable.
+    pub(crate) fn held_investigation_candidates(
+        &self,
+    ) -> Result<Vec<InvestigationRecoveryCandidate>, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let ids=tx.prepare("SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))<=128 THEN id END FROM investigation_tasks WHERE live=1 ORDER BY ordinal LIMIT 3")?
+            .query_map([],|r|r.get::<_,Option<String>>(0))?.collect::<Result<Vec<_>,_>>()?;
+        if ids.len() > MAX_LIVE_TASKS {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let mut candidates = Vec::new();
+        for id in ids {
+            let id = id.ok_or(InvestigationStoreError::Invalid)?;
+            let task = load_execution_task(&tx, &id)?;
+            if task.execution.is_some() || task.phase != Phase::Queued {
+                continue;
+            }
+            candidates.push(InvestigationRecoveryCandidate {
+                id,
+                revision: task.detail.summary.revision,
+                identity: None,
+                target: JobLockTarget {
+                    namespace: self.namespace.clone(),
+                    id: task.detail.summary.job_id,
+                    existing: true,
+                },
+            });
+        }
+        tx.commit()?;
+        Ok(candidates)
+    }
+
     pub(crate) fn recover_investigation(
         &mut self,
         candidate: &InvestigationRecoveryCandidate,
@@ -940,6 +976,8 @@ impl JobStore {
             return Ok(Some(task.detail));
         }
         let unknown = matches!(task.phase, Phase::Invocation | Phase::AuditInvocation);
+        // AC-1707: held by the agent pool and never claimed, so nothing ran.
+        let held = task.execution.is_none() && task.phase == Phase::Queued;
         if next_family && task.phase == Phase::Consent {
             // An uninvoked consent stamp is not a provider call. Preserve all
             // earlier measured usage while removing only that prospective call.
@@ -963,7 +1001,7 @@ impl JobStore {
         } else {
             InvestigationStatus::Interrupted
         };
-        task.detail.error=Some(if unknown{"A started invocation has no durable admitted outcome; it was not replayed."}else{"The execution owner stopped and its transient input was lost; work was not resumed."}.into());
+        task.detail.error=Some(if unknown{"A started invocation has no durable admitted outcome; it was not replayed."}else if held{"The app stopped before this held investigation started; it was not started."}else{"The execution owner stopped and its transient input was lost; work was not resumed."}.into());
         bump(&tx, &mut task)?;
         event(
             &tx,
@@ -977,6 +1015,8 @@ impl JobStore {
             None,
             if unknown {
                 "Owner death confirmed; the started invocation outcome is unknown."
+            } else if held {
+                "The app stopped before this held investigation started."
             } else {
                 "Owner death confirmed; transient preparation was interrupted."
             },
