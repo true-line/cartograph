@@ -20,6 +20,7 @@ fn snapshot(
                 .map(SourceContinuationOutcome::Unavailable)
                 .unwrap_or(SourceContinuationOutcome::Acquired),
             active_milliseconds: fixture.f.task.detail.usage.active_milliseconds + 1,
+            refusal: None,
         })
 }
 
@@ -123,6 +124,7 @@ fn source_continuation_snapshot_matches_real_prompt_and_settlement_without_write
             candidate: &actual,
             candidate_prepared: &prepared,
             proof: &fixture.proof,
+            refusal: None,
         };
         let outcome = match reason {
             Some(reason) => SourceSettlement::Unavailable {
@@ -180,6 +182,7 @@ fn source_continuation_snapshot_rejects_missing_charge_stale_request_and_candida
         candidate_ledger: candidate.ledger(),
         outcome: SourceContinuationOutcome::Acquired,
         active_milliseconds: fixture.f.task.detail.usage.active_milliseconds + 1,
+        refusal: None,
     };
     assert!(matches!(
         fixture.f.store.next_source_continuation_snapshot(&input),
@@ -445,6 +448,7 @@ fn source_prospective_attachment_matches_outcomes_and_reopens() {
                     candidate: &candidate,
                     candidate_prepared: &prepared,
                     proof: &fixture.proof,
+                    refusal: None,
                 },
                 reason
                     .clone()
@@ -554,6 +558,7 @@ fn source_prospective_attachment_rejects_reason_swap_before_retained_callback() 
             candidate: &candidate_a,
             candidate_prepared: &prepared_a,
             proof: &fixture.proof,
+            refusal: None,
         },
         SourceContinuationOutcome::Unavailable(b),
         projected_b.detail().usage.active_milliseconds,

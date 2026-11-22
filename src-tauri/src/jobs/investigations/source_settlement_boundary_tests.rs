@@ -66,6 +66,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                 kind,
                 reason.clone(),
                 before.detail.usage.active_milliseconds + 1,
+                None,
             )
             .unwrap();
             let legacy = completion::with_observation_prefix_reread(|| {
@@ -79,6 +80,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                     kind,
                     reason.clone(),
                     before.detail.usage.active_milliseconds + 1,
+                    None,
                 )
             })
             .unwrap();
@@ -104,6 +106,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                     candidate: input,
                     candidate_prepared: prepared,
                     proof: &fixture.proof,
+                    refusal: None,
                 };
                 if let Some(reason) = &reason {
                     SourceSettlement::Unavailable {
@@ -402,6 +405,7 @@ fn source_settlement_cancelled_terminal_projections_match_reread_control() {
                 kind,
                 None,
                 before.detail.usage.active_milliseconds + 1,
+                None,
             )
         };
         let actual = project().unwrap();
