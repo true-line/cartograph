@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { saveExport } from './saveExport';
-import type { SpecArtifact, SpecBundle } from './store';
+import type { SpecArtifact, SpecAssertion, SpecBundle } from './store';
 import { inTauri } from './tauri';
 
 export type ReadSpecArtifact = (artifactId: string) => Promise<SpecArtifact | null>;
@@ -129,12 +129,105 @@ export function expectedSpecBundle(bundle: SpecBundle): ExpectedSpecBundle {
   };
 }
 
-/** The bundle file's text. The host's `save_spec_bundle_export` writes the
- *  same bytes (AC-0740); this copy only serves the browser preview, whose
- *  bundles are small. */
+/** The `schema` a v2 bundle file opens with (ADR-0086). */
+export const BUNDLE_FILE_SCHEMA_V2 = 'cartograph.spec-bundle-file/v2';
+
+/** An assertion as the v2 file lists it: `ref` for an id that is `node:` or
+ *  `edge:` and its subject id, and evidence naming its source by index. The
+ *  keys are in the spec crate's order, so the line is byte for byte its. */
+function assertionLine(assertion: SpecAssertion, sourceIndex: (repo: string, commit: string) => number): string {
+  const derived = (['node', 'edge'] as const).find((ref) => assertion.id === `${ref}:${assertion.subject_id}`);
+  const provenance = assertion.provenance as SpecAssertion['provenance'] & { basis?: unknown };
+  const line: Record<string, unknown> = derived ? { ref: derived } : { id: assertion.id };
+  line.subject_id = assertion.subject_id;
+  line.subject_kind = assertion.subject_kind;
+  line.summary = assertion.summary;
+  const prov: Record<string, unknown> = {
+    tier: provenance.tier,
+    confidence_tier: provenance.confidence_tier,
+    evidence: provenance.evidence.map((row) => ({
+      source: sourceIndex(row.repo, row.commit_sha),
+      path: row.path,
+      byte_start: row.byte_start,
+      byte_end: row.byte_end,
+    })),
+    extractor_id: provenance.extractor_id,
+    content_hash: provenance.content_hash,
+  };
+  if (provenance.method != null && provenance.method.kind !== 'unrecorded') prov.method = provenance.method;
+  if (provenance.basis != null) prov.basis = provenance.basis;
+  line.provenance = prov;
+  if (assertion.edge_label != null) line.edge_label = assertion.edge_label;
+  if (assertion.omission != null) line.omission = assertion.omission;
+  return JSON.stringify(line);
+}
+
+/** A list of entries, one per line (ADR-0086 decision 6). */
+function lines(entries: string[]): string {
+  return entries.length === 0 ? '[]' : `[\n${entries.join(',\n')}\n]`;
+}
+
+/** The v2 bundle file's text (ADR-0086). The host's `save_spec_bundle_export`
+ *  writes the same bytes (AC-0740); this copy only serves the browser
+ *  preview, whose bundles are small. Content is only in `files`, each
+ *  evidence source once in `sources`, each assertion once in `assertions`;
+ *  two artifacts with one file name are refused. */
 export function specBundleFileContent(bundle: SpecBundle, artifacts: SpecArtifact[]): string {
-  const files = Object.fromEntries(artifacts.map((artifact) => [artifact.file_name, artifact.content]));
-  return JSON.stringify({ ...bundle, artifacts, files }, null, 2);
+  const sources: string[] = [];
+  const sourceIds = new Map<string, number>();
+  const sourceIndex = (repo: string, commit: string): number => {
+    const key = JSON.stringify([repo, commit]);
+    let index = sourceIds.get(key);
+    if (index === undefined) {
+      index = sources.length;
+      sources.push(JSON.stringify({ repo, commit_sha: commit }));
+      sourceIds.set(key, index);
+    }
+    return index;
+  };
+  const assertions: string[] = [];
+  const listed = new Map<string, number>();
+  const names = new Set<string>();
+  const artifactLines = artifacts.map((artifact) => {
+    if (names.has(artifact.file_name)) {
+      throw new Error(`two artifacts share the file name ${JSON.stringify(artifact.file_name)}`);
+    }
+    names.add(artifact.file_name);
+    const indexes = artifact.assertions.map((assertion) => {
+      const line = assertionLine(assertion, sourceIndex);
+      let index = listed.get(line);
+      if (index === undefined) {
+        index = assertions.length;
+        assertions.push(line);
+        listed.set(line, index);
+      }
+      return index;
+    });
+    const { id, file_name, title, format, schema, content_id } = artifact;
+    return JSON.stringify({ id, file_name, title, format, schema, content_id, assertions: indexes });
+  });
+  const head = [
+    `{"schema":${JSON.stringify(BUNDLE_FILE_SCHEMA_V2)}`,
+    `"mode":${JSON.stringify(bundle.mode)}`,
+    `"assertion_count":${bundle.assertion_count}`,
+    `"gap_count":${bundle.gap_count}`,
+    `"drift_count":${bundle.drift_count}`,
+    `"security_count":${bundle.security_count}`,
+  ];
+  if (bundle.graph_basis != null) head.push(`"graph_basis":${JSON.stringify(bundle.graph_basis)}`);
+  if (bundle.curated_basis != null) head.push(`"curated_basis":${JSON.stringify(bundle.curated_basis)}`);
+  // `files` is written entry by entry: a JS object would move array-index
+  // names ahead of the rest, and the file keeps the artifacts' order.
+  const files = artifacts.map(
+    (artifact) => `${JSON.stringify(artifact.file_name)}:${JSON.stringify(artifact.content)}`,
+  );
+  return [
+    ...head,
+    `"sources":${lines(sources)}`,
+    `"artifacts":${lines(artifactLines)}`,
+    `"assertions":${lines(assertions)}`,
+    `"files":{${files.length === 0 ? '' : `\n${files.join(',\n')}\n`}}}\n`,
+  ].join(',\n');
 }
 
 function errorMessage(error: unknown): string {
