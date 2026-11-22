@@ -473,6 +473,8 @@ export interface InvestigationObligationObservation {
   exactly_supplied: boolean;
   unmet: InvestigationRefusalReason | null;
   last_attempt_outcome?: 'acquired' | 'unavailable' | 'firewall_refused';
+  /** AC-1430: never read because capacity excluded it; disclosed in limitations, not met. */
+  capacity_disclosed?: true;
 }
 export type InvestigationCompletionBasis =
   { kind: 'not_assessed' } |

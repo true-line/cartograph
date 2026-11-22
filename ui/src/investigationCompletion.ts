@@ -10,7 +10,10 @@ const fields = (v: object, required: string[], optional: string[] = []) => requi
   Object.keys(v).every((key) => required.includes(key) || optional.includes(key));
 const observations = (rows: InvestigationObligationObservation[], maximum = 12) => Array.isArray(rows) && rows.length <= maximum &&
   new Set(rows.map((row) => row.obligation_id)).size === rows.length && rows.every((row) => row &&
-    fields(row, ['obligation_id', 'kind', 'attempted', 'acquired', 'exactly_supplied', 'unmet'], ['last_attempt_outcome']) &&
+    fields(row, ['obligation_id', 'kind', 'attempted', 'acquired', 'exactly_supplied', 'unmet'], ['last_attempt_outcome', 'capacity_disclosed']) &&
+    // AC-1430: present only as true, on a never-attempted capacity gap.
+    (row.capacity_disclosed === undefined || (row.capacity_disclosed === true && !row.attempted && !row.acquired &&
+      !row.exactly_supplied && row.unmet === null)) &&
     hash(row.obligation_id) && ['source', 'inventory'].includes(row.kind) &&
     [row.attempted, row.acquired, row.exactly_supplied].every((v) => typeof v === 'boolean') &&
     (!row.exactly_supplied || row.acquired) &&
@@ -47,8 +50,10 @@ export function validCompletionResult(value: InvestigationCompletionResult | und
         !(row.status === 'supplied' ? row.supplied && row.acquired : row.status === 'unmet' && !row.supplied)))) return false;
   if (partial) return result.findings.length > 0 && result.knowledge_completeness === 'partial' &&
     value.assessment.every((row) => row.exactly_supplied);
+  // AC-1430: a capacity-disclosed row is named in a top-level limitation.
   if (value.outcome === 'supported') return result.findings.length > 0 && result.knowledge_completeness !== 'insufficient_evidence' &&
-    value.assessment.every((row) => row.exactly_supplied);
+    value.assessment.every((row) => row.exactly_supplied || (row.capacity_disclosed === true &&
+      result.limitations.some((text) => text.includes(row.obligation_id.slice(0, 12)))));
   return value.outcome === 'insufficient_evidence' && result.findings.length === 0 && result.knowledge_completeness === 'insufficient_evidence' &&
     result.limitations.length > 0 && value.assessment.every((row) => row.attempted);
 }

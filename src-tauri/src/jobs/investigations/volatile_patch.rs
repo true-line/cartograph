@@ -20,7 +20,9 @@ impl CorrectionMode {
     pub(super) fn from_refusal(
         record: &agents::investigation::staged_refusal::RefusalRecord,
         finding_count: usize,
+        role: SpecialistId,
     ) -> Result<Self, InvestigationStoreError> {
+        let limitations = role.patches_whole_finish();
         if record.refusal_count != 1
             || finding_count > 12
             || record
@@ -32,17 +34,19 @@ impl CorrectionMode {
         }
         // Eligibility must not depend on a caller-supplied count: a forged
         // smaller count cannot downgrade a finding-local refusal to fallback.
-        Ok(match PatchBasis::from_refusal(record, 12) {
-            Ok(_) => Self::Patch {
-                basis: PatchBasis::from_refusal(record, finding_count)
-                    .map_err(|_| InvestigationStoreError::Invalid)?,
+        Ok(
+            match PatchBasis::from_refusal_for(record, 12, limitations) {
+                Ok(_) => Self::Patch {
+                    basis: PatchBasis::from_refusal_for(record, finding_count, limitations)
+                        .map_err(|_| InvestigationStoreError::Invalid)?,
+                },
+                Err(_) => Self::WholeAnswer {
+                    finish_hash: record.finish_hash.clone(),
+                    refusal_hash: record.refusal_id.clone(),
+                    finding_count,
+                },
             },
-            Err(_) => Self::WholeAnswer {
-                finish_hash: record.finish_hash.clone(),
-                refusal_hash: record.refusal_id.clone(),
-                finding_count,
-            },
-        })
+        )
     }
     fn finding_count(&self) -> usize {
         match self {
@@ -228,7 +232,11 @@ pub(super) fn authenticate(
     let entry = &entries[0];
     admission_journal::AuthenticatedRefusalBasis::load(connection, task, 1, entry)?
         .ok_or(InvestigationStoreError::Invalid)?;
-    let derived = CorrectionMode::from_refusal(&entry.record, marker.finding_count())?;
+    let derived = CorrectionMode::from_refusal(
+        &entry.record,
+        marker.finding_count(),
+        task.detail.summary.specialist_id,
+    )?;
     if derived != *marker {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -326,7 +334,8 @@ pub(super) fn merge(
     if encode(&original, MAX_ACTION_BYTES)? != authenticated.original {
         return Err(InvestigationStoreError::Invalid);
     }
-    let merged = match held.merge(raw_patch, &first) {
+    let whole = task.detail.summary.specialist_id.patches_whole_finish();
+    let merged = match held.merge_with(raw_patch, &first, whole) {
         Ok(merged) => merged,
         Err(code) => return Ok(Err(code)),
     };
@@ -442,6 +451,8 @@ mod tests {
             refusal_hash: core_prov::content_hash(b"fixture refusal"),
             finding_count: 3,
             flagged_indices: vec![0, 2],
+            flagged_limitations: vec![],
+            capacity_gaps: vec![],
         }
     }
 

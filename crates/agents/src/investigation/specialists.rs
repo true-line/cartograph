@@ -227,7 +227,7 @@ The supported wrapper example above and this insufficient-evidence wrapper are t
 const VISIBLE_ACTION_SCHEMA_V28: &str = "Visible schema@1: turn_progress.response_schema is this call's exact response schema, identical to the provider schema field; return one object matching it. Host admission remains authoritative.";
 
 /// @29 (ADR-0085): each action is a native tool; one call per turn.
-const NATIVE_TOOLS_V29: &str = "Native tools@1: each action is a tool with turn_progress.response_schema's parameters. Call one tool per turn; its result is your next input. An undecodable call is not run and returns invalid_action; a third ends the run. Answer only by tool. Host admission is authoritative.";
+const NATIVE_TOOLS_V29: &str = "Native tools@1: call one tool per turn with turn_progress.response_schema's parameters; its result is your next input. A bad call returns invalid_action; a third ends the run. Name an excluded_by_capacity gap in a top-level limitation by its obligation_id's first 12 chars.";
 
 /// The @13 sentence naming the compiled analyst templates by content hash.
 fn compiled_schema_hashes() -> String {
@@ -316,6 +316,12 @@ impl SpecialistId {
     /// @27 volatile finish-patch correction; @28 keeps it unchanged.
     pub fn uses_finish_patch(self) -> bool {
         self.has(Capability::FinishPatch)
+    }
+
+    /// @29 (AC-1431): a finish patch also covers flagged top-level
+    /// limitations, and a full finish on a patch step is read as a patch.
+    pub fn patches_whole_finish(self) -> bool {
+        self == Self::DomainAnalystV29
     }
 
     /// @28 only: the selected per-call response schema is also model-visible

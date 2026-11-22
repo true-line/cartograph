@@ -456,6 +456,9 @@ impl RefusalFeedback {
 }
 
 #[cfg(test)]
+#[path = "capacity_disclosure_tests.rs"]
+mod capacity_disclosure_tests;
+#[cfg(test)]
 #[path = "feedback_capacity_tests.rs"]
 mod feedback_capacity_tests;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +472,56 @@ pub struct ObligationObservation {
     pub unmet: Option<RefusalReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attempt_outcome: Option<CompletionAttemptOutcome>,
+    /// @29 (AC-1430): never acquired because capacity excluded it, and the
+    /// accepted finish names it in limitations. Reported apart from met.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capacity_disclosed: bool,
+}
+
+/// @29 (AC-1430): a capacity-excluded obligation the finish names in an
+/// overall limitation counts as disclosed, not met. The name is the first
+/// [`CAPACITY_NAME_CHARS`] characters of its obligation_id: short enough to
+/// stay under the replay copy window. Only bound capacity exclusions qualify.
+pub(super) fn disclose_capacity(
+    assessment: &mut [ObligationObservation],
+    limitations: &[String],
+    consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+) {
+    if let Some(bound) = consistency {
+        disclose_named(
+            assessment,
+            limitations,
+            bound.capacity_excluded_obligations(),
+        );
+    }
+}
+
+fn disclose_named(
+    assessment: &mut [ObligationObservation],
+    limitations: &[String],
+    excluded: &[String],
+) {
+    for observation in assessment {
+        if observation.unmet == Some(RefusalReason::NotAttempted)
+            && !observation.attempted
+            && !observation.acquired
+            && !observation.exactly_supplied
+            && excluded.contains(&observation.obligation_id)
+            && limitations
+                .iter()
+                .any(|text| text.contains(capacity_name(&observation.obligation_id)))
+        {
+            observation.unmet = None;
+            observation.capacity_disclosed = true;
+        }
+    }
+}
+pub const CAPACITY_NAME_CHARS: usize = 12;
+/// The prefix a limitation uses to name a capacity-excluded obligation.
+pub fn capacity_name(obligation_id: &str) -> &str {
+    obligation_id
+        .get(..CAPACITY_NAME_CHARS)
+        .unwrap_or(obligation_id)
 }
 pub struct AcceptedCandidate {
     pub outcome: CompletionOutcome,
@@ -922,7 +975,21 @@ pub(super) fn admit_finish_with_locator(
             feedback,
         });
     }
-    if unmet.is_empty() && prose_correction.is_none() {
+    // Refusals keep the derived assessment so replay re-derives them exactly;
+    // only an accepted @29 candidate carries disclosed capacity exclusions.
+    let mut accepted = assessment.clone();
+    if request.specialist_id == "domain-analyst@29"
+        && finish.outcome == CompletionOutcome::Supported
+        && let Some(result) = &admitted
+    {
+        disclose_capacity(&mut accepted, &result.limitations, consistency);
+    }
+    let undisclosed = unmet.iter().any(|entry| {
+        accepted
+            .iter()
+            .any(|item| item.obligation_id == entry.obligation_id && !item.capacity_disclosed)
+    });
+    if !undisclosed && prose_correction.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
         Ok(FinishDecision::Accepted(AcceptedCandidate {
@@ -930,7 +997,7 @@ pub(super) fn admit_finish_with_locator(
             findings: admitted.findings,
             knowledge_completeness: admitted.knowledge_completeness,
             limitations: admitted.limitations,
-            assessment,
+            assessment: accepted,
         }))
     } else {
         let feedback = RefusalFeedback {
@@ -1190,6 +1257,7 @@ pub(super) fn derive_assessment_for_binding_with_policy_using_consistency(
             acquired,
             exactly_supplied: supplied,
             unmet: reason,
+            capacity_disclosed: false,
             last_attempt_outcome: matching
                 .last()
                 .map(|evidence| match evidence.record.outcome {

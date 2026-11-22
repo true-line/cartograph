@@ -213,6 +213,8 @@ fn analyst28_finish_patch_shows_its_patch_schema() {
             refusal_hash: "c".repeat(64),
             finding_count: 3,
             flagged_indices: vec![1],
+            flagged_limitations: vec![],
+            capacity_gaps: vec![],
         };
         let input = input.with_finish_patch(&patch).unwrap();
         input.validate_acquisition_projection().unwrap();

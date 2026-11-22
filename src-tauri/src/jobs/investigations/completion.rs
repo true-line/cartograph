@@ -1702,6 +1702,7 @@ fn observed_assessment(
                     RefusalReason::Unavailable
                 }),
                 last_attempt_outcome: last,
+                capacity_disclosed: false,
             }
         })
         .collect()
@@ -2210,6 +2211,7 @@ pub(super) fn refused(
         task.pending_correction = Some(volatile_patch::CorrectionMode::from_refusal(
             &entry.record,
             finding_count,
+            task.detail.summary.specialist_id,
         )?);
     }
     task.detail.usage = entry.usage.clone();

@@ -193,6 +193,8 @@ impl CapturedSourceInvocationFixture {
                             refusal_hash,
                             finding_count,
                             flagged_indices: vec![1],
+                            flagged_limitations: vec![],
+                            capacity_gaps: vec![],
                         },
                     }),
                     _ => unreachable!(),
