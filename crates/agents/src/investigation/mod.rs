@@ -21,6 +21,7 @@ mod enumeration_claims;
 mod finding_review;
 #[doc(hidden)]
 pub mod finish_patch;
+pub mod native_tools;
 mod input;
 mod inspection;
 mod inventory_workspace;
