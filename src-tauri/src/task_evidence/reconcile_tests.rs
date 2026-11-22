@@ -187,3 +187,40 @@ fn a_failed_read_records_nothing() {
     assert!(reconcile(state, "stage-v2:unknown", 1).is_err());
     assert_eq!(result_rows(state, id), 0);
 }
+
+#[test]
+fn a_reversed_slot_edge_is_not_the_same_relation() {
+    let fixture = fixture();
+    let (state, staged) = (&fixture.state, &fixture.staged);
+    {
+        let mut graph = state.graph.lock().unwrap();
+        graph
+            .delete_edge(&staged.basis.source_id, GAP, "CALLS")
+            .unwrap();
+        graph
+            .put_edge(&Edge {
+                src: GAP.into(),
+                dst: staged.basis.source_id.clone(),
+                label: "CALLS".into(),
+                props: json!({}),
+            })
+            .unwrap();
+    }
+    let result = reconcile(state, &staged.proposal_id, 1).unwrap().result;
+    assert_eq!(
+        result.slot.relation,
+        agents::reconciliation::SlotPresence::Missing
+    );
+    assert_eq!(result.outcome, ReconciliationOutcome::Missing);
+}
+
+#[test]
+fn v2_origins_bind_to_their_items_by_evidence_id_not_order() {
+    let fixture = fixture();
+    let mut reordered = fixture.staged.clone();
+    reordered.source_basis.as_mut().unwrap().evidence.reverse();
+    assert_eq!(item_facts(&reordered), item_facts(&fixture.staged));
+    let first = &fixture.staged.basis.evidence[0].id;
+    let origin = origin_of(reordered.source_basis.as_ref().unwrap(), first).unwrap();
+    assert_eq!(&origin.evidence_id, first);
+}

@@ -60,10 +60,15 @@ pub(crate) struct ReconciliationHistory {
 fn item_facts(staged: &StagedProposal) -> Vec<Vec<FactKey>> {
     let node = |id: &str| FactKey::Node { id: id.to_owned() };
     match &staged.source_basis {
-        Some(basis) => basis
+        Some(basis) => staged
+            .basis
             .evidence
             .iter()
-            .map(|origin| vec![graph_fact(&origin.fact)])
+            .map(|item| {
+                origin_of(basis, &item.id)
+                    .map(|origin| vec![graph_fact(&origin.fact)])
+                    .unwrap_or_default()
+            })
             .collect(),
         None => staged
             .basis
@@ -84,6 +89,18 @@ fn item_facts(staged: &StagedProposal) -> Vec<Vec<FactKey>> {
             })
             .collect(),
     }
+}
+
+/// The origin a v2 basis binds to one staged item, by its evidence id (the
+/// basis does not keep the manifest's order).
+fn origin_of<'a>(
+    basis: &'a TaskSourceBasisV2,
+    evidence_id: &str,
+) -> Option<&'a TaskEvidenceOrigin> {
+    basis
+        .evidence
+        .iter()
+        .find(|origin| origin.evidence_id == evidence_id)
 }
 
 /// How one staged item is located in a current receipt.
@@ -283,6 +300,38 @@ impl Reader<'_> {
     }
 }
 
+/// The slot's directed relation: `(from, to)`. A v2 record selected the
+/// exact edge fact. A v1 record kept no direction, so either direction
+/// between its source and Gap is its relation.
+fn slot_edges(staged: &StagedProposal) -> Vec<(String, String)> {
+    let basis = &staged.basis;
+    let selected = staged.source_basis.as_ref().and_then(|source| {
+        source
+            .selected_facts
+            .iter()
+            .find_map(|selected| match &selected.fact {
+                TaskFactKey::Edge {
+                    source,
+                    label,
+                    destination,
+                } if *label == basis.edge_label
+                    && ((*source == basis.source_id && *destination == basis.gap_id)
+                        || (*source == basis.gap_id && *destination == basis.source_id)) =>
+                {
+                    Some((source.clone(), destination.clone()))
+                }
+                _ => None,
+            })
+    });
+    match selected {
+        Some(edge) => vec![edge],
+        None => vec![
+            (basis.source_id.clone(), basis.gap_id.clone()),
+            (basis.gap_id.clone(), basis.source_id.clone()),
+        ],
+    }
+}
+
 /// The directed slot in the current graph.
 fn slot(staged: &StagedProposal, nodes: &[Node], edges: &[Edge]) -> SlotReconciliation {
     let basis = &staged.basis;
@@ -294,16 +343,26 @@ fn slot(staged: &StagedProposal, nodes: &[Node], edges: &[Edge]) -> SlotReconcil
             SlotPresence::Missing
         }
     };
+    let directions = slot_edges(staged);
     let gap = match node(&basis.gap_id) {
         Some(gap) if spec::is_gap_node(gap) => GapPresence::Present,
         Some(_) => GapPresence::GapResolved,
         None => {
             // The Gap is gone: recovery resolved the slot when the source now
-            // has the relation to a real (non-gap) node.
+            // has the relation, in the slot's own direction, to a real node.
+            let real = |id: &str| node(id).is_some_and(|target| !spec::is_gap_node(target));
             let resolved = edges.iter().any(|edge| {
-                edge.src == basis.source_id
-                    && edge.label == basis.edge_label
-                    && node(&edge.dst).is_some_and(|target| !spec::is_gap_node(target))
+                edge.label == basis.edge_label
+                    && directions.iter().any(|(from, to)| {
+                        (*from == basis.source_id
+                            && edge.src == *from
+                            && *to == basis.gap_id
+                            && real(&edge.dst))
+                            || (*to == basis.source_id
+                                && edge.dst == *to
+                                && *from == basis.gap_id
+                                && real(&edge.src))
+                    })
             });
             if resolved {
                 GapPresence::GapResolved
@@ -314,8 +373,9 @@ fn slot(staged: &StagedProposal, nodes: &[Node], edges: &[Edge]) -> SlotReconcil
     };
     let relation = edges.iter().any(|edge| {
         edge.label == basis.edge_label
-            && ((edge.src == basis.source_id && edge.dst == basis.gap_id)
-                || (edge.src == basis.gap_id && edge.dst == basis.source_id))
+            && directions
+                .iter()
+                .any(|(from, to)| edge.src == *from && edge.dst == *to)
     });
     SlotReconciliation {
         source: present(node(&basis.source_id).is_some()),
@@ -375,7 +435,7 @@ pub(crate) fn reconcile(
         let locate = match staged
             .source_basis
             .as_ref()
-            .and_then(|basis| basis.evidence.get(index))
+            .and_then(|basis| origin_of(basis, &item.id))
         {
             Some(TaskEvidenceOrigin {
                 role,
@@ -590,6 +650,6 @@ pub(crate) async fn staged_reconciliation_history(
     crate::off_ui_thread(move || history(&app.state::<AppState>(), &proposal_id, limit)).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "reconcile_tests.rs"]
 mod tests;
