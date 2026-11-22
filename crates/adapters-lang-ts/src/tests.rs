@@ -5759,6 +5759,7 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         &known,
         &crate::reexports::Index::default(),
         Vec::new(),
+        Default::default(),
         &id(),
         &mut lists,
     )
@@ -5770,6 +5771,7 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         &known,
         &crate::reexports::Index::default(),
         Vec::new(),
+        Default::default(),
         &id(),
         &mut store,
     )
@@ -6101,5 +6103,151 @@ export function cycle(loop: Loop) { loop.spin(); }
     assert_eq!(
         gaps,
         BTreeSet::from(["Loop.spin", "Proxy.send", "ResourceStore.absent"])
+    );
+}
+
+#[test]
+fn typed_call_on_an_interface_reaches_each_implementation() {
+    // AC-1515: `I.m` on an interface links to `m` on every implementing
+    // class, through extending interfaces, subclasses and namespace
+    // imports; a mock only from test code, and only when nothing else
+    // implements `I`.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("test")).unwrap();
+    std::fs::write(
+        src.join("protocol.ts"),
+        r#"
+export interface UrlsShape { handle(uri: string): void; }
+export interface WideShape extends UrlsShape { extra(): void; }
+export interface Lonely { ping(): void; }
+export interface Unused { idle(): void; }
+export interface Probe { scan(): void; }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("impl.ts"),
+        r#"
+import { WideShape } from './protocol.js';
+import * as protocol from './protocol.js';
+export class Urls implements protocol.UrlsShape { handle(uri: string) {} }
+export abstract class Base implements WideShape { handle(uri: string) {} abstract extra(): void; }
+export class Leaf extends Base { extra() {} }
+export class Twig extends Base { handle(uri: string) {} extra() {} }
+export class Real { scan() {} }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("test/mock.ts"),
+        r#"
+import { UrlsShape, Lonely, Probe } from '../protocol';
+import { Base, Real } from '../impl';
+export class MockUrls implements UrlsShape { handle(uri: string) {} }
+export class MockBase extends Base implements UrlsShape { extra() {} }
+export class MockProbe extends Real implements Probe {}
+export class MockLonely implements Lonely { ping() {} }
+export function probe(lonely: Lonely) { lonely.ping(); }
+export function check(urls: UrlsShape) { urls.handle('y'); }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("use.ts"),
+        r#"
+import { UrlsShape, WideShape, Lonely, Unused, Probe } from './protocol';
+export function send(urls: UrlsShape) { urls.handle('x'); }
+export function wide(shape: WideShape) { shape.extra(); }
+export function ping(lonely: Lonely) { lonely.ping(); }
+export function absent(urls: UrlsShape) { urls.missing(); }
+export function idle(unused: Unused) { unused.idle(); }
+export function scan(probe: Probe) { probe.scan(); }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("local.ts"),
+        r#"
+interface Local { run(): void; }
+class Runner implements Local { run() {} }
+export function go(local: Local) { local.run(); }
+export function stop(local: Local) { local.halt(); }
+"#,
+    )
+    .unwrap();
+
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    let sym = |name: &str| format!("sym:qwtm/example@src/{name}");
+    let targets = |from: &str| -> BTreeSet<String> {
+        ex.edges
+            .iter()
+            .filter(|e| e.src == sym(from) && e.label == "CALLS" && !e.dst.starts_with("gap:"))
+            .map(|e| e.dst.clone())
+            .collect()
+    };
+    assert_eq!(
+        targets("use.ts#send"),
+        BTreeSet::from([
+            sym("impl.ts#Base.handle"),
+            sym("impl.ts#Twig.handle"),
+            sym("impl.ts#Urls.handle"),
+        ])
+    );
+    assert_eq!(
+        targets("use.ts#wide"),
+        BTreeSet::from([sym("impl.ts#Leaf.extra"), sym("impl.ts#Twig.extra")])
+    );
+    assert_eq!(targets("use.ts#ping"), BTreeSet::new());
+    // A mock inheriting a product method is still a mock.
+    assert_eq!(targets("use.ts#scan"), BTreeSet::new());
+    assert_eq!(
+        targets("local.ts#go"),
+        BTreeSet::from([sym("local.ts#Runner.run")])
+    );
+    assert_eq!(
+        targets("test/mock.ts#probe"),
+        BTreeSet::from([sym("test/mock.ts#MockLonely.ping")])
+    );
+    assert_eq!(targets("test/mock.ts#check"), targets("use.ts#send"));
+    let send = ex
+        .edges
+        .iter()
+        .find(|e| e.src == sym("use.ts#send") && e.dst == sym("impl.ts#Base.handle"))
+        .unwrap();
+    assert_eq!(send.props["resolution"], "interface-implementation");
+    assert_eq!(send.props["interface"], sym("protocol.ts#UrlsShape"));
+    assert_eq!(send.props["implementation"], sym("impl.ts#Base"));
+    assert_eq!(send.props["alternatives"], 3);
+    assert_eq!(send.props["prov"]["confidence_tier"], "InferredStrong");
+    let cited: Vec<&str> = send.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(cited, ["src/use.ts", "src/impl.ts", "src/protocol.ts"]);
+    let hashes: BTreeSet<&str> = ex
+        .edges
+        .iter()
+        .filter(|e| e.src == sym("use.ts#send") && e.label == "CALLS")
+        .map(|e| e.props["prov"]["content_hash"].as_str().unwrap())
+        .collect();
+    assert_eq!(hashes.len(), 3);
+    let gaps: BTreeSet<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["callee"].as_str())
+        .collect();
+    assert_eq!(
+        gaps,
+        BTreeSet::from([
+            "Local.halt",
+            "Lonely.ping",
+            "Probe.scan",
+            "Unused.idle",
+            "UrlsShape.missing"
+        ])
     );
 }
