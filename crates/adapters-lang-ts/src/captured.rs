@@ -36,6 +36,16 @@ pub use receipt::{
 
 /// Maximum directory entries examined, including excluded entries.
 pub const MAX_VISITED_ENTRIES: usize = 100_000;
+/// Ceiling on the directory entries a project may let one selection examine
+/// (#1653). The walk retains only selected paths, so entries cost time, not
+/// memory.
+pub const HARD_MAX_VISITED_ENTRIES: usize = 1_000_000;
+/// Maximum unfollowed symlink paths one selection retains for reporting. It
+/// stays at the historical entry bound when a project raises
+/// [`SelectionLimits::max_visited_entries`], so a raised walk never retains
+/// more symlink paths than the default walk could; one past it fails the
+/// selection whole.
+pub const MAX_UNFOLLOWED_LINKS: usize = MAX_VISITED_ENTRIES;
 /// Maximum nested directory depth below the host-selected root.
 pub const MAX_DIRECTORY_DEPTH: usize = 64;
 /// Maximum receipt memory retained in one adapter result, before host
@@ -153,12 +163,47 @@ pub struct Selection {
 /// encodings and selected special files fail, and no partial selection is
 /// returned. This is not a filesystem snapshot.
 pub fn enumerate_selection(root: &Path) -> Result<Selection, CapturedError> {
+    enumerate_selection_within(root, SelectionLimits::default())
+}
+
+/// Bounds of one TS/JS selection walk a project may change (#1653).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionLimits {
+    /// Directory entries examined, including excluded ones; 1 to
+    /// [`HARD_MAX_VISITED_ENTRIES`].
+    pub max_visited_entries: usize,
+    /// Files selected; at most [`source_capture::HARD_MAX_FILES`], and the
+    /// capture that follows applies its own file bound.
+    pub max_files: usize,
+}
+
+impl Default for SelectionLimits {
+    fn default() -> Self {
+        Self {
+            max_visited_entries: MAX_VISITED_ENTRIES,
+            max_files: source_capture::MAX_FILES,
+        }
+    }
+}
+
+/// [`enumerate_selection`] within `limits`. Limits above the hard ceilings
+/// are refused before the walk starts.
+pub fn enumerate_selection_within(
+    root: &Path,
+    limits: SelectionLimits,
+) -> Result<Selection, CapturedError> {
+    if !(1..=HARD_MAX_VISITED_ENTRIES).contains(&limits.max_visited_entries)
+        || limits.max_files > source_capture::HARD_MAX_FILES
+    {
+        return Err(CapturedError::Invalid("selection limits"));
+    }
     let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
     enumerate_with_limits(
         &directory,
-        MAX_VISITED_ENTRIES,
+        limits.max_visited_entries,
         MAX_DIRECTORY_DEPTH,
-        source_capture::MAX_FILES,
+        limits.max_files,
+        MAX_UNFOLLOWED_LINKS,
     )
 }
 
@@ -172,6 +217,7 @@ fn enumerate_with_limits(
     max_entries: usize,
     max_depth: usize,
     max_files: usize,
+    max_unfollowed: usize,
 ) -> Result<Selection, CapturedError> {
     struct Walk {
         files: Vec<String>,
@@ -180,6 +226,7 @@ fn enumerate_with_limits(
         max_entries: usize,
         max_depth: usize,
         max_files: usize,
+        max_unfollowed: usize,
     }
     impl Walk {
         fn visit(
@@ -223,6 +270,9 @@ fn enumerate_with_limits(
                     if !valid_path(&path) {
                         return Err(CapturedError::Invalid("symlink path"));
                     }
+                    if self.unfollowed.len() == self.max_unfollowed {
+                        return Err(CapturedError::Limit("unfollowed links"));
+                    }
                     self.unfollowed.push(path);
                     continue;
                 }
@@ -258,6 +308,7 @@ fn enumerate_with_limits(
         max_entries,
         max_depth,
         max_files,
+        max_unfollowed,
     };
     walk.visit(directory, "", &IgnoreRules::default(), 0)?;
     walk.files.sort();

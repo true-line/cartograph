@@ -35,6 +35,9 @@ const MIB: u64 = 1024 * 1024;
 pub const CAPTURE_STORE_MAX_MIB: &str = "capture_store_max_mib";
 pub const CAPTURE_STORE_MAX_CAPTURES: &str = "capture_store_max_captures";
 
+/// Directory entries one TS/JS selection walk may examine (AC-1802).
+pub const TS_SELECTION_MAX_VISITED_ENTRIES: &str = "ts_selection_max_visited_entries";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -101,6 +104,14 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: source_capture::MAX_STORED_CAPTURES,
         advanced: true,
         description: "Retained source captures kept across all recoveries. Lowering it keeps what is stored but refuses new captures until space is freed.",
+    },
+    LimitSpec {
+        key: TS_SELECTION_MAX_VISITED_ENTRIES,
+        default: adapters_lang_ts::captured::MAX_VISITED_ENTRIES as u64,
+        min: 10_000,
+        max: adapters_lang_ts::captured::HARD_MAX_VISITED_ENTRIES as u64,
+        advanced: true,
+        description: "Directory entries, including ignored ones, one recovery may examine when selecting TS/JS source. Larger values let big trees finish selection but take longer.",
     },
 ];
 
@@ -315,6 +326,32 @@ mod tests {
         ));
         write(&conn, CAPTURE_STORE_MAX_CAPTURES, Some(captures.min)).unwrap();
         assert_eq!(read(&conn, CAPTURE_STORE_MAX_CAPTURES).unwrap(), 100);
+    }
+
+    // AC-1802 / #1653: the TS/JS selection walk key defaults to the
+    // adapter's historical bound and stops at its hard ceiling.
+    #[test]
+    fn selection_walk_key_stops_at_the_adapter_hard_ceiling() {
+        let entries = spec(TS_SELECTION_MAX_VISITED_ENTRIES).unwrap();
+        assert_eq!(
+            entries.default,
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES as u64
+        );
+        assert_eq!(
+            entries.max,
+            adapters_lang_ts::captured::HARD_MAX_VISITED_ENTRIES as u64
+        );
+        assert!(entries.advanced);
+        let conn = conn();
+        write(&conn, TS_SELECTION_MAX_VISITED_ENTRIES, Some(entries.max)).unwrap();
+        assert!(matches!(
+            write(
+                &conn,
+                TS_SELECTION_MAX_VISITED_ENTRIES,
+                Some(entries.max + 1)
+            ),
+            Err(OperatorLimitError::OutOfRange { .. })
+        ));
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value
