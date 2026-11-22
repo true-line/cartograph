@@ -69,7 +69,7 @@ impl FindingStore {
     /// Replace `repo`'s findings from `detector` with `batch` — a re-run of
     /// the same detector supersedes its previous report instead of piling
     /// duplicates (deterministic re-preflight ⇒ identical register).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn replace_for(
         &mut self,
         repo: &str,
