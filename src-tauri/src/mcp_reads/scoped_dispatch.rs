@@ -216,6 +216,7 @@ impl<'a> ScopedDispatcher<'a> {
                     Evidence::Describe {
                         session_id,
                         session_basis_id,
+                        kind,
                         fact,
                         ordinal,
                         ..
@@ -238,6 +239,7 @@ impl<'a> ScopedDispatcher<'a> {
                         let response = super::scoped_evidence::describe(
                             self.state,
                             &proof,
+                            kind.role(),
                             ordinal,
                             inner,
                             || self.session.check_current(ctx),
@@ -252,6 +254,7 @@ impl<'a> ScopedDispatcher<'a> {
                     Evidence::Read {
                         session_id,
                         session_basis_id,
+                        kind,
                         target,
                         ..
                     } => {
@@ -263,6 +266,10 @@ impl<'a> ScopedDispatcher<'a> {
                             cap,
                         )?;
                         let target = super::scoped_evidence::ScopedEvidenceTarget::decode(&target)?;
+                        // The kind names the role the target cites.
+                        if target.binding_role() != kind.role() {
+                            return Err(ReadError::InvalidRequest);
+                        }
                         let key = crate::task_evidence::graph_fact(&target.fact);
                         let proof =
                             self.session
@@ -398,6 +405,16 @@ struct Detail {
 #[serde(rename_all = "snake_case")]
 enum EvidenceKind {
     RetainedPrimarySource,
+    /// A fact's observed binding: a captured observation input (ADR-0079).
+    RetainedObservedInput,
+}
+impl EvidenceKind {
+    fn role(&self) -> core_graph::BindingRole {
+        match self {
+            Self::RetainedPrimarySource => core_graph::BindingRole::Primary,
+            Self::RetainedObservedInput => core_graph::BindingRole::Observed,
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -405,8 +422,7 @@ enum Evidence {
     Describe {
         session_id: String,
         session_basis_id: String,
-        #[serde(rename = "kind")]
-        _kind: EvidenceKind,
+        kind: EvidenceKind,
         fact: Fact,
         ordinal: usize,
         #[serde(rename = "max_bytes")]
@@ -415,8 +431,7 @@ enum Evidence {
     Read {
         session_id: String,
         session_basis_id: String,
-        #[serde(rename = "kind")]
-        _kind: EvidenceKind,
+        kind: EvidenceKind,
         target: Value,
         #[serde(rename = "max_bytes")]
         _max_bytes: std::num::NonZeroUsize,

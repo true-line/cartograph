@@ -82,6 +82,13 @@ const span = (await call("cartograph_evidence", {
 })).structuredContent.span;
 ```
 
+A fact observed in a captured Terraform state, Pulumi export or trace may also
+have observed evidence: request it with `kind: "retained_observed_input"` in both
+modes. Its target names the source's input identity (`input/src_…`), its `scope`
+is `observed_input_only`, and it cites what was observed, never a declaration;
+report it as observed, not as the declaring source. Read an observed target only
+with that kind.
+
 Copy the complete returned target unchanged, including nested source and captured
 identities. Do not widen the span or construct a target from a filesystem path.
 `description.next_ordinal` can select another range if relevant; do not enumerate
