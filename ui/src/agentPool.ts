@@ -156,3 +156,30 @@ export function usageTotal(work: readonly AgentWork[], usage: readonly JobUsage[
   }), { job_id: 0, calls: 0, unreported_calls: 0, input_tokens: 0, output_tokens: 0, request_bytes: 0,
     model: models.size === 1 ? rows[0].model : `${models.size} models` });
 }
+
+/** The host's agent pool controls (AC-1704). A limit of 0 means no limit. */
+export interface AgentPoolControls {
+  paused: boolean;
+  local_limit: number;
+  cloud_limit: number;
+}
+
+/** Largest per-mode limit the host accepts. */
+export const AGENT_POOL_MAX_LIMIT = 16;
+
+/** The stored controls; null outside the app or when the host cannot say. */
+export async function loadAgentPoolControls(): Promise<AgentPoolControls | null> {
+  return invokeOr<AgentPoolControls | null>('get_agent_pool_controls', null);
+}
+
+/** Persist the controls and return what the host stored. */
+export async function saveAgentPoolControls(controls: AgentPoolControls): Promise<AgentPoolControls | null> {
+  return invokeOr<AgentPoolControls | null>('set_agent_pool_controls', null, { controls });
+}
+
+/** One line on what the controls do to new agent work. */
+export function controlsLine(controls: AgentPoolControls): string {
+  if (controls.paused) return 'New agent work is paused. Work already running continues.';
+  const limit = (count: number, mode: string) => (count === 0 ? `no ${mode} limit` : `at most ${count} ${mode}`);
+  return `New agent work starts with ${limit(controls.local_limit, 'local')} and ${limit(controls.cloud_limit, 'cloud')} at a time.`;
+}

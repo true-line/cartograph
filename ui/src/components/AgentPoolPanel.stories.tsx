@@ -78,3 +78,33 @@ export const UsageUnreadable: Story = {
     await expect(canvas.queryByTestId('agent-pool-usage-3')).toBeNull();
   },
 };
+
+// AC-1704: pause and per-mode limits are sent to the host as one controls value.
+export const Controls: Story = {
+  args: {
+    controls: { paused: false, local_limit: 2, cloud_limit: 0 },
+    onChangeControls: fn(),
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('agent-pool-controls')).toHaveTextContent('New agent work starts with at most 2 local and no cloud limit at a time.');
+    await userEvent.click(canvas.getByRole('button', { name: 'Pause new agent work' }));
+    await expect(args.onChangeControls).toHaveBeenCalledWith({ paused: true, local_limit: 2, cloud_limit: 0 });
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'Cloud at a time' }), '3');
+    await expect(args.onChangeControls).toHaveBeenLastCalledWith({ paused: false, local_limit: 2, cloud_limit: 3 });
+  },
+};
+
+export const Paused: Story = {
+  args: {
+    controls: { paused: true, local_limit: 0, cloud_limit: 0 },
+    controlsError: 'The pool controls were not saved: store busy',
+    onChangeControls: fn(),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('agent-pool-controls')).toHaveTextContent('New agent work is paused. Work already running continues.');
+    await expect(canvas.getByRole('button', { name: 'Resume agent work' })).toBeVisible();
+    await expect(canvas.getByRole('alert')).toHaveTextContent('store busy');
+  },
+};

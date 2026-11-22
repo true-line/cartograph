@@ -2,8 +2,8 @@ import type { Job } from '../store';
 import type { InvestigationProvider } from '../investigationTypes';
 import { stageLabel } from '../stageLabels';
 import {
-  LANE_LABEL, LANE_OUTPUT, agentPool, providerLine, usageLine, usageTotal,
-  type AgentLane, type AgentWork, type JobUsage,
+  AGENT_POOL_MAX_LIMIT, LANE_LABEL, LANE_OUTPUT, agentPool, controlsLine, providerLine, usageLine, usageTotal,
+  type AgentLane, type AgentPoolControls, type AgentWork, type JobUsage,
 } from '../agentPool';
 
 export interface AgentPoolPanelProps {
@@ -15,12 +15,32 @@ export interface AgentPoolPanelProps {
   /** Provider-reported usage per job (AC-1703); empty when none is recorded,
    *  null when it could not be read. */
   usage?: JobUsage[] | null;
+  /** The host's pool controls (AC-1704); null while unknown. */
+  controls?: AgentPoolControls | null;
+  /** Set when saving the controls failed. */
+  controlsError?: string | null;
+  onChangeControls?: (controls: AgentPoolControls) => void;
   onOpenJobs: () => void;
   onOpenCuration: () => void;
   onViewInvestigation?: (id: string) => void;
 }
 
 const LANES: AgentLane[] = ['investigation', 'area-expert', 'section-draft', 'escalation'];
+
+const LIMIT_CHOICES = Array.from({ length: AGENT_POOL_MAX_LIMIT + 1 }, (_, count) => count);
+
+function LimitSelect({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="agent-pool-limit">
+      {label}
+      <select value={value} onChange={(event) => onChange(Number(event.target.value))}>
+        {LIMIT_CHOICES.map((count) => (
+          <option key={count} value={count}>{count === 0 ? 'No limit' : count}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 function WorkRow({ item, usage, onViewInvestigation }: {
   item: AgentWork;
@@ -58,10 +78,11 @@ function WorkRow({ item, usage, onViewInvestigation }: {
 /**
  * The agent pool (#252, AC-1701): the agent work the host has recorded as
  * jobs, the providers it is configured with, and the proposals waiting for a
- * person. Read-only: controls stay on Jobs and in curation.
+ * person, with controls that pause or cap new agent work (AC-1704). Cancel
+ * and retry stay on Jobs; decisions stay in curation.
  */
 export function AgentPoolPanel({
-  jobs, providers, awaitingCuration, usage = [], onOpenJobs, onOpenCuration, onViewInvestigation,
+  jobs, providers, awaitingCuration, usage = [], controls = null, controlsError = null, onChangeControls, onOpenJobs, onOpenCuration, onViewInvestigation,
 }: AgentPoolPanelProps) {
   const pool = agentPool(jobs);
   const usageOf = new Map((usage ?? []).map((row) => [row.job_id, row]));
@@ -78,6 +99,29 @@ export function AgentPoolPanel({
         </div>
         <button type="button" className="secondary-button" onClick={onOpenJobs}>Open Jobs</button>
       </header>
+
+      <section aria-label="Pool controls">
+        <h3>Controls</h3>
+        {controls === null || !onChangeControls
+          ? <p className="muted">The pool controls have not loaded.</p>
+          : <div className="agent-pool-controls">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => onChangeControls({ ...controls, paused: !controls.paused })}
+            >
+              {controls.paused ? 'Resume agent work' : 'Pause new agent work'}
+            </button>
+            <LimitSelect label="Local at a time" value={controls.local_limit} onChange={(local_limit) => onChangeControls({ ...controls, local_limit })} />
+            <LimitSelect label="Cloud at a time" value={controls.cloud_limit} onChange={(cloud_limit) => onChangeControls({ ...controls, cloud_limit })} />
+          </div>}
+        {controls && <p data-testid="agent-pool-controls">{controlsLine(controls)}</p>}
+        {controlsError && <p className="job-error" role="alert">{controlsError}</p>}
+        <p className="muted">
+          Controls gate topic expert questions, section drafts and gap escalations when they
+          start. Specialist investigations keep their own runner.
+        </p>
+      </section>
 
       <ul className="agent-pool-lanes" aria-label="Active agent work by kind">
         {LANES.map((lane) => (
