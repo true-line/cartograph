@@ -281,13 +281,23 @@ dependencies = [
 name = "app-store"
 version = "0.73.0"
 dependencies = [
+ "agents",
+ "cap-fs-ext",
+ "cap-std",
  "context-hub",
+ "core-graph",
+ "core-prov",
+ "core-redact",
  "dunce",
  "ingest",
+ "llm",
  "rusqlite",
+ "semantic",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
