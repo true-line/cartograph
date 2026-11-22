@@ -28,6 +28,7 @@ mod mcp_client_id;
 mod mcp_grant;
 pub mod native_bridge;
 pub mod native_proxy;
+pub mod native_session;
 pub mod native_tools;
 pub mod rejected_response;
 // Separate completion families preserve every legacy generation and identity.
