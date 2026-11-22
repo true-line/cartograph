@@ -1562,29 +1562,20 @@ fn acquisition_error(error: Failure) -> HostError {
         _ => HostError::Operational,
     }
 }
+/// The investigation firewall: the saved egress policy and the project's
+/// saved read-deny rules on top of the defaults (ADR-0083, #679).
 fn firewall(state: &AppState) -> Result<EgressFirewall, HostError> {
-    let firewall = EgressFirewall::new(
-        state
-            .settings
-            .lock()
-            .map_err(|_| HostError::Operational)?
+    let settings = state.settings.lock().map_err(|_| HostError::Operational)?;
+    Ok(EgressFirewall::new(
+        settings
             .egress_policy()
             .map_err(|_| HostError::Operational)?,
-    );
-    #[cfg(test)]
-    if let Some(rules) = TEST_READ_DENY_RULES.with(|rules| rules.borrow().clone()) {
-        return Ok(firewall.with_read_deny_rules(
-            llm::read_deny::ReadDenyRules::with_project_rules(rules)
-                .map_err(|_| HostError::InvalidInput)?,
-        ));
-    }
-    Ok(firewall)
-}
-#[cfg(test)]
-thread_local! {
-    /// Test-only project read-deny rules for the worker's firewall (#679).
-    pub(super) static TEST_READ_DENY_RULES: std::cell::RefCell<Option<Vec<String>>> =
-        const { std::cell::RefCell::new(None) };
+    )
+    .with_read_deny_rules(
+        settings
+            .read_deny_rules()
+            .map_err(|_| HostError::Operational)?,
+    ))
 }
 fn read_detail(
     state: &AppState,
