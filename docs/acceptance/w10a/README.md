@@ -59,3 +59,41 @@ line and the reason, never silently dropped.
 The pass thresholds were frozen by the owner's one-line go on 2026-11-22.
 Any later change to a threshold or a label needs a new go and is recorded
 here with the reason.
+
+## Result: first scored run (2026-11-22)
+
+Run: the showcase manifest (`docs/showcases/simplelogin.md`, gap 1) at
+Cartograph `40ff457`, with the app at the commit above, the extension at
+`d18b40fc` and Android at `ab6e7103`. Scored by
+[`score.py`](score.py) (`python3 -I score.py <app checkout> <graph.db>`).
+The report is in [`scores.json`](scores.json).
+
+| Measure | Result | Pass |
+|---|---|---|
+| Link recall | 19 / 19 | yes |
+| Link precision | 19 / 22 | no |
+| Gap accuracy | 4 / 7 | no |
+| Redirects | 3 / 3, plus 1 extra | no |
+| Status precision / recall | 11 / 13 and 11 / 11 | no / yes |
+| Key precision / recall | 7 / 7 and 7 / 7 | yes / yes |
+
+**The run fails against the frozen labels.** All eight misses come from the
+three Flask-Admin calls (`url_for(admin.email_search.index)` at
+`tests/admin/test_email_search.py:254` and `:557`, and
+`url_for(admin.custom_domain_search.index)` at
+`tests/admin/test_custom_domain_search.py:204`). The labels expect
+`gap:unknown_endpoint_name` for them, because Flask-Admin views were out of
+the route model when the labels were written. This run recovers them as
+Endpoints: `GET /admin/admin.email_search/` and
+`GET /admin/admin.custom_domain_search/`. Those URLs match
+`app/admin/index.py:44-47`, where the view's `endpoint=` is also its URL.
+The three calls therefore link instead of becoming Gaps. Their statuses
+(200 at lines 254 and 204) appear on the edges but are not labelled, and
+`follow_redirects=True` at line 557 marks one more edge `follows_redirects`.
+
+On the other 23 calls the run matches every label: 19 links with no wrong
+endpoint, 4 Gaps with the labelled reasons, 3 redirect edges, and every
+labelled status and key.
+
+The labels are not changed here. Relabelling the three Flask-Admin calls
+needs a new go.

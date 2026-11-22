@@ -24,9 +24,8 @@ Keep this directory outside every model input. Recovery never reads it.
 
 The expected set and the pass column below were frozen by the owner's
 one-line go on 2026-11-22. Any later change to a step, a label or a pass
-value needs a new go and is recorded here with the reason. No run has
-been scored yet. #2169 is done only when a scored run and its table are committed
-here, whatever the result.
+value needs a new go and is recorded here with the reason. The first
+scored run is recorded under Result below.
 
 ## Expected journey
 
@@ -69,3 +68,50 @@ the version found.
 A missing required step makes the result partial. It is reported with the
 step it misses, never silently dropped. A step public help states but the
 run cannot find stays a named miss, not proof the code lacks it.
+
+## Result: first scored run (2026-11-22)
+
+Run: the showcase manifest (`docs/showcases/simplelogin.md`, gap 1) at
+Cartograph `40ff457`, with the app at `4f212552` and the extension at
+`d18b40fc`. Scored by [`score.py`](score.py)
+(`python3 -I score.py <run output dir>`). The report is in
+[`scores.json`](scores.json). The scorer read all 25 candidates in
+`journeys.md`. It matches a screen step by its route (J1 `api-key` or
+`onboarding`, J2 `/main`, J6 `new-alias`) and a client call by method and
+path. It scores the candidate with the most required steps, which is
+`Main → POST /api/v2/alias/custom/new`
+(`/` → `/main`, then the goal).
+
+| Step | Expected | Found | |
+|---|---|---|---|
+| J1 | API key setup screen | not on the path | missing |
+| J1a | `GET /api/user_info` | on `/main` | optional, found |
+| J2 | Main screen | `/main` | found |
+| J3 | `GET /api/v5/alias/options` | `GET /api/v4/alias/options` on `/main` | missing |
+| J4 | `GET /api/v2/mailboxes` | `GET /api/mailboxes` on `/main` | optional, missing |
+| J5 | custom alias, v3 or v2 | `POST /api/v2/alias/custom/new`, the goal | found |
+| J5a | `POST /api/alias/random/new` | on `/main`; the goal of a separate candidate | optional, found |
+| J6 | New alias screen | not on the path | missing |
+
+| Measure | Result | Pass |
+|---|---|---|
+| Required steps | 2 / 5 | no |
+| Order | J2 before J5 | no (steps missing) |
+| Alternate path | J5a is not this journey's goal | yes |
+| Endpoints | 3 / 3 matched calls link to the server endpoint | yes |
+
+**The result is partial: J1, J3 and J6 are missing.**
+
+- **J1 and J6 are recovery misses.** The extension declares both screens,
+  `/api-key-setting` and `/new-alias-result/` (`src/popup/Navigation.js`),
+  but the candidate goes straight from `/` to `/main` and ends at the goal
+  endpoint, with no result screen.
+- **J3 is a version miss.** Public help documents `v5`, and the pinned
+  extension calls `v4` (`src/popup/APIService.js:13`). J4 has the same
+  problem (`/api/mailboxes`, not `/api/v2/mailboxes`).
+
+Extra calls on the path, reported by name: `GET /api/mailboxes`,
+`GET /api/v4/alias/options`, `POST /api/aliases/<int:alias_id>/toggle`,
+`POST /api/api_key` (on `/`) and `POST /api/v2/aliases`.
+
+The expected set is not changed here. Accepting `v4` for J3 needs a new go.
