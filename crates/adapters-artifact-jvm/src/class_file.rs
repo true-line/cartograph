@@ -20,6 +20,9 @@ pub const ACC_ANNOTATION: u16 = 0x2000;
 pub const ACC_ENUM: u16 = 0x4000;
 /// Access flag on a method: a bridge method.
 pub const ACC_BRIDGE: u16 = 0x0040;
+/// Access flag: a static member (on an `InnerClasses` entry, a static
+/// nested class).
+pub const ACC_STATIC: u16 = 0x0008;
 
 /// Why a class file was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +121,26 @@ pub struct ClassRef {
     pub span: Span,
 }
 
+/// One field of the class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    /// Field descriptor (`Ljava/time/Clock;`).
+    pub descriptor: String,
+    /// The `field_info` structure's bytes.
+    pub span: Span,
+}
+
+/// The class's own `InnerClasses` entry: it is nested in another class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nesting {
+    /// Internal name of the enclosing class, `None` for a local or
+    /// anonymous class.
+    pub outer: Option<String>,
+    /// The access flags the source declared (`ACC_STATIC` for a static
+    /// nested class).
+    pub access: u16,
+}
+
 /// What a class file states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassFile {
@@ -133,8 +156,12 @@ pub struct ClassFile {
     pub header_span: Span,
     /// Every class the constant pool references, in pool order.
     pub class_refs: Vec<ClassRef>,
+    /// Fields in declaration order.
+    pub fields: Vec<Field>,
     /// Methods in declaration order.
     pub methods: Vec<Method>,
+    /// How the class is nested, from its own `InnerClasses` entry.
+    pub nesting: Option<Nesting>,
 }
 
 #[derive(Debug, Clone)]
@@ -396,7 +423,7 @@ fn read_calls(
                 let handles = bootstraps
                     .get(usize::from(*bootstrap))
                     .cloned()
-                    .unwrap_or_default();
+                    .ok_or(Refusal::ConstantIndex)?;
                 calls.push(Call::Dynamic { handles, span });
             } else {
                 calls.push(Call::Invoke {
@@ -488,9 +515,17 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
     for _ in 0..reader.u16()? {
         interfaces.push(pool.class(reader.u16()?)?.to_string());
     }
+    let mut fields = Vec::new();
     for _ in 0..reader.u16()? {
-        reader.take(6)?;
+        let start = reader.at as u64;
+        reader.u16()?;
+        pool.utf8(reader.u16()?)?;
+        let descriptor = pool.utf8(reader.u16()?)?.to_string();
         read_attributes(&mut reader, &pool, false)?;
+        fields.push(Field {
+            descriptor,
+            span: (start, reader.at as u64),
+        });
     }
     let mut raw = Vec::new();
     for _ in 0..reader.u16()? {
@@ -508,12 +543,15 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
         });
     }
     let mut bootstraps = Vec::new();
+    let mut nesting = None;
     for _ in 0..reader.u16()? {
         let name = reader.u16()?;
         let len = reader.u32()? as usize;
         let body = reader.take(len)?;
-        if pool.utf8(name)? == "BootstrapMethods" {
-            bootstraps = read_bootstraps(body, &pool)?;
+        match pool.utf8(name)? {
+            "BootstrapMethods" => bootstraps = read_bootstraps(body, &pool)?,
+            "InnerClasses" => nesting = read_nesting(body, &pool, &this_class)?,
+            _ => {}
         }
     }
     if reader.at != bytes.len() {
@@ -554,8 +592,49 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
         interfaces,
         header_span,
         class_refs,
+        fields,
         methods,
+        nesting,
     })
+}
+
+/// The class's own entry in its `InnerClasses` attribute (JVMS §4.7.6).
+fn read_nesting(body: &[u8], pool: &Pool, this_class: &str) -> Result<Option<Nesting>, Refusal> {
+    let mut reader = Reader { bytes: body, at: 0 };
+    let mut own = None;
+    for _ in 0..reader.u16()? {
+        let inner = reader.u16()?;
+        let outer = reader.u16()?;
+        reader.u16()?;
+        let access = reader.u16()?;
+        if pool.class(inner)? == this_class {
+            let outer = if outer == 0 {
+                None
+            } else {
+                Some(pool.class(outer)?.to_string())
+            };
+            own = Some(Nesting { outer, access });
+        }
+    }
+    if reader.at != body.len() {
+        return Err(Refusal::Truncated);
+    }
+    Ok(own)
+}
+
+/// The internal names of the classes a field or method descriptor names,
+/// array element classes included, in order.
+pub fn descriptor_classes(descriptor: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = descriptor;
+    while let Some(at) = rest.find('L') {
+        let Some(end) = rest[at..].find(';') else {
+            break;
+        };
+        out.push(&rest[at + 1..at + end]);
+        rest = &rest[at + end + 1..];
+    }
+    out
 }
 
 /// The Java-source spelling of a field descriptor's type: simple class
@@ -599,4 +678,35 @@ pub fn parameter_types(descriptor: &str) -> Option<Vec<String>> {
         rest = next;
     }
     Some(types)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `invokedynamic` naming a bootstrap method the class does not have
+    /// is a bad constant index, not a call with no handles.
+    #[test]
+    fn a_missing_bootstrap_method_is_refused() {
+        let pool = Pool {
+            entries: vec![Constant::Unused, Constant::InvokeDynamic(3)],
+            spans: vec![(0, 0), (10, 15)],
+        };
+        let code = [0xba, 0, 1, 0, 0, 0xb1];
+        assert_eq!(
+            read_calls(&code, 0, &pool, &Vec::new()),
+            Err(Refusal::ConstantIndex)
+        );
+        let bootstraps = vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        assert_eq!(read_calls(&code, 0, &pool, &bootstraps).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn descriptors_name_their_classes() {
+        assert_eq!(
+            descriptor_classes("(Ljava/time/Clock;I[[Lcom/a/B$C;)Ljava/util/List;"),
+            vec!["java/time/Clock", "com/a/B$C", "java/util/List"]
+        );
+        assert!(descriptor_classes("(IJ)V").is_empty());
+    }
 }

@@ -12,8 +12,8 @@
 pub mod class_file;
 
 use class_file::{
-    ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_ENUM, ACC_INTERFACE, ACC_SYNTHETIC, Call,
-    ClassFile, MemberRef, Method, Span,
+    ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_ENUM, ACC_INTERFACE, ACC_STATIC, ACC_SYNTHETIC,
+    Call, ClassFile, MemberRef, Method, Span,
 };
 use core_graph::{Edge, Node};
 use core_prov::{ArtifactLocator, ArtifactRef, ConfidenceTier, EvidenceBasis, Provenance, Tier};
@@ -125,11 +125,38 @@ fn class_kind(access: u16) -> &'static str {
     }
 }
 
+/// How many leading constructor parameters the compiler added that the
+/// source does not declare: an inner (non-static member) class's enclosing
+/// instance, or an enum constant's name and ordinal.
+fn added_constructor_parameters(class: &ClassFile, descriptor: &str) -> usize {
+    if class.access & ACC_ENUM != 0
+        && class.super_class.as_deref() == Some("java/lang/Enum")
+        && descriptor.starts_with("(Ljava/lang/String;I")
+    {
+        return 2;
+    }
+    match &class.nesting {
+        Some(nesting)
+            if nesting.access & (ACC_STATIC | ACC_INTERFACE | ACC_ENUM) == 0
+                && class.access & ACC_INTERFACE == 0 =>
+        {
+            match &nesting.outer {
+                Some(outer) if descriptor.starts_with(&format!("(L{outer};")) => 1,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// A method's qualified name as the Java source adapter spells it:
-/// `Owner.method(Type,Type)`, a constructor named for its class.
-fn method_name(owner: &str, method: &str, descriptor: &str) -> Option<String> {
-    let params = class_file::parameter_types(descriptor)?;
+/// `Owner.method(Type,Type)`, a constructor named for its class and listing
+/// only the parameters its source declares.
+fn method_name(owner: &str, class: &ClassFile, method: &str, descriptor: &str) -> Option<String> {
+    let mut params = class_file::parameter_types(descriptor)?;
     let name = if method == "<init>" {
+        let added = added_constructor_parameters(class, descriptor).min(params.len());
+        params.drain(..added);
         owner.rsplit('.').next().unwrap_or(owner)
     } else {
         method
@@ -207,7 +234,9 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
             if !emitted(method) {
                 continue;
             }
-            if let Some(name) = method_name(&read.nested, &method.name, &method.descriptor) {
+            if let Some(name) =
+                method_name(&read.nested, &read.class, &method.name, &method.descriptor)
+            {
                 methods.insert(
                     (
                         read.class.this_class.clone(),
@@ -254,7 +283,7 @@ fn emit_class(
         "name": nested,
         "kind": class_kind(class.access),
         "language": "java",
-        "binary_name": dotted(&class.this_class),
+        "binary_name": class.this_class.replace('/', "."),
         "abstract": class.access & ACC_ABSTRACT != 0 && class.access & ACC_INTERFACE == 0,
         "prov": prov(digest, class.header_span, ConfidenceTier::Confirmed, &format!("Symbol {symbol}")),
     });
@@ -296,7 +325,7 @@ fn emit_class(
         .collect();
 
     for method in class.methods.iter().filter(|method| emitted(method)) {
-        let Some(name) = method_name(nested, &method.name, &method.descriptor) else {
+        let Some(name) = method_name(nested, class, &method.name, &method.descriptor) else {
             continue;
         };
         let source = symbol_id(id.repo, path, &name);
@@ -360,14 +389,34 @@ fn emit_class(
 
     let own_package = package_of(&class.this_class);
     let mut imported = BTreeSet::new();
-    for reference in &class.class_refs {
+    // Classes the constant pool names, then classes named only in a field
+    // or method descriptor (a parameter, return or field type).
+    let pooled = class.class_refs.iter().filter_map(|reference| {
         // An array type names its element class after the `[`s and `L`.
         let name = reference.name.trim_start_matches('[');
         let name = match name.strip_prefix('L') {
             Some(element) if reference.name.starts_with('[') => element.trim_end_matches(';'),
-            _ if reference.name.starts_with('[') => continue,
+            _ if reference.name.starts_with('[') => return None,
             _ => name,
         };
+        Some((name, reference.span))
+    });
+    let described = class
+        .fields
+        .iter()
+        .map(|field| (field.descriptor.as_str(), field.span))
+        .chain(
+            class
+                .methods
+                .iter()
+                .map(|method| (method.descriptor.as_str(), method.span)),
+        )
+        .flat_map(|(descriptor, span)| {
+            class_file::descriptor_classes(descriptor)
+                .into_iter()
+                .map(move |name| (name, span))
+        });
+    for (name, span) in pooled.chain(described) {
         let package = package_of(name);
         let outer = name.split('$').next().unwrap_or(name);
         if outer == class.this_class.split('$').next().unwrap_or("")
@@ -387,7 +436,7 @@ fn emit_class(
             label: "IMPORTS".into(),
             props: serde_json::json!({
                 "specifier": module,
-                "prov": prov(digest, reference.span, ConfidenceTier::Confirmed, &format!("IMPORTS {path} {module}")),
+                "prov": prov(digest, span, ConfidenceTier::Confirmed, &format!("IMPORTS {path} {module}")),
             }),
         });
     }
