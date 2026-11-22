@@ -92,10 +92,11 @@ pub use contract::{
 pub use views::{
     ArchitectureComponents, ArchitectureElement, ArchitectureFact, ArchitectureRelation,
     ArchitectureView, DeploymentRole, SPEC_VIEW_MAX_EDGES, SPEC_VIEW_MAX_FLOWS,
-    SPEC_VIEW_MAX_NODES, SpecDiagramView, SpecViewBundle, compile_selected_flow_view,
-    compile_spec_views, compile_spec_with_views, compile_spec_with_views_and_coverage,
-    try_compile_spec_with_views_and_coverage, try_compile_spec_with_views_supplied,
-    try_compile_spec_with_views_supplied_kept,
+    SPEC_VIEW_MAX_NODES, SpecDiagramView, SpecViewBundle, SpecViewCaps, compile_selected_flow_view,
+    compile_selected_flow_view_capped, compile_spec_views, compile_spec_with_views,
+    compile_spec_with_views_and_coverage, try_compile_spec_with_views_and_coverage,
+    try_compile_spec_with_views_supplied, try_compile_spec_with_views_supplied_kept,
+    try_compile_spec_with_views_supplied_kept_capped,
 };
 pub use workbench::{
     AREA_BRIEFING_BYTES, AREA_SECTIONS, AreaBriefing, AreaNeighbours, area_blocks, area_briefing,

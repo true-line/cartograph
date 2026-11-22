@@ -7158,6 +7158,9 @@ struct SpecInputs {
     /// Display names of the registered repositories, by registry key
     /// (#2049). Empty when the registry was not read.
     repo_names: Vec<(String, String)>,
+    /// The diagram view caps (#1653): the defaults unless the export reads
+    /// the project's operator limits.
+    view_caps: spec::SpecViewCaps,
 }
 
 /// The knowledge-layer facts `user-stories` renders beside the base
@@ -7467,6 +7470,7 @@ impl SpecRead {
             curated,
             graph_basis,
             repo_names,
+            view_caps: spec::SpecViewCaps::default(),
         }
     }
 }
@@ -7748,7 +7752,7 @@ fn compile_spec_with_views_and_curated<A>(
         let candidates = inputs.candidates()?;
         let knowledge = inputs.knowledge(&candidates, mode)?;
         // An export whose citations do not resolve is refused (ADR-0058).
-        spec::try_compile_spec_with_views_supplied_kept(
+        spec::try_compile_spec_with_views_supplied_kept_capped(
             &inputs.base.graph.0,
             &inputs.base.graph.1,
             &inputs.flows,
@@ -7756,6 +7760,7 @@ fn compile_spec_with_views_and_curated<A>(
             &inputs.rejected_hashes,
             inputs.supplied(knowledge.as_ref()),
             keep,
+            inputs.view_caps,
         )
         .map_err(|error| error.to_string())?
     };
@@ -7928,7 +7933,26 @@ async fn export_spec<R: tauri::Runtime>(
 /// command that needs the graph meanwhile waits for the read alone.
 fn export_inputs(state: &AppState) -> Result<SpecInputs, String> {
     let review = curated::gather(state);
-    Ok(read_spec_locked(state)?.inputs(Some(&review)))
+    let mut inputs = read_spec_locked(state)?.inputs(Some(&review));
+    inputs.view_caps = spec_view_caps(state)?;
+    Ok(inputs)
+}
+
+/// The project's diagram view caps (#1653). A stored cap that no longer
+/// validates is an error, not the default.
+fn spec_view_caps(state: &AppState) -> Result<spec::SpecViewCaps, String> {
+    let settings = state.settings.lock().map_err(|error| error.to_string())?;
+    let cap = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+            .and_then(|value| usize::try_from(value).map_err(|error| error.to_string()))
+    };
+    Ok(spec::SpecViewCaps {
+        nodes: cap(operator_limits::SPEC_VIEW_MAX_NODES)?,
+        edges: cap(operator_limits::SPEC_VIEW_MAX_EDGES)?,
+        flows: cap(operator_limits::SPEC_VIEW_MAX_FLOWS)?,
+    })
 }
 
 fn export_spec_blocking(
@@ -8089,7 +8113,7 @@ async fn read_selected_flow_view(
             .filter(|record| record.decision == agents::AssertionDecision::Rejected)
             .map(|record| record.assertion.provenance.content_hash)
             .collect();
-        spec::compile_selected_flow_view(
+        spec::compile_selected_flow_view_capped(
             &nodes,
             &edges,
             &flows,
@@ -8097,6 +8121,7 @@ async fn read_selected_flow_view(
             &rejected,
             &trigger,
             &content_id,
+            spec_view_caps(&state)?,
         )
     })
     .await

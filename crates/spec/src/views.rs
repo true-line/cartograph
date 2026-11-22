@@ -21,6 +21,30 @@ pub const SPEC_VIEW_MAX_EDGES: usize = 3000;
 /// Flow-count cap applied to the `flow-dossiers` diagram projection (#488, #591).
 pub const SPEC_VIEW_MAX_FLOWS: usize = 200;
 
+/// The per-view caps a compilation applies (#1653). The default is the
+/// historical `SPEC_VIEW_MAX_*` caps; an operator may choose others. The
+/// caps bound only the projection sent for rendering: artifact identity,
+/// `content_id`, and the reported totals never depend on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecViewCaps {
+    /// Nodes kept per view.
+    pub nodes: usize,
+    /// Edges kept per view, among those between kept nodes.
+    pub edges: usize,
+    /// Flows kept in the flow view.
+    pub flows: usize,
+}
+
+impl Default for SpecViewCaps {
+    fn default() -> Self {
+        Self {
+            nodes: SPEC_VIEW_MAX_NODES,
+            edges: SPEC_VIEW_MAX_EDGES,
+            flows: SPEC_VIEW_MAX_FLOWS,
+        }
+    }
+}
+
 /// Observed deployment or runtime backing attached to an infrastructure
 /// `Resource` node (US-0036, AC-0246, AC-0247).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +75,7 @@ pub struct SpecDiagramView {
     pub mode: ExportMode,
     /// Structured graph nodes in this view projection, carrying provenance and props.
     pub nodes: Vec<Node>,
-    /// Total node count in this view projection before `SPEC_VIEW_MAX_NODES` truncation.
+    /// Total node count in this view projection before the node cap ([`SpecViewCaps`]).
     pub nodes_total: usize,
     /// Structured graph edges in this view projection, carrying provenance and props.
     pub edges: Vec<Edge>,
@@ -60,7 +84,7 @@ pub struct SpecDiagramView {
     /// Projected flows with R-INT-4/R-INT-5 hop projection applied (populated for `flow-dossiers`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flows: Vec<Flow>,
-    /// Total flow count in this view projection before `SPEC_VIEW_MAX_FLOWS` truncation.
+    /// Total flow count in this view projection before the flow cap ([`SpecViewCaps`]).
     pub flows_total: usize,
     /// Deployment roles keyed by resource node id (populated when T1 state/deployment facts exist).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -278,12 +302,13 @@ fn bounded_diagram_view(
     mut edges: Vec<Edge>,
     mut flows: Vec<Flow>,
     include_deployments: bool,
+    caps: SpecViewCaps,
 ) -> SpecDiagramView {
     let nodes_total = nodes.len();
     let edges_total = edges.len();
     let flows_total = flows.len();
 
-    nodes.truncate(SPEC_VIEW_MAX_NODES);
+    nodes.truncate(caps.nodes);
     let retained_node_ids: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
     let deployments = if include_deployments {
         nodes
@@ -298,8 +323,8 @@ fn bounded_diagram_view(
         retained_node_ids.contains(edge.src.as_str())
             && retained_node_ids.contains(edge.dst.as_str())
     });
-    edges.truncate(SPEC_VIEW_MAX_EDGES);
-    flows.truncate(SPEC_VIEW_MAX_FLOWS);
+    edges.truncate(caps.edges);
+    flows.truncate(caps.flows);
 
     let truncated =
         nodes.len() < nodes_total || edges.len() < edges_total || flows.len() < flows_total;
@@ -335,6 +360,7 @@ fn flow_diagram_view(
     by_id: &BTreeMap<&str, &Node>,
     filtered_edges: &[&Edge],
     flows: &[Flow],
+    caps: SpecViewCaps,
 ) -> SpecDiagramView {
     // 2. Flow + infrastructure roles view: all projected flows, their hop
     // participants, and any infrastructure Resource nodes + BACKS/TRIGGERS/ROUTES
@@ -342,7 +368,7 @@ fn flow_diagram_view(
     // Participants come only from the flows the view keeps, in flow order, so
     // a later node/edge cap drops whole trailing flows' context rather than
     // arbitrary participants of retained flows.
-    let retained_flows = &flows[..flows.len().min(SPEC_VIEW_MAX_FLOWS)];
+    let retained_flows = &flows[..flows.len().min(caps.flows)];
     let mut flow_nodes: Vec<Node> = Vec::new();
     let mut flow_node_ids: BTreeSet<String> = BTreeSet::new();
     let mut flow_edges: Vec<Edge> = Vec::new();
@@ -423,7 +449,15 @@ fn flow_diagram_view(
         }
     }
 
-    bounded_diagram_view(artifact, mode, flow_nodes, flow_edges, flows.to_vec(), true)
+    bounded_diagram_view(
+        artifact,
+        mode,
+        flow_nodes,
+        flow_edges,
+        flows.to_vec(),
+        true,
+        caps,
+    )
 }
 
 /// Compile one selected flow within existing diagram bounds, bound to the
@@ -436,6 +470,31 @@ pub fn compile_selected_flow_view(
     rejected_hashes: &BTreeSet<String>,
     trigger: &str,
     expected_content_id: &str,
+) -> Result<SpecDiagramView, String> {
+    compile_selected_flow_view_capped(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        trigger,
+        expected_content_id,
+        SpecViewCaps::default(),
+    )
+}
+
+/// [`compile_selected_flow_view`] within the operator's chosen view caps
+/// (#1653).
+#[allow(clippy::too_many_arguments)]
+pub fn compile_selected_flow_view_capped(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    trigger: &str,
+    expected_content_id: &str,
+    caps: SpecViewCaps,
 ) -> Result<SpecDiagramView, String> {
     let projection = selected::project(nodes, edges, flows, mode, rejected_hashes, None)
         .map_err(|error| format!("flow projection failed: {error:?}"))?;
@@ -467,6 +526,7 @@ pub fn compile_selected_flow_view(
         &by_id,
         &filtered_edges,
         std::slice::from_ref(selected_flow),
+        caps,
     ))
 }
 
@@ -572,7 +632,32 @@ pub fn try_compile_spec_with_views_supplied_kept<A>(
     mode: ExportMode,
     rejected_hashes: &BTreeSet<String>,
     supplied: crate::Supplied<'_>,
+    keep: impl FnMut(SpecArtifact) -> A,
+) -> Result<(SpecBundle<A>, SpecViewBundle), crate::FactIndexError> {
+    try_compile_spec_with_views_supplied_kept_capped(
+        nodes,
+        edges,
+        flows,
+        mode,
+        rejected_hashes,
+        supplied,
+        keep,
+        SpecViewCaps::default(),
+    )
+}
+
+/// [`try_compile_spec_with_views_supplied_kept`] within the operator's
+/// chosen view caps (#1653). The bundle is identical for every caps value.
+#[allow(clippy::too_many_arguments)]
+pub fn try_compile_spec_with_views_supplied_kept_capped<A>(
+    nodes: &[Node],
+    edges: &[Edge],
+    flows: &[Flow],
+    mode: ExportMode,
+    rejected_hashes: &BTreeSet<String>,
+    supplied: crate::Supplied<'_>,
     mut keep: impl FnMut(SpecArtifact) -> A,
+    caps: SpecViewCaps,
 ) -> Result<(SpecBundle<A>, SpecViewBundle), crate::FactIndexError> {
     // As every compile under test does, read a compacted base (#2215).
     #[cfg(test)]
@@ -729,6 +814,7 @@ pub fn try_compile_spec_with_views_supplied_kept<A>(
             topology_edges,
             Vec::new(),
             true,
+            caps,
         ),
         flows: flow_diagram_view(
             flow_artifact,
@@ -736,6 +822,7 @@ pub fn try_compile_spec_with_views_supplied_kept<A>(
             &by_id,
             &filtered_edges,
             &projection.flows,
+            caps,
         ),
         data_model: bounded_diagram_view(
             data_artifact,
@@ -744,6 +831,7 @@ pub fn try_compile_spec_with_views_supplied_kept<A>(
             data_edges,
             Vec::new(),
             false,
+            caps,
         ),
         architecture,
     };
@@ -1436,6 +1524,103 @@ mod tests {
                 .expect("synthetic participant node");
             assert_eq!(node.label, "Unknown");
         }
+    }
+
+    // AC-1419 (#1653): an operator's view caps bound only the projection
+    // sent for rendering. Smaller caps truncate the topology view, the
+    // totals and content identity stay the same, and the bundle is
+    // byte-identical whatever the caps.
+    #[test]
+    fn view_caps_bound_only_the_rendered_projection() {
+        let (nodes, edges, flows) = fixture();
+        let compile = |caps: SpecViewCaps| {
+            try_compile_spec_with_views_supplied_kept_capped(
+                &nodes,
+                &edges,
+                &flows,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                crate::Supplied {
+                    knowledge: None,
+                    coverage: &[],
+                    stale_coverage: &[],
+                    curated: crate::Curated::NotSupplied,
+                    graph_content_hash: None,
+                    source_revisions: None,
+                    repo_names: &[],
+                },
+                |artifact| artifact,
+                caps,
+            )
+            .unwrap()
+        };
+        let (bundle, views) = compile(SpecViewCaps::default());
+        assert!(
+            views.topology.nodes.len() > 1,
+            "fixture needs two topology nodes"
+        );
+        let tight = SpecViewCaps {
+            nodes: 1,
+            edges: 1,
+            flows: 1,
+        };
+        let (tight_bundle, tight_views) = compile(tight);
+        assert_eq!(
+            serde_json::to_value(&bundle).unwrap(),
+            serde_json::to_value(&tight_bundle).unwrap()
+        );
+        assert_eq!(tight_views.topology.nodes.len(), 1);
+        assert!(tight_views.topology.truncated);
+        assert_eq!(tight_views.topology.nodes_total, views.topology.nodes_total);
+        assert_eq!(tight_views.topology.content_id, views.topology.content_id);
+        assert!(tight_views.flows.flows.len() <= 1);
+        assert_eq!(tight_views.flows.flows_total, views.flows.flows_total);
+        // The flow cap also selects whose participants the flow view draws:
+        // with a hop-less flow sorted first, capping at one flow draws what
+        // that flow alone draws, not the later flow's participants.
+        let mut padding = flows[0].clone();
+        padding.trigger = "ep:AAA-padding:0000".into();
+        padding.trigger_name = "Padding".into();
+        padding.hops.clear();
+        let two_flows = vec![padding.clone(), flows[0].clone()];
+        let one_flow = SpecViewCaps {
+            flows: 1,
+            ..SpecViewCaps::default()
+        };
+        let compile_flows = |input: &[Flow]| {
+            try_compile_spec_with_views_supplied_kept_capped(
+                &nodes,
+                &edges,
+                input,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                crate::Supplied {
+                    knowledge: None,
+                    coverage: &[],
+                    stale_coverage: &[],
+                    curated: crate::Curated::NotSupplied,
+                    graph_content_hash: None,
+                    source_revisions: None,
+                    repo_names: &[],
+                },
+                |artifact| artifact,
+                one_flow,
+            )
+            .unwrap()
+            .1
+        };
+        let capped = compile_flows(&two_flows);
+        let only_first = compile_flows(std::slice::from_ref(&padding));
+        assert_eq!(capped.flows.flows.len(), 1);
+        assert_eq!(capped.flows.flows[0].trigger, padding.trigger);
+        let ids = |view: &SpecDiagramView| -> Vec<String> {
+            view.nodes.iter().map(|node| node.id.clone()).collect()
+        };
+        assert_eq!(ids(&capped.flows), ids(&only_first.flows));
+        assert_eq!(
+            serde_json::to_value(&capped.flows.edges).unwrap(),
+            serde_json::to_value(&only_first.flows.edges).unwrap()
+        );
     }
 
     // AC-0246 (T-0246): compile_spec_with_views produces both the SpecBundle and
