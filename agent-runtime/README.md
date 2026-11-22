@@ -3,7 +3,10 @@
 One process per investigation run, started, fed and stopped by the desktop
 host. It runs the agent harness loop and nothing else:
 
-- **Pi** (`@mariozechner/pi-agent-core`, MIT) for local Ollama models.
+- **Pi** (`@mariozechner/pi-agent-core`, MIT) for local models: Ollama through
+  its native chat API (the frozen `num_ctx` on every request), or vLLM through
+  its OpenAI-compatible API (`backend: "vllm"`, the DGX Spark lane; the
+  server needs `--enable-auto-tool-choice` and a `--tool-call-parser`).
 - **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`, Anthropic commercial
   terms) for Claude.
 
@@ -23,7 +26,7 @@ diagnostics go to stderr. Types are in `src/protocol.ts`.
 | Direction | Message | Meaning |
 |-----------|---------|---------|
 | → host | `ready` | Process is up; names runtime and version. |
-| ← host | `start` | Lane (`pi` or `claude`), model, proxy URL and token, system and task prompt, the role's tools with JSON Schemas, declared hook points, turn cap. |
+| ← host | `start` | Lane (`pi` or `claude`), Pi backend (`ollama` or `vllm`), model, proxy URL and token, system and task prompt, the role's tools with JSON Schemas, declared hook points, turn cap. |
 | → host | `tool_call` | The model called a role tool; the host admits or refuses it. |
 | ← host | `tool_result` | Result text, or an error the model sees as a tool error; `terminal` when the host admitted a finish. |
 | → host | `hook` | A declared lifecycle point (`run_start`, `pre_tool`, `post_tool`, `stop`) reached in the harness. |
