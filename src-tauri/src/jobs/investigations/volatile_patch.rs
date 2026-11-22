@@ -80,7 +80,7 @@ impl StoredTask {
 /// Observation only, never admission authority. Unknown counts stay null.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FinishTelemetry {
+pub struct FinishTelemetry {
     pub finding_count: Option<usize>,
     pub flagged_count: Option<usize>,
     pub patched_count: Option<usize>,
@@ -341,7 +341,7 @@ pub(super) fn merge(
 }
 
 impl JobStore {
-    pub(crate) fn investigation_pending_patch(
+    pub fn investigation_pending_patch(
         &self,
         execution: &JobExecution,
         id: &str,
@@ -432,7 +432,7 @@ pub(super) fn validate_result_witness(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 
