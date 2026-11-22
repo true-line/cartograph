@@ -440,7 +440,7 @@ enum Evidence {
 mod logical;
 pub(super) mod schemas;
 pub(crate) use logical::logical_protocol_workspace_bytes;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;
 
 #[derive(Deserialize)]

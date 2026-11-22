@@ -162,7 +162,7 @@ fn preview_member<R: tauri::Runtime>(
     Ok((canonical.display().to_string(), report))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests {
     use super::{MemberPreflight, preflight_system_blocking};
     use tauri::Manager;

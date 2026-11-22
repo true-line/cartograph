@@ -3,11 +3,17 @@
 
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// A one-group test build (build.rs, #1924) leaves the other group's tests out,
+// so helpers only they use are unused there; the full build still lints them.
+#![cfg_attr(
+    any(app_test_group = "acceptance", app_test_group = "core"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 
 mod agent_pool;
 mod area_briefing;
 mod area_expert;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod conformance_tests;
 mod context;
 mod curated;
@@ -19,7 +25,7 @@ use app_store::escalation;
 use app_store::evidence;
 mod export_save;
 use app_store::findings;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod graph_projection_tests;
 mod investigations;
 use app_store::job_execution;
@@ -32,7 +38,7 @@ mod manifest_draft;
 mod mcp_reads;
 use app_store::metrics;
 mod model_debug;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod name_unique_tests;
 use app_store::ingest_basis::{
     ActivePlugin, SystemRepo, coverage_config_hash, plugin_settings_root, source_revisions_of,
@@ -43,7 +49,7 @@ use app_store::operator_limits;
 use app_store::paths;
 #[path = "primary_source_commands.rs"]
 mod primary_source;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod primary_source_tests;
 mod projects;
 mod proposals;
@@ -51,15 +57,15 @@ mod provider_checks;
 use app_store::provider_credentials;
 #[cfg(test)]
 mod registered_source_tests;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod registry_tests;
 mod section_compose;
 mod section_review;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod semantic_cache_tests;
 mod semantic_evaluation;
 use app_store::settings;
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod showcase_tests;
 use app_store::source_access;
 use app_store::sources;
@@ -8742,7 +8748,7 @@ fn test_source_registry(
     Arc::new(Mutex::new(registry))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests {
     use super::test_source_registry;
     use core_graph::{Edge, GraphStore, Node, SqliteGraphStore};

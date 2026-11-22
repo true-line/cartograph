@@ -703,8 +703,8 @@ fn assemble_from_snapshot(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod completion_tests;

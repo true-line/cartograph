@@ -177,7 +177,14 @@ groups (`adapters` and `ingest` name their packages, `core` runs the rest of
 the workspace, so a new crate lands there), "Rust agents & spec
 tests" runs `cargo test -p agents -p spec`, and six "Rust app tests" shards run the `app`
 test binary through `scripts/rust-test-shard.mjs`, which fails a shard whose
-run does not account for exactly the tests it selected. The shards split the
+run does not account for exactly the tests it selected. The app tests form two
+groups in `scripts/app-test-groups.json` (`acceptance`, the worker acceptance
+harness, and `core`, the rest), and each group's shards build the binary with
+`APP_TEST_GROUP` set so `src-tauri/build.rs` leaves the other group's large
+test modules out (`#[cfg(all(test, not(app_test_group = "...")))]`); a plain
+`cargo test` still builds every test. A new top-level test module needs its
+`<module>::` prefix in that file, or every shard fails, and the "App test
+coverage" job fails unless each test ran in exactly one shard. The shards split the
 tests by the measured seconds in `scripts/rust-test-weights.json` (the script's
 header says how to regenerate it); keep each slow replay scenario its own test,
 since one test can't be split across shards. The app crate itself compiles

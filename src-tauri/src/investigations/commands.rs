@@ -832,7 +832,7 @@ pub(crate) async fn read_investigation_citation(
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod staged_tests {
     use super::*;
 
@@ -964,7 +964,7 @@ mod staged_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod policy_catalog_tests {
     use super::*;
 
@@ -1285,7 +1285,7 @@ mod policy_catalog_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "commands/activation_tests.rs"]
 mod activation_tests;
 

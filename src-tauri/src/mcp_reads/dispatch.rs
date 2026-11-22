@@ -550,5 +550,5 @@ pub(super) fn tool_descriptor(tool: ReadTool) -> Value {
     json!({"name":tool.name(),"description":description,"inputSchema":input_schema,"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;

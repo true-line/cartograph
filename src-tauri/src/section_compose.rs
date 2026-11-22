@@ -1101,6 +1101,6 @@ fn left_out_stage(outcomes: &[&ComposeOutcome]) -> String {
     stage
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "section_compose_tests.rs"]
 pub(crate) mod tests;

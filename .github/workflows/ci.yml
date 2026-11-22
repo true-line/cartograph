@@ -643,9 +643,13 @@ jobs:
   # 4-vCPU runner (#1924). Its tests are split across parallel shards, each a
   # plain libtest run, so no test executes differently; the shard script fails
   # when the tests libtest accounts for differ from the shard's selection.
-  # Hosted runners are separate machines, so no heavy-build slot is taken.
+  # The tests form two groups (scripts/app-test-groups.json): a group's shards
+  # build the binary without the other group's test modules, which halves the
+  # acceptance shards' compile, and app-test-coverage checks that every test
+  # ran in exactly one shard. Hosted runners are separate machines, so no
+  # heavy-build slot is taken.
   rust-app-tests:
-    name: Rust app tests (${{ matrix.shard }}/6)
+    name: Rust app tests (${{ matrix.group }} ${{ matrix.shard }}/${{ matrix.shards }})
     needs: [policy, merge-evidence, preflight-evidence, ci-image]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
@@ -677,8 +681,27 @@ jobs:
     strategy:
       # Every shard reports, so one failure does not hide another shard's.
       fail-fast: false
+      # Shard counts match scripts/app-test-groups.json.
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        include:
+          - group: acceptance
+            shard: 1
+            shards: 2
+          - group: acceptance
+            shard: 2
+            shards: 2
+          - group: core
+            shard: 1
+            shards: 4
+          - group: core
+            shard: 2
+            shards: 4
+          - group: core
+            shard: 3
+            shards: 4
+          - group: core
+            shard: 4
+            shards: 4
     # Line tables only, as in the Rust lane (#1924).
     env:
       CARGO_BUILD_JOBS: 6
@@ -699,13 +722,13 @@ jobs:
       - name: Use a fixed cargo home
         run: echo "CARGO_HOME=$HOME/.cargo-ci" >> "$GITHUB_ENV"
 
-      # The shards build the same binary, so they share one cache entry and
-      # only the first shard writes it.
+      # The shards build the same dependencies, so they share one cache entry
+      # and only the first core shard writes it.
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: app-tests
-          save-if: ${{ matrix.shard == 1 }}
+          save-if: ${{ matrix.group == 'core' && matrix.shard == 1 }}
 
       # As in the Rust lane.
       - name: Install sccache
@@ -751,14 +774,16 @@ jobs:
       # and recompiles only what the pull request changed. rustc keys its
       # state on the crate's content, so a stale entry costs time, not
       # correctness; a new toolchain or Cargo.lock starts a new prefix.
+      # Each test group compiles a different app crate, so each has its own.
       - name: Name the app incremental cache
         id: incremental
         env:
+          GROUP: ${{ matrix.group }}
           LOCK_HASH: ${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
         run: |
           echo "APP_INCREMENTAL_DIR=$RUNNER_TEMP/app-incremental" >> "$GITHUB_ENV"
-          echo "prefix=app-incremental-$LOCK_HASH-" >> "$GITHUB_OUTPUT"
-          echo "key=app-incremental-$LOCK_HASH-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+          echo "prefix=app-incremental-$GROUP-$LOCK_HASH-" >> "$GITHUB_OUTPUT"
+          echo "key=app-incremental-$GROUP-$LOCK_HASH-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the app incremental cache
         id: restore
@@ -774,19 +799,32 @@ jobs:
       - name: Placeholder frontend dist
         run: mkdir -p ui/dist
 
-      # The shard records each test's seconds for scripts/rust-test-weights.json.
+      # The shard records each test's seconds for scripts/rust-test-weights.json
+      # and the tests its build listed and it selected, for app-test-coverage.
       - name: Test
         env:
+          GROUP: ${{ matrix.group }}
           SHARD: ${{ matrix.shard }}
-          SHARD_TIMES_FILE: ${{ runner.temp }}/app-test-times-${{ matrix.shard }}.json
-        run: node scripts/rust-test-shard.mjs "$SHARD/6" -- -p app --bin app
+          SHARDS: ${{ matrix.shards }}
+          SHARD_TIMES_FILE: ${{ runner.temp }}/app-test-times-${{ matrix.group }}-${{ matrix.shard }}.json
+          SHARD_LIST_FILE: ${{ runner.temp }}/app-test-list-${{ matrix.group }}-${{ matrix.shard }}.json
+        run: node scripts/rust-test-shard.mjs "$SHARD/$SHARDS" --group "$GROUP" -- -p app --bin app
 
       - name: Keep the shard's test times
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: app-test-times-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/app-test-times-${{ matrix.shard }}.json
+          name: app-test-times-${{ matrix.group }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/app-test-times-${{ matrix.group }}-${{ matrix.shard }}.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Keep the shard's test list
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-test-list-${{ matrix.group }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/app-test-list-${{ matrix.group }}-${{ matrix.shard }}.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -794,9 +832,50 @@ jobs:
         if: ${{ !cancelled() }}
         run: '"$SCCACHE_PATH" --show-stats'
 
-  # Saves the app crate's incremental state from main for the shards (#1924).
+  # Every app test that either group's build listed ran in exactly one shard
+  # (#1924): a test module gated out of its own group, or left to both, fails
+  # here; a test that scripts/app-test-groups.json assigns to no group already
+  # failed its shards.
+  app-test-coverage:
+    name: App test coverage
+    needs: [policy, merge-evidence, preflight-evidence, rust-app-tests]
+    if: >-
+      !cancelled() && needs.policy.result == 'success' &&
+      ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
+      (needs.policy.outputs.run_post_merge == 'true' && needs.merge-evidence.outputs.validated != 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Collect the shards' test lists
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: app-test-list-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/app-test-lists
+          merge-multiple: true
+
+      - name: Every test ran in exactly one shard
+        env:
+          LISTS: ${{ runner.temp }}/app-test-lists
+        run: node scripts/rust-test-shard.mjs --verify-coverage "$LISTS"/*.json
+
+  # Saves the app crate's incremental state from main for the shards (#1924),
+  # one entry per test group.
   app-incremental:
-    name: App incremental cache
+    name: App incremental cache (${{ matrix.group }})
     needs: [policy, ci-image]
     # Main only: a pull request's cache is visible to that pull request alone.
     # !cancelled(): ci-image's skipped evidence needs would otherwise skip it.
@@ -824,6 +903,10 @@ jobs:
       packages: read
       pull-requests: read
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [acceptance, core]
     # Line tables only, as in the Rust lane (#1924).
     env:
       CARGO_BUILD_JOBS: 6
@@ -890,14 +973,16 @@ jobs:
       # and recompiles only what the pull request changed. rustc keys its
       # state on the crate's content, so a stale entry costs time, not
       # correctness; a new toolchain or Cargo.lock starts a new prefix.
+      # Each test group compiles a different app crate, so each has its own.
       - name: Name the app incremental cache
         id: incremental
         env:
+          GROUP: ${{ matrix.group }}
           LOCK_HASH: ${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
         run: |
           echo "APP_INCREMENTAL_DIR=$RUNNER_TEMP/app-incremental" >> "$GITHUB_ENV"
-          echo "prefix=app-incremental-$LOCK_HASH-" >> "$GITHUB_OUTPUT"
-          echo "key=app-incremental-$LOCK_HASH-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+          echo "prefix=app-incremental-$GROUP-$LOCK_HASH-" >> "$GITHUB_OUTPUT"
+          echo "key=app-incremental-$GROUP-$LOCK_HASH-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the app incremental cache
         id: restore
@@ -915,6 +1000,8 @@ jobs:
 
       - name: Build the app test binary
         if: steps.restore.outputs.cache-hit != 'true'
+        env:
+          APP_TEST_GROUP: ${{ matrix.group }}
         run: cargo test -p app --bin app --no-run
 
       # One entry an hour, so frequent merges do not crowd the other lanes'
@@ -926,22 +1013,26 @@ jobs:
           path: ${{ env.APP_INCREMENTAL_DIR }}
           key: ${{ steps.incremental.outputs.key }}
 
-      # Keep only the newest entry: each hour saves under a new key, and
-      # about 1 GB an hour would push the other lanes' caches out of the
-      # repository's budget.
+      # Keep only the group's newest entry: each hour saves under a new key,
+      # and about 1 GB an hour would push the other lanes' caches out of the
+      # repository's budget. Entries named before the groups go too.
       - name: Drop older app incremental caches
         if: steps.restore.outputs.cache-hit != 'true'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
           KEY: ${{ steps.incremental.outputs.key }}
+          GROUP: ${{ matrix.group }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const caches = await github.paginate(github.rest.actions.getActionsCacheList, {
               owner, repo, key: 'app-incremental-', per_page: 100,
             });
+            const mine = `app-incremental-${process.env.GROUP}-`;
+            const grouped = /^app-incremental-(?:acceptance|core)-/u;
             for (const cache of caches) {
-              if (cache.key.startsWith('app-incremental-') && cache.key !== process.env.KEY) {
+              const stale = cache.key.startsWith(mine) || (cache.key.startsWith('app-incremental-') && !grouped.test(cache.key));
+              if (stale && cache.key !== process.env.KEY) {
                 await github.rest.actions.deleteActionsCacheById({ owner, repo, cache_id: cache.id });
                 core.info(`deleted ${cache.key}`);
               }
@@ -1355,7 +1446,7 @@ jobs:
 
   complete:
     name: Complete suite
-    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, rust-heavy-tests, rust-clippy, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
+    needs: [policy, merge-evidence, preflight-evidence, ci-image, docs, rust, rust-app-tests, app-test-coverage, rust-heavy-tests, rust-clippy, windows-job-ownership, compliance, zizmor, frontend, codeql, workflow-runtime]
     if: >-
       !cancelled() && needs.policy.result == 'success' &&
       ((needs.policy.outputs.run_full == 'true' && needs.preflight-evidence.outputs.validated != 'true') ||
@@ -1369,6 +1460,7 @@ jobs:
           CI_IMAGE: ${{ needs.ci-image.result }}
           RUST: ${{ needs.rust.result }}
           RUST_APP_TESTS: ${{ needs.rust-app-tests.result }}
+          APP_TEST_COVERAGE: ${{ needs.app-test-coverage.result }}
           RUST_HEAVY_TESTS: ${{ needs.rust-heavy-tests.result }}
           RUST_CLIPPY: ${{ needs.rust-clippy.result }}
           WINDOWS_JOB_OWNERSHIP: ${{ needs.windows-job-ownership.result }}
@@ -1382,6 +1474,7 @@ jobs:
           test "$CI_IMAGE" = success
           test "$RUST" = success
           test "$RUST_APP_TESTS" = success
+          test "$APP_TEST_COVERAGE" = success
           test "$RUST_HEAVY_TESTS" = success
           test "$RUST_CLIPPY" = success
           test "$WINDOWS_JOB_OWNERSHIP" = success

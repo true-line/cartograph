@@ -1,0 +1,52 @@
+{
+  "$comment": "App unit-test groups (#1924). Each group's CI shards build only its tests (APP_TEST_GROUP, src-tauri/build.rs) and run the tests assigned here; a test belongs to the group with its longest matching name prefix. A test no prefix covers fails every shard: add its top-level module here.",
+  "groups": {
+    "acceptance": {
+      "shards": 2,
+      "prefixes": [
+        "investigations::worker::tests::acceptance::"
+      ]
+    },
+    "core": {
+      "shards": 4,
+      "prefixes": [
+        "agent_pool::",
+        "area_briefing::",
+        "area_expert::",
+        "conformance_tests::",
+        "context::",
+        "curated::",
+        "curated_workbench::",
+        "drop_intake::",
+        "export_save::",
+        "graph_projection_tests::",
+        "investigations::",
+        "job_execution_host_tests::",
+        "knowledge_phase::",
+        "local_commit::",
+        "manifest_draft::",
+        "mcp_reads::",
+        "model_debug::",
+        "name_unique_tests::",
+        "pipeline_activity::",
+        "primary_source_tests::",
+        "projects::",
+        "proposals::",
+        "provider_checks::",
+        "registered_source_tests::",
+        "registry_tests::",
+        "section_compose::",
+        "section_review::",
+        "semantic_cache_tests::",
+        "semantic_evaluation::",
+        "showcase_tests::",
+        "spec_bundle_file::",
+        "system_preflight::",
+        "task_evidence::",
+        "test_app::",
+        "tests::",
+        "work_packets::"
+      ]
+    }
+  }
+}

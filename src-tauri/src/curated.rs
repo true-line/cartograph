@@ -875,14 +875,14 @@ pub(crate) fn read_graph_compacted(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "curated_drafts_tests.rs"]
 mod drafts_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "curated_findings_tests.rs"]
 mod findings_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "curated_finding_reads_tests.rs"]
 mod finding_reads_tests;

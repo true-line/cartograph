@@ -466,5 +466,5 @@ pub(crate) fn prepare(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;
