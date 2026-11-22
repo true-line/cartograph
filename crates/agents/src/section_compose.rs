@@ -282,11 +282,37 @@ pub fn action(input: &ComposeInput<'_>, action_id: String) -> CompletionAction {
         .iter()
         .map(|fact| fact.citation_id.clone())
         .collect();
+    action_with_schema(input, action_id, response_schema(&citable))
+}
+
+/// The completion action of a composition whose schema does not list the
+/// citable ids (#2399): each citation id is a string, and [`decode`] still
+/// leaves out a claim citing an id that is not citable. For a request whose
+/// listed ids would leave no room under its input ceiling, since the prompt
+/// already prints every citable id.
+pub fn action_unlisted(input: &ComposeInput<'_>, action_id: String) -> CompletionAction {
+    action_with_schema(input, action_id, unlisted_response_schema())
+}
+
+/// [`response_schema`] with each citation id any string.
+pub fn unlisted_response_schema() -> String {
+    let mut schema: serde_json::Value =
+        serde_json::from_str(&response_schema(&BTreeSet::new())).expect("schema is JSON");
+    schema["properties"]["claims"]["items"]["properties"]["citation_ids"]["items"] =
+        serde_json::json!({"type": "string"});
+    schema.to_string()
+}
+
+fn action_with_schema(
+    input: &ComposeInput<'_>,
+    action_id: String,
+    schema: String,
+) -> CompletionAction {
     CompletionAction {
         action_id,
         tier: AnalysisTier::Agentic,
         payload: CompletionPayload {
-            response_schema: Some(response_schema(&citable)),
+            response_schema: Some(schema),
             system: SYSTEM.to_owned(),
             prompt: prompt(input),
             spans: Vec::new(),
