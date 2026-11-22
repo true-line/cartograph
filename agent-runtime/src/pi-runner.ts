@@ -1,6 +1,7 @@
 // Local lane (ADR-0085 decision 9, AC-1423): Pi drives the loop against the
 // host's loopback proxy, which forwards to Ollama's native chat API so the
-// frozen context window (ADR-0081) is sent on every request.
+// frozen context window (ADR-0081) is sent on every request, or to vLLM's
+// OpenAI-compatible API (the DGX Spark lane), whose window is fixed at start.
 import { Agent, type AgentTool, type StreamFn } from "@mariozechner/pi-agent-core";
 import type { Model } from "@mariozechner/pi-ai";
 import type { HostChannel } from "./host.ts";
@@ -8,18 +9,37 @@ import { ollamaStreamFn } from "./ollama-stream.ts";
 import type { SidecarMessage, StartMessage } from "./protocol.ts";
 
 export function piModel(start: StartMessage): Model<"openai-completions"> {
-  return {
+  const base = {
     id: start.model,
     name: start.model,
-    api: "openai-completions",
-    provider: "ollama",
-    baseUrl: start.base_url,
-    reasoning: false,
-    input: ["text"],
+    api: "openai-completions" as const,
+    input: ["text" as const],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: start.context_window ?? 32768,
     maxTokens: start.max_output_tokens ?? 4096,
   };
+  if (start.backend === "vllm") {
+    // vLLM's OpenAI-compatible server (the DGX Spark lane). Tool calls need the
+    // server started with --enable-auto-tool-choice and a --tool-call-parser
+    // for the model. `reasoning` is on only so Pi sends
+    // chat_template_kwargs.enable_thinking=false while thinking is off.
+    return {
+      ...base,
+      provider: "vllm",
+      baseUrl: `${start.base_url.replace(/\/$/, "")}/v1`,
+      reasoning: true,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        supportsStrictMode: false,
+        maxTokensField: "max_tokens",
+        thinkingFormat: "qwen-chat-template",
+        requiresReasoningContentOnAssistantMessages: false,
+      },
+    };
+  }
+  return { ...base, provider: "ollama", baseUrl: start.base_url, reasoning: false };
 }
 
 /** Tools whose execution is entirely the host's. */
@@ -52,7 +72,11 @@ export async function runPi(
     // The proxy token, not a provider key: the host adds any real credential.
     getApiKey: () => start.token,
     toolExecution: "sequential",
-    streamFn: (streamFn ?? ollamaStreamFn(start.base_url, start.token, start.context_window)) as StreamFn,
+    // Ollama gets the native API so the frozen num_ctx travels; vLLM uses Pi's
+    // own OpenAI-compatible stream.
+    ...(streamFn || start.backend !== "vllm"
+      ? { streamFn: (streamFn ?? ollamaStreamFn(start.base_url, start.token, start.context_window)) as StreamFn }
+      : {}),
     beforeToolCall: async ({ toolCall, args }) => {
       const outcome = await host.hook("pre_tool", { tool: toolCall.name, arguments: args });
       return outcome.allow ? undefined : { block: true, reason: outcome.reason ?? "Denied by the run's pre_tool hook." };

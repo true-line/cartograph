@@ -31,7 +31,15 @@ export interface StartMessage {
   max_turns: number;
   context_window?: number;
   max_output_tokens?: number;
+  /**
+   * Pi lane only: the server behind the proxy. `ollama` (default) speaks the
+   * native chat API with `num_ctx`; `vllm` speaks the OpenAI-compatible API,
+   * whose context window is fixed at server start (`max_model_len`).
+   */
+  backend?: PiBackend;
 }
+
+export type PiBackend = "ollama" | "vllm";
 
 export interface ToolResultMessage {
   type: "tool_result";
@@ -130,6 +138,9 @@ function validateStart(value: Record<string, unknown>): StartMessage {
   for (const hook of hooks) {
     if (!HOOK_POINTS.includes(hook)) throw new Error(`hook point not exposed by this runtime: ${String(hook)}`);
   }
+  const backend = value.backend ?? "ollama";
+  if (backend !== "ollama" && backend !== "vllm") throw new Error("start.backend must be ollama or vllm");
+  if (value.backend !== undefined && value.lane !== "pi") throw new Error("start.backend applies to the pi lane only");
   const maxTurns = value.max_turns;
   if (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 256) {
     throw new Error("start.max_turns must be 1..256");
@@ -148,5 +159,6 @@ function validateStart(value: Record<string, unknown>): StartMessage {
     max_turns: maxTurns,
     context_window: typeof value.context_window === "number" ? value.context_window : undefined,
     max_output_tokens: typeof value.max_output_tokens === "number" ? value.max_output_tokens : undefined,
+    backend,
   };
 }
