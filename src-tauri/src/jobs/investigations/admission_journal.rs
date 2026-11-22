@@ -619,6 +619,9 @@ fn validate_publication_response(
                 max_bytes: read.max_bytes,
             })?
         }
+        // No host executes artifact reads yet (ADR-0089 step 2), so no
+        // stored publication can carry one.
+        InvestigationTool::ReadArtifact => return Err(InvestigationStoreError::Invalid),
         InvestigationTool::QueryContext => {
             let query = &after
                 .queries

@@ -644,6 +644,8 @@ impl InvestigationStopReason {
                         Rule::QueryShape => message!("query_shape"),
                         Rule::InventoryContext => message!("inventory_context"),
                         Rule::InventoryShape => message!("inventory_shape"),
+                        Rule::ArtifactContext => message!("artifact_context"),
+                        Rule::ArtifactShape => message!("artifact_shape"),
                         Rule::ReplayContext => message!("replay_context"),
                         Rule::ReplayReference => message!("replay_reference"),
                         Rule::EvidenceShape => message!("evidence_shape"),
