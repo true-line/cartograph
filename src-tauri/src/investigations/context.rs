@@ -929,6 +929,7 @@ impl FrozenContext {
             schema_version: 1,
             coverage: None,
             coverage_reads: vec![],
+            artifact_reads: vec![],
             graph_snapshot_id: graph_id,
             scope_snapshot_id: snapshot.id().into(),
             revision: 0,

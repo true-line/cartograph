@@ -14,6 +14,7 @@ pub(in crate::investigation) fn basis() -> (
     let snapshot = format!("context-v1:{}", "b".repeat(64));
     let ledger = InvestigationInputLedger {
         coverage_reads: vec![],
+        artifact_reads: vec![],
         schema_version: 1,
         coverage: None,
         graph_snapshot_id: snapshot.clone(),

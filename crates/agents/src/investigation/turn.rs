@@ -23,6 +23,7 @@ impl InvestigationQueryBudget {
             .iter()
             .map(|query| query.response_bytes)
             .chain(ledger.coverage_reads.iter().map(|read| read.response_bytes))
+            .chain(ledger.artifact_reads.iter().map(|read| read.response_bytes))
             .try_fold(0usize, |sum, bytes| {
                 sum.checked_add(bytes)
                     .ok_or(InvestigationError::LimitExceeded)
@@ -65,6 +66,7 @@ pub enum InvestigationTurnPhase {
     AfterQuery,
     AfterRead,
     AfterCoverageRead,
+    AfterArtifactRead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -74,6 +76,14 @@ pub enum InvestigationCompletedAction {
         read_index: usize,
         repo: String,
         inventory_hash: String,
+        response_bytes: usize,
+    },
+    ReadArtifact {
+        read_index: usize,
+        artifact_id: String,
+        content_id: String,
+        offset: usize,
+        next_offset: Option<usize>,
         response_bytes: usize,
     },
     QueryContext {
@@ -127,6 +137,7 @@ impl InvestigationTurnBasis {
             return if current.revision == 0
                 && self.completed_tool.is_none()
                 && current.coverage_reads.is_empty()
+                && current.artifact_reads.is_empty()
                 && current.queries.is_empty()
                 && current.citations.is_empty()
                 && current.selected_facts.is_empty()
@@ -145,6 +156,7 @@ impl InvestigationTurnBasis {
             || previous.supplied_history_hash != current.supplied_history_hash
             || previous.supplied_history_bytes != current.supplied_history_bytes
             || !current.coverage_reads.starts_with(&previous.coverage_reads)
+            || !current.artifact_reads.starts_with(&previous.artifact_reads)
             || !current.queries.starts_with(&previous.queries)
             || !current.citations.starts_with(&previous.citations)
             || !previous
@@ -162,6 +174,7 @@ impl InvestigationTurnBasis {
         let valid = match self.completed_tool {
             Some(InvestigationTool::QueryContext) => {
                 current.coverage_reads == previous.coverage_reads
+                    && current.artifact_reads == previous.artifact_reads
                     && current.queries.len() == previous.queries.len() + 1
                     && added.iter().all(|citation| {
                         matches!(citation.origin, InvestigationEvidenceOrigin::GraphMetadata)
@@ -169,6 +182,7 @@ impl InvestigationTurnBasis {
             }
             Some(InvestigationTool::ReadEvidence) => {
                 current.coverage_reads == previous.coverage_reads
+                    && current.artifact_reads == previous.artifact_reads
                     && current.queries == previous.queries
                     && current.selected_facts == previous.selected_facts
                     && added.len() == 1
@@ -177,6 +191,16 @@ impl InvestigationTurnBasis {
             Some(InvestigationTool::ReadCoverageInventory) => {
                 current.schema_version == 2
                     && current.coverage_reads.len() == previous.coverage_reads.len() + 1
+                    && current.artifact_reads == previous.artifact_reads
+                    && current.queries == previous.queries
+                    && current.selected_facts == previous.selected_facts
+                    && current.receipt_references == previous.receipt_references
+                    && current.citations == previous.citations
+            }
+            Some(InvestigationTool::ReadArtifact) => {
+                current.schema_version == 2
+                    && current.artifact_reads.len() == previous.artifact_reads.len() + 1
+                    && current.coverage_reads == previous.coverage_reads
                     && current.queries == previous.queries
                     && current.selected_facts == previous.selected_facts
                     && current.receipt_references == previous.receipt_references
@@ -229,6 +253,25 @@ impl InvestigationTurnBasis {
                         read_index,
                         repo: read.request.repo.clone(),
                         inventory_hash: read.request.inventory_hash.clone(),
+                        response_bytes: read.response_bytes,
+                    }),
+                )
+            }
+            Some(InvestigationTool::ReadArtifact) => {
+                let read_index = current
+                    .artifact_reads
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(InvestigationError::InvalidInput)?;
+                let read = &current.artifact_reads[read_index];
+                (
+                    InvestigationTurnPhase::AfterArtifactRead,
+                    Some(InvestigationCompletedAction::ReadArtifact {
+                        read_index,
+                        artifact_id: read.request.artifact_id.clone(),
+                        content_id: read.content_id.clone(),
+                        offset: read.request.offset,
+                        next_offset: read.next_offset,
                         response_bytes: read.response_bytes,
                     }),
                 )

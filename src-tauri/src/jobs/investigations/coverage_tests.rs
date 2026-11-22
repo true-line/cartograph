@@ -371,6 +371,7 @@ fn coverage_archive_first_input_transition_is_atomic_and_history_bound() {
     let original = archive(64, 1);
     let ledger = InvestigationInputLedger {
         coverage_reads: vec![],
+        artifact_reads: vec![],
         schema_version: 2,
         coverage: Some(original.proof().clone()),
         graph_snapshot_id: original.proof().snapshot_id.clone(),

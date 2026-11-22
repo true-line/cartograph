@@ -529,6 +529,7 @@ mod tests {
         let (archive, _) = fixture();
         let mut ledger = InvestigationInputLedger {
             coverage_reads: vec![],
+            artifact_reads: vec![],
             schema_version: 1,
             coverage: None,
             graph_snapshot_id: archive.proof.snapshot_id.clone(),
@@ -590,6 +591,7 @@ mod tests {
         let (archive, _) = fixture();
         let previous = InvestigationInputLedger {
             coverage_reads: vec![],
+            artifact_reads: vec![],
             schema_version: 2,
             coverage: Some(archive.proof.clone()),
             graph_snapshot_id: archive.proof.snapshot_id.clone(),
@@ -650,3 +652,7 @@ mod tests {
 #[cfg(test)]
 #[path = "coverage_detail_tests.rs"]
 mod detail_tests;
+
+#[cfg(test)]
+#[path = "artifact_read_ledger_tests.rs"]
+mod artifact_read_tests;

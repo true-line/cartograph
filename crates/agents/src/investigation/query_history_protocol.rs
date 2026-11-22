@@ -29,6 +29,8 @@ pub enum ActionSemanticRule {
     QueryShape,
     InventoryContext,
     InventoryShape,
+    ArtifactContext,
+    ArtifactShape,
     ReplayContext,
     ReplayReference,
     EvidenceShape,

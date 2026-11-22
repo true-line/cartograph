@@ -44,6 +44,7 @@ fn initial() -> InvestigationInputLedger {
     .unwrap();
     InvestigationInputLedger {
         coverage_reads: vec![],
+        artifact_reads: vec![],
         schema_version: 2,
         coverage: Some(qualification.durable_proof(snapshot.id()).unwrap()),
         graph_snapshot_id: snapshot.id().into(),

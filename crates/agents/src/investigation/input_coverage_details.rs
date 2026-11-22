@@ -18,7 +18,11 @@ impl InvestigationInput {
             .coverage
             .as_ref()
             .ok_or(InvestigationError::InvalidInput)?;
-        if raw_details.len() != self.ledger.coverage_reads.len() {
+        // Artifact pages are supplied by ADR-0089 step 2. Until then a ledger
+        // that names one cannot become a prompt, so no page is dropped.
+        if raw_details.len() != self.ledger.coverage_reads.len()
+            || !self.ledger.artifact_reads.is_empty()
+        {
             return Err(InvestigationError::InvalidInput);
         }
         let mut details = Vec::with_capacity(raw_details.len());

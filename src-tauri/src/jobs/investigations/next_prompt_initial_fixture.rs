@@ -70,6 +70,7 @@ pub(in crate::jobs::investigations) fn initial_fixture_with_configured_request(
         schema_version: 2,
         coverage: Some(proof.clone()),
         coverage_reads: vec![],
+        artifact_reads: vec![],
         graph_snapshot_id: proof.snapshot_id.clone(),
         scope_snapshot_id: proof.snapshot_id,
         revision: 0,

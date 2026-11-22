@@ -86,6 +86,7 @@ pub(crate) fn workspace_bytes(
         schema_version: 2,
         coverage: None,
         coverage_reads: vec![],
+        artifact_reads: vec![],
         graph_snapshot_id: format!("context-v1:{}", "0".repeat(64)),
         scope_snapshot_id: format!("context-v1:{}", "0".repeat(64)),
         revision: 0,

@@ -312,7 +312,11 @@ impl InvestigationDisclosure {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        if self.coverage_details.len() != ledger.coverage_reads.len() {
+        // Artifact pages are not disclosed until their supply lands
+        // (ADR-0089 step 2), so a disclosure never omits one silently.
+        if self.coverage_details.len() != ledger.coverage_reads.len()
+            || !ledger.artifact_reads.is_empty()
+        {
             return Err(InvestigationError::InvalidInput);
         }
         for (index, (entry, read)) in self

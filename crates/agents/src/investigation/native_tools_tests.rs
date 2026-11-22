@@ -13,6 +13,7 @@ fn ledger() -> InvestigationInputLedger {
         schema_version: 2,
         coverage: None,
         coverage_reads: vec![],
+        artifact_reads: vec![],
         graph_snapshot_id: "graph:fixture".into(),
         scope_snapshot_id: "scope:fixture".into(),
         revision: 0,
