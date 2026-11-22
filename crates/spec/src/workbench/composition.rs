@@ -310,7 +310,17 @@ pub fn rule_excerpt_within(document: &str, number: &str, bytes: usize) -> Option
 /// text, as the capability facts name them. Empty when `text` holds no
 /// excerpt.
 pub fn excerpt_rule_capabilities(text: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    excerpt_rules(text)
+        .into_iter()
+        .map(|(id, (capabilities, _))| (id, capabilities))
+        .collect()
+}
+
+/// Each rule of a [`rule_excerpt_within`] excerpt in `text` as (the
+/// capabilities it is listed under, the rule in domain terms), by citation
+/// id (#2419). Empty when `text` holds no excerpt.
+pub fn excerpt_rules(text: &str) -> BTreeMap<String, (BTreeSet<String>, String)> {
+    let mut found: BTreeMap<String, (BTreeSet<String>, String)> = BTreeMap::new();
     let Some(at) = text.find(RULE_EXCERPT_HEADING) else {
         return found;
     };
@@ -322,14 +332,14 @@ pub fn excerpt_rule_capabilities(text: &str) -> BTreeMap<String, BTreeSet<String
             continue;
         };
         let cells: Vec<&str> = cells.split(" | ").collect();
-        if let [capability, .., citation] = cells[..]
-            && cells.len() >= 3
+        if let [capability, rule, .., citation] = cells[..]
             && printed_ids(citation).len() == 1
             && citation.len() == 18
         {
             found
                 .entry(citation.to_owned())
-                .or_default()
+                .or_insert_with(|| (BTreeSet::new(), rule.to_owned()))
+                .0
                 .insert(plain_text(capability));
         }
     }
