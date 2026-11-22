@@ -2,7 +2,7 @@
 // stdio; each bounded step is one model call through the run's proxy, and the
 // model's next tool call comes back as the bounded loop's exact action bytes.
 use super::*;
-use crate::investigation::native_proxy::ProxyConfig;
+use crate::investigation::native_proxy::{CallLimits, ProxyConfig};
 use crate::investigation::response_schema::CHOICE;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -78,7 +78,7 @@ fn runtime(answers: Vec<Answer>, seen: Arc<Mutex<Vec<Value>>>) -> FakeLink {
             .build()
             .unwrap();
         for answer in answers {
-            let body = json!({"model": MODEL, "options": {"num_ctx": 32768}, "messages": messages});
+            let body = json!({"model": MODEL, "options": {"num_ctx": 32768, "num_predict": start["max_output_tokens"]}, "messages": messages});
             let status = client
                 .post(&url)
                 .bearer_auth(&token)
@@ -185,7 +185,6 @@ fn harness(scripts: Vec<Vec<Answer>>) -> Harness {
     let config = SessionConfig {
         lane: RuntimeLane::Pi,
         max_turns: 12,
-        max_output_tokens: Some(2048),
         budget_bytes: 1 << 20,
     };
     let session = NativeSession::new(
@@ -215,6 +214,12 @@ fn payload(turn: u64) -> CompletionPayload {
     }
 }
 
+const LIMITS: CallLimits = CallLimits {
+    max_request_bytes: 1 << 20,
+    max_response_bytes: 1 << 20,
+    max_output_tokens: 2048,
+};
+
 fn soon() -> Instant {
     Instant::now() + Duration::from_secs(20)
 }
@@ -231,7 +236,10 @@ fn a_step_is_one_model_call_that_returns_the_next_tool_call() {
         recorded.lock().unwrap().push(bytes);
         true
     };
-    let first = h.session.step(&payload(1), soon(), &go, &record).unwrap();
+    let first = h
+        .session
+        .step(&payload(1), &LIMITS, soon(), &go, &record)
+        .unwrap();
     let action: Value = serde_json::from_str(&first.text).unwrap();
     assert_eq!(action["type"], "query_context");
     assert_eq!(action["context_id"], CONTEXT);
@@ -244,7 +252,10 @@ fn a_step_is_one_model_call_that_returns_the_next_tool_call() {
         "fake-agent",
         "the run names the runtime it ran on"
     );
-    let second = h.session.step(&payload(2), soon(), &go, &record).unwrap();
+    let second = h
+        .session
+        .step(&payload(2), &LIMITS, soon(), &go, &record)
+        .unwrap();
     assert_eq!(
         second.started, None,
         "the second step answers the last call"
@@ -271,8 +282,13 @@ fn a_step_is_one_model_call_that_returns_the_next_tool_call() {
 #[test]
 fn a_second_call_in_one_answer_is_refused_and_carried_in_the_next_request() {
     let mut h = harness(vec![vec![Answer::Calls(2), Answer::Calls(1)]]);
-    h.session.step(&payload(1), soon(), &go, &|_| true).unwrap();
-    let second = h.session.step(&payload(2), soon(), &go, &|_| true).unwrap();
+    h.session
+        .step(&payload(1), &LIMITS, soon(), &go, &|_| true)
+        .unwrap();
+    let second = h
+        .session
+        .step(&payload(2), &LIMITS, soon(), &go, &|_| true)
+        .unwrap();
     assert_eq!(second.started, None);
     assert_eq!(h.hits.load(Ordering::SeqCst), 2);
     let seen = h.seen.lock().unwrap();
@@ -285,10 +301,13 @@ fn a_second_call_in_one_answer_is_refused_and_carried_in_the_next_request() {
 fn an_answer_without_a_tool_call_fails_the_step_and_the_next_one_restarts() {
     let mut h = harness(vec![vec![Answer::Text], vec![Answer::Calls(1)]]);
     assert_eq!(
-        h.session.step(&payload(1), soon(), &go, &|_| true),
+        h.session.step(&payload(1), &LIMITS, soon(), &go, &|_| true),
         Err(answered(FailureCode::EmptyCompletion))
     );
-    let next = h.session.step(&payload(2), soon(), &go, &|_| true).unwrap();
+    let next = h
+        .session
+        .step(&payload(2), &LIMITS, soon(), &go, &|_| true)
+        .unwrap();
     assert_eq!(next.started, Some(StartReason::First));
     assert_eq!(h.spawns.load(Ordering::SeqCst), 2);
     assert_eq!(h.hits.load(Ordering::SeqCst), 2);
@@ -298,12 +317,19 @@ fn an_answer_without_a_tool_call_fails_the_step_and_the_next_one_restarts() {
 fn a_cancelled_or_unrecorded_step_sends_nothing() {
     let mut h = harness(vec![vec![Answer::Calls(1)], vec![Answer::Calls(1)]]);
     assert_eq!(
-        h.session
-            .step(&payload(1), soon(), &|| CallDirective::Cancelled, &|_| true),
+        h.session.step(
+            &payload(1),
+            &LIMITS,
+            soon(),
+            &|| CallDirective::Cancelled,
+            &|_| true
+        ),
         Err(not_sent(FailureCode::Cancelled))
     );
     assert_eq!(h.spawns.load(Ordering::SeqCst), 0);
-    let refused = h.session.step(&payload(1), soon(), &go, &|_| false);
+    let refused = h
+        .session
+        .step(&payload(1), &LIMITS, soon(), &go, &|_| false);
     assert_eq!(refused, Err(not_sent(FailureCode::EgressDenied)));
     assert_eq!(h.hits.load(Ordering::SeqCst), 0);
 }
@@ -343,4 +369,56 @@ fn a_process_link_speaks_one_json_object_per_line() {
         LinkPoll::Closed,
         "a line that is not a JSON object ends the link"
     );
+}
+
+#[test]
+fn control_is_checked_again_at_dispatch() {
+    let recorded = Cell::new(false);
+    let record = |_| {
+        recorded.set(true);
+        true
+    };
+    let stopped = Cell::new(None);
+    assert!(!guard_dispatch(
+        &|| CallDirective::OwnershipLost,
+        &record,
+        &stopped,
+        10
+    ));
+    assert_eq!(stopped.get(), Some(not_sent(FailureCode::OwnershipLost)));
+    assert!(!recorded.get(), "a lost run records and sends nothing");
+    let stopped = Cell::new(None);
+    assert!(guard_dispatch(&go, &record, &stopped, 10));
+    assert!(recorded.get());
+    assert_eq!(stopped.get(), None);
+    // A run that stops while waiting for the request also sends nothing.
+    let mut h = harness(vec![vec![Answer::Calls(1)]]);
+    let calls = Cell::new(0);
+    let lost = || {
+        calls.set(calls.get() + 1);
+        if calls.get() > 1 {
+            CallDirective::Cancelled
+        } else {
+            CallDirective::Continue
+        }
+    };
+    assert_eq!(
+        h.session
+            .step(&payload(1), &LIMITS, soon(), &lost, &|_| true),
+        Err(not_sent(FailureCode::Cancelled))
+    );
+    assert_eq!(h.hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_runtime_asks_for_the_steps_output_limit() {
+    let mut h = harness(vec![vec![Answer::Calls(1)]]);
+    let tight = CallLimits {
+        max_output_tokens: 512,
+        ..LIMITS
+    };
+    h.session
+        .step(&payload(1), &tight, soon(), &go, &|_| true)
+        .unwrap();
+    assert_eq!(h.hits.load(Ordering::SeqCst), 1);
 }
