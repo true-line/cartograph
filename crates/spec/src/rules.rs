@@ -154,6 +154,17 @@ fn definition_shape<'a>(
             f,
             "Logical {operator:?}; left {left}; right {right}; short-circuit syntax"
         ),
+        DefinitionExpressionKind::Call {
+            callee,
+            arguments,
+            dependency,
+        } => write!(
+            f,
+            "Call; callee {callee}; arguments {arguments:?}; dependency {dependency}; returned value unresolved"
+        ),
+        DefinitionExpressionKind::KeywordArgument { name, value } => {
+            write!(f, "Keyword argument; name {name}; value {value}")
+        }
         DefinitionExpressionKind::Unsupported { gap_id } => {
             write!(f, "Unsupported: {}", reference(gap_id, visible))
         }
@@ -408,6 +419,8 @@ fn render_observation(
         let polarity = match condition.polarity {
             BranchPolarity::TruthyBranch => "truthy branch",
             BranchPolarity::FalsyBranch => "falsy branch",
+            BranchPolarity::RaisedBranch => "raised branch",
+            BranchPolarity::UnraisedBranch => "not raised branch",
         };
         writeln!(
             output,

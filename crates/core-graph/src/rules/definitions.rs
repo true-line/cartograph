@@ -124,6 +124,22 @@ pub enum DefinitionExpressionKind {
         /// Right operand index.
         right: u32,
     },
+    /// A call, whose returned value remains explicitly unresolved (AC-1034).
+    Call {
+        /// Callee expression index.
+        callee: u32,
+        /// Argument expression indices, in source order.
+        arguments: Vec<u32>,
+        /// Index of the unresolved call-value prerequisite.
+        dependency: u32,
+    },
+    /// A named argument of a call (`code=api_code`), AC-1034.
+    KeywordArgument {
+        /// The argument's name, a property-name node.
+        name: u32,
+        /// The argument's value expression index.
+        value: u32,
+    },
     /// Explicitly unsupported source, never a silently truncated complete tree.
     Unsupported {
         /// An interpretation Gap explaining the unsupported source form.
@@ -550,9 +566,10 @@ fn arena(
         };
         let mut children = Vec::new();
         let syntax_ok = match &node.kind {
+            // Python spells numbers `integer` / `float` and null `none`.
             DefinitionExpressionKind::Literal => matches!(
                 node.expression.syntax_kind.as_str(),
-                "true" | "false" | "null" | "string" | "number"
+                "true" | "false" | "null" | "none" | "string" | "number" | "integer" | "float"
             ),
             DefinitionExpressionKind::Identifier { .. } => matches!(
                 node.expression.syntax_kind.as_str(),
@@ -563,12 +580,21 @@ fn arena(
                 "property_identifier" | "identifier"
             ),
             DefinitionExpressionKind::Member { computed, .. } => {
-                node.expression.syntax_kind
-                    == if *computed {
-                        "subscript_expression"
-                    } else {
-                        "member_expression"
-                    }
+                let kind = node.expression.syntax_kind.as_str();
+                if *computed {
+                    matches!(kind, "subscript_expression" | "subscript")
+                } else {
+                    matches!(kind, "member_expression" | "attribute")
+                }
+            }
+            DefinitionExpressionKind::Call { .. } => {
+                matches!(
+                    node.expression.syntax_kind.as_str(),
+                    "call" | "call_expression"
+                )
+            }
+            DefinitionExpressionKind::KeywordArgument { .. } => {
+                node.expression.syntax_kind == "keyword_argument"
             }
             DefinitionExpressionKind::Parenthesized { .. } => {
                 node.expression.syntax_kind == "parenthesized_expression"
@@ -591,16 +617,26 @@ fn arena(
                         KnownLiteral::Boolean(true) => node.expression.syntax_kind == "true",
                         KnownLiteral::Boolean(false) => node.expression.syntax_kind == "false",
                         KnownLiteral::String(_) => node.expression.syntax_kind == "string",
-                        KnownLiteral::Number(_) => node.expression.syntax_kind == "number",
-                        KnownLiteral::Null => node.expression.syntax_kind == "null",
+                        KnownLiteral::Number(_) => matches!(
+                            node.expression.syntax_kind.as_str(),
+                            "number" | "integer" | "float"
+                        ),
+                        KnownLiteral::Null => {
+                            matches!(node.expression.syntax_kind.as_str(), "null" | "none")
+                        }
                     },
                     Some(LiteralEvidence::Withheld { kind, .. }) => match kind {
                         LiteralKind::Boolean => {
                             matches!(node.expression.syntax_kind.as_str(), "true" | "false")
                         }
                         LiteralKind::String => node.expression.syntax_kind == "string",
-                        LiteralKind::Number => node.expression.syntax_kind == "number",
-                        LiteralKind::Null => node.expression.syntax_kind == "null",
+                        LiteralKind::Number => matches!(
+                            node.expression.syntax_kind.as_str(),
+                            "number" | "integer" | "float"
+                        ),
+                        LiteralKind::Null => {
+                            matches!(node.expression.syntax_kind.as_str(), "null" | "none")
+                        }
                     },
                     None => false,
                 };
@@ -639,6 +675,30 @@ fn arena(
                     return Err(invalid("property_kind"));
                 }
                 children.extend([*object, *property]);
+            }
+            DefinitionExpressionKind::Call {
+                callee,
+                arguments,
+                dependency: index,
+            } => {
+                if !matches!(
+                    dependency(*index)?.resolution,
+                    DependencyResolution::Unresolved { .. }
+                ) {
+                    return Err(invalid("call_value"));
+                }
+                children.push(*callee);
+                children.extend(arguments.iter().copied());
+            }
+            DefinitionExpressionKind::KeywordArgument { name, value } => {
+                let name_node = arena
+                    .nodes
+                    .get(*name as usize)
+                    .ok_or_else(|| invalid("property_index"))?;
+                if !matches!(name_node.kind, DefinitionExpressionKind::PropertyName) {
+                    return Err(invalid("property_kind"));
+                }
+                children.extend([*name, *value]);
             }
             DefinitionExpressionKind::Parenthesized { value } => children.push(*value),
             DefinitionExpressionKind::Unary { operand, .. } => children.push(*operand),
