@@ -25,16 +25,20 @@ pub enum AgentTool {
     ReplayQuery,
     /// Terminal findings or insufficient evidence.
     Finish,
+    /// The one correction of a refused finish: replace or withdraw only the
+    /// flagged findings.
+    FinishPatch,
 }
 
 impl AgentTool {
     /// Every tool, in vocabulary order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::QueryContext,
         Self::ReadCoverageInventory,
         Self::ReadEvidence,
         Self::ReplayQuery,
         Self::Finish,
+        Self::FinishPatch,
     ];
 
     /// Stable tool name, equal to the bounded action `type`.
@@ -45,6 +49,7 @@ impl AgentTool {
             Self::ReadEvidence => "read_evidence",
             Self::ReplayQuery => "replay_query",
             Self::Finish => "finish",
+            Self::FinishPatch => "finish_patch",
         }
     }
 
@@ -69,6 +74,9 @@ impl AgentTool {
             }
             Self::Finish => {
                 "End the investigation with findings that cite only citations acquired in this run, or with insufficient_evidence and explicit limitations. Refused until the run has read source evidence for any supported finding."
+            }
+            Self::FinishPatch => {
+                "Correct the refused finish once: replace or withdraw only the findings the feedback flagged, by finding_index. Other findings stay as finished."
             }
         }
     }
@@ -129,9 +137,16 @@ pub fn tool_definitions_from_schema(
         .get("$defs")
         .cloned()
         .unwrap_or(Value::Object(Map::new()));
-    let branches = schema["anyOf"]
-        .as_array()
-        .ok_or(InvestigationError::InvalidInput)?;
+    // A finish-patch step offers one bare action object instead of a choice.
+    let single = [schema.clone()];
+    let branches = match schema.get("anyOf") {
+        Some(branches) => branches
+            .as_array()
+            .ok_or(InvestigationError::InvalidInput)?
+            .as_slice(),
+        None if schema["properties"]["type"]["const"] == AgentTool::FinishPatch.name() => &single,
+        None => return Err(InvestigationError::InvalidInput),
+    };
     let mut tools = Vec::new();
     let mut finish = Vec::new();
     for branch in branches {
@@ -144,6 +159,11 @@ pub fn tool_definitions_from_schema(
                 .as_str()
                 .ok_or(InvestigationError::InvalidInput)?;
             finish.push(serde_json::json!({ "$ref": action }));
+            continue;
+        }
+        if let Some(values) = branch.get("enum") {
+            // Pending acquisition choices: one `enum` of concrete actions.
+            enum_tools(values, &mut tools)?;
             continue;
         }
         let name = branch["properties"]["type"]["const"]
@@ -190,6 +210,120 @@ pub fn tool_definitions_from_schema(
     Ok(tools)
 }
 
+/// Splits an `enum` of concrete acquisition actions (the choice schema while
+/// acquisition choices are pending) into one tool per action `type`, each
+/// accepting only its own exact actions. `type` and `context_id` are host
+/// fields as elsewhere, so a tool whose actions carry `context_id` needs them
+/// all to carry it. A type that already has a tool is refused, never merged.
+fn enum_tools(values: &Value, tools: &mut Vec<ToolDefinition>) -> Result<(), InvestigationError> {
+    let values = values.as_array().ok_or(InvestigationError::InvalidInput)?;
+    let mut groups: Vec<(AgentTool, Vec<Value>, Option<bool>)> = Vec::new();
+    for value in values {
+        let mut action = value
+            .as_object()
+            .cloned()
+            .ok_or(InvestigationError::InvalidInput)?;
+        let tool = action
+            .remove("type")
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(AgentTool::from_name)
+            .filter(|tool| *tool != AgentTool::Finish)
+            .ok_or(InvestigationError::InvalidInput)?;
+        let context = action.remove("context_id").is_some();
+        let index = match groups.iter().position(|(seen, _, _)| *seen == tool) {
+            Some(index) => index,
+            None => {
+                groups.push((tool, Vec::new(), None));
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[index];
+        if group.2.replace(context).is_some_and(|seen| seen != context) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        group.1.push(Value::Object(action));
+    }
+    for (tool, actions, context) in groups {
+        if tools.iter().any(|existing| existing.name == tool.name()) {
+            return Err(InvestigationError::InvalidInput);
+        }
+        tools.push(ToolDefinition {
+            name: tool.name(),
+            description: tool.description(),
+            input_schema: typed_choices(&actions),
+            host_context_id: context.unwrap_or(false),
+        });
+    }
+    Ok(())
+}
+
+/// An object schema whose properties list each field's offered values with
+/// their JSON type. Tool-call parsers type arguments from `properties`; a bare
+/// `enum` left a nested `query` as a JSON string (v0.75.0 smoke). Admission
+/// still accepts only an exact offered choice.
+fn typed_choices(actions: &[Value]) -> Value {
+    let mut fields: Vec<&str> = Vec::new();
+    for action in actions {
+        for field in action.as_object().into_iter().flat_map(Map::keys) {
+            if !fields.contains(&field.as_str()) {
+                fields.push(field);
+            }
+        }
+    }
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+    for field in fields {
+        let mut values: Vec<&Value> = Vec::new();
+        for value in actions.iter().filter_map(|action| action.get(field)) {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        let mut property = serde_json::json!({ "enum": values });
+        let kinds: std::collections::BTreeSet<_> = values.iter().map(|v| json_type(v)).collect();
+        if let [kind] = kinds.into_iter().collect::<Vec<_>>()[..] {
+            property["type"] = kind.into();
+        }
+        properties.insert(field.into(), property);
+        if actions.iter().all(|action| action.get(field).is_some()) {
+            required.push(field);
+        }
+    }
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// The declared JSON type of `field` in a tool's schema, through one local
+/// `$ref`.
+fn declared_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
+    let property = &schema["properties"][field];
+    let property = match property["$ref"]
+        .as_str()
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+    {
+        Some(name) => &schema["$defs"][name],
+        None => property,
+    };
+    property["type"].as_str()
+}
+
 /// Removes `type` and `context_id` from an object schema; reports whether
 /// `context_id` was present (and so must be injected by the host).
 fn strip_host_fields(schema: &mut Value) -> bool {
@@ -232,12 +366,27 @@ pub fn action_from_tool_call(
             "Do not send type or context_id; the host supplies them.",
         ));
     }
+    // Some tool-call parsers deliver an object or array argument as its JSON
+    // text. Decode it back only where the tool declares that type; the bounded
+    // decoder still validates the result.
+    let mut arguments = arguments.clone();
+    for (field, value) in arguments.iter_mut() {
+        let Value::String(text) = value else { continue };
+        let Some(kind @ ("object" | "array")) = declared_type(&tool.input_schema, field) else {
+            continue;
+        };
+        if let Ok(decoded) = serde_json::from_str::<Value>(text)
+            && json_type(&decoded) == kind
+        {
+            *value = decoded;
+        }
+    }
     let mut action = Map::new();
     action.insert("type".into(), Value::String(name.into()));
     if tool.host_context_id {
         action.insert("context_id".into(), Value::String(context_id.into()));
     }
-    action.extend(arguments.clone());
+    action.extend(arguments);
     let action = Value::Object(action);
     let value = if name == AgentTool::Finish.name() {
         let outcome = match action["knowledge_completeness"].as_str() {

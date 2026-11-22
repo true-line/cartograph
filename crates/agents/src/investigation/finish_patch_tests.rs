@@ -234,3 +234,23 @@ fn finish_patch_schema_uses_saved_indices_and_existing_finding_bounds() {
         ordinary["$defs"]["finding"]["properties"]["statement"]
     );
 }
+
+// AC-1420: a finish-patch step on a native tool runtime offers exactly one
+// finish_patch tool, and a call decodes to the bare patch action.
+#[test]
+fn finish_patch_step_becomes_one_native_tool() {
+    use crate::investigation::native_tools::{action_from_tool_call, tool_definitions_from_schema};
+    let saved = basis(&finish(), vec![0, 2]);
+    let ledger = crate::investigation::tests::ledger();
+    let tools = tool_definitions_from_schema(&saved.response_schema(&ledger).unwrap()).unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "finish_patch");
+    assert!(tools[0].input_schema["properties"].get("type").is_none());
+    assert!(tools[0].input_schema["$defs"]["finding"].is_object());
+    let arguments = json!({"patches": [{"finding_index": 2, "withdraw": true}]});
+    let action = action_from_tool_call(&tools, "finish_patch", &arguments, "ctx").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&action).unwrap(),
+        json!({"type": "finish_patch", "patches": [{"finding_index": 2, "withdraw": true}]})
+    );
+}

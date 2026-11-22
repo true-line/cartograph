@@ -570,6 +570,79 @@ fn gated_acquisition_schema_never_broadens_empty_pending_choices() {
     }
 }
 
+// AC-1420: the first choice step of a run with pending acquisition choices
+// (domain-analyst@29, D1-D3) offers each concrete choice as a native tool, and
+// a call to it yields exactly that choice. v0.75.0 refused this schema before
+// any model call (invalid_input).
+#[test]
+fn pending_acquisition_choices_become_native_tools() {
+    use super::super::native_tools::{action_from_tool_call, tool_definitions_from_schema};
+    let f = Fixture::new();
+    let ledger = f.empty();
+    let choices = f.derive(&ledger, &[]).unwrap();
+    assert!(!choices.entries().is_empty() && !choices.attempts_complete());
+    let wire = super::super::response_schema::select_acquisition(
+        staged_refusal::CompletionCallMode::Choice,
+        &choices,
+        &ledger,
+        &f.contract.request_hash,
+    )
+    .unwrap()
+    .unwrap();
+    let tools = tool_definitions_from_schema(&wire).unwrap();
+    assert_eq!(tools.last().unwrap().name, "finish");
+    // Admission narrows the same schema before dispatch: no finish while
+    // attempts are pending, and the choices stay tools.
+    let eligible = super::super::response_schema::select_eligible_acquisition(
+        Some(wire.clone()),
+        staged_refusal::CompletionCallMode::Choice,
+        &choices,
+        &ledger,
+    )
+    .unwrap()
+    .unwrap();
+    let narrowed = tool_definitions_from_schema(&eligible).unwrap();
+    assert!(!narrowed.is_empty() && narrowed.iter().all(|tool| tool.name != "finish"));
+    for choice in choices.entries() {
+        let expected = serde_json::to_value(&choice.action).unwrap();
+        let name = expected["type"].as_str().unwrap();
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.input_schema["additionalProperties"], false);
+        let mut arguments = expected.as_object().unwrap().clone();
+        arguments.remove("type");
+        let context = arguments
+            .remove("context_id")
+            .map(|id| id.as_str().unwrap().to_owned())
+            .unwrap_or_default();
+        for (field, value) in &arguments {
+            let property = &tool.input_schema["properties"][field];
+            assert!(property["enum"].as_array().unwrap().contains(value));
+            if value.is_object() {
+                assert_eq!(property["type"], "object", "{field} is typed");
+            }
+        }
+        let arguments = serde_json::Value::Object(arguments);
+        let action = action_from_tool_call(&tools, name, &arguments, &context).unwrap();
+        let action: serde_json::Value = serde_json::from_str(&action).unwrap();
+        assert_eq!(action, expected);
+        // A parser that sends an object argument as its JSON text still
+        // decodes to the same choice (glm-5.3-flash on vLLM, v0.75.0 smoke).
+        let stringified: serde_json::Map<_, _> = arguments
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(field, value)| match value {
+                serde_json::Value::Object(_) => (field.clone(), value.to_string().into()),
+                _ => (field.clone(), value.clone()),
+            })
+            .collect();
+        let action = action_from_tool_call(&tools, name, &stringified.into(), &context).unwrap();
+        let action: serde_json::Value = serde_json::from_str(&action).unwrap();
+        assert_eq!(action, expected);
+    }
+}
+
 // AC-0480: completed inventory/source obligations do not invent query history.
 #[test]
 fn completed_acquisitions_without_queries_do_not_offer_replay() {
@@ -1722,5 +1795,52 @@ fn auditor14_real_seven_target_correction_fits_both_slots() {
             actual = serde_json::to_string(&actual).unwrap();
             bound = serde_json::to_string(&bound).unwrap();
         }
+    }
+}
+
+// AC-1420: every choice-step schema the acquisition path produces converts to
+// native tools: pending choices, completed attempts with and without saved
+// queries (replay pairs), FinishOnly, and each eligibility-narrowed form.
+#[test]
+fn every_acquisition_schema_converts_to_native_tools() {
+    use super::super::native_tools::tool_definitions_from_schema;
+    use staged_refusal::CompletionCallMode::{Choice, FinishOnly};
+    let f = Fixture::new();
+    let mut schemas = Vec::new();
+    for ledger in [f.empty(), f.ledger.clone()] {
+        let pending = f.derive(&ledger, &[]).unwrap();
+        let mut complete = pending.clone();
+        complete.entries.clear();
+        complete.blocked.clear();
+        complete.deferred = 0;
+        for choices in [&pending, &complete] {
+            for mode in [Choice, FinishOnly] {
+                let wire = super::super::response_schema::select_acquisition(
+                    mode,
+                    choices,
+                    &ledger,
+                    &f.contract.request_hash,
+                )
+                .unwrap()
+                .unwrap();
+                let eligible = super::super::response_schema::select_eligible_acquisition(
+                    Some(wire.clone()),
+                    mode,
+                    choices,
+                    &ledger,
+                )
+                .unwrap()
+                .unwrap();
+                schemas.push(wire);
+                schemas.push(eligible);
+            }
+        }
+    }
+    assert!(schemas.iter().any(|s| s.contains("\"enum\"")));
+    assert!(schemas.iter().any(|s| s.contains("replay_query")));
+    for schema in &schemas {
+        let tools = tool_definitions_from_schema(schema)
+            .unwrap_or_else(|error| panic!("{error:?} for {schema}"));
+        assert!(!tools.is_empty(), "no tools for {schema}");
     }
 }
