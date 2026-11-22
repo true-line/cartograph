@@ -5,7 +5,7 @@ use crate::{AgentBroker, AgentCandidate, AgentEvidence, AgentTask, ProposalStore
 use core_prov::{ConfidenceTier, EvidenceRef};
 use serde_json::json;
 
-fn v1_task() -> AgentTask {
+pub(crate) fn v1_task() -> AgentTask {
     let evidence = |id: &str, path: &str, text: &str| AgentEvidence {
         id: id.into(),
         source: EvidenceRef {
@@ -37,7 +37,7 @@ fn v1_task() -> AgentTask {
     }
 }
 
-fn v1_record() -> StagedProposal {
+pub(crate) fn v1_record() -> StagedProposal {
     let task = v1_task();
     let broker = AgentBroker::bounded_default();
     let proposal = broker
@@ -74,7 +74,7 @@ fn v2_record() -> StagedProposal {
         .unwrap()
 }
 
-fn recovery() -> RecoveryBasis {
+pub(crate) fn recovery() -> RecoveryBasis {
     RecoveryBasis {
         job_id: 7,
         graph_snapshot_id: format!("context-v1:{}", "2".repeat(64)),
@@ -85,7 +85,7 @@ fn recovery() -> RecoveryBasis {
     }
 }
 
-fn present_slot() -> SlotReconciliation {
+pub(crate) fn present_slot() -> SlotReconciliation {
     SlotReconciliation {
         source: SlotPresence::Present,
         gap: GapPresence::Present,
@@ -112,7 +112,7 @@ fn origin(path: &str, len: usize) -> ReconciledOrigin {
     }
 }
 
-fn range<'a>(path: &str, digest: &'a str, bytes: &'a [u8]) -> RecapturedItem<'a> {
+pub(crate) fn range<'a>(path: &str, digest: &'a str, bytes: &'a [u8]) -> RecapturedItem<'a> {
     RecapturedItem::Range {
         origin: origin(path, bytes.len()),
         fact_digest: digest,
@@ -120,7 +120,7 @@ fn range<'a>(path: &str, digest: &'a str, bytes: &'a [u8]) -> RecapturedItem<'a>
     }
 }
 
-fn candidate(label: &str, summary: &str) -> RecapturedCandidate {
+pub(crate) fn candidate(label: &str, summary: &str) -> RecapturedCandidate {
     RecapturedCandidate::Present {
         label: label.into(),
         summary: summary.into(),
@@ -361,7 +361,7 @@ fn candidate_and_slot_outcomes() {
     );
 }
 
-fn derive_v1(
+pub(crate) fn derive_v1(
     evidence: Vec<RecapturedItem<'_>>,
     candidates: Vec<RecapturedCandidate>,
 ) -> ReconciliationResultV1 {
@@ -488,7 +488,7 @@ fn a_result_binds_only_its_own_record() {
     .unwrap_err();
 }
 
-fn result_v1() -> ReconciliationResultV1 {
+pub(crate) fn result_v1() -> ReconciliationResultV1 {
     derive_v1(
         vec![
             range("cart.ts", "", b"cart source text"),
@@ -559,4 +559,25 @@ fn every_accepted_result_still_decodes_with_its_id() {
     let stored = result.canonical_bytes().unwrap();
     assert!(stored.len() <= MAX_RESULT_BYTES);
     assert!(stored.len() > MAX_RESULT_BYTES - 61);
+}
+
+#[test]
+fn a_recovery_that_read_no_bytes_names_no_capture() {
+    // AC-1072: when every cited fact is gone, nothing was recaptured; the
+    // result still decodes, and a matched origin still needs its capture.
+    let result = ReconciliationResultV1::derive(
+        &v1_record(),
+        ReconciliationInput {
+            recovery: RecoveryBasis {
+                captures: Vec::new(),
+                ..recovery()
+            },
+            slot: present_slot(),
+            evidence: vec![RecapturedItem::FactAbsent, RecapturedItem::FactAbsent],
+            candidates: vec![RecapturedCandidate::Absent],
+        },
+    )
+    .unwrap();
+    assert_eq!(result.outcome, ReconciliationOutcome::Missing);
+    ReconciliationResultV1::decode(&result.canonical_bytes().unwrap()).unwrap();
 }

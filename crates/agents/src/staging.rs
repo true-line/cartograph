@@ -866,6 +866,7 @@ impl ProposalStore {
              BEFORE UPDATE OF sequence, proposal_id, immutable_json, created_at ON staged_agent_proposals
              BEGIN SELECT RAISE(ABORT, 'staged proposal content is immutable'); END;",
         )?;
+        conn.execute_batch(reconciliations::SCHEMA)?;
         Ok(Self { conn })
     }
 
@@ -1240,6 +1241,9 @@ fn check_review_headroom(staged: &StagedProposal) -> Result<(), StagingError> {
     reviewed.reviewed_at = Some("9999-12-31T23:59:59Z".into());
     check_record_size(&reviewed)
 }
+
+mod reconciliations;
+pub use reconciliations::{MAX_RECONCILIATION_HISTORY, RecordedReconciliation};
 
 #[cfg(test)]
 mod tests;

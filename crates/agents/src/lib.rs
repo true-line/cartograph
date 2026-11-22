@@ -43,8 +43,9 @@ pub mod staging;
 pub use prepared::PreparedAgentTask;
 pub use source_basis::*;
 pub use staging::{
-    CandidateBasis, ContextStatus, EvidenceBasis, EvidenceBinding, ProposalStore, StagedProposal,
-    StagedProposalPage, StagedReceiptReference, StagingError, TaskBasisManifest,
+    CandidateBasis, ContextStatus, EvidenceBasis, EvidenceBinding, MAX_RECONCILIATION_HISTORY,
+    ProposalStore, RecordedReconciliation, StagedProposal, StagedProposalPage,
+    StagedReceiptReference, StagingError, TaskBasisManifest,
 };
 
 /// Stable extractor identifier carried by every T3 proposal.
