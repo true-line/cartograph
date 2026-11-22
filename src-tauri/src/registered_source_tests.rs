@@ -81,6 +81,7 @@ fn recover(state: &AppState, source: &RegisteredSource) -> (DeltaSummary, Reconc
         &mut crate::OperationFacts::default(),
         &mut Default::default(),
         &crate::Documented::from([(source.repo_key.clone(), Vec::new())]),
+        ingest::api_docs::ApiDocLimits::default(),
     )
     .unwrap();
     record_ingest_metrics(

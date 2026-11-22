@@ -43,6 +43,11 @@ pub const PLUGIN_MAX_FUEL_BILLIONS: &str = "plugin_max_fuel_billions";
 pub const PLUGIN_MAX_MEMORY_MIB: &str = "plugin_max_memory_mib";
 pub const PLUGIN_DEADLINE_SECONDS: &str = "plugin_deadline_seconds";
 
+/// API reference documents a repository may declare, and MiB each may hold
+/// (AC-0313, AC-1804).
+pub const API_DOCS_MAX_DOCS: &str = "api_docs_max_docs";
+pub const API_DOCS_MAX_MIB: &str = "api_docs_max_mib";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -141,6 +146,22 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: 60,
         advanced: true,
         description: "Seconds one plugin call may run on one file before the whole plugin pass fails. Raising it lets a stuck plugin hold the ingest longer; only raise it for plugins you trust.",
+    },
+    LimitSpec {
+        key: API_DOCS_MAX_DOCS,
+        default: ingest::api_docs::MAX_API_DOCS as u64,
+        min: 1,
+        max: ingest::api_docs::HARD_MAX_API_DOCS as u64,
+        advanced: false,
+        description: "API reference documents one repository may declare. More declared documents than this reads none of them and records a gap.",
+    },
+    LimitSpec {
+        key: API_DOCS_MAX_MIB,
+        default: ingest::api_docs::MAX_API_DOC_BYTES / MIB,
+        min: 1,
+        max: ingest::api_docs::HARD_MAX_API_DOC_BYTES / MIB,
+        advanced: false,
+        description: "MiB one declared API reference document may hold. A larger document is not read and is recorded as a gap.",
     },
 ];
 
@@ -406,6 +427,23 @@ mod tests {
             write(&conn, PLUGIN_MAX_MEMORY_MIB, Some(memory.max + 1)),
             Err(OperatorLimitError::OutOfRange { .. })
         ));
+    }
+
+    // AC-1804 / #1653: the API docs keys default to the loader's bounds and
+    // stop at its hard ceilings, so every saved pair is one it accepts.
+    #[test]
+    fn api_docs_keys_default_to_the_loader_bounds_and_stop_at_its_ceilings() {
+        use ingest::api_docs::ApiDocLimits;
+        let docs = spec(API_DOCS_MAX_DOCS).unwrap();
+        let mib = spec(API_DOCS_MAX_MIB).unwrap();
+        assert_eq!(
+            ApiDocLimits::within(docs.default as usize, mib.default * MIB),
+            Some(ApiDocLimits::default())
+        );
+        assert!(ApiDocLimits::within(docs.max as usize, mib.max * MIB).is_some());
+        assert!(ApiDocLimits::within(docs.min as usize, mib.min * MIB).is_some());
+        assert!(ApiDocLimits::within(docs.max as usize + 1, mib.max * MIB).is_none());
+        assert!(ApiDocLimits::within(docs.max as usize, (mib.max + 1) * MIB).is_none());
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value
