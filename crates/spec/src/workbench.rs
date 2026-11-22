@@ -41,7 +41,7 @@ pub use document::{
     SYSTEM_SCOPE, SectionScopeError, cited_fact_digests, cited_fact_hashes, cited_node_hashes,
     drafted_section, section_citation_set,
 };
-pub use neutrality::{CODE_LABELS, SourceIdentifiers};
+pub use neutrality::{CODE_LABELS, CitedText, SourceIdentifiers, route_literals};
 mod endpoint_inventory;
 mod endpoint_permissions;
 mod environments;

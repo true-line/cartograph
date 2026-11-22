@@ -134,6 +134,8 @@ pub use workbench::{
     section_citation_set, section_text,
 };
 
+pub use workbench::{CitedText, route_literals};
+
 /// Edge labels that appear on the topology map — callers use this to query
 /// exactly the edges the artifact renders.
 pub const TOPOLOGY_EDGE_LABELS: &[&str] = &[
