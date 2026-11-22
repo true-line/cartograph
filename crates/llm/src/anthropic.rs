@@ -359,6 +359,13 @@ impl LlmProvider for AnthropicProvider {
                 category: message.stop_details.and_then(|details| details.category),
             });
         }
+        if message.stop_reason.as_deref() == Some("max_tokens") {
+            // A cut-off answer is never handed on, even when what arrived
+            // still parses (AC-1806).
+            return Err(ProviderError::InvalidResponse(
+                "the answer reached the output token limit".into(),
+            ));
+        }
         let text: String = message
             .content
             .iter()
@@ -556,6 +563,22 @@ mod tests {
         complete_with_consent(&provider).unwrap();
         let raw = server.join().unwrap();
         assert!(raw.contains("\"max_tokens\":4096"), "{raw}");
+    }
+
+    // AC-1806: an answer stopped at the output token limit is refused even
+    // when its text still parses.
+    #[test]
+    fn a_completion_cut_off_at_the_token_limit_is_refused() {
+        let (endpoint, server) = mock_api(
+            r#"{"content":[{"type":"text","text":"{\"target\":\"ch:orders\"}"}],"stop_reason":"max_tokens"}"#,
+        );
+        let provider =
+            AnthropicProvider::with_endpoint(ClaudeLane::Opus, "sk-test", endpoint).unwrap();
+        assert!(matches!(
+            complete_with_consent(&provider),
+            Err(ProviderError::InvalidResponse(reason)) if reason.contains("output token limit")
+        ));
+        server.join().unwrap();
     }
 
     #[test]
