@@ -3,7 +3,7 @@
 - **Status:** Accepted (Cartograph lead as delegate)
 - **Date:** 2026-11-21
 - **Deciders:** Cartograph lead (delegate); Claude implements
-- **Related:** #1653; US-0032 / AC-1406, AC-0564; ADR-0053
+- **Related:** #1653; US-0032 / AC-1406, AC-1407, AC-0564; ADR-0053
 
 ## Context
 
@@ -35,6 +35,13 @@ change every existing run and could exhaust memory on smaller Macs.
 4. With **Ollama default**, the request bytes and provider id are exactly what
    they were before this decision. The protocol version does not change: the
    option is a provider choice recorded in the profile, not a transport change.
+5. **Ollama port (AC-1407).** The same window has an **Ollama port** section. Only
+   the port is configurable (1 to 65535, default 11434); the host stays
+   `127.0.0.1`, so the loopback-only, no-proxy local transport is unchanged.
+   New desktop investigations, the installed-model list and the local Ollama
+   check use it. The bounded profile's endpoint id, which the descriptor,
+   consent and provenance record, names the port. Ingest, composition and
+   escalation keep the default endpoint for now.
 
 ## Consequences
 
