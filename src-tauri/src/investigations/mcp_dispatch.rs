@@ -1,5 +1,7 @@
 //! Authenticated transport adapter over the existing durable coordinator.
 //! No provider configuration, principal or consent decision comes from the wire.
+// Its only caller is the Unix-only MCP service (#227).
+#![cfg_attr(not(unix), allow(dead_code))]
 use crate::mcp_reads::{ReadError, scope::ScopeLimits, task_reservation::TaskReservations};
 use agents::investigation::McpTaskSession;
 use mcp_wire::{task_arguments::TaskArguments, tools::TaskTool};

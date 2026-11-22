@@ -23,6 +23,9 @@
 //! no stored fact leaves the projection not computed. The projection the
 //! session retains holds at most `crate::curated::MAX_CURATED_ACCEPTED`
 //! records and the stale decisions.
+// The service that serves these reads (`service`) is Unix-only, so on Windows
+// most of this module has no caller yet (#227).
+#![cfg_attr(not(unix), allow(dead_code))]
 
 use crate::curated::{self, ReviewSource};
 use agents::{DecisionLog, DecisionSelectionError};
@@ -54,7 +57,6 @@ pub(crate) mod client_skill;
 pub(crate) mod commands;
 pub(crate) mod curated_read;
 pub(crate) mod dispatch;
-#[cfg(unix)]
 pub(crate) mod reservation;
 pub(crate) mod scope;
 pub(crate) mod scoped_dispatch;
