@@ -69,6 +69,13 @@ The owner chose a locked store and runner with no human reviewer
    the app has verified the signature and revalidated the receipt's corpus,
    capture, embedding-binding and policy digests against live state. Any
    mismatch abstains, as ADR-0038 already requires on reload.
+   The policy digest binds the dataset digests, the embedding space and the
+   family parameters, never calibration labels, so the app recomputes it
+   from the receipt and its own parameters without a runner change
+   (AC-1511).
+   The app's store holds `runner-key.txt`, `locked-receipt.json`,
+   `policy.json` and `corpora.json`; the receipt arrives by a tool step
+   over the restricted key, never by an app network call (AC-1512).
 
 ## Consequences
 

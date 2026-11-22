@@ -6,6 +6,13 @@ use std::io::Write;
 pub(super) struct Observation {
     pub observed: Vec<ObservedCorpus>,
     pub guards: Vec<RetentionGuard>,
+    /// Per corpus, the canonical graph and capture documents the observed
+    /// digests hash. A locked store's corpus files are these bytes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production admits on the digests alone")
+    )]
+    pub documents: BTreeMap<String, (Vec<u8>, Vec<u8>)>,
     captures: BTreeMap<String, source_capture::Capture>,
 }
 fn evidence(props: &serde_json::Value) -> Result<Vec<core_prov::EvidenceRef>, String> {
@@ -70,11 +77,6 @@ fn bound_graph(nodes: &[Node], edges: &[Edge]) -> Result<(), String> {
     }
     serde_json::to_writer(Counter(0), &(nodes, edges)).map_err(err)
 }
-fn hash(value: &impl Serialize) -> Result<String, String> {
-    canonical_json(value)
-        .map(|bytes| sha256(&bytes))
-        .map_err(err)
-}
 pub(super) fn observe(
     state: &AppState,
     _graph: &SqliteGraphStore,
@@ -97,6 +99,7 @@ pub(super) fn observe(
     let mut observed = Vec::new();
     let mut guards = Vec::new();
     let mut captures = BTreeMap::new();
+    let mut documents = BTreeMap::new();
     let mut remaining = 32 * 1024 * 1024;
     for selector in selectors {
         let source = state
@@ -151,12 +154,22 @@ pub(super) fn observe(
         }
         let snapshot =
             context_hub::ContextSnapshot::new(selected_nodes, selected_edges).map_err(err)?;
-        let graph_snapshot_hash = hash(
+        // A locked store holds these exact documents as its corpus files, so
+        // the runner's corpus digests equal this host's (ADR-0082).
+        let graph_document = canonical_json(
             &serde_json::json!({"recipe":"cartograph-t2-host-graph@1","corpus_id":selector.corpus_id,"repo_id":selector.repo_id,"revision":selector.revision,"snapshot_id":snapshot.id()}),
-        )?;
-        let capture_manifest_hash = hash(
+        )
+        .map_err(err)?;
+        let capture_document = canonical_json(
             &serde_json::json!({"recipe":"cartograph-t2-host-capture@1","corpus_id":selector.corpus_id,"repo_id":selector.repo_id,"revision":selector.revision,"capture_id":capture.id()}),
-        )?;
+        )
+        .map_err(err)?;
+        let graph_snapshot_hash = sha256(&graph_document);
+        let capture_manifest_hash = sha256(&capture_document);
+        documents.insert(
+            selector.corpus_id.clone(),
+            (graph_document, capture_document),
+        );
         observed.push(ObservedCorpus {
             corpus_id: selector.corpus_id.clone(),
             repo_id: selector.repo_id.clone(),
@@ -171,6 +184,7 @@ pub(super) fn observe(
     Ok(Observation {
         observed,
         guards,
+        documents,
         captures,
     })
 }

@@ -133,36 +133,7 @@ impl FrozenPolicy {
         embedding: &EmbeddingSpaceBinding,
         parameters: Vec<FamilyPolicy>,
     ) -> Result<Self> {
-        if parameters.is_empty() || parameters.len() > 256 {
-            return Err("policy family bound".into());
-        }
-        let mut families = BTreeMap::new();
-        for parameter in parameters {
-            if !parameter.threshold.is_finite()
-                || !(0.0..=1.0).contains(&parameter.threshold)
-                || !parameter.ambiguity_margin.is_finite()
-                || !(0.0..=1.0).contains(&parameter.ambiguity_margin)
-                || !parameter.precision_floor.is_finite()
-                || !(0.0..=1.0).contains(&parameter.precision_floor)
-                || !(2..=256).contains(&parameter.neighbors)
-                || [
-                    parameter.min_evaluation_cases,
-                    parameter.min_answerable_cases,
-                    parameter.min_no_match_cases,
-                ]
-                .iter()
-                .any(|count| !(1..=1_000_000).contains(count))
-                || parameter.family.subtype().is_some_and(|s| s.len() > 128)
-            {
-                return Err("invalid explicit family policy".into());
-            }
-            if families
-                .insert(parameter.family.clone(), parameter)
-                .is_some()
-            {
-                return Err("duplicate policy family".into());
-            }
-        }
+        let (families, digest) = freeze_parameters(&calibration.binding, embedding, parameters)?;
         let known_calibration: BTreeSet<_> = calibration
             .labels
             .iter()
@@ -178,17 +149,6 @@ impl FrozenPolicy {
                 .entry(case.family.clone())
                 .or_insert(0_u64) += 1;
         }
-        // Integer-only policy-hash@1: exact f32 bit patterns are u32; exact f64
-        // bit patterns are decimal strings to stay within JCS integer bounds.
-        let policies: Vec<_> = families.values().map(|p| serde_json::json!({
-            "family": p.family, "threshold_bits":p.threshold.to_bits(),
-            "margin_bits":p.ambiguity_margin.to_bits(), "neighbors":p.neighbors,
-            "minimum_cases":p.min_evaluation_cases,"minimum_answerable":p.min_answerable_cases,
-            "minimum_no_match":p.min_no_match_cases,"precision_floor_bits":p.precision_floor.to_bits().to_string()
-        })).collect();
-        let digest = digest(
-            &serde_json::json!({"recipe":"t2-explicit-policy-bits@1", "candidate_recipe":"t2-production-propose-cosine@1", "binding":calibration.binding,"embedding":embedding,"families":policies}),
-        )?;
         Ok(Self {
             binding: calibration.binding.clone(),
             embedding: embedding.clone(),
@@ -206,6 +166,76 @@ impl FrozenPolicy {
     pub fn family_policies(&self) -> impl Iterator<Item = &FamilyPolicy> {
         self.families.values()
     }
+    /// The policy a locked receipt was scored under, rebuilt from the
+    /// receipt's dataset digests and the host's own parameters. It carries no
+    /// calibration counts, so it can rank live hops but never score.
+    pub(super) fn for_locked_receipt(
+        binding: DatasetBinding,
+        embedding: &EmbeddingSpaceBinding,
+        parameters: Vec<FamilyPolicy>,
+    ) -> Result<Self> {
+        let (families, digest) = freeze_parameters(&binding, embedding, parameters)?;
+        Ok(Self {
+            binding,
+            embedding: embedding.clone(),
+            families,
+            calibration_counts: BTreeMap::new(),
+            digest,
+        })
+    }
+}
+
+/// Validate explicit family parameters and compute the policy digest
+/// (`t2-explicit-policy-bits@1`). The digest binds the dataset and embedding
+/// space, never calibration labels, so a host holding only a locked receipt's
+/// dataset digests recomputes it exactly (ADR-0082).
+fn freeze_parameters(
+    binding: &DatasetBinding,
+    embedding: &EmbeddingSpaceBinding,
+    parameters: Vec<FamilyPolicy>,
+) -> Result<(BTreeMap<FamilyKey, FamilyPolicy>, String)> {
+    if parameters.is_empty() || parameters.len() > 256 {
+        return Err("policy family bound".into());
+    }
+    let mut families = BTreeMap::new();
+    for parameter in parameters {
+        if !parameter.threshold.is_finite()
+            || !(0.0..=1.0).contains(&parameter.threshold)
+            || !parameter.ambiguity_margin.is_finite()
+            || !(0.0..=1.0).contains(&parameter.ambiguity_margin)
+            || !parameter.precision_floor.is_finite()
+            || !(0.0..=1.0).contains(&parameter.precision_floor)
+            || !(2..=256).contains(&parameter.neighbors)
+            || [
+                parameter.min_evaluation_cases,
+                parameter.min_answerable_cases,
+                parameter.min_no_match_cases,
+            ]
+            .iter()
+            .any(|count| !(1..=1_000_000).contains(count))
+            || parameter.family.subtype().is_some_and(|s| s.len() > 128)
+        {
+            return Err("invalid explicit family policy".into());
+        }
+        if families
+            .insert(parameter.family.clone(), parameter)
+            .is_some()
+        {
+            return Err("duplicate policy family".into());
+        }
+    }
+    // Integer-only policy-hash@1: exact f32 bit patterns are u32; exact f64
+    // bit patterns are decimal strings to stay within JCS integer bounds.
+    let policies: Vec<_> = families.values().map(|p| serde_json::json!({
+        "family": p.family, "threshold_bits":p.threshold.to_bits(),
+        "margin_bits":p.ambiguity_margin.to_bits(), "neighbors":p.neighbors,
+        "minimum_cases":p.min_evaluation_cases,"minimum_answerable":p.min_answerable_cases,
+        "minimum_no_match":p.min_no_match_cases,"precision_floor_bits":p.precision_floor.to_bits().to_string()
+    })).collect();
+    let digest = digest(
+        &serde_json::json!({"recipe":"t2-explicit-policy-bits@1", "candidate_recipe":"t2-production-propose-cosine@1", "binding":binding,"embedding":embedding,"families":policies}),
+    )?;
+    Ok((families, digest))
 }
 
 /// Prepare all texts before sealing the #657 embedding operation. No labels or
