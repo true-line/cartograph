@@ -368,7 +368,7 @@ fn flow_diagram_view(
     // Participants come only from the flows the view keeps, in flow order, so
     // a later node/edge cap drops whole trailing flows' context rather than
     // arbitrary participants of retained flows.
-    let retained_flows = &flows[..flows.len().min(SPEC_VIEW_MAX_FLOWS)];
+    let retained_flows = &flows[..flows.len().min(caps.flows)];
     let mut flow_nodes: Vec<Node> = Vec::new();
     let mut flow_node_ids: BTreeSet<String> = BTreeSet::new();
     let mut flow_edges: Vec<Edge> = Vec::new();
@@ -1575,6 +1575,52 @@ mod tests {
         assert_eq!(tight_views.topology.content_id, views.topology.content_id);
         assert!(tight_views.flows.flows.len() <= 1);
         assert_eq!(tight_views.flows.flows_total, views.flows.flows_total);
+        // The flow cap also selects whose participants the flow view draws:
+        // with a hop-less flow sorted first, capping at one flow draws what
+        // that flow alone draws, not the later flow's participants.
+        let mut padding = flows[0].clone();
+        padding.trigger = "ep:AAA-padding:0000".into();
+        padding.trigger_name = "Padding".into();
+        padding.hops.clear();
+        let two_flows = vec![padding.clone(), flows[0].clone()];
+        let one_flow = SpecViewCaps {
+            flows: 1,
+            ..SpecViewCaps::default()
+        };
+        let compile_flows = |input: &[Flow]| {
+            try_compile_spec_with_views_supplied_kept_capped(
+                &nodes,
+                &edges,
+                input,
+                ExportMode::BestEffort,
+                &BTreeSet::new(),
+                crate::Supplied {
+                    knowledge: None,
+                    coverage: &[],
+                    stale_coverage: &[],
+                    curated: crate::Curated::NotSupplied,
+                    graph_content_hash: None,
+                    source_revisions: None,
+                    repo_names: &[],
+                },
+                |artifact| artifact,
+                one_flow,
+            )
+            .unwrap()
+            .1
+        };
+        let capped = compile_flows(&two_flows);
+        let only_first = compile_flows(std::slice::from_ref(&padding));
+        assert_eq!(capped.flows.flows.len(), 1);
+        assert_eq!(capped.flows.flows[0].trigger, padding.trigger);
+        let ids = |view: &SpecDiagramView| -> Vec<String> {
+            view.nodes.iter().map(|node| node.id.clone()).collect()
+        };
+        assert_eq!(ids(&capped.flows), ids(&only_first.flows));
+        assert_eq!(
+            serde_json::to_value(&capped.flows.edges).unwrap(),
+            serde_json::to_value(&only_first.flows.edges).unwrap()
+        );
     }
 
     // AC-0246 (T-0246): compile_spec_with_views produces both the SpecBundle and
