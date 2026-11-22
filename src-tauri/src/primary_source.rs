@@ -2120,12 +2120,29 @@ impl PrimarySourceStore {
         // The environment reader's selection (AC-1059), read for every layer
         // selection, is tried with the lanes first. When the whole set cannot
         // be retained, the lanes are retained without it and the reader reads
-        // the checkout, so it never costs a lane its capture.
+        // the checkout, so it never costs a lane its capture. Shipped JVM
+        // class files (AC-1215) are tried with both first, and are the first
+        // left out.
         let environments = ingest::environments::environment_paths(root).ok();
-        let mut capture = environments
-            .as_ref()
-            .and_then(|paths| capture_paths(&with(paths)).ok());
-        let environments_captured = capture.is_some();
+        let classes = if wants_lanes {
+            adapters_artifact_jvm::class_paths(root).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut capture = None;
+        let mut environments_captured = false;
+        if !classes.is_empty() {
+            let mut extra = environments.clone().unwrap_or_default();
+            extra.extend_from_slice(&classes);
+            capture = capture_paths(&with(&extra)).ok();
+            environments_captured = capture.is_some() && environments.is_some();
+        }
+        if capture.is_none() {
+            capture = environments
+                .as_ref()
+                .and_then(|paths| capture_paths(&with(paths)).ok());
+            environments_captured = capture.is_some();
+        }
         if capture.is_none() && !lanes.is_empty() {
             capture = capture_paths(&with(&[])).ok();
         }
