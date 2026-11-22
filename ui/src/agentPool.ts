@@ -4,7 +4,8 @@
 // host already keeps (job rows, the investigation catalog, staged
 // proposals); nothing is inferred about a live worker or about spend.
 import type { Job, StagedProposal } from './store';
-import type { InvestigationProvider } from './investigationTypes';
+import type { InvestigationProvider, InvestigationSummary } from './investigationTypes';
+import { investigationIsActive } from './investigationStore';
 import { invokeOr } from './tauri';
 import type { LocalLaneStatus } from './components/LocalLane';
 
@@ -195,4 +196,46 @@ export function localServerLine(status: LocalLaneStatus): string {
   return missing === 0
     ? 'The local model server is running and every model is installed.'
     : `The local model server is running; ${missing} of ${status.models.length} models ${missing === 1 ? 'is' : 'are'} missing (see Settings, Local lane).`;
+}
+
+/** A saved chat session (#252, AC-1710): the turns of one conversation in
+ *  the loaded task history, newest first. */
+export interface ChatSession {
+  conversation_id: string;
+  /** The newest turn; opening the session opens this turn. */
+  latest: InvestigationSummary;
+  turns: number;
+  /** Some turn is queued, running or still has an invocation pending. */
+  active: boolean;
+  /** Some turn is open in an Agent chats pane. */
+  open: boolean;
+}
+
+/** Group the loaded task history into chat sessions: active ones first,
+ *  then by the newest turn's update time. Only the loaded page is read. */
+export function chatSessions(history: readonly InvestigationSummary[], openTasks: readonly string[]): ChatSession[] {
+  const open = new Set(openTasks);
+  const byConversation = new Map<string, ChatSession>();
+  for (const turn of history) {
+    const session = byConversation.get(turn.conversation_id);
+    const isActive = investigationIsActive(turn);
+    const isOpen = open.has(turn.investigation_id);
+    if (!session) {
+      byConversation.set(turn.conversation_id, { conversation_id: turn.conversation_id, latest: turn, turns: 1, active: isActive, open: isOpen });
+      continue;
+    }
+    session.turns += 1;
+    session.active ||= isActive;
+    session.open ||= isOpen;
+    if (turn.updated_at > session.latest.updated_at) session.latest = turn;
+  }
+  return [...byConversation.values()].sort((a, b) =>
+    Number(b.active) - Number(a.active) || b.latest.updated_at.localeCompare(a.latest.updated_at));
+}
+
+/** One line on a chat session's size and newest turn. */
+export function chatSessionLine(session: ChatSession): string {
+  const turns = `${session.turns} ${session.turns === 1 ? 'turn' : 'turns'}`;
+  const status = session.latest.status.split('_').join(' ');
+  return `${turns} · latest ${status} · ${session.latest.provider_mode} · updated ${session.latest.updated_at}`;
 }
