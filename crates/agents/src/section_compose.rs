@@ -63,7 +63,8 @@ facts it cites. Never write a file path, a file name or a code identifier (a fun
 class, module or variable name): those stay in the citations. URL routes, HTTP methods \
 and statuses, field names and user-facing messages are part of the observable contract \
 and may be stated, but a route you state must be one a fact you cite shows: cite its \
-endpoint. Choose each claim's kind honestly: implemented_behavior for what the \
+endpoint. A number, count or version you state must appear in a fact you cite, and a \
+statement about endpoints or routes cites an Endpoint fact. Choose each claim's kind honestly: implemented_behavior for what the \
 code does, documented_intent only for what the target's own documentation or test \
 scenario names say is intended, inferred_interpretation for a reading across facts. \
 Reply with the JSON object the response schema describes and nothing else.";
@@ -316,6 +317,8 @@ pub struct Composed {
     pub finish: SectionDraftFinish,
     /// Claims left out for a per-claim bound.
     pub left_out: usize,
+    /// How many claims each bound left out, by reason (#2349).
+    pub reasons: std::collections::BTreeMap<&'static str, usize>,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +346,7 @@ pub fn decode(
         serde_json::from_str(text.trim()).map_err(|_| ComposeRefusal::NotTheSchema)?;
     let mut claims = Vec::new();
     let mut left_out = 0;
+    let mut reasons = std::collections::BTreeMap::new();
     for claim in reply.claims {
         let kind = match claim.claim_kind.as_str() {
             "implemented_behavior" => Some(ClaimKind::Implemented),
@@ -372,20 +376,27 @@ pub fn decode(
         let cites_ok = !citations.is_empty()
             && citations.len() <= MAX_CITATIONS
             && citations.iter().all(|id| citable.contains(id));
-        match kind {
-            Some(kind)
-                if cites_ok
-                    && statement_admissible(&statement)
-                    && substantive(&statement)
-                    && claims.len() < MAX_CLAIMS =>
-            {
-                claims.push(Claim {
-                    statement,
-                    kind,
-                    citations,
-                })
+        // The first bound a claim fails names why it is left out.
+        let reason = match kind {
+            None => Some("claim_kind_unknown"),
+            Some(_) if !cites_ok => Some("citation_not_citable"),
+            Some(_) if !statement_admissible(&statement) => Some("statement_not_admissible"),
+            Some(_) if !substantive(&statement) => Some("statement_not_substantive"),
+            Some(_) if claims.len() >= MAX_CLAIMS => Some("too_many_claims"),
+            Some(_) => None,
+        };
+        match (kind, reason) {
+            (Some(kind), None) => claims.push(Claim {
+                statement,
+                kind,
+                citations,
+            }),
+            (_, reason) => {
+                left_out += 1;
+                *reasons
+                    .entry(reason.unwrap_or("claim_kind_unknown"))
+                    .or_default() += 1;
             }
-            _ => left_out += 1,
         }
     }
     if claims.is_empty() {
@@ -397,6 +408,7 @@ pub fn decode(
             claims,
         },
         left_out,
+        reasons,
     })
 }
 
