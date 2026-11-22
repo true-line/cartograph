@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// A desktop local provider: its completion model and context window (#1643, #1653).
-type LocalProviderKey = (String, Option<u32>);
+/// A desktop local provider: its completion model (#1643), context window and
+/// loopback Ollama port (#1653).
+type LocalProviderKey = (String, Option<u32>, u16);
 
 /// App-lifetime clients and transient worker payloads. Durable task state and
 /// deduplication belong exclusively to JobStore's coordinator tables.
@@ -62,33 +63,38 @@ impl InvestigationRuntime {
     }
 
     /// The provider a new desktop start uses: the configured local completion
-    /// model (#1643) and context window (#1653) when either differs from the
-    /// shipped default, otherwise the mode's default provider. Construction
-    /// makes no network call; a model that is not installed fails at its
-    /// first request and is reported.
+    /// model (#1643), context window and Ollama port (#1653) when any differs
+    /// from the shipped default, otherwise the mode's default provider.
+    /// Construction makes no network call; a model that is not installed, or
+    /// a port with no Ollama, fails at its first request and is reported.
     pub(super) fn provider_for_start(
         &self,
         mode: InvestigationProviderMode,
         local_model: Option<&str>,
         context_window: Option<u32>,
+        port: Option<u16>,
     ) -> Result<Arc<dyn LlmProvider>, HostError> {
         if mode != InvestigationProviderMode::Local {
             return self.provider(mode);
         }
         let model = local_model.unwrap_or(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL);
-        if model == llm::OllamaProvider::DEFAULT_COMPLETION_MODEL && context_window.is_none() {
+        let port = port.unwrap_or(llm::OllamaProvider::DEFAULT_PORT);
+        if model == llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
+            && context_window.is_none()
+            && port == llm::OllamaProvider::DEFAULT_PORT
+        {
             return self.provider(mode);
         }
         let mut providers = self
             .local_models
             .lock()
             .map_err(|_| HostError::Operational)?;
-        let key = (model.to_owned(), context_window);
+        let key = (model.to_owned(), context_window, port);
         if let Some(provider) = providers.get(&key) {
             return Ok(provider.clone());
         }
         let mut local = llm::OllamaProvider::with_models(
-            llm::OllamaProvider::DEFAULT_URL,
+            &llm::OllamaProvider::loopback_url(port),
             llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
             model,
             Duration::from_secs(120),
@@ -114,8 +120,9 @@ impl InvestigationRuntime {
         mode: InvestigationProviderMode,
         local_model: Option<&str>,
         context_window: Option<u32>,
+        port: Option<u16>,
     ) -> InvestigationProvider {
-        self.provider_for_start(mode, local_model, context_window)
+        self.provider_for_start(mode, local_model, context_window, port)
             .and_then(|p| descriptor(p.as_ref(), mode))
             .unwrap_or_else(|_| InvestigationProvider {
                 mode,
@@ -342,20 +349,21 @@ mod run_clock_tests {
         let runtime = InvestigationRuntime::default();
         let local = InvestigationProviderMode::Local;
         let chosen = runtime
-            .provider_for_start(local, Some("qwen3:30b-a3b"), None)
+            .provider_for_start(local, Some("qwen3:30b-a3b"), None, None)
             .unwrap();
         assert_eq!(
             descriptor(chosen.as_ref(), local).unwrap().model,
             "qwen3:30b-a3b"
         );
         let again = runtime
-            .provider_for_start(local, Some("qwen3:30b-a3b"), None)
+            .provider_for_start(local, Some("qwen3:30b-a3b"), None, None)
             .unwrap();
         assert!(Arc::ptr_eq(&chosen, &again));
         let default = runtime
             .provider_for_start(
                 local,
                 Some(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL),
+                None,
                 None,
             )
             .unwrap();
@@ -365,18 +373,18 @@ mod run_clock_tests {
             llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
         );
         assert!(Arc::ptr_eq(
-            &runtime.provider_for_start(local, None, None).unwrap(),
+            &runtime.provider_for_start(local, None, None, None).unwrap(),
             &default
         ));
         // The catalog shows what a desktop start would use.
         assert_eq!(
             runtime
-                .descriptor_for_start(local, Some("qwen3:30b-a3b"), None)
+                .descriptor_for_start(local, Some("qwen3:30b-a3b"), None, None)
                 .model,
             "qwen3:30b-a3b"
         );
         assert_eq!(
-            runtime.descriptor_for_start(local, None, None).model,
+            runtime.descriptor_for_start(local, None, None, None).model,
             llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
         );
     }
@@ -387,7 +395,7 @@ mod run_clock_tests {
         let runtime = InvestigationRuntime::default();
         let local = InvestigationProviderMode::Local;
         let windowed = runtime
-            .provider_for_start(local, None, Some(32768))
+            .provider_for_start(local, None, Some(32768), None)
             .unwrap();
         assert!(!Arc::ptr_eq(&windowed, &runtime.provider(local).unwrap()));
         assert_eq!(
@@ -401,11 +409,11 @@ mod run_clock_tests {
         assert!(Arc::ptr_eq(
             &windowed,
             &runtime
-                .provider_for_start(local, None, Some(32768))
+                .provider_for_start(local, None, Some(32768), None)
                 .unwrap()
         ));
         let both = runtime
-            .provider_for_start(local, Some("qwen3:30b-a3b"), Some(8192))
+            .provider_for_start(local, Some("qwen3:30b-a3b"), Some(8192), None)
             .unwrap();
         assert!(
             descriptor(both.as_ref(), local)
@@ -413,12 +421,16 @@ mod run_clock_tests {
                 .provider_id
                 .ends_with("qwen3:30b-a3b:num-ctx-8192")
         );
-        assert!(runtime.provider_for_start(local, None, Some(5000)).is_err());
+        assert!(
+            runtime
+                .provider_for_start(local, None, Some(5000), None)
+                .is_err()
+        );
         let cloud = InvestigationProviderMode::Cloud;
         // The cloud provider ignores the window: same provider, or the same
         // error when no cloud key is configured.
         match (
-            runtime.provider_for_start(cloud, None, Some(32768)),
+            runtime.provider_for_start(cloud, None, Some(32768), None),
             runtime.provider(cloud),
         ) {
             (Ok(windowed), Ok(plain)) => assert!(Arc::ptr_eq(&windowed, &plain)),
@@ -427,6 +439,37 @@ mod run_clock_tests {
             }
             _ => panic!("the context window changed the cloud provider"),
         }
+    }
+    // #1653: a saved Ollama port gets its own loopback provider, recorded in
+    // the descriptor's endpoint; the default port keeps the mode provider.
+    #[test]
+    fn configured_ollama_port_selects_its_own_loopback_provider() {
+        let runtime = InvestigationRuntime::default();
+        let local = InvestigationProviderMode::Local;
+        let moved = runtime
+            .provider_for_start(local, None, None, Some(11500))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&moved, &runtime.provider(local).unwrap()));
+        assert_eq!(
+            descriptor(moved.as_ref(), local).unwrap().endpoint,
+            "http://127.0.0.1:11500/api/chat"
+        );
+        assert!(Arc::ptr_eq(
+            &runtime
+                .provider_for_start(local, None, None, Some(llm::OllamaProvider::DEFAULT_PORT))
+                .unwrap(),
+            &runtime.provider(local).unwrap()
+        ));
+        let windowed = runtime
+            .provider_for_start(local, None, Some(16384), Some(11500))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&windowed, &moved));
+        assert_eq!(
+            runtime
+                .descriptor_for_start(local, None, None, Some(11500))
+                .endpoint,
+            "http://127.0.0.1:11500/api/chat"
+        );
     }
     // AC-0562: a saved active allowance above the default extends the deadline.
     #[test]

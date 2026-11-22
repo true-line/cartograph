@@ -1,12 +1,65 @@
 import { useEffect, useState } from 'react';
-import { CONTEXT_WINDOWS, formatContextWindow, formatMinutes, parseMinutes, tauriContextWindowApi, tauriLocalModelApi,
-  toMinutes, type ContextWindowApi, type InstalledModel, type LocalModelApi, type LocalModelChoice, type RunLimits,
-  type RunLimitsApi } from '../runLimits';
+import { CONTEXT_WINDOWS, DEFAULT_OLLAMA_PORT, formatContextWindow, formatMinutes, parseMinutes, parsePort,
+  tauriContextWindowApi, tauriLocalModelApi, tauriOllamaPortApi, toMinutes, type ContextWindowApi, type InstalledModel,
+  type LocalModelApi, type LocalModelChoice, type OllamaPortApi, type RunLimits, type RunLimitsApi } from '../runLimits';
 
 export interface ConfigureWindowProps {
   api: RunLimitsApi;
   modelApi?: LocalModelApi;
   contextApi?: ContextWindowApi;
+  portApi?: OllamaPortApi;
+}
+
+/** Configure → Ollama port (#1653): the loopback port new desktop investigations reach Ollama on. */
+function OllamaPortSection({ api }: { api: OllamaPortApi }) {
+  const [current, setCurrent] = useState<number | null | undefined>(undefined);
+  const [text, setText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const show = (next: number | null) => { setCurrent(next); setText(String(next ?? DEFAULT_OLLAMA_PORT)); };
+  useEffect(() => { api.load().then(show, (e: unknown) => setError(String(e))); }, [api]);
+
+  const save = async (port: number | null) => {
+    setBusy(true); setError(null); setSaved(null);
+    try {
+      const next = await api.save(port);
+      show(next);
+      setSaved(`Saved. New investigations reach Ollama at 127.0.0.1:${next ?? DEFAULT_OLLAMA_PORT}. Reopen this window to list its models.`);
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  const parsed = parsePort(text);
+  const unchanged = typeof parsed === 'number' && parsed === (current ?? DEFAULT_OLLAMA_PORT);
+
+  return <section className="configure-section" aria-label="Ollama port">
+    <h2>Ollama port</h2>
+    <p className="muted">The port Ollama listens on, on this Mac only (127.0.0.1). Change it only if you run Ollama on a
+      port other than {DEFAULT_OLLAMA_PORT}. Running investigations keep theirs, and the endpoint is recorded with each run.</p>
+    {current !== undefined && <form onSubmit={(event) => {
+      event.preventDefault();
+      if (typeof parsed === 'number') void save(parsed);
+    }}>
+      <label className="configure-field">
+        <span>Port</span>
+        <input type="number" inputMode="numeric" min={1} max={65535} step={1} value={text} disabled={busy}
+          aria-invalid={typeof parsed === 'string'} onChange={(event) => setText(event.target.value)} />
+        <small className={typeof parsed === 'string' ? 'error-text' : 'muted'}>
+          {typeof parsed === 'string' ? parsed : `Default ${DEFAULT_OLLAMA_PORT}.`}
+        </small>
+      </label>
+      <div className="configure-actions">
+        <button type="submit" disabled={busy || typeof parsed === 'string' || unchanged}>Use this port</button>
+        <button type="button" className="secondary-button" disabled={busy || current === null}
+          onClick={() => void save(null)}>Use default port</button>
+      </div>
+    </form>}
+    {current === undefined && !error && <p className="muted">Loading…</p>}
+    {current === undefined && error && <button type="button" disabled={busy}
+      onClick={() => void save(null)}>Use default port</button>}
+    {saved && <p className="muted" role="status">{saved}</p>}
+    {error && <p className="error-text" role="alert">{error}</p>}
+  </section>;
 }
 
 /** Configure → Context window (#1653): the `num_ctx` new desktop investigations ask Ollama for. */
@@ -113,7 +166,8 @@ function LocalModelSection({ api }: { api: LocalModelApi }) {
  * Configure → Run Limits (#1633): the two investigation time limits, kept
  * apart from the app Settings page. Every other cap stays fixed.
  */
-export function ConfigureWindow({ api, modelApi = tauriLocalModelApi, contextApi = tauriContextWindowApi }: ConfigureWindowProps) {
+export function ConfigureWindow({ api, modelApi = tauriLocalModelApi, contextApi = tauriContextWindowApi,
+  portApi = tauriOllamaPortApi }: ConfigureWindowProps) {
   const [limits, setLimits] = useState<RunLimits | null>(null);
   const [task, setTask] = useState('');
   const [call, setCall] = useState('');
@@ -190,5 +244,6 @@ export function ConfigureWindow({ api, modelApi = tauriLocalModelApi, contextApi
     {error && <p className="error-text" role="alert">{error}</p>}
     <LocalModelSection api={modelApi} />
     <ContextWindowSection api={contextApi} />
+    <OllamaPortSection api={portApi} />
   </main>;
 }

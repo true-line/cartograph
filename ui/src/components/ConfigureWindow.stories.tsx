@@ -1,6 +1,7 @@
 // AC-0562 (#1633): Configure → Run Limits edits only the two time limits, bounded by [default, max].
 // AC-0564 (#1643): the local completion model is chosen from installed Ollama models.
 // AC-1406 (#1653): the context window is one of a closed set, or Ollama's default.
+// AC-1407 (#1653): the Ollama port is a loopback port 1..=65535, or the default 11434.
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { expect, userEvent, waitFor, within } from 'storybook/test';
@@ -17,6 +18,7 @@ let loadFailure: string | null = null;
 const defaultModel: LocalModelChoice = { model: 'qwen3:8b', default_model: 'qwen3:8b', customized: false };
 let model = defaultModel;
 let contextWindow: number | null = null;
+let ollamaPort: number | null = null;
 let modelFailure: string | null = null;
 let installed: Array<{ name: string; digest: string }> | string = [
   { name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
@@ -25,6 +27,7 @@ const meta = {
   title: 'Surfaces/ConfigureWindow', component: ConfigureWindow, args: { api: tauriRunLimitsApi },
   beforeEach: () => {
     calls = []; stored = shipped; loadFailure = null; model = defaultModel; modelFailure = null; contextWindow = null;
+    ollamaPort = null;
     installed = [{ name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
     mockIPC((command, args) => {
       calls.push([command, args]);
@@ -45,6 +48,12 @@ const meta = {
       }
       if (command === 'reset_local_model') { model = defaultModel; modelFailure = null; return model; }
       if (command === 'get_local_context_window') return contextWindow;
+      if (command === 'get_local_ollama_port') return ollamaPort;
+      if (command === 'set_local_ollama_port') {
+        const port = (args as { port: number | null }).port;
+        ollamaPort = port === 11434 ? null : port;
+        return ollamaPort;
+      }
       if (command === 'set_local_context_window') { contextWindow = (args as { tokens: number | null }).tokens; return contextWindow; }
       throw new Error(`unexpected command ${command}`);
     });
@@ -201,5 +210,29 @@ export const ChooseContextWindowThenDefault: Story = {
     await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('leave the context window to Ollama'));
     await expect(select).toHaveValue('');
     await expect(calls).toContainEqual(['set_local_context_window', { tokens: null }]);
+  },
+};
+
+export const ChooseOllamaPortThenDefault: Story = {
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    const section = within(await c.findByRole('region', { name: 'Ollama port' }));
+    const input = await section.findByLabelText(/^Port/);
+    await expect(input).toHaveValue(11434);
+    await expect(section.getByRole('button', { name: 'Use this port' })).toBeDisabled();
+    await expect(section.getByRole('button', { name: 'Use default port' })).toBeDisabled();
+    await userEvent.clear(input);
+    await userEvent.type(input, '70000');
+    await expect(section.getByText('Enter a whole port number from 1 to 65535.')).toBeInTheDocument();
+    await expect(section.getByRole('button', { name: 'Use this port' })).toBeDisabled();
+    await userEvent.clear(input);
+    await userEvent.type(input, '11500');
+    await userEvent.click(section.getByRole('button', { name: 'Use this port' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('127.0.0.1:11500'));
+    await expect(calls).toContainEqual(['set_local_ollama_port', { port: 11500 }]);
+    await userEvent.click(section.getByRole('button', { name: 'Use default port' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('127.0.0.1:11434'));
+    await expect(input).toHaveValue(11434);
+    await expect(calls).toContainEqual(['set_local_ollama_port', { port: null }]);
   },
 };

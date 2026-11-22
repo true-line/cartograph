@@ -64,6 +64,26 @@ export const tauriContextWindowApi: ContextWindowApi = {
   save: (tokens) => invoke<number | null>('set_local_context_window', { tokens }),
 };
 
+/** Ollama's default loopback port; `null` on the wire means this one (#1653). */
+export const DEFAULT_OLLAMA_PORT = 11434;
+
+export interface OllamaPortApi {
+  load(): Promise<number | null>;
+  save(port: number | null): Promise<number | null>;
+}
+
+export const tauriOllamaPortApi: OllamaPortApi = {
+  load: () => invoke<number | null>('get_local_ollama_port'),
+  save: (port) => invoke<number | null>('set_local_ollama_port', { port }),
+};
+
+/** A whole port 1..=65535, or a message saying why not. */
+export function parsePort(text: string): number | string {
+  const value = Number(text.trim());
+  return text.trim() !== '' && Number.isInteger(value) && value >= 1 && value <= 65535
+    ? value : 'Enter a whole port number from 1 to 65535.';
+}
+
 /** "32K tokens" for 32768. */
 export const formatContextWindow = (tokens: number) => `${tokens / 1024}K tokens`;
 

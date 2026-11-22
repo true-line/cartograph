@@ -113,6 +113,7 @@ pub enum SettingsError {
     InvalidInvestigationChoice,
     InvalidLocalModel,
     InvalidContextWindow(u32),
+    InvalidLocalPort(i64),
     InvalidRunLimit {
         field: &'static str,
         value: u64,
@@ -155,6 +156,9 @@ impl std::fmt::Display for SettingsError {
                 "context window must be one of {:?} tokens, got {tokens}",
                 llm::OllamaProvider::CONTEXT_WINDOWS
             ),
+            Self::InvalidLocalPort(port) => {
+                write!(f, "Ollama port must be 1..=65535, got {port}")
+            }
             Self::InvalidRunLimit {
                 field,
                 value,
@@ -364,6 +368,12 @@ impl SettingsStore {
                  context_tokens INTEGER CHECK (context_tokens > 0)
              ) STRICT;
              INSERT OR IGNORE INTO settings_local_context (id) VALUES (1);
+             -- NULL is Ollama's default port 11434; the host is always loopback (#1653).
+             CREATE TABLE IF NOT EXISTS settings_local_endpoint (
+                 id   INTEGER PRIMARY KEY CHECK (id = 1),
+                 port INTEGER CHECK (port BETWEEN 1 AND 65535)
+             ) STRICT;
+             INSERT OR IGNORE INTO settings_local_endpoint (id) VALUES (1);
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -854,6 +864,41 @@ impl SettingsStore {
         self.local_context_window()
     }
 
+    /// The loopback port new desktop investigations reach Ollama on (#1653):
+    /// `None` is Ollama's default, [`llm::OllamaProvider::DEFAULT_PORT`].
+    pub fn local_ollama_port(&self) -> Result<Option<u16>, SettingsError> {
+        let stored: Option<i64> = self.conn.query_row(
+            "SELECT port FROM settings_local_endpoint WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        stored
+            .map(|port| {
+                u16::try_from(port)
+                    .ok()
+                    .filter(|port| *port != 0)
+                    .ok_or(SettingsError::InvalidLocalPort(port))
+            })
+            .transpose()
+    }
+
+    /// Persist a loopback port, or `None` for the default. The default port
+    /// itself is stored as `None`, so it reads back as the default.
+    pub fn set_local_ollama_port(
+        &mut self,
+        port: Option<u16>,
+    ) -> Result<Option<u16>, SettingsError> {
+        if port == Some(0) {
+            return Err(SettingsError::InvalidLocalPort(0));
+        }
+        let port = port.filter(|port| *port != llm::OllamaProvider::DEFAULT_PORT);
+        self.conn.execute(
+            "UPDATE settings_local_endpoint SET port = ?1 WHERE id = 1",
+            params![port],
+        )?;
+        self.local_ollama_port()
+    }
+
     /// Derive the egress firewall policy from persisted settings: cloud is
     /// allowed only for enabled LLM tiers whose provider is `cloud` **and**
     /// which hold standing consent. Everything else stays local-only.
@@ -958,6 +1003,35 @@ mod tests {
             Err(SettingsError::InvalidLocalModel)
         ));
         assert_eq!(store.reset_local_model().unwrap(), shipped);
+    }
+
+    // #1653: the Ollama port defaults to 11434, persists across reopen,
+    // refuses port 0 and stores the default port as the default.
+    #[test]
+    fn local_ollama_port_default_persist_validate_and_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.local_ollama_port().unwrap(), None);
+        assert!(matches!(
+            store.set_local_ollama_port(Some(0)),
+            Err(SettingsError::InvalidLocalPort(0))
+        ));
+        assert_eq!(
+            store.set_local_ollama_port(Some(11500)).unwrap(),
+            Some(11500)
+        );
+        assert_eq!(
+            store
+                .set_local_ollama_port(Some(llm::OllamaProvider::DEFAULT_PORT))
+                .unwrap(),
+            None
+        );
+        store.set_local_ollama_port(Some(11500)).unwrap();
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.local_ollama_port().unwrap(), Some(11500));
+        assert_eq!(store.set_local_ollama_port(None).unwrap(), None);
     }
 
     // #1653: the context window defaults to Ollama's own, persists across

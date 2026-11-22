@@ -534,6 +534,14 @@ impl OllamaProvider {
 
     /// Default loopback endpoint used by Ollama.
     pub const DEFAULT_URL: &'static str = "http://127.0.0.1:11434/";
+    /// Ollama's default port, the one in [`Self::DEFAULT_URL`].
+    pub const DEFAULT_PORT: u16 = 11434;
+
+    /// The loopback endpoint for an Ollama listening on `port` (#1653). Only
+    /// the port is configurable: the host stays `127.0.0.1`.
+    pub fn loopback_url(port: u16) -> String {
+        format!("http://127.0.0.1:{port}/")
+    }
     /// Default local embedding model.
     pub const DEFAULT_EMBEDDING_MODEL: &'static str = "nomic-embed-text";
     /// Default local completion model. Cartograph never downloads it.
@@ -1172,6 +1180,26 @@ mod tests {
         assert!(provider.capabilities().embeddings);
         assert!(provider.capabilities().chat);
         server.join().unwrap();
+    }
+
+    // #1653: only the port of the local endpoint varies, and the default port
+    // is exactly the default endpoint.
+    #[test]
+    fn ollama_loopback_url_varies_only_the_port() {
+        assert_eq!(
+            OllamaProvider::loopback_url(OllamaProvider::DEFAULT_PORT),
+            OllamaProvider::DEFAULT_URL
+        );
+        let provider = OllamaProvider::new(
+            &OllamaProvider::loopback_url(11500),
+            "m",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            provider.bounded_profile().unwrap().endpoint_id,
+            "http://127.0.0.1:11500/api/chat"
+        );
     }
 
     // #1653: a chosen context window is closed, applied once and bound to the

@@ -118,17 +118,18 @@ pub(super) fn start_access<R: tauri::Runtime>(
     // This resolves app-lifetime configuration only, without network activity.
     // An unavailable provider is passed through: durable deduplication must win
     // over a later configuration change for an already committed request.
-    // Desktop starts use the configured local completion model (#1643) and
-    // context window (#1653); MCP keeps the shipped defaults.
-    let (local_model, context_window) =
+    // Desktop starts use the configured local completion model (#1643),
+    // context window and Ollama port (#1653); MCP keeps the shipped defaults.
+    let (local_model, context_window, port) =
         if session.is_none() && request.provider_mode == InvestigationProviderMode::Local {
             let store = state.settings.lock().map_err(|e| e.to_string())?;
             (
                 Some(store.local_model().map_err(|e| e.to_string())?.model),
                 store.local_context_window().map_err(|e| e.to_string())?,
+                store.local_ollama_port().map_err(|e| e.to_string())?,
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
     let provider = state
         .investigations
@@ -136,6 +137,7 @@ pub(super) fn start_access<R: tauri::Runtime>(
             request.provider_mode,
             local_model.as_deref(),
             context_window,
+            port,
         )
         .ok();
     let descriptor = provider
