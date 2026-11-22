@@ -45,9 +45,17 @@ use core_graph::Edge;
 pub const SUBSYSTEM_RULE: &str = "knowledge.subsystems";
 /// Changed units, signals, clustering or naming require a new recipe version.
 pub const SUBSYSTEM_RULE_VERSION: &str = "6";
-/// Files clustered per repository. Similarity is computed per pair of files
-/// that share a signal, so the bound keeps one run's work and memory fixed.
-pub const MAX_SUBSYSTEM_FILES: usize = 8192;
+/// Files clustered per repository. Every structure the rule holds is linear
+/// in the files (each keeps at most [`REFINE_NEIGHBOURS`] neighbours), and
+/// similarity walks at most [`MAX_POSTING_FILES`] files per signal, so the
+/// bound keeps one run's work and memory fixed (AC-1042).
+pub const MAX_SUBSYSTEM_FILES: usize = 65_536;
+/// Files a signal's similarity is spread over. A signal more files carry
+/// separates almost nothing (its weight is the log of the files over the
+/// carriers) and costs work quadratic in its carriers, so it adds no
+/// similarity; it still names groups. A signal more than half the files
+/// carry is already dropped, so below 8,192 files this changes nothing.
+const MAX_POSTING_FILES: usize = 4096;
 /// Omission when the base has more than [`MAX_SUBSYSTEM_FILES`] unit files.
 pub const SUBSYSTEM_FILE_CAP: &str = "subsystem-file-cap";
 
@@ -1048,30 +1056,55 @@ fn signals<'a>(
         *coupling[to].entry(from).or_default() += strength;
     }
     let mut near: Rows = vec![Vec::new(); n];
+    // One file's similarity to every other, and the files it touched: only
+    // those are read and reset, so a file costs its signals' carriers, not
+    // the whole repository. The sums are added in the same order as a dense
+    // row's, so the weights are the same to the bit.
     let mut row = vec![0.0f64; n];
+    let mut touched: Vec<usize> = Vec::new();
+    let mut seen = vec![false; n];
     for file in 0..n {
         if shared[file] {
             continue;
         }
-        row.fill(0.0);
+        for &other in &touched {
+            row[other] = 0.0;
+            seen[other] = false;
+        }
+        touched.clear();
+        let mut spread = |other: usize, weight: f64, row: &mut [f64]| {
+            if !seen[other] {
+                seen[other] = true;
+                touched.push(other);
+            }
+            row[other] += weight;
+        };
         for (term, weight) in &word_vectors[file] {
-            for &(other, other_weight) in &word_postings[term] {
-                row[other] += weight * other_weight;
+            let carriers = &word_postings[term];
+            if carriers.len() > MAX_POSTING_FILES {
+                continue;
+            }
+            for &(other, other_weight) in carriers {
+                spread(other, weight * other_weight, &mut row);
             }
         }
         for (target, weight) in &use_vectors[file] {
-            for &(other, other_weight) in &use_postings[target] {
-                row[other] += weight * other_weight;
+            let carriers = &use_postings[target];
+            if carriers.len() > MAX_POSTING_FILES {
+                continue;
+            }
+            for &(other, other_weight) in carriers {
+                spread(other, weight * other_weight, &mut row);
             }
         }
         for (&other, &strength) in &coupling[file] {
-            row[other] += strength;
+            spread(other, strength, &mut row);
         }
-        let mut ranked: Vec<(usize, f64)> = row
+        touched.sort_unstable();
+        let mut ranked: Vec<(usize, f64)> = touched
             .iter()
-            .enumerate()
-            .filter(|&(other, &weight)| other != file && !shared[other] && weight > 0.0)
-            .map(|(other, &weight)| (other, weight))
+            .map(|&other| (other, row[other]))
+            .filter(|&(other, weight)| other != file && !shared[other] && weight > 0.0)
             .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         ranked.truncate(REFINE_NEIGHBOURS);

@@ -344,6 +344,47 @@ fn a_widely_used_file_named_for_a_subject_stays_with_it() {
     assert_eq!(alias.2.len(), 5);
 }
 
+// AC-1042: a repository past the old bound of 8,192 unit files is grouped,
+// and a signal carried by more than 4,096 files spreads no similarity, so a
+// word most of two concepts' files carry does not glue them into one.
+#[test]
+fn a_repository_past_eight_thousand_files_is_grouped() {
+    let mut fixture = Fixture::default();
+    for (subject, symbol) in [
+        ("alias", "forward"),
+        ("mailbox", "verify"),
+        ("invoice", "charge"),
+    ] {
+        for i in 0..3000 {
+            let path = format!("app/{subject}/{subject}_{i}.py");
+            // 4,200 of the 9,000 files also define a `ledger` symbol.
+            let ledger = subject != "invoice" && i < 2100;
+            let symbols: &[&str] = if ledger {
+                &[symbol, "ledger"]
+            } else {
+                &[symbol]
+            };
+            fixture.file(&path, symbols);
+        }
+    }
+    let report = derive_subsystems(&fixture.snapshot());
+    assert_eq!(report.omission, None);
+    assert_eq!(report.files, 9000);
+    let groups = groups(&report);
+    for subject in ["Alias", "Mailbox", "Invoice"] {
+        let (_, _, files) = groups
+            .iter()
+            .find(|(name, _, _)| name == subject)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{subject}: {:?}",
+                    groups.iter().map(|g| (&g.0, g.2.len())).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(files.len(), 3000, "{subject}");
+    }
+}
+
 // AC-0870: a base past the file bound derives nothing and says why; a base
 // with nothing to separate derives nothing.
 #[test]
