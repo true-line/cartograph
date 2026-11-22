@@ -57,7 +57,11 @@ impl<'a> Support<'a> {
     }
 
     pub fn from_props(props: &'a serde_json::Value) -> Option<Self> {
-        let support: Self = Self::deserialize(&props["prov"]).ok()?;
+        // A compacted `prov` is text with no escapes, so its strings borrow.
+        let support: Self = match core_graph::stored::compact_text(&props["prov"]) {
+            Some(text) => serde_json::from_str(text).ok()?,
+            None => Self::deserialize(&props["prov"]).ok()?,
+        };
         // Core's integrity validation checks the tier/ceiling. Required source
         // strings, evidence and method shape were validated by borrowed serde.
         let integrity = Provenance {

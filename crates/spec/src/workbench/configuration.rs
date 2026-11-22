@@ -124,7 +124,8 @@ const NOT_COVERED: &[&str] = &[
 /// The confidence a fact records, without decoding its whole provenance. A
 /// fact with none is unresolved, as [`provenance`] makes it.
 fn confidence(props: &serde_json::Value) -> ConfidenceTier {
-    ConfidenceTier::deserialize(&props["prov"]["confidence_tier"]).unwrap_or(ConfidenceTier::Gap)
+    ConfidenceTier::deserialize(&crate::stored_prov(props)["confidence_tier"])
+        .unwrap_or(ConfidenceTier::Gap)
 }
 
 fn weak(props: &serde_json::Value) -> bool {

@@ -121,7 +121,7 @@ fn areas<'a>(
         let core_graph::overlay::OverlayItem::Node(node) = &fact.item else {
             continue;
         };
-        let Ok(p) = Provenance::deserialize(&node.props["prov"]) else {
+        let Ok(p) = Provenance::deserialize(&*crate::stored_prov(&node.props)) else {
             continue;
         };
         if node.label != "Subsystem"
@@ -291,7 +291,7 @@ impl Support<'_> {
             Self::Node(n) => &n.props,
             Self::Edge(e) => &e.props,
         };
-        let p = Provenance::deserialize(&props["prov"])
+        let p = Provenance::deserialize(&*crate::stored_prov(props))
             .map_err(|_| CapabilityStoryInputError::InvalidSupportProvenance)?;
         p.validate()
             .map_err(|_| CapabilityStoryInputError::InvalidSupportProvenance)?;
@@ -472,7 +472,7 @@ fn validated_stories<'a>(
     let mut ordered = BTreeMap::new();
     for candidate in candidates {
         let node = candidate.capability;
-        let p = Provenance::deserialize(&node.props["prov"])
+        let p = Provenance::deserialize(&*crate::stored_prov(&node.props))
             .map_err(|_| CapabilityStoryInputError::Candidate)?;
         if node.label != "Capability"
             || node.id.is_empty()
@@ -522,7 +522,7 @@ fn validated_stories<'a>(
             visible &= fact.visible(mode, rejected)?;
             support.push((cite, fact));
         }
-        let p = Provenance::deserialize(&candidate.capability.props["prov"])
+        let p = Provenance::deserialize(&*crate::stored_prov(&candidate.capability.props))
             .expect("candidate provenance validated above");
         if included(&p, mode, rejected) && visible {
             stories.included.push(Story {
@@ -555,7 +555,8 @@ fn validated_stories<'a>(
         actor_order.insert(listed_order(node), (node, endpoint, fact));
     }
     for &(node, endpoint, fact) in actor_order.values() {
-        let p = Provenance::deserialize(&node.props["prov"]).expect("canonical Actor provenance");
+        let p = Provenance::deserialize(&*crate::stored_prov(&node.props))
+            .expect("canonical Actor provenance");
         let support = Support::Node(endpoint);
         if included(&p, mode, rejected)
             && visible_nodes.contains(endpoint.id.as_str())

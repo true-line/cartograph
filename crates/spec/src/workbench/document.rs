@@ -253,7 +253,7 @@ pub fn cited_fact_digests(
             id: node.id.clone(),
         });
         if cited.contains(&id)
-            && let Ok(digest) = core_graph::source::node_digest(node)
+            && let Ok(digest) = core_graph::source::node_digest(&stored_node(node))
         {
             digests.insert(id, digest);
         }
@@ -261,12 +261,35 @@ pub fn cited_fact_digests(
     for edge in edges {
         let id = citation_id(&edge_key(edge));
         if cited.contains(&id)
-            && let Ok(digest) = core_graph::source::edge_digest(edge)
+            && let Ok(digest) = core_graph::source::edge_digest(&stored_edge(edge))
         {
             digests.insert(id, digest);
         }
     }
     digests
+}
+
+/// A fact as it was stored, for a digest over every field: borrowed unless
+/// the base holds its `prov` or rule payload as text (#2215).
+fn stored_node(node: &Node) -> std::borrow::Cow<'_, Node> {
+    use core_graph::stored::compact_text;
+    if compact_text(&node.props["prov"]).is_some() || compact_text(&node.props["rule"]).is_some() {
+        let mut node = node.clone();
+        crate::workbench::restore_stored(&node.label, &mut node.props);
+        std::borrow::Cow::Owned(node)
+    } else {
+        std::borrow::Cow::Borrowed(node)
+    }
+}
+
+fn stored_edge(edge: &Edge) -> std::borrow::Cow<'_, Edge> {
+    if core_graph::stored::compact_text(&edge.props["prov"]).is_some() {
+        let mut edge = edge.clone();
+        core_graph::stored::restore_prov(&mut edge.props);
+        std::borrow::Cow::Owned(edge)
+    } else {
+        std::borrow::Cow::Borrowed(edge)
+    }
 }
 
 fn hashes_of<'a>(
