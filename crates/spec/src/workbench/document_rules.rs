@@ -1175,6 +1175,29 @@ pub(super) fn rules_per_capability(
          what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
          capability, nearest callable first.\n"
     )?;
+    let stops = capture_stops(nodes);
+    if !stops.is_empty() {
+        let listed: Vec<String> = stops
+            .iter()
+            .take(MAX_LISTED_STOPS)
+            .map(|stop| stop.said())
+            .collect();
+        let more = stops.len().saturating_sub(MAX_LISTED_STOPS);
+        writeln!(
+            out,
+            "Rule capture stopped early in {} file{} (Gap, AC-1048): {}{}. The exits and \
+             changes after each stop are not recorded, so the rules below are incomplete for \
+             those files; the gap register lists each stop.\n",
+            stops.len(),
+            if stops.len() == 1 { "" } else { "s" },
+            listed.join("; "),
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            },
+        )?;
+    }
     if !index.machines.is_empty() {
         writeln!(
             out,
@@ -1200,6 +1223,26 @@ pub(super) fn rules_per_capability(
     }
     let mut printed = 0;
     let mut headings = crate::workbench::document::AreaHeadings::new(knowledge);
+    // Under an area whose member file's rule capture stopped (AC-1048).
+    let mut area_stops: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for stop in &stops {
+        if let Some(area) = knowledge.file_areas.get(stop.file.as_str()) {
+            area_stops
+                .entry(area.id.as_str())
+                .or_default()
+                .push(stop.said());
+        }
+    }
+    for (area, said) in area_stops {
+        headings.note(
+            area,
+            format!(
+                "Rule capture stopped early in this area's code (Gap): {}. The rule tables of \
+                 this area are incomplete.",
+                said.join("; ")
+            ),
+        );
+    }
     // Areas in name order, each one's state machines first (its lifecycle,
     // which a briefing cut from the front keeps, #2069), then its
     // capabilities, then its own code; the capabilities with no area last,
@@ -1316,6 +1359,70 @@ pub(super) fn rules_per_capability(
         printed += index.changes(&shared, &mut BTreeSet::new(), assertions, asserted, out)?;
     }
     Ok(printed)
+}
+
+/// Files listed by name in §1.5's capture-stop sentence (AC-1048).
+const MAX_LISTED_STOPS: usize = 10;
+
+/// Where an adapter ended a file's rule recovery (AC-1048).
+struct CaptureStop {
+    /// The file's id, `file:{repo}@{path}`.
+    file: String,
+    /// The file's path.
+    path: String,
+    /// Exits and effects from the stop on, when the adapter counted them.
+    omitted: Option<u64>,
+    /// Whether a capture limit (not unsupported syntax) stopped it.
+    limit: bool,
+}
+
+impl CaptureStop {
+    fn said(&self) -> String {
+        let why = if self.limit {
+            "a capture limit"
+        } else {
+            "unsupported syntax"
+        };
+        match self.omitted {
+            Some(n) => format!(
+                "`{}`, at {why}, with {n} later exit{} and change{} not recorded",
+                self.path,
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "" } else { "s" },
+            ),
+            None => format!("`{}`, at {why}", self.path),
+        }
+    }
+}
+
+/// Each file whose rule recovery an adapter ended early: a rule-evidence
+/// Gap whose scope is the rule or the rest of the file, in path order.
+fn capture_stops(nodes: &[&Node]) -> Vec<CaptureStop> {
+    let mut stops: BTreeMap<String, CaptureStop> = BTreeMap::new();
+    for node in nodes.iter().filter(|n| n.label == "Gap") {
+        let props = &node.props;
+        if props["rule_evidence_gap"] != true || props["scope"] != "rule_or_remaining_file_analysis"
+        {
+            continue;
+        }
+        let spans = crate::workbench::stored_spans(props);
+        let Some((Some(repo), Some(path))) = spans.first().map(|span| (span.repo, span.path))
+        else {
+            continue;
+        };
+        let file = format!("file:{repo}@{path}");
+        let stop = CaptureStop {
+            file: file.clone(),
+            path: path.to_owned(),
+            omitted: props["omitted_rule_sites"].as_u64(),
+            limit: props["reason_code"] == "analysis_limit",
+        };
+        // One stop per file; the adapter writes at most one.
+        stops.entry(file).or_insert(stop);
+    }
+    let mut stops: Vec<CaptureStop> = stops.into_values().collect();
+    stops.sort_by(|a, b| a.path.cmp(&b.path));
+    stops
 }
 
 /// One part of §1.5, in print order.
@@ -3239,6 +3346,67 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         )
         .unwrap();
         assert!(!out.finish().contains("own code"));
+    }
+
+    // AC-1048 (T-1048): a file whose rule capture stopped early is named in
+    // §1.5's lead with what was not recorded, and again under its area.
+    #[test]
+    fn a_file_whose_rule_capture_stopped_is_stated_incomplete() {
+        let guards: String = (0..300)
+            .map(|i| format!("    if (x === {i}) throw new Error('no');\n"))
+            .collect();
+        let source = format!("export function run(x: number) {{\n{guards}}}\n");
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/order/order.service.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
+        let order = Node {
+            id: "subsystem:1".into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": "Order" }),
+        };
+        let knowledge = Stories {
+            included: Vec::new(),
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: [("file:repo@src/order/order.service.ts", &order)]
+                .into_iter()
+                .collect(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        assert!(
+            text.contains(
+                "Rule capture stopped early in 1 file (Gap, AC-1048): `src/order/order.service.ts`, at a capture limit, with 44 later exits and changes not recorded."
+            ),
+            "{text}"
+        );
+        let area = text.find("### Order\n").expect("area heading");
+        assert!(
+            text[area..].starts_with(
+                "### Order\n\nRule capture stopped early in this area's code (Gap): `src/order/order.service.ts`, at a capture limit, with 44 later exits and changes not recorded. The rule tables of this area are incomplete.\n"
+            ),
+            "{text}"
+        );
     }
 
     // AC-1046 (T-1046): a guard testing what a TypeORM query builder
