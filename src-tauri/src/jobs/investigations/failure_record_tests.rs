@@ -148,6 +148,7 @@ fn rejected_response_stop_keeps_bounded_redacted_record() {
                     rejected: RejectedCompletion {
                         step_id: "step-1".into(),
                         text: response.into(),
+                        action: None,
                     },
                 },
             )
@@ -216,6 +217,7 @@ fn unstorable_rejected_response_still_stops() {
                 rejected: RejectedCompletion {
                     step_id: "step-1".into(),
                     text: "not an action".into(),
+                    action: None,
                 },
             },
         )
@@ -233,4 +235,87 @@ fn unstorable_rejected_response_still_stops() {
         .unwrap();
     assert_eq!(count, 0);
     assert_eq!(fixture.store.investigation(&id).unwrap(), detail);
+}
+
+// AC-1405: a host failure after a decoded action keeps the exact canonical
+// bytes the worker hashed into the saved action hash, even where a JSON map
+// would order the fields differently; a body with a secret keeps only its size
+// and hash; a stop before any action was hashed keeps nothing. The terminal
+// outcome is a plain stop's in every case.
+#[test]
+fn host_failure_stop_keeps_canonical_admitted_action() {
+    use agents::investigation::admitted_action::{ActionRetention, ActionWithheldReason};
+    let response = "{ \"type\": \"query_context\", \"query\": {\"kind\": \"entity\"} }";
+    // Typed order: `type` before `query`, unlike a sorted map.
+    let typed = "{\"type\":\"query_context\",\"query\":{\"kind\":\"entity\"}}";
+    let secret = "{\"type\":\"query_context\",\"labels\":[\"AKIA0000000000000000\"]}";
+    let cases = [
+        (
+            InvestigationStopReason::PreparationAt(PreparationPhase::Query),
+            Some(typed),
+            None,
+        ),
+        (
+            InvestigationStopReason::HostLimitAt {
+                phase: PreparationPhase::Inventory,
+                limit: HostLimitKind::Unspecified,
+            },
+            Some(secret),
+            Some(ActionWithheldReason::Sensitive),
+        ),
+        (
+            InvestigationStopReason::PreparationAt(PreparationPhase::Query),
+            None,
+            None,
+        ),
+    ];
+    for (index, (reason, action, withheld)) in cases.into_iter().enumerate() {
+        let mut fixture = Fixture::new();
+        let (id, execution) = fixture.start(
+            &format!("admitted-action-{index}"),
+            InvestigationProviderMode::Local,
+        );
+        fixture.prepare(&id, &execution, false);
+        let revision = fixture.store.investigation(&id).unwrap().summary.revision;
+        let detail = fixture
+            .store
+            .advance_investigation(
+                &execution,
+                revision,
+                InvestigationTransition::StopRejected {
+                    reason,
+                    active_milliseconds: 0,
+                    rejected: RejectedCompletion {
+                        step_id: "step-2".into(),
+                        text: response.into(),
+                        action: action.map(|bytes| bytes.as_bytes().to_vec()),
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+        assert_eq!(detail.error.as_deref(), Some(reason.test_message()));
+        let reopened = JobStore::open(fixture.directory.path().join("state.db")).unwrap();
+        assert_eq!(reopened.investigation_rejected_response(&id).unwrap(), None);
+        let kept = reopened.investigation_admitted_action(&id).unwrap();
+        let Some(canonical) = action else {
+            assert_eq!(kept, None);
+            continue;
+        };
+        let kept = kept.unwrap();
+        assert_eq!(kept.step_id, "step-2");
+        assert_eq!(
+            kept.action_hash,
+            core_prov::content_hash(canonical.as_bytes())
+        );
+        match withheld {
+            None => assert_eq!(
+                kept.retention,
+                ActionRetention::Body {
+                    json: canonical.into()
+                }
+            ),
+            Some(reason) => assert_eq!(kept.retention, ActionRetention::Withheld { reason }),
+        }
+    }
 }

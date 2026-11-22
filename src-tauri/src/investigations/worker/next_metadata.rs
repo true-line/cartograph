@@ -43,7 +43,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             finish_telemetry: None,
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
-            action_hash: content_hash(&bounded_json(&original, 32 * 1024)?),
+            action_hash: self.hold_action(bounded_json(&original, 32 * 1024)?),
             observed_model: completion.response_model.clone(),
             reported_input_tokens: completion
                 .usage

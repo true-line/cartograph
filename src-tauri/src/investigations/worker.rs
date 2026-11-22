@@ -420,6 +420,16 @@ struct Worker<'a, R: tauri::Runtime> {
 }
 
 impl<R: tauri::Runtime> Worker<'_, R> {
+    /// Keep the canonical action bytes with the held response, so a later
+    /// host failure records exactly what `action_hash` covers (AC-1405).
+    fn hold_action(&mut self, canonical: Vec<u8>) -> String {
+        let hash = content_hash(&canonical);
+        if let Some(held) = self.last_completion.as_mut() {
+            held.action = Some(canonical);
+        }
+        hash
+    }
+
     fn completion_limits(
         &self,
         policy: &InvestigationPolicy,
@@ -810,6 +820,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             self.last_completion = Some(crate::jobs::investigations::RejectedCompletion {
                 step_id: step_id.clone(),
                 text: completion.text.clone(),
+                action: None,
             });
             input
                 .validate_response_metadata(completion.response_model.as_deref())
@@ -924,7 +935,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
                 let value: serde_json::Value = serde_json::from_str(&completion.text)
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-                let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                let hash = self.hold_action(bounded_json(&value, 32 * 1024)?);
                 // A finish-only tool proposal terminates before ActionAdmitted,
                 // BeginTool, query replay publication or source access. It is not
                 // a capacity refusal and cannot buy another model iteration.
@@ -962,7 +973,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 // context identity, rather than its legacy projection.
                 let value: serde_json::Value = serde_json::from_str(&completion.text)
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-                let hash = content_hash(&bounded_json(&value, 32 * 1024)?);
+                let hash = self.hold_action(bounded_json(&value, 32 * 1024)?);
                 match qualified {
                     QualifiedInvestigationAction::QueryContext { query, .. } => (
                         Some(InvestigationAction::QueryContext { query }),
@@ -979,7 +990,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             } else {
                 let action = InvestigationAction::decode(&completion.text)
                     .map_err(|_| Failure::Stop(InvestigationStopReason::InvalidResponse))?;
-                let hash = content_hash(&bounded_json(&action, 32 * 1024)?);
+                let hash = self.hold_action(bounded_json(&action, 32 * 1024)?);
                 (Some(action), None, hash)
             };
             if source_replay_correction_for.is_some()

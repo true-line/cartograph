@@ -2236,16 +2236,22 @@ fn next_prompt_foreign_cursor_preparation_phase_is_durable() {
     let reopened = crate::jobs::JobStore::open(&db).unwrap();
     assert_eq!(reopened.investigation(&f.id).unwrap(), detail);
     assert_eq!(reopened.investigation_events(&f.id, 0).unwrap(), events);
-    for path in [db.clone(), db.with_file_name("state.db-wal")] {
-        if path.exists() {
-            assert!(
-                !std::fs::read(path)
-                    .unwrap()
-                    .windows(b"PRIVATE-FOREIGN-CURSOR-1293".len())
-                    .any(|bytes| bytes == b"PRIVATE-FOREIGN-CURSOR-1293")
-            );
-        }
-    }
+    // AC-1405 (ADR-0076): the admitted query, cursor included, is kept only as
+    // the canonical action body its saved hash covers; no response excerpt is.
+    assert_eq!(
+        reopened.investigation_rejected_response(&f.id).unwrap(),
+        None
+    );
+    let kept = reopened
+        .investigation_admitted_action(&f.id)
+        .unwrap()
+        .unwrap();
+    let agents::investigation::admitted_action::ActionRetention::Body { json } = &kept.retention
+    else {
+        panic!("expected the admitted action body");
+    };
+    assert!(json.contains("PRIVATE-FOREIGN-CURSOR-1293"));
+    assert_eq!(kept.action_hash, core_prov::content_hash(json.as_bytes()));
 }
 
 // AC-0447: a scripted schema bypass stops semantically before captured-source preparation.

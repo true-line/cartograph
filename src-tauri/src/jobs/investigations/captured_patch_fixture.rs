@@ -381,6 +381,7 @@ impl CapturedSourceInvocationFixture {
                 },
                 Some(held),
                 Some(&raw),
+                None,
             )
             .unwrap();
         let success = matches!(case, "replace" | "withdraw" | "withhold" | "audit_replace");
