@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "journey": "Create an alias from the browser extension",
+  "target": {
+    "repository": "https://github.com/simple-login/app",
+    "commit": "4f212552d4f8ba31e2ef8f4a8e52a642ee0f9798",
+    "client": {
+      "repository": "https://github.com/simple-login/browser-extension",
+      "commit": "d18b40fc774a3b477468bc608c3589a24f04c3ed"
+    }
+  },
+  "sources": {
+    "H1": "simple-login/app docs/api.md (public API documentation, read at master)",
+    "H2": "simple-login/browser-extension DEVELOPMENT.md (public developer notes)"
+  },
+  "labels": ["implemented", "documented intent", "inferred", "unknown"],
+  "steps": [
+    {
+      "id": "J1",
+      "kind": "screen",
+      "name": "API key setup",
+      "statement": "Before the first alias, the user gives the extension an API code, either by entering it or through the web onboarding pages /onboarding, /onboarding/setup_done and /onboarding/final. The extension keeps the key in its storage.",
+      "label": "documented intent",
+      "sources": ["H1 intro: the api code is obtained by the user entering it in the browser extension case", "H2: onboarding flow and SLStorage"],
+      "required": true
+    },
+    {
+      "id": "J1a",
+      "kind": "client_call",
+      "name": "Validate the API key",
+      "endpoint": "GET /api/user_info",
+      "statement": "The extension may check the key with GET /api/user_info, which returns the user's name and plan and 401 for a wrong key.",
+      "label": "inferred",
+      "sources": ["H1 GET /api/user_info: 'could be used to validate the api key'; the doc does not say the extension calls it"],
+      "required": false
+    },
+    {
+      "id": "J2",
+      "kind": "screen",
+      "name": "Main screen",
+      "statement": "Opening the extension shows the main screen: an alias recommendation for the current site, alias creation and the existing alias.",
+      "label": "documented intent",
+      "sources": ["H2: 'main screen: displays email alias recommendation, alias creation and existing alias'"],
+      "required": true
+    },
+    {
+      "id": "J3",
+      "kind": "client_call",
+      "name": "Load alias options",
+      "endpoint": "GET /api/v5/alias/options",
+      "inputs": ["Authentication header", "hostname query (optional, recommended)"],
+      "statement": "The main screen loads can_create, the suffixes with their signed_suffix, a prefix_suggestion from the hostname and an optional recommendation of an alias already used on that site.",
+      "label": "documented intent",
+      "sources": ["H1 GET /api/v5/alias/options: 'Used by the first extension screen when user opens the extension'"],
+      "required": true
+    },
+    {
+      "id": "J4",
+      "kind": "client_call",
+      "name": "Load mailboxes",
+      "endpoint": "GET /api/v2/mailboxes",
+      "statement": "To fill mailbox_ids for a custom alias, the extension lists the user's mailboxes.",
+      "label": "inferred",
+      "sources": ["H1 POST /api/v3/alias/custom/new takes mailbox_ids; the doc does not say the extension calls GET /api/v2/mailboxes"],
+      "required": false
+    },
+    {
+      "id": "J5",
+      "kind": "client_call",
+      "name": "Create a custom alias",
+      "endpoint": "POST /api/v3/alias/custom/new",
+      "endpoint_any": ["POST /api/v3/alias/custom/new", "POST /api/v2/alias/custom/new"],
+      "inputs": ["Authentication header", "hostname query (optional, recommended)", "alias_prefix", "signed_suffix from J3", "mailbox_ids", "note (optional)", "name (optional)"],
+      "statement": "Creating an alias with a chosen prefix posts the prefix, one signed suffix from the options and the owning mailboxes. Success is 201 with the new alias.",
+      "label": "inferred",
+      "sources": ["H1 POST /api/v3/alias/custom/new; that the extension's creation step calls this version is inferred from J3 handing it signed suffixes"],
+      "required": true
+    },
+    {
+      "id": "J5a",
+      "kind": "client_call",
+      "name": "Create a random alias (alternate path)",
+      "endpoint": "POST /api/alias/random/new",
+      "inputs": ["Authentication header", "hostname query (optional, recommended)", "mode query uuid|word (optional)", "note (optional)"],
+      "statement": "The alternate creation path posts a random alias, with no prefix or suffix. Success is 201 with the new alias.",
+      "label": "inferred",
+      "sources": ["H1 POST /api/alias/random/new; the doc does not tie it to the extension"],
+      "required": false,
+      "alternate_of": "J5"
+    },
+    {
+      "id": "J6",
+      "kind": "screen",
+      "name": "New alias screen",
+      "statement": "After creation the user is redirected to the new alias screen, where they can copy the alias.",
+      "label": "documented intent",
+      "sources": ["H2: 'new alias screen: when a new alias is created, user is redirected to this screen so they can copy it'"],
+      "required": true
+    }
+  ],
+  "order": ["J1", "J2", "J3", "J5", "J6"],
+  "unknown": [
+    "The extension's route or screen names in code. Public help names the screens only in prose.",
+    "Whether the extension calls GET /api/user_info or GET /api/v2/mailboxes during this journey.",
+    "Which custom-alias endpoint version the pinned extension calls. Public help documents v3; ADR-0050's example label shows v2. J5 therefore matches either, and the run records which.",
+    "The error screens for a refused creation (can_create false, quota, validation)."
+  ]
+}
