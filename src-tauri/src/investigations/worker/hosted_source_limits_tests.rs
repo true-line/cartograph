@@ -77,6 +77,19 @@ impl LlmProvider for HostedSource {
     }
 }
 
+/// Save the project read-deny rule `*`, so the production firewall refuses
+/// every source read toward a cloud provider (AC-1414, #679).
+fn deny_every_read(f: &NextFixture) {
+    let state = f.base.base.app.state::<AppState>();
+    let rules = state
+        .settings
+        .lock()
+        .unwrap()
+        .set_read_deny_rules(vec!["*".into()])
+        .unwrap();
+    assert_eq!(rules.project_rules(), ["*"]);
+}
+
 /// Run `f` on a scripted Cloud provider, approving every step it asks for.
 fn run_with_approvals(f: &NextFixture, provider: Arc<dyn LlmProvider>) {
     // Standing consent is confined to this temporary scripted fixture.
@@ -309,12 +322,31 @@ fn historical_source_limits_database_reopens() {
     }
 }
 
-/// A cloud provider that queries once, reads the source, then finishes.
-/// It records whether any call after the read carried source spans.
+/// A cloud provider that queries once, reads the source, then follows
+/// `script` for every later call. It records whether any call after the read
+/// carried source spans or named the withheld read.
 struct RefusedSource {
     calls: AtomicUsize,
     spans_after_read: AtomicUsize,
     withheld_seen: AtomicUsize,
+    script: fn(usize, &Value) -> Value,
+    max_calls: usize,
+}
+impl RefusedSource {
+    fn new(script: fn(usize, &Value) -> Value, max_calls: usize) -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            spans_after_read: AtomicUsize::new(0),
+            withheld_seen: AtomicUsize::new(0),
+            script,
+            max_calls,
+        })
+    }
+}
+fn insufficient(_: usize, _: &Value) -> Value {
+    json!({"schema_version":1,"outcome":"insufficient_evidence","action":{
+        "type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence",
+        "limitations":["The acquired source was withheld from this provider."]}})
 }
 impl LlmProvider for RefusedSource {
     fn id(&self) -> &str {
@@ -343,7 +375,7 @@ impl LlmProvider for RefusedSource {
         _: &CompletionControl<'_>,
     ) -> Result<BoundedCompletion, BoundedCallError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(call < 3, "unexpected extra call");
+        assert!(call < self.max_calls, "unexpected extra call");
         let prompt: Value = serde_json::from_str(&request.payload().prompt).unwrap();
         if call >= 2 {
             self.spans_after_read
@@ -366,9 +398,7 @@ impl LlmProvider for RefusedSource {
                     .unwrap();
                 json!({"type":"read_evidence","fact":option["fact"],"role":range["role"],"index":range["index"]})
             }
-            _ => json!({"schema_version":1,"outcome":"insufficient_evidence","action":{
-                "type":"finish","findings":[],"knowledge_completeness":"insufficient_evidence",
-                "limitations":["The acquired source was withheld from this provider."]}}),
+            _ => (self.script)(call, &prompt),
         };
         Ok(BoundedCompletion {
             text: action.to_string(),
@@ -388,23 +418,18 @@ impl LlmProvider for RefusedSource {
 // and the store keeps the acquisition, the refusal and its event.
 #[test]
 fn hosted_refused_read_is_withheld_and_recorded() {
-    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = Some(vec!["*".into()]));
     let local = NextProvider::new(false);
     let base = CompletionFixture::new(&local, SpecialistId::DomainAnalystV9, true, false, false);
     let request = base.request.clone();
-    let provider = Arc::new(RefusedSource {
-        calls: AtomicUsize::new(0),
-        spans_after_read: AtomicUsize::new(0),
-        withheld_seen: AtomicUsize::new(0),
-    });
+    let provider = RefusedSource::new(insufficient, 3);
     let f = NextFixture::from_completion_base(
         provider.as_ref(),
         SpecialistId::DomainAnalystV10,
         base,
         request,
     );
+    deny_every_read(&f);
     run_with_approvals(&f, provider.clone());
-    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = None);
     let state = f.base.base.app.state::<AppState>();
     let detail = state
         .jobs
@@ -443,4 +468,150 @@ fn hosted_refused_read_is_withheld_and_recorded() {
     // The refusal is an authentic own-role attempt, so an insufficient-evidence
     // finish with a limitation completes.
     assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+}
+
+/// Run `provider` on a cloud task whose every source read the firewall
+/// refuses, with the source (and optionally the inventory) obligation.
+fn run_refusing(provider: &Arc<RefusedSource>, inventory: bool) -> NextFixture {
+    let local = NextProvider::new(false);
+    let base = CompletionFixture::new(
+        &local,
+        SpecialistId::DomainAnalystV9,
+        true,
+        inventory,
+        false,
+    );
+    let request = base.request.clone();
+    let f = NextFixture::from_completion_base(
+        provider.as_ref(),
+        SpecialistId::DomainAnalystV10,
+        base,
+        request,
+    );
+    deny_every_read(&f);
+    run_with_approvals(&f, provider.clone());
+    f
+}
+
+fn refusal_events(f: &NextFixture) -> usize {
+    let state = f.base.base.app.state::<AppState>();
+    let events = state
+        .jobs
+        .lock()
+        .unwrap()
+        .investigation_events(&f.id, 0)
+        .unwrap();
+    events
+        .items
+        .iter()
+        .filter(|event| event.kind == InvestigationEventKind::ReadFirewallRefused)
+        .count()
+}
+
+/// A supported finish that cites only a graph fact, never the source.
+fn supported_without_source(_: usize, prompt: &Value) -> Value {
+    let citation = prompt["citations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["origin"]["kind"] != "captured_primary_source")
+        .unwrap_or_else(|| panic!("no graph citation in {prompt}"));
+    json!({"schema_version":1,"outcome":"supported","action":{
+        "type":"finish","findings":[{"claim_kind":"inferred_interpretation",
+        "title":"Graph-only claim","statement":"The graph records a business rule.",
+        "citation_ids":[citation["citation_id"]],"limitations":["The source was withheld."]}],
+        "knowledge_completeness":"partial","limitations":["The source was withheld."]}})
+}
+
+// AC-1415 / #679: a refused read is acquired but never exactly supplied, so
+// a supported finish cannot meet its obligation. The first unmet finish is
+// refused with feedback, the refused read does not reset the counter, and
+// the second unmet finish fails atomically with no result; reopen matches.
+#[test]
+fn hosted_refused_read_cannot_support_and_second_unmet_finish_fails() {
+    let provider = RefusedSource::new(supported_without_source, 4);
+    let f = run_refusing(&provider, false);
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs
+        .investigation_owned_detail(&f.execution, &f.id)
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        4,
+        "{:?}",
+        detail.error
+    );
+    assert_eq!(detail.summary.status, InvestigationStatus::Failed);
+    assert_eq!(
+        detail.summary.completion_outcome,
+        Some(InvestigationCompletionOutcome::ObligationsUnmet)
+    );
+    assert_eq!(detail.completion.as_ref().unwrap().refusal_count, 2);
+    assert!(jobs.investigation_result(&f.id).unwrap().is_none());
+    assert_eq!(provider.spans_after_read.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.withheld_seen.load(Ordering::SeqCst), 2);
+    assert_eq!(detail.usage.evidence_items, 1);
+    drop(jobs);
+    assert_eq!(refusal_events(&f), 1);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation_owned_detail(&f.execution, &f.id)
+            .unwrap(),
+        detail
+    );
+    assert!(reopened.investigation_result(&f.id).unwrap().is_none());
+}
+
+/// After the refused source read: an insufficient finish before the
+/// inventory is attempted, then the allowed inventory read, then the same
+/// insufficient finish.
+fn insufficient_then_inventory(call: usize, prompt: &Value) -> Value {
+    if call != 3 {
+        return insufficient(call, prompt);
+    }
+    let target = prompt["completion_contract"]["obligations"]["obligations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|obligation| &obligation["target"])
+        .find(|target| target.get("inventory_hash").is_some())
+        .unwrap();
+    json!({"type":"read_coverage_inventory","context_id":target["context_id"],
+        "repo":target["repo"],"inventory_hash":target["inventory_hash"],"max_bytes":32768})
+}
+
+// AC-1415 / #679: with a refused source read and an allowed inventory read,
+// an insufficient finish needs a completed own-role attempt for every
+// obligation. Before the inventory is attempted it is refused; after it,
+// the same finish completes, with one refusal and the refusal still recorded.
+#[test]
+fn hosted_mixed_refusal_needs_every_own_role_attempt() {
+    let provider = RefusedSource::new(insufficient_then_inventory, 5);
+    let f = run_refusing(&provider, true);
+    let state = f.base.base.app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    let detail = jobs
+        .investigation_owned_detail(&f.execution, &f.id)
+        .unwrap();
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        5,
+        "{:?}",
+        detail.error
+    );
+    assert_eq!(detail.summary.status, InvestigationStatus::Completed);
+    assert_eq!(detail.completion.as_ref().unwrap().refusal_count, 1);
+    assert_eq!(provider.spans_after_read.load(Ordering::SeqCst), 0);
+    assert_eq!(detail.usage.evidence_items, 1);
+    drop(jobs);
+    assert_eq!(refusal_events(&f), 1);
+    let reopened = crate::jobs::JobStore::open(f.base.base.app_data.join("state.db")).unwrap();
+    assert_eq!(
+        reopened
+            .investigation_owned_detail(&f.execution, &f.id)
+            .unwrap(),
+        detail
+    );
 }
