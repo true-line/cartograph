@@ -5758,6 +5758,7 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         calls(),
         &known,
         &crate::reexports::Index::default(),
+        Vec::new(),
         &id(),
         &mut lists,
     )
@@ -5768,6 +5769,7 @@ fn call_and_pulumi_completion_is_identical_over_lists_and_store() {
         calls(),
         &known,
         &crate::reexports::Index::default(),
+        Vec::new(),
         &id(),
         &mut store,
     )
@@ -5993,4 +5995,97 @@ fn node_test_runner_calls_are_tests() {
     };
     assert_eq!(framework("vitest case"), "vitest-jest");
     assert_eq!(framework("hq > admits a soul"), "node-test");
+}
+
+#[test]
+fn typed_call_on_an_inheriting_class_reaches_the_nearest_base_method() {
+    // AC-1514: `T.m` that `T` only inherits resolves through `extends`.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("base.ts"),
+        r#"
+export class Disposable { dispose() {} }
+export class Store extends Disposable { get(key: string) { return key; } }
+export class Loop extends Knot {}
+class Knot extends Loop {}
+export abstract class Shape { area() { return 0; } abstract label(): string; }
+export class Square extends Shape { label() { return 'sq'; } }
+export function measure(square: Square) { square.area(); }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("derived.ts"),
+        r#"
+import { Store } from './base.js';
+import { Remote } from 'remote-pkg';
+export class ResourceStore extends Store {}
+export class OwnStore extends Store { get(key: string) { return key + '!'; } }
+export class Proxy extends Remote {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("use.ts"),
+        r#"
+import { ResourceStore, OwnStore, Proxy } from './derived.js';
+import { Loop } from './base';
+export function read(store: ResourceStore) { store.get('a'); }
+export function close(store: ResourceStore) { store.dispose(); }
+export function own(store: OwnStore) { store.get('b'); }
+export function missing(store: ResourceStore) { store.absent(); }
+export function remote(proxy: Proxy) { proxy.send(); }
+export function cycle(loop: Loop) { loop.spin(); }
+"#,
+    )
+    .unwrap();
+
+    let ex = extract_dir(dir.path(), &id()).unwrap();
+    let calls = edge_pairs(&ex, "CALLS");
+    let sym = |name: &str| format!("sym:qwtm/example@src/{name}");
+    for (from, to) in [
+        ("use.ts#read", "base.ts#Store.get"),
+        ("use.ts#close", "base.ts#Disposable.dispose"),
+        ("use.ts#own", "derived.ts#OwnStore.get"),
+        ("base.ts#measure", "base.ts#Shape.area"),
+    ] {
+        assert!(
+            calls.contains(&(sym(from).as_str(), sym(to).as_str())),
+            "{from} -> {to} in {calls:?}"
+        );
+    }
+    let close = ex
+        .edges
+        .iter()
+        .find(|e| e.src == sym("use.ts#close") && e.label == "CALLS")
+        .unwrap();
+    assert_eq!(close.props["resolution"], "inherited-member");
+    assert_eq!(
+        close.props["inherits_via"],
+        serde_json::json!([
+            sym("derived.ts#ResourceStore"),
+            sym("base.ts#Store"),
+            sym("base.ts#Disposable")
+        ])
+    );
+    assert_eq!(close.props["prov"]["confidence_tier"], "Confirmed");
+    let cited: Vec<&str> = close.props["prov"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(cited, ["src/use.ts", "src/derived.ts", "src/base.ts"]);
+    let gaps: BTreeSet<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Gap")
+        .filter_map(|n| n.props["callee"].as_str())
+        .collect();
+    assert_eq!(
+        gaps,
+        BTreeSet::from(["Loop.spin", "Proxy.send", "ResourceStore.absent"])
+    );
 }

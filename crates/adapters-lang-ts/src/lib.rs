@@ -114,6 +114,9 @@ pub struct Extraction {
     /// Calls on bindings imported from bare specifiers, proven only for
     /// allowlisted packages at directory completion (ADR-0078, AC-1506).
     dependency_calls: Vec<dependency_types::Call>,
+    /// Each class's `extends` clause (AC-1514), so a typed call on a class
+    /// that only inherits the method reaches the base that declares it.
+    heritage: Vec<heritage::Base>,
     /// What the opt-in dependency type reader did on this walk (AC-1506).
     pub dependency_types: DependencyTypesReport,
 }
@@ -335,6 +338,7 @@ fn retarget_commit(
     for call in &mut extraction.dependency_calls {
         call.retarget(commit);
     }
+    heritage::retarget(&mut extraction.heritage, commit);
     Ok(())
 }
 
@@ -373,6 +377,7 @@ impl Extraction {
         self.reexports.clear();
         self.exported.clear();
         self.dependency_calls.clear();
+        self.heritage.clear();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -980,7 +985,10 @@ fn sym_id(repo: &str, path: &str, name: &str) -> String {
 
 fn enclosing_class_name(cx: &FileCx, mut node: TsNode) -> Option<String> {
     while let Some(parent) = node.parent() {
-        if matches!(parent.kind(), "class_declaration" | "class") {
+        if matches!(
+            parent.kind(),
+            "class_declaration" | "abstract_class_declaration" | "class"
+        ) {
             return Some(callable::class_name(cx, parent));
         }
         node = parent;
@@ -2437,6 +2445,7 @@ fn extract_source_recording(
             (arrow_function parameter: (identifier) @binding)
             (function_declaration name: (identifier) @binding)
             (class_declaration name: (type_identifier) @binding)
+            (abstract_class_declaration name: (type_identifier) @binding)
             "#,
         );
         let mut cursor = QueryCursor::new();
@@ -3128,7 +3137,12 @@ fn extract_source_recording(
     let prove_receiver = |name: String, site: TsNode| -> Option<ReceiverProof> {
         let local_class = bindings
             .stable_declaration(site, &name)
-            .filter(|declaration| declaration.kind() == "class_declaration")
+            .filter(|declaration| {
+                matches!(
+                    declaration.kind(),
+                    "class_declaration" | "abstract_class_declaration"
+                )
+            })
             .map(|class| callable::class_name(&cx, class));
         let imported_type = bindings
             .imported(site, &name)
@@ -3322,7 +3336,19 @@ fn extract_source_recording(
         let receiver_type = receiver_proof.name;
         let local_dst = receiver_proof
             .local_class
+            .clone()
             .and_then(|class| methods.get(&(class, method.clone())).cloned());
+        // A top-level local class without the method may inherit it: the
+        // call waits for directory completion like an imported one (AC-1514).
+        let local_inherited = receiver_proof
+            .local_class
+            .filter(|class| local_dst.is_none() && !class.contains(['@', '/']))
+            .map(|class| {
+                (
+                    sym_id(id.repo, cx.path, &format!("{class}.{method}")),
+                    class,
+                )
+            });
         let imported_target = receiver_proof
             .imported_type
             .map(|(target_file, exported_type)| {
@@ -3330,7 +3356,8 @@ fn extract_source_recording(
                     sym_id(id.repo, &target_file, &format!("{exported_type}.{method}")),
                     exported_type,
                 )
-            });
+            })
+            .or(local_inherited);
         let imported_dst = imported_target.as_ref().map(|(dst, _)| dst.clone());
         let Some(dst) = local_dst.clone().or(imported_dst) else {
             continue;
@@ -3375,6 +3402,17 @@ fn extract_source_recording(
     };
     client_routes::extract(&cx, root, &route_proofs, &mut out.client_routes);
     client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
+    // Inherited members resolve in test code too: a test calls the same
+    // classes the product does (AC-1514).
+    heritage::bases(
+        &cx,
+        &syntax_nodes,
+        &heritage::Imports {
+            files: &imported_types,
+            modules: &import_modules,
+        },
+        &mut out.heritage,
+    );
     // Guards in test code are not business rules (#2009).
     if !target_tests::in_test_tree(cx.path) {
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
@@ -3563,6 +3601,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.reexports.extend(ex.reexports);
     out.exported.extend(ex.exported);
     out.dependency_calls.extend(ex.dependency_calls);
+    out.heritage.extend(ex.heritage);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3571,6 +3610,7 @@ fn complete_pending_calls(
     mut pending: Vec<PendingCall>,
     known_symbols: &std::collections::HashSet<String>,
     barrels: &reexports::Index<'_>,
+    bases: Vec<heritage::Base>,
     id: &SourceId,
     facts: &mut impl FactAccess,
 ) -> Result<(), core_graph::GraphError> {
@@ -3598,10 +3638,52 @@ fn complete_pending_calls(
             call.resolved_edge = PackedEdge::pack(edge)?;
         }
     }
+    // A typed call whose class only inherits the method walks its bases
+    // to the nearest declaration (AC-1514).
+    // Classes are not Symbols themselves: a class is known by its
+    // `extends` clause or by a member Symbol (`…#T.m`).
+    let classes: std::collections::HashSet<String> = if bases.is_empty() {
+        Default::default()
+    } else {
+        bases
+            .iter()
+            .map(|base| base.class.clone())
+            .chain(known_symbols.iter().filter_map(|symbol| {
+                let (prefix, qualified) = symbol.rsplit_once('#')?;
+                let (class, _) = qualified.split_once('.')?;
+                Some(format!("{prefix}#{class}"))
+            }))
+            .collect()
+    };
+    let place = |class: &str| {
+        reconcile_guessed_extension(class, &classes).or_else(|| {
+            (!barrels.is_empty() && !classes.contains(class))
+                .then(|| barrels.resolve(id.repo, class, &classes))
+                .flatten()
+                .map(|resolved| resolved.dst)
+        })
+    };
+    let bases = heritage::Index::new(bases, place);
+    let inherited: Vec<Option<heritage::Inherited>> = pending
+        .iter()
+        .map(|call| {
+            (call.requires_instance_method
+                && !bases.is_empty()
+                && !known_symbols.contains(&call.resolved_edge.dst))
+            .then(|| {
+                bases
+                    .chain(&call.resolved_edge.dst, place, known_symbols)
+                    .into_iter()
+                    .next()
+            })
+            .flatten()
+        })
+        .collect();
     let targets: BTreeSet<&str> = pending
         .iter()
         .filter(|call| call.requires_instance_method)
         .map(|call| call.resolved_edge.dst.as_str())
+        .chain(inherited.iter().flatten().map(|found| found.dst.as_str()))
         .collect();
     let instance_methods: BTreeSet<String> = facts
         .decode_nodes(|id, _| targets.contains(id))?
@@ -3610,18 +3692,34 @@ fn complete_pending_calls(
         .map(|node| node.id)
         .collect();
     let (mut nodes, mut edges) = (Vec::new(), Vec::new());
-    for call in pending {
+    for (call, inherited) in pending.into_iter().zip(inherited) {
         if known_symbols.contains(&call.resolved_edge.dst)
             && (!call.requires_instance_method
                 || instance_methods.contains(&call.resolved_edge.dst))
         {
             edges.push(call.resolved_edge.unpack()?);
+        } else if let Some(found) = inherited.filter(|found| instance_methods.contains(&found.dst))
+        {
+            edges.push(inherited_edge(call.resolved_edge.unpack()?, found));
         } else {
             nodes.push(call.gap_node.unpack()?);
             edges.push(call.gap_edge.unpack()?);
         }
     }
     facts.append(nodes, edges)
+}
+
+/// A typed call's edge retargeted to the base method it inherits, citing
+/// every `extends` clause walked (AC-1514).
+fn inherited_edge(mut edge: Edge, found: heritage::Inherited) -> Edge {
+    edge.dst = found.dst;
+    edge.props["resolution"] = "inherited-member".into();
+    edge.props["inherits_via"] = found.via.into_iter().map(serde_json::Value::from).collect();
+    if let Ok(mut prov) = serde_json::from_value::<Provenance>(edge.props["prov"].clone()) {
+        prov.evidence.extend(found.evidence);
+        edge.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
+    }
+    edge
 }
 
 /// Append each pending Pulumi relationship whose endpoints resolve.
@@ -3689,6 +3787,7 @@ fn complete_directory(
         std::mem::take(&mut out.pending_calls),
         &known_symbols,
         &reexports::Index::new(&reexports, &exported),
+        std::mem::take(&mut out.heritage),
         id,
         &mut *facts,
     )?;
@@ -3970,6 +4069,7 @@ pub mod declarations;
 mod dependency_types;
 mod grammar;
 pub mod graphql_resolvers;
+mod heritage;
 pub mod indexeddb;
 mod instances;
 mod local_definitions;
