@@ -215,7 +215,7 @@ Which gates run where:
 
 | Gate | Linux (`ubuntu-latest`) | Windows (`windows-latest`) | macOS (self-hosted, `scheduled.yml`) |
 |---|---|---|---|
-| Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | format and clippy: advisory, every push to main (`windows.yml`) | — |
+| Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | format and clippy (all but `app`): advisory, every push to main (`windows.yml`) | — |
 | `cargo test` (every package; `app` in two test groups of six shards on Linux, and `job-execution-tests` covered there by `app-store`; four processes on macOS) | every PR and merge | advisory, every push to main, all but `app` (`windows.yml`) | daily; not a PR gate |
 | Unsigned installer with both sidecars (#227) | — | advisory, every push to main (`windows.yml`) | — |
 | Job ownership tests (`job-execution-tests --test ownership`) | every PR and merge (as `app-store`'s unit tests) | every PR and merge | daily (in the workspace run) |

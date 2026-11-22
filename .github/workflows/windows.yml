@@ -18,6 +18,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # ready_for_review too: a draft skips every job, and marking it ready
+    # starts no other run.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/windows.yml
       - scripts/build-agent-runtime.mjs
@@ -65,8 +68,9 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     # The Linux Rust lane's three test groups, plus fmt and clippy. The app
-    # unit tests stay on Linux (ci.yml's app shards); clippy still compiles
-    # the app and its tests here.
+    # stays on Linux for both: its MCP and job paths are Unix-only, so Windows
+    # clippy reports them as dead code (#227). The installer job still builds
+    # the app here.
     strategy:
       fail-fast: false
       matrix:
@@ -140,15 +144,16 @@ jobs:
 
       - name: Clippy
         if: matrix.lane == 'lint'
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --exclude app --all-targets -- -D warnings
 
       - name: Test
         if: matrix.lane != 'lint'
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
-        # PACKAGES is a list of cargo arguments: split it on spaces.
-        run: cargo test --locked $PACKAGES
+        # PACKAGES is a list of cargo arguments: split it on spaces. Every
+        # package runs, so one run lists all of a lane's Windows failures.
+        run: cargo test --locked --no-fail-fast $PACKAGES
 
   # An unsigned NSIS installer with both sidecars, as an artifact for manual
   # testing. It is never published: release.yml ships macOS only until the
