@@ -2228,23 +2228,256 @@ fn with_definitions(
     };
     let mut out = said;
     let mut said_names = std::collections::BTreeSet::new();
-    for (name, _, tested) in &named {
-        if !tested || !said_names.insert(name.as_str()) {
+    let mut said_bindings = std::collections::BTreeSet::new();
+    let mut sentences = 0;
+    let mut say = |out: &mut String, what: &str, is: &str| {
+        let sentence = format!(" Here {what} is {is}.");
+        if is != what
+            && sentences < MAX_DEFINITION_SENTENCES
+            && crate::workbench::neutrality::projected_code_token(&sentence).is_none()
+        {
+            out.push_str(&sentence);
+            sentences += 1;
+            true
+        } else {
+            false
+        }
+    };
+    for (index, (name, _, tested)) in named.iter().enumerate() {
+        if !tested || !said_names.insert(name.clone()) {
             continue;
         }
         let Some(what) = noun(&Expr::Ref(vec![name.clone()]), &cx) else {
             continue;
         };
-        let Some(is) = defined_noun(&Expr::Ref(vec![name.clone()]), &named, &cx, 0) else {
+        if let Some(is) = defined_noun(&Expr::Ref(vec![name.clone()]), &named, &cx, 0) {
+            say(&mut out, &what, &is);
+            continue;
+        }
+        // Outside the textual rules, the recorded expression is read node by
+        // node, and each local name it reads is said in a sentence of its
+        // own (AC-1040).
+        let Some(definition) = definitions
+            .iter()
+            .filter(|d| d.uses.iter().find_map(&spelled).as_deref() == Some(name.as_str()))
+            .nth(named[..index].iter().filter(|(n, ..)| n == name).count())
+        else {
             continue;
         };
-        let sentence = format!(" Here {what} is {is}.");
-        if is != what && crate::workbench::neutrality::projected_code_token(&sentence).is_none() {
-            out.push_str(&sentence);
+        let mut queue = std::collections::VecDeque::from([(name.clone(), what, definition)]);
+        while let Some((spelling, what, definition)) = queue.pop_front() {
+            if !said_bindings.insert(definition.binding_id.as_str())
+                || (spelling != *name && !said_names.insert(spelling.clone()))
+            {
+                continue;
+            }
+            let mut later = Vec::new();
+            let root = definition.expression.root as usize;
+            let Some(is) = node_noun(definitions, definition, &spelling, root, &cx, &mut later, 0)
+            else {
+                continue;
+            };
+            if say(&mut out, &what, &is) {
+                queue.extend(later);
+            }
         }
     }
     out
 }
+
+/// The most "Here … is …" sentences one statement carries.
+const MAX_DEFINITION_SENTENCES: usize = 6;
+
+/// One recorded initializer node as a noun phrase (AC-1040): a sum reads
+/// "A plus B", an index "the first of X", a member "X's y", a plain
+/// function's call "the “f” result for A", and a record lookup "the alias
+/// whose email is …"; any other method call is not said. A local name it
+/// reads is said by name and queued in `later` to be stated next, unless
+/// it is the name being defined (`x = f(x)`), whose earlier value is read
+/// in place.
+fn node_noun<'d>(
+    definitions: &'d [core_graph::rules::LocalDefinition],
+    definition: &'d core_graph::rules::LocalDefinition,
+    defining: &str,
+    index: usize,
+    cx: &Context<'_>,
+    later: &mut Vec<Queued<'d>>,
+    depth: usize,
+) -> Option<String> {
+    use core_graph::rules::{BinaryOperator, DefinitionExpressionKind as K, DependencyResolution};
+    if depth > 6 {
+        return None;
+    }
+    let nodes = &definition.expression.nodes;
+    let node = nodes.get(index)?;
+    let display =
+        |i: u32| -> Option<&str> { Some(nodes.get(i as usize)?.expression.display.as_str()) };
+    let plain = |text: &str| -> bool {
+        !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    // The recorded local an identifier node reads, with its spelling.
+    let local = |i: u32| -> Option<(&'d str, &'d core_graph::rules::LocalDefinition)> {
+        let n = nodes.get(i as usize)?;
+        let K::Identifier { dependency } = n.kind else {
+            return None;
+        };
+        let DependencyResolution::Binding { binding_id, .. } =
+            &definition.dependencies.get(dependency as usize)?.resolution
+        else {
+            return None;
+        };
+        let inner = definitions.iter().find(|d| &d.binding_id == binding_id)?;
+        Some((n.expression.display.as_str(), inner))
+    };
+    let name = |i: u32, later: &mut Vec<Queued<'d>>| -> Option<String> {
+        let n = nodes.get(i as usize)?;
+        if !matches!(n.kind, K::Identifier { .. }) {
+            return node_noun(
+                definitions,
+                definition,
+                defining,
+                i as usize,
+                cx,
+                later,
+                depth + 1,
+            );
+        }
+        let text = n.expression.display.as_str();
+        if !plain(text) {
+            return None;
+        }
+        let what = noun(&Expr::Ref(vec![text.to_owned()]), cx)?;
+        let Some((_, inner)) = local(i) else {
+            return Some(what);
+        };
+        if let Some(read) = request_read(inner.initializer.display.as_str()) {
+            return Some(read);
+        }
+        if text == defining {
+            let root = inner.expression.root as usize;
+            return node_noun(definitions, inner, text, root, cx, later, depth + 1);
+        }
+        later.push((text.to_owned(), what.clone(), inner));
+        Some(what)
+    };
+    match &node.kind {
+        K::Identifier { .. } => name(index as u32, later),
+        K::Literal => noun(&parse(node.expression.display.as_str())?, cx),
+        K::Parenthesized { value } => node_noun(
+            definitions,
+            definition,
+            defining,
+            *value as usize,
+            cx,
+            later,
+            depth + 1,
+        ),
+        K::Binary {
+            operator: BinaryOperator::Add,
+            left,
+            right,
+        } => Some(format!(
+            "{} plus {}",
+            name(*left, later)?,
+            name(*right, later)?
+        )),
+        K::Member {
+            object,
+            property,
+            computed: false,
+            ..
+        } => {
+            let property = display(*property)?;
+            if !plain(property) {
+                return None;
+            }
+            let object_node = nodes.get(*object as usize)?;
+            if matches!(object_node.kind, K::Identifier { .. }) && local(*object).is_none() {
+                let text = object_node.expression.display.as_str();
+                return noun(&Expr::Ref(vec![text.to_owned(), property.to_owned()]), cx);
+            }
+            Some(format!(
+                "the {} of {}",
+                words(property),
+                name(*object, later)?
+            ))
+        }
+        K::Member {
+            object,
+            property,
+            computed: true,
+            ..
+        } => {
+            let ordinal = match display(*property)? {
+                "0" => "first",
+                "1" => "second",
+                "2" => "third",
+                _ => return None,
+            };
+            Some(format!("the {ordinal} of {}", name(*object, later)?))
+        }
+        K::Call {
+            callee, arguments, ..
+        } => {
+            let callee_node = nodes.get(*callee as usize)?;
+            let called = match &callee_node.kind {
+                K::Identifier { .. } => callee_node.expression.display.as_str(),
+                K::Member {
+                    object,
+                    property,
+                    computed: false,
+                    ..
+                } => {
+                    let model = display(*object)?;
+                    let method = display(*property)?;
+                    // `Alias.get_by(email=x)`: the alias whose email is x.
+                    if is_class(model) && plain(model) && matches!(method, "get_by" | "first_by") {
+                        let mut parts = Vec::new();
+                        for argument in arguments {
+                            let K::KeywordArgument { name: key, value } =
+                                nodes.get(*argument as usize)?.kind
+                            else {
+                                return None;
+                            };
+                            let key = display(key)?;
+                            if !plain(key) {
+                                return None;
+                            }
+                            parts.push(format!("{} is {}", words(key), name(value, later)?));
+                        }
+                        if parts.is_empty() {
+                            return None;
+                        }
+                        return Some(format!(
+                            "the {} whose {}",
+                            words(model),
+                            parts.join(" and ")
+                        ));
+                    }
+                    // Any other method's result (`cache.get(k)`) is not said.
+                    return None;
+                }
+                _ => return None,
+            };
+            if !plain(called) || predicate_verb(called).is_some() {
+                return None;
+            }
+            let called = format!("the “{}” result", words(called.trim_start_matches('_')));
+            match &arguments[..] {
+                [] => Some(called),
+                [one] if !matches!(nodes.get(*one as usize)?.kind, K::KeywordArgument { .. }) => {
+                    Some(format!("{called} for {}", name(*one, later)?))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A local name queued to be stated: its spelling, its noun and its
+/// definition.
+type Queued<'d> = (String, String, &'d core_graph::rules::LocalDefinition);
 
 /// A request input read by its literal name: `request.headers.get("X")` is
 /// the “X” header, `request.args.get("x")` the “x” query parameter and
