@@ -2096,14 +2096,6 @@ impl PrimarySourceStore {
         if ingest::coverage::wants(layers, ingest::coverage::INFRA_LAYERS) {
             lanes.extend(iac::tf_paths(root).unwrap_or_default());
         }
-        // The environment reader's selection (AC-1059) joins it for every
-        // layer selection, under the same fallback; the reader reads the
-        // capture only when its selection was listed and retained.
-        let environments = ingest::environments::environment_paths(root).ok();
-        if let Some(paths) = &environments {
-            lanes.extend(paths.iter().cloned());
-        }
-        let no_lanes = lanes.is_empty();
         // Workflows and Dockerfiles (AC-1057) are read for every layer
         // selection, so they are retained with the TS/JS selection itself,
         // even when the lanes fall back: a capture always holds the pipeline
@@ -2116,17 +2108,26 @@ impl PrimarySourceStore {
         })?);
         base.sort();
         base.dedup();
-        let combined = (!lanes.is_empty())
-            .then(|| {
-                let mut paths = base.clone();
-                paths.extend(lanes);
-                paths.sort();
-                paths.dedup();
-                capture_paths(&paths).ok()
-            })
-            .flatten();
-        let environments_captured = environments.is_some() && (no_lanes || combined.is_some());
-        let capture = match combined {
+        let with = |extra: &[String]| {
+            let mut paths = base.clone();
+            paths.extend(lanes.iter().chain(extra).cloned());
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        // The environment reader's selection (AC-1059), read for every layer
+        // selection, is tried with the lanes first. When the whole set cannot
+        // be retained, the lanes are retained without it and the reader reads
+        // the checkout, so it never costs a lane its capture.
+        let environments = ingest::environments::environment_paths(root).ok();
+        let mut capture = environments
+            .as_ref()
+            .and_then(|paths| capture_paths(&with(paths)).ok());
+        let environments_captured = capture.is_some();
+        if capture.is_none() && !lanes.is_empty() {
+            capture = capture_paths(&with(&[])).ok();
+        }
+        let capture = match capture {
             Some(capture) => capture,
             None => capture_paths(&base).map_err(|_| match commit {
                 Some(_) => "Selected TS/JS source could not be read from the cloned commit's Git objects within the capture limits; recovery was not published.".to_string(),

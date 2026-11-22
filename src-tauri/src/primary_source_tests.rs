@@ -3465,6 +3465,51 @@ fn the_selection_walk_follows_the_projects_capture_and_entry_limits() {
     assert_eq!(input.capture.as_ref().unwrap().manifest().files.len(), 2);
 }
 
+// AC-1059: when the environment selection does not fit beside the lanes,
+// the lanes keep their capture without it and the environment reader reads
+// the checkout.
+#[test]
+fn an_environment_selection_that_does_not_fit_never_costs_the_lanes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "local");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("app.py"), "print('app')\n").unwrap();
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx\n",
+    )
+    .unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits {
+                max_files: 2,
+                ..source_capture::CaptureLimits::default()
+            },
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+        )
+        .unwrap();
+    assert!(!input.environments_captured);
+    let paths: Vec<_> = input
+        .capture
+        .as_ref()
+        .unwrap()
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["app.py", "source.ts"]);
+}
+
 // AC-1057: a source's workflows and Dockerfiles join its capture, and the
 // pipeline reader parses the retained bytes, not the checkout.
 #[test]

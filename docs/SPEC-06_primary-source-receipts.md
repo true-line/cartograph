@@ -324,8 +324,9 @@ finding still reads the checkout, and pipeline facts carry no receipt.
 
 The environment reader's selection (`environments::is_environment_file`:
 Compose, kustomize, Helm, Kubernetes-candidate YAML and settings files)
-joins the lanes' capture for every layer selection, under the lanes'
-fallback. The capture records whether that selection was listed and retained
+joins the lanes' capture for every layer selection when the whole set fits;
+otherwise the lanes are retained without it, so it never costs a lane its
+capture. The capture records whether that selection was listed and retained
 (`environments_captured`); when it was, the reader reads only the retained
 bytes, and the checkout is listed only for its directories and other files: a
 selected file absent from the capture is not among the files read, and a
