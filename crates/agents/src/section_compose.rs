@@ -168,12 +168,15 @@ pub struct ComposeInput<'a> {
 }
 
 /// The fingerprint of this role's definition: its instructions, its
-/// per-section guidance and its schema template.
+/// per-section guidance and its schema templates, listed and unlisted
+/// (#2399).
 pub fn definition_fingerprint() -> String {
     let schema = response_schema(&BTreeSet::new());
+    let unlisted = unlisted_response_schema();
     crate::source_basis::domain_hash(
         b"cartograph:section-composer-definition:v1\0",
-        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{schema}").as_bytes(),
+        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{schema}\0{unlisted}")
+            .as_bytes(),
     )
 }
 
