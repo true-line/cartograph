@@ -55,7 +55,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             finish_telemetry: None,
             step_id: step_id.into(),
             response_hash: content_hash(completion.text.as_bytes()),
-            action_hash: source_response_action_hash(&original)?,
+            action_hash: self.hold_action(source_response_action_bytes(&original)?),
             observed_model: completion.response_model.clone(),
             reported_input_tokens: completion
                 .usage
@@ -251,8 +251,8 @@ fn cleanup_failure(failure: SourceCleanupFailure) -> Failure {
     }
 }
 
-fn source_response_action_hash(original: &serde_json::Value) -> Result<String, Failure> {
-    Ok(content_hash(&bounded_json(original, 32 * 1024)?))
+fn source_response_action_bytes(original: &serde_json::Value) -> Result<Vec<u8>, Failure> {
+    Ok(bounded_json(original, 32 * 1024)?)
 }
 
 #[cfg(test)]
@@ -274,7 +274,10 @@ mod capacity_hash_tests {
             role: agents::TaskRangeRole::Provenance,
             index: 0,
         };
-        assert_eq!(source_response_action_hash(&original).unwrap(), expected);
+        assert_eq!(
+            content_hash(&source_response_action_bytes(&original).unwrap()),
+            expected
+        );
         assert_eq!(offered.capacity_refusal_hash().unwrap(), expected);
         let mut shifted = offered.clone();
         if let AcquisitionAction::ReadEvidence { index, .. } = &mut shifted {
