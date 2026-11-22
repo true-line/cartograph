@@ -527,12 +527,17 @@ impl SqliteGraphStore {
                 Kind::Edge => e.first().map(source::edge_digest).transpose()?,
             };
             let binding = source::load_selection_binding(&transaction, role, fact)?;
-            let omission = source::selection_omission(
-                &transaction,
-                fact,
-                digest.as_deref(),
-                complete_coverage,
-            )?;
+            // Omission rows record primary receipts only; an observed
+            // selection never reads them, and no observed omission is recorded.
+            let omission = match role {
+                source::BindingRole::Primary => source::selection_omission(
+                    &transaction,
+                    fact,
+                    digest.as_deref(),
+                    complete_coverage,
+                )?,
+                source::BindingRole::Observed => source::OmissionLookup::Unrecorded,
+            };
             #[cfg(any(test, feature = "test-support"))]
             if let Some(after_lookup) = self.source_binding_after_lookup.borrow_mut().take() {
                 after_lookup()?;

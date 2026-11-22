@@ -766,9 +766,17 @@ fn scoped_window_json_accounting_preserves_duplicate_property_values() {
 fn selected_facts_read_the_requested_binding_role() {
     // AC-1051 (ADR-0079): the same revision-bound selection reads a fact's
     // observed binding when asked for the observed role, and its primary one
-    // otherwise; a fact with only an observed binding is Absent as primary.
+    // otherwise; a fact with only an observed binding is Absent as primary,
+    // and a primary omission never reads as an observed one.
+    use crate::source::{OmissionLookup, ReceiptOmissionKind, SourceOmission, SourceOmissions};
     let mut store = SqliteGraphStore::open_in_memory().unwrap();
     store.put_node(&node("a")).unwrap();
+    store.put_node(&node("b")).unwrap();
+    let omitted = [SourceOmission {
+        fact: FactKey::from_node(&node("b")),
+        emitted_fact_digest: node_digest(&node("b")).unwrap(),
+        kind: ReceiptOmissionKind::StoreCapacity,
+    }];
     let observed = SourceBinding {
         fact: FactKey::from_node(&node("a")),
         repo_key: "repo/a".into(),
@@ -785,7 +793,10 @@ fn selected_facts_read_the_requested_binding_role() {
                 &[],
                 std::slice::from_ref(&observed),
                 None,
-                crate::source::SourceOmissions::NONE,
+                SourceOmissions {
+                    records: &omitted,
+                    complete: true,
+                },
             )
             .unwrap()
     );
@@ -809,4 +820,28 @@ fn selected_facts_read_the_requested_binding_role() {
         as_primary.selections[0].state,
         FactSourceState::Absent { .. }
     ));
+    let omitted_key = [omitted[0].fact.clone()];
+    let primary_omitted = store
+        .read_selected_facts_at_revision(&omitted_key, &revision, limits(1))
+        .unwrap();
+    assert!(matches!(
+        primary_omitted.selections[0].omission,
+        OmissionLookup::Omitted { .. }
+    ));
+    let observed_omitted = store
+        .read_selected_facts_at_revision_as(
+            &omitted_key,
+            &revision,
+            limits(1),
+            crate::source::BindingRole::Observed,
+        )
+        .unwrap();
+    assert!(matches!(
+        observed_omitted.selections[0].state,
+        FactSourceState::Absent { .. }
+    ));
+    assert_eq!(
+        observed_omitted.selections[0].omission,
+        OmissionLookup::Unrecorded
+    );
 }
