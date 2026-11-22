@@ -450,15 +450,24 @@ fn numerals(literal: &str) -> impl Iterator<Item = &str> {
 /// Whether `text` shows `numeral` as a whole token: not inside a longer
 /// number or word, so `25` is not shown by `a25f` or `1.25` (#2357).
 fn contains_numeral(text: &str, numeral: &str) -> bool {
-    let bytes = text.as_bytes();
+    // A letter or digit in any script continues a token (`25秒`).
+    let continues = |mut around: std::str::Chars<'_>, back: bool| {
+        let next = |chars: &mut std::str::Chars<'_>| {
+            if back {
+                chars.next_back()
+            } else {
+                chars.next()
+            }
+        };
+        match next(&mut around) {
+            Some(c) if c.is_alphanumeric() => true,
+            Some('.') => next(&mut around).is_some_and(|c| c.is_ascii_digit()),
+            _ => false,
+        }
+    };
     text.match_indices(numeral).any(|(start, matched)| {
         let end = start + matched.len();
-        let word = |at: usize| bytes.get(at).is_some_and(u8::is_ascii_alphanumeric);
-        let digit = |at: usize| bytes.get(at).is_some_and(u8::is_ascii_digit);
-        let before = start == 0
-            || !(word(start - 1) || (bytes[start - 1] == b'.' && start >= 2 && digit(start - 2)));
-        let after = !(word(end) || (bytes.get(end) == Some(&b'.') && digit(end + 1)));
-        before && after
+        !continues(text[..start].chars(), true) && !continues(text[end..].chars(), false)
     })
 }
 
@@ -938,6 +947,7 @@ mod tests {
         );
         assert_eq!(hexed.uncited_number("It has 17 areas.", h), Some("17"));
         assert!(!contains_numeral("1.25", "25") && !contains_numeral("x25", "25"));
+        assert!(!contains_numeral("第25章", "25") && !contains_numeral("25秒", "25"));
         assert!(contains_numeral("timeout 15s", "15s") && contains_numeral("[2, 3]", "2"));
         assert!(contains_version("served at /api/v2/alias.", "2"));
         // A section reference and a route are not figures.
