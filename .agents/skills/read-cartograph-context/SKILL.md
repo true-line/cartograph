@@ -17,8 +17,10 @@ Choose the smallest useful route:
 
 - Discover a relevant node by identifier, name or narrow text query. Candidates
   are matches, not established relationships. Preserve query/context/cursor on
-  continuation. Discovery currently covers nodes only; flows use the official
+  continuation. Discovery covers nodes only; flows use the official
   `flow-dossiers` artifact.
+- Follow a found node's relations with `cartograph_query` when capabilities
+  offer it: a bounded page of its neighborhood, the edges among those nodes.
 - List artifact metadata, then request a selected artifact page. A catalog entry
   names a producer, not a completed artifact. Continue only when the question
   needs more, using the returned content identity and byte offset.
