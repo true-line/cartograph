@@ -68,6 +68,9 @@ struct Rejection<'a> {
     /// Where the rule is, in a reader's terms, when its owner's name is not
     /// (an inline function: the route it handles, #2009).
     place: Option<String>,
+    /// The changes that fill a list this exit tests (AC-1050): the values
+    /// they test are followed with the exit's own (AC-1052).
+    also: Vec<&'a Node>,
 }
 
 fn one_line(text: &str) -> String {
@@ -257,12 +260,25 @@ fn rejection<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Opt
 /// branch around it only for these.
 fn choice<'a>(rule: &'a Node, owner: &'a str, constant: Constants<'_>) -> Option<Rejection<'a>> {
     let parsed = crate::rules::rule_payload(rule).ok()?;
-    if !parsed.conditions.is_empty()
-        || !matches!(parsed.effect, LocalExit::Return { value: Some(_) })
-    {
+    let LocalExit::Return { value: Some(value) } = &parsed.effect else {
+        return None;
+    };
+    if !parsed.conditions.is_empty() || computed_otherwise(value) {
         return None;
     }
     guarded(rule, owner, true, constant)
+}
+
+/// An arithmetic value a callable returns when no guard returned first
+/// (AC-1052): said only beside the guarded returns it completes, where its
+/// function is followed, not alone as a row.
+fn computed_otherwise(value: &SourceExpression) -> bool {
+    let text = value.display.as_str();
+    value.syntax_kind == "binary_expression"
+        && !["&&", "||", "??", "==", "!=", "<", ">"]
+            .iter()
+            .any(|op| text.contains(op))
+        && text.contains(['+', '-', '*', '/', '%'])
 }
 
 /// A guarded effect (an assignment or a call statement, #1998) as a row.
@@ -349,6 +365,7 @@ fn guarded<'a>(
         outcome,
         statement,
         place: None,
+        also: Vec::new(),
     })
 }
 
@@ -598,6 +615,83 @@ impl<'a> Index<'a> {
         })
     }
 
+    /// A guard that tests a list its callable starts empty (`const found =
+    /// []`) says what is added to it (AC-1050): "Here the found start
+    /// empty, and when …, the line's product variant is added to the
+    /// found." Only the callable's own recorded `push` changes are said.
+    fn collected(&self, owner_id: &str, owner: &str, mut row: Rejection<'a>) -> Rejection<'a> {
+        let Some(said) = row.statement.as_mut() else {
+            return row;
+        };
+        let Ok(exit) = crate::rules::rule_payload(row.rule) else {
+            return row;
+        };
+        if !exit.effect.exits() {
+            return row;
+        }
+        let siblings = self.governs.get(owner_id).map_or(&[][..], Vec::as_slice);
+        for definition in exit.local_definitions.iter().flatten() {
+            if definition.initializer.display.as_str().trim() != "[]" {
+                continue;
+            }
+            // The list's name, read off a use inside a tested condition.
+            let Some(name) = definition_name(&exit, definition) else {
+                continue;
+            };
+            let push = format!("{name}.push(");
+            let mut pushes = Vec::new();
+            let added: Vec<String> = siblings
+                .iter()
+                .filter_map(|sibling| {
+                    let parsed = crate::rules::rule_payload(sibling).ok()?;
+                    let LocalExit::Call { value } = &parsed.effect else {
+                        return None;
+                    };
+                    let value = value.display.as_str().trim();
+                    value
+                        .strip_prefix("await ")
+                        .unwrap_or(value)
+                        .starts_with(&push)
+                        .then_some(())?;
+                    // The push's list is this definition's binding, not a
+                    // shadowing list of the same name.
+                    parsed
+                        .dependencies
+                        .iter()
+                        .any(|d| {
+                            matches!(
+                                &d.resolution,
+                                core_graph::rules::DependencyResolution::Binding { binding_id, .. }
+                                    if *binding_id == definition.binding_id
+                            )
+                        })
+                        .then_some(())?;
+                    let stated = super::statements::statement(
+                        &parsed,
+                        owner,
+                        Some(&|k| self.constant(k)),
+                        &failed_calls(sibling),
+                    )?;
+                    let stated = stated.strip_suffix('.').unwrap_or(&stated).to_owned();
+                    let mut chars = stated.chars();
+                    let first = chars.next()?;
+                    pushes.push(*sibling);
+                    Some(format!("{}{}", first.to_lowercase(), chars.as_str()))
+                })
+                .collect();
+            if added.is_empty() || added.len() > MAX_COLLECTED_PUSHES {
+                continue;
+            }
+            row.also.extend(pushes);
+            said.push_str(&format!(
+                " Here the {} start empty, and {}.",
+                super::statements::words(&name),
+                added.join("; and ")
+            ));
+        }
+        row
+    }
+
     /// Each rejection exit of `owners`, in order, one at a time.
     fn each(
         &self,
@@ -612,9 +706,10 @@ impl<'a> Index<'a> {
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(owner);
             for rule in self.governs.get(owner).into_iter().flatten() {
-                if let Some(mut found) = rejection(rule, name, Some(&|k| self.constant(k)))
+                if let Some(found) = rejection(rule, name, Some(&|k| self.constant(k)))
                     .or_else(|| self.mail_reply(rule, owner, name))
                 {
+                    let mut found = self.collected(owner, name, found);
                     found.place = self.place(owner, name);
                     n += 1;
                     row(found)?;
@@ -725,6 +820,7 @@ impl<'a> Index<'a> {
                 &failed_calls(rule),
             ),
             place: None,
+            also: Vec::new(),
         })
     }
 
@@ -858,6 +954,48 @@ fn smtp_constants(display: &str) -> impl Iterator<Item = (Option<&str>, &str)> {
         })
 }
 
+/// The method whose value `init` is: `await this.variants.level(ctx, v)`
+/// or `variants.level(v)` gives `level` (AC-1052). A plain function call,
+/// a chain with a call before the last step or anything after the call is
+/// not one.
+fn method_value(init: &str) -> Option<&str> {
+    let call = init.strip_prefix("await ").unwrap_or(init).trim();
+    let open = call.find('(')?;
+    let end = open + closing(&call[open..])?;
+    if end + 1 != call.len() {
+        return None;
+    }
+    let path: Vec<&str> = call[..open].split('.').collect();
+    let (method, receiver) = path.split_last()?;
+    let ident = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with(|c: char| c.is_ascii_digit())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    (!receiver.is_empty() && path.iter().all(|s| ident(s)) && method.len() >= 3).then_some(*method)
+}
+
+/// The name a local definition binds, read off its use inside one of the
+/// rule's tested conditions.
+fn definition_name(
+    parsed: &core_graph::rules::GuardedExitEvidence,
+    definition: &core_graph::rules::LocalDefinition,
+) -> Option<String> {
+    definition.uses.iter().find_map(|at| {
+        let within =
+            parsed.conditions.iter().map(|c| &c.expression).find(|e| {
+                e.source.byte_start <= at.byte_start && at.byte_end <= e.source.byte_end
+            })?;
+        let start = usize::try_from(at.byte_start - within.source.byte_start).ok()?;
+        let end = usize::try_from(at.byte_end - within.source.byte_start).ok()?;
+        let name = within.display.as_str().get(start..end)?;
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            .then(|| name.to_owned())
+    })
+}
+
 /// Predicates followed per rejection row.
 pub(super) const MAX_PREDICATES: usize = 3;
 /// Call hops followed past a predicate.
@@ -882,7 +1020,14 @@ impl<'a> Index<'a> {
         // followed into that function too (AC-1036): `alias_suffix =
         // check_suffix_signature(signed_suffix)` under `not alias_suffix`.
         let mut scan = row.when.clone();
-        if let Ok(parsed) = crate::rules::rule_payload(row.rule) {
+        // A tested local holding a method's value (`availableStock = await
+        // this.variants.getSaleableStockLevel(ctx, v)`) is followed into
+        // that method, as the value it returns (AC-1052).
+        let mut values: Vec<(String, String, String)> = Vec::new();
+        for rule in std::iter::once(row.rule).chain(row.also.iter().copied()) {
+            let Ok(parsed) = crate::rules::rule_payload(rule) else {
+                continue;
+            };
             // Only a definition the condition itself reads (AC-1040): the
             // locals its value reads in turn are stated, not followed.
             let tested = |definition: &&core_graph::rules::LocalDefinition| {
@@ -906,13 +1051,28 @@ impl<'a> Index<'a> {
                     }),
                     _ => false,
                 };
-                if plain_call {
+                if plain_call && rule.id == row.rule.id {
                     scan.push_str(" and ");
                     scan.push_str(&one_line(definition.initializer.display.as_str()));
+                } else {
+                    let init = one_line(definition.initializer.display.as_str());
+                    if let Some(method) = method_value(&init)
+                        && let Some(local) = definition_name(&parsed, definition)
+                    {
+                        values.push((method.to_owned(), local, init));
+                    }
                 }
             }
         }
-        for name in called_names(&scan) {
+        let mut names: Vec<(&str, Option<(&str, &str)>)> =
+            called_names(&scan).into_iter().map(|n| (n, None)).collect();
+        for (method, local, init) in &values {
+            if !names.iter().any(|(n, _)| n == method) {
+                names.push((method.as_str(), Some((local.as_str(), init.as_str()))));
+            }
+        }
+        for (name, value) in names {
+            let context = value.map_or(row.when.as_str(), |(_, init)| init);
             let named = self
                 .by_name
                 .get(name)
@@ -924,7 +1084,7 @@ impl<'a> Index<'a> {
             let mut matched = "matched by name, inferred".to_owned();
             let targets = if named.len() > 1
                 && let Some(class) =
-                    receiver(&row.when, name).and_then(|r| receiver_class(r, row.owner))
+                    receiver(context, name).and_then(|r| receiver_class(r, row.owner))
             {
                 narrowed = named
                     .iter()
@@ -978,14 +1138,30 @@ impl<'a> Index<'a> {
                 .get(target)
                 .and_then(|n| n.props["name"].as_str())
                 .unwrap_or(target);
-            writeln!(
-                out,
-                "| ↳ | The check “{}” decides as follows ({matched}, \
-                 {PREDICATE_DEPTH} call hops): | {}() in {} | — |",
-                Literal(super::statements::words(name)),
-                Literal(name),
-                Literal(qualified),
-            )?;
+            if let Some((local, _)) = value {
+                writeln!(
+                    out,
+                    "| ↳ | The {} is the “{}” value, as follows ({matched}, \
+                     {PREDICATE_DEPTH} call hops): | {}() in {} | — |",
+                    Literal(super::statements::words(local)),
+                    Literal(super::statements::words(
+                        name.strip_prefix("get")
+                            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+                            .unwrap_or(name)
+                    )),
+                    Literal(name),
+                    Literal(qualified),
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "| ↳ | The check “{}” decides as follows ({matched}, \
+                     {PREDICATE_DEPTH} call hops): | {}() in {} | — |",
+                    Literal(super::statements::words(name)),
+                    Literal(name),
+                    Literal(qualified),
+                )?;
+            }
             let mut seen: BTreeSet<&str> = BTreeSet::from([*target]);
             let mut order = vec![*target];
             let mut front = vec![*target];
@@ -1542,7 +1718,7 @@ fn state_machine<'a>(
         for owner in owners {
             for rule in index.governs.get(owner).into_iter().flatten() {
                 if let Some(row) = guarded(rule, hook_name, true, Some(&|k| index.constant(k))) {
-                    guards.push(row);
+                    guards.push(index.collected(owner, hook_name, row));
                 }
             }
         }
@@ -1566,8 +1742,18 @@ fn state_machine<'a>(
             )?;
         }
         out.push_str(HEADER)?;
+        let mut followed = BTreeSet::new();
+        let mut explained = BTreeSet::new();
         for row in &guards {
             write_row(row, assertions, asserted, out)?;
+            // What a guard's tested value is decided by (AC-1052).
+            index.follow(
+                row,
+                &mut (&mut followed, &mut explained),
+                assertions,
+                asserted,
+                out,
+            )?;
             rows += 1;
         }
         out.push_str("\n")?;
@@ -1762,6 +1948,10 @@ impl<'a> Index<'a> {
         Ok(shown)
     }
 }
+
+/// The most `push` changes one guard's collected-list sentence says
+/// (AC-1050).
+const MAX_COLLECTED_PUSHES: usize = 3;
 
 /// Call hops followed from a guard and the functions nested in it.
 pub(super) const GUARD_DEPTH: usize = 2;
@@ -3554,6 +3744,159 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
             let text = render(&changed);
             assert!(!text.contains("Here the available variants"), "{text}");
         }
+    }
+
+    // AC-1050 (T-1050): a list a callable starts empty and fills in a loop
+    // is stated with what is added to it, and the guard that tests it says
+    // what it holds.
+    #[test]
+    fn a_list_collected_in_a_loop_is_stated() {
+        let source = "export function configureDefaultOrderProcess(options) {
+    const orderProcess: OrderProcess<OrderState> = {
+        transitions: {
+            AddingItems: { to: ['ArrangingPayment', 'Cancelled'] },
+            ArrangingPayment: { to: ['AddingItems', 'Cancelled'] },
+            Cancelled: { to: [] },
+        },
+        async onTransitionStart(fromState, toState, { ctx, order }) {
+            if (toState === 'Cancelled') {
+                const variantsWithInsufficientStock: ProductVariant[] = [];
+                variantsWithInsufficientStock.push(order.code);
+            }
+            if (toState === 'ArrangingPayment') {
+                const variantsWithInsufficientStock: ProductVariant[] = [];
+                for (const line of order.lines) {
+                    const availableStock = await this.productVariantService.getSaleableStockLevel(
+                        ctx,
+                        line.productVariant,
+                    );
+                    if (line.quantity > availableStock) {
+                        variantsWithInsufficientStock.push(line.productVariant);
+                    }
+                }
+                if (variantsWithInsufficientStock.length) {
+                    return 'message.cannot-transition-to-payment-due-to-insufficient-stock';
+                }
+            }
+        },
+    };
+    return orderProcess;
+}
+
+export class ProductVariantService {
+    async getSaleableStockLevel(ctx: RequestContext, variant: ProductVariant): Promise<number> {
+        const { outOfStockThreshold, trackInventory } = await this.globalSettingsService.getSettings(ctx);
+        const inventoryNotTracked =
+            variant.trackInventory === GlobalFlag.FALSE ||
+            (variant.trackInventory === GlobalFlag.INHERIT && trackInventory === false);
+        if (inventoryNotTracked) {
+            return Number.MAX_SAFE_INTEGER;
+        }
+        const { stockOnHand, stockAllocated } = await this.stockLevelService.getAvailableStock(
+            ctx,
+            variant.id,
+        );
+        const effectiveOutOfStockThreshold = variant.useGlobalOutOfStockThreshold
+            ? outOfStockThreshold
+            : variant.outOfStockThreshold;
+        return stockOnHand - stockAllocated - effectiveOutOfStockThreshold;
+    }
+}
+";
+        let facts = adapters_lang_ts::extract_source(
+            source.as_bytes(),
+            "src/order/order-process.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+            },
+        )
+        .unwrap();
+        let (held_nodes, held_edges) =
+            crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+        let nodes: Vec<&Node> = held_nodes.iter().collect();
+        let edges: Vec<&Edge> = held_edges.iter().collect();
+        let order = Node {
+            id: "subsystem:1".into(),
+            label: "Subsystem".into(),
+            props: serde_json::json!({ "name": "Order" }),
+        };
+        let knowledge = Stories {
+            included: Vec::new(),
+            filtered: 0,
+            areas: BTreeMap::new(),
+            file_areas: [("file:repo@src/order/order-process.ts", &order)]
+                .into_iter()
+                .collect(),
+        };
+        let budget = Budget::new(None).unwrap();
+        let mut assertions = Assertions::new(&budget);
+        let mut asserted = BTreeSet::new();
+        let mut out = Text::new(&budget, "").unwrap();
+        rules_per_capability(
+            (&nodes, &edges),
+            &knowledge,
+            (&mut assertions, &mut asserted),
+            &mut out,
+        )
+        .unwrap();
+        let text = out.finish();
+        assert!(
+            text.contains(
+                "the move is refused with the message “cannot transition to payment due to \
+                 insufficient stock”. Here the variants with insufficient stock start empty, and \
+                 when the to state is “ArrangingPayment”, and the line's quantity is more than \
+                 the available stock, the line's product variant is added to the variants with \
+                 insufficient stock."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "When the to state is “ArrangingPayment”, and the variants with insufficient \
+                 stock are not empty, the move is refused"
+            ),
+            "{text}"
+        );
+        // A shadowing list of the same name is not what the guard tests.
+        assert!(
+            !text.contains("start empty, and when the to state is “Cancelled”"),
+            "{text}"
+        );
+        assert!(!text.contains("stock; and"), "{text}");
+        assert_eq!(
+            text.matches(
+                "the line's product variant is added to the variants with insufficient stock."
+            )
+            .count(),
+            // The guard's sentence, the hook's change row and the area's
+            // own-code row.
+            3,
+            "{text}"
+        );
+        // AC-1052 (T-1052): the tested stock is followed into the method
+        // that gives it, with its guarded and its otherwise value.
+        for said in [
+            "| ↳ | The available stock is the “saleable stock level” value, as follows",
+            "| ↳ ProductVariantService.getSaleableStockLevel | When the variant's track \
+             inventory is “FALSE” or both the variant's track inventory is “INHERIT” and the \
+             track inventory is false, the product variant's saleable stock level is the largest \
+             safe integer (9007199254740991). |",
+            "| ↳ ProductVariantService.getSaleableStockLevel | Otherwise, the product variant's \
+             saleable stock level is the stock on hand minus the stock allocated minus the \
+             effective out of stock threshold. Here the effective out of stock threshold is the \
+             out of stock threshold when the variant's use global out of stock threshold is set, \
+             and otherwise the variant's out of stock threshold. |",
+        ] {
+            assert!(text.contains(said), "{said}\n{text}");
+        }
+        // The otherwise value is not a row of its own beside the area's
+        // rejections.
+        assert_eq!(
+            text.matches("Otherwise, the product variant's").count(),
+            1,
+            "{text}"
+        );
     }
 
     // AC-0951: a state machine is stated under the area of the file that
