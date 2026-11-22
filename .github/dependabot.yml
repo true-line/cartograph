@@ -34,7 +34,10 @@ updates:
       npm-ui-minor-patch:
         update-types: [minor, patch]
     ignore:
-      # TS 7.x is blocked until typescript-eslint's peer range admits it (#174).
+      # `typescript` stays on 6.x because typescript-eslint loads its JS API,
+      # which TS 7 does not ship. Build and typecheck use the TS 7 compiler
+      # through the exactly pinned `typescript-7` alias instead (#174). Drop
+      # the alias and this ignore once typescript-eslint supports TS 7.
       - dependency-name: typescript
         update-types: [version-update:semver-major]
 
