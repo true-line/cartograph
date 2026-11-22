@@ -574,3 +574,91 @@ fn a_rule_is_cited_with_the_capability_it_is_listed_under() {
         BTreeMap::from([("Manage user (API)", BTreeSet::from(["F-user"]))])
     );
 }
+
+/// AC-1325 (T-1325, #2419): on a local lane each claim the reviewer judges
+/// an overreach is left out before staging; an unreadable review keeps the
+/// claims.
+#[test]
+fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let cites = [id("cap:orders")];
+    let composer = Scripted {
+        reply: json!({"claims": [
+            {"statement": "Shoppers place orders for themselves.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place orders from every channel there is.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place up to 17 orders a day.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    // The staging checks run first: the claim stating an uncited number
+    // keeps its own reason and is never reviewed.
+    let composed = || {
+        let mut composed = compose(
+            &state,
+            &composer,
+            &prepared,
+            None,
+            &|| CallDirective::Continue,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(screen(&prepared, &mut composed), None);
+        assert_eq!(composed.reasons["number_not_cited"], 1);
+        composed
+    };
+    let reviewer = Scripted {
+        reply: json!({"verdicts": [
+            {"claim": 1, "verdict": "shown"}, {"claim": 2, "verdict": "overreach"},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let (kept, how) = review(
+        &state,
+        &reviewer,
+        &prepared,
+        composed(),
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap();
+    assert_eq!(how, "reviewed");
+    assert_eq!(kept.finish.claims.len(), 1);
+    assert_eq!(
+        kept.finish.claims[0].statement,
+        "Shoppers place orders for themselves."
+    );
+    assert_eq!((kept.left_out, kept.reasons["claim_overreaches"]), (2, 1));
+    // The reviewer read both claims and the cited capability's text.
+    let prompt = reviewer.prompts.lock().unwrap()[0].clone();
+    assert!(prompt.contains("2. Shoppers place orders from every channel there is."));
+    assert!(!prompt.contains("17 orders"));
+    assert!(prompt.contains(&format!("{}: ", id("cap:orders"))) && prompt.contains("Place orders"));
+    // A reply that is not the schema's keeps every claim.
+    let unreadable = Scripted {
+        reply: "not a review".into(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let (kept, how) = review(
+        &state,
+        &unreadable,
+        &prepared,
+        composed(),
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap();
+    assert_eq!((how, kept.finish.claims.len()), ("review_unavailable", 2));
+}
