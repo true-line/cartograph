@@ -78,14 +78,18 @@ export async function serve(io: Io, runners: {
   return finished ?? { type: "done", reason: "cancelled", detail: "host closed stdin" };
 }
 
+// Run from source (`node src/main.ts`). The packaged executable starts from
+// sea-entry.ts instead; there `import.meta` is empty and this never runs.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { runPi } = await import("./pi-runner.ts");
-  const { runClaude } = await import("./claude-runner.ts");
-  const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  const versions = {
-    pi: packageVersion("@mariozechner/pi-agent-core"),
-    claude: packageVersion("@anthropic-ai/claude-agent-sdk"),
-  };
-  await serve({ lines, write: (line) => process.stdout.write(line) }, { pi: runPi, claude: runClaude }, versions);
-  process.exit(0);
+  void (async () => {
+    const { runPi } = await import("./pi-runner.ts");
+    const { runClaude } = await import("./claude-runner.ts");
+    const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    const versions = {
+      pi: packageVersion("@mariozechner/pi-agent-core"),
+      claude: packageVersion("@anthropic-ai/claude-agent-sdk"),
+    };
+    await serve({ lines, write: (line) => process.stdout.write(line) }, { pi: runPi, claude: runClaude }, versions);
+    process.exit(0);
+  })();
 }
