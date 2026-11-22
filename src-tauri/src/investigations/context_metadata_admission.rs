@@ -82,9 +82,11 @@ impl FrozenContext {
             raw,
             kind,
             guards,
+            rows,
             ..
         } = prepared;
         self.ledger = ledger;
+        self.retain_rows(rows);
         match kind {
             PreparedContextReadKind::Query => self.query_pages.push(raw),
             PreparedContextReadKind::Inventory => self.inventory_details.push(raw),

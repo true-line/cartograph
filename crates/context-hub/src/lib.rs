@@ -327,11 +327,170 @@ pub enum ContextError {
     Serialization(#[from] serde_json::Error),
 }
 
-#[derive(Serialize)]
-struct Selection {
-    scope: QueryScope,
-    kind: Option<FactKind>,
-    labels: BTreeSet<String>,
+/// One normalized query selection; its identity binds a cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FactSelection {
+    /// The facts' scope.
+    pub scope: QueryScope,
+    /// Nodes only, edges only, or both.
+    pub kind: Option<FactKind>,
+    /// The admitted labels; empty admits all.
+    pub labels: BTreeSet<String>,
+}
+
+impl FactSelection {
+    /// Whether `fact` passes the kind and label filters, whatever its scope.
+    pub fn admits(&self, fact: &ContextFact) -> bool {
+        self.kind.is_none_or(|kind| fact.reference.kind() == kind)
+            && (self.labels.is_empty() || self.labels.contains(&fact.label))
+    }
+}
+
+/// Where a query's facts come from (#1602): a snapshot held in memory, or a
+/// store read at one pinned revision that never holds the whole graph.
+pub trait FactSource {
+    /// The source's failure, which also carries selection refusals.
+    type Error: From<ContextError>;
+    /// The number of facts `selection` selects, in snapshot identity order
+    /// (nodes by id, then edges by source, label and destination), and at
+    /// most `limit` of them from `offset`. An unknown anchor or node is
+    /// refused with [`ContextError::UnknownAnchor`] or
+    /// [`ContextError::UnknownNode`].
+    fn select(
+        &mut self,
+        selection: &FactSelection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<ContextFact>), Self::Error>;
+}
+
+impl FactSource for &ContextSnapshot {
+    type Error = ContextError;
+
+    fn select(
+        &mut self,
+        selection: &FactSelection,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<ContextFact>), ContextError> {
+        let neighborhood = match &selection.scope {
+            QueryScope::All | QueryScope::Node { .. } => None,
+            QueryScope::Neighborhood { anchor, hops } => {
+                if !self.node_ids.contains(anchor) {
+                    return Err(ContextError::UnknownAnchor(anchor.clone()));
+                }
+                Some(self.neighborhood(anchor, *hops))
+            }
+        };
+        if let QueryScope::Node { id } = &selection.scope
+            && !self.node_ids.contains(id)
+        {
+            return Err(ContextError::UnknownNode(id.clone()));
+        }
+        let selected: Vec<&ContextFact> = self
+            .facts
+            .iter()
+            .filter(|fact| {
+                selection.admits(fact)
+                    && match &selection.scope {
+                        QueryScope::All => true,
+                        QueryScope::Node { id } => matches!(
+                            &fact.reference,
+                            FactReference::Node { id: fact_id } if fact_id == id
+                        ),
+                        QueryScope::Neighborhood { .. } => {
+                            scope_refs::contains(&fact.reference, neighborhood.as_ref())
+                        }
+                    }
+            })
+            .collect();
+        let page = selected
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|fact| (*fact).clone())
+            .collect();
+        Ok((selected.len(), page))
+    }
+}
+
+/// Select a stable page of `source`'s facts, whose complete content identity
+/// is `snapshot_id`, within the request's item and whole-response byte
+/// budgets. Oversized facts are never skipped to fit later facts.
+pub fn query_source<S: FactSource>(
+    snapshot_id: &str,
+    request: QueryRequest,
+    source: &mut S,
+) -> Result<QueryResponse, S::Error> {
+    request.validate_limits()?;
+    let selection = FactSelection {
+        scope: request.scope,
+        kind: request.kind,
+        labels: request.labels.into_iter().collect(),
+    };
+    let requested = request.cursor.as_ref().map_or(0, |cursor| cursor.offset);
+    let (total, page) = source.select(&selection, requested, request.max_facts)?;
+    let selection_id = content_identity("selection-v1", &selection)?;
+    let offset = match request.cursor {
+        Some(cursor) => {
+            if cursor.snapshot_id != snapshot_id {
+                return Err(ContextError::CursorSnapshotMismatch.into());
+            }
+            if cursor.selection_id != selection_id {
+                return Err(ContextError::CursorSelectionMismatch.into());
+            }
+            if cursor.offset > total {
+                return Err(ContextError::InvalidCursorOffset {
+                    offset: cursor.offset,
+                    total_selected: total,
+                }
+                .into());
+            }
+            cursor.offset
+        }
+        None => 0,
+    };
+    let cursor_at = |offset| {
+        (offset < total).then(|| QueryCursor {
+            snapshot_id: snapshot_id.to_owned(),
+            selection_id: selection_id.clone(),
+            offset,
+        })
+    };
+    let mut response = QueryResponse {
+        snapshot_id: snapshot_id.to_owned(),
+        view: ContextView::RecoveredGraph,
+        total_selected: total,
+        facts: Vec::new(),
+        next_cursor: cursor_at(offset),
+    };
+    for fact in page {
+        response.facts.push(fact);
+        response.next_cursor = cursor_at(offset + response.facts.len());
+        let bytes = logical::encoded_size(&response).map_err(ContextError::from)?;
+        if bytes > request.max_bytes {
+            response.facts.pop();
+            if response.facts.is_empty() {
+                return Err(ContextError::ResponseBudgetExceeded {
+                    max_bytes: request.max_bytes,
+                    required_bytes: bytes,
+                }
+                .into());
+            }
+            response.next_cursor = cursor_at(offset + response.facts.len());
+            return Ok(response);
+        }
+    }
+    // Empty selections and end-position cursors still have an envelope.
+    let bytes = logical::encoded_size(&response).map_err(ContextError::from)?;
+    if bytes > request.max_bytes {
+        return Err(ContextError::ResponseBudgetExceeded {
+            max_bytes: request.max_bytes,
+            required_bytes: bytes,
+        }
+        .into());
+    }
+    Ok(response)
 }
 
 /// Immutable owned read projection of a complete recovered graph.
@@ -405,104 +564,7 @@ impl ContextSnapshot {
     /// Select a stable page within the requested item and whole-response byte
     /// budgets. Oversized facts are never skipped to fit later facts.
     pub fn query(&self, request: QueryRequest) -> Result<QueryResponse, ContextError> {
-        request.validate_limits()?;
-        let selection = Selection {
-            scope: request.scope,
-            kind: request.kind,
-            labels: request.labels.into_iter().collect(),
-        };
-        let neighborhood = match &selection.scope {
-            QueryScope::All | QueryScope::Node { .. } => None,
-            QueryScope::Neighborhood { anchor, hops } => {
-                if !self.node_ids.contains(anchor) {
-                    return Err(ContextError::UnknownAnchor(anchor.clone()));
-                }
-                Some(self.neighborhood(anchor, *hops))
-            }
-        };
-        if let QueryScope::Node { id } = &selection.scope
-            && !self.node_ids.contains(id)
-        {
-            return Err(ContextError::UnknownNode(id.clone()));
-        }
-        let selection_id = content_identity("selection-v1", &selection)?;
-        let selected: Vec<&ContextFact> = self
-            .facts
-            .iter()
-            .filter(|fact| {
-                selection
-                    .kind
-                    .is_none_or(|kind| fact.reference.kind() == kind)
-                    && (selection.labels.is_empty() || selection.labels.contains(&fact.label))
-                    && match &selection.scope {
-                        QueryScope::All => true,
-                        QueryScope::Node { id } => matches!(
-                            &fact.reference,
-                            FactReference::Node { id: fact_id } if fact_id == id
-                        ),
-                        QueryScope::Neighborhood { .. } => {
-                            scope_refs::contains(&fact.reference, neighborhood.as_ref())
-                        }
-                    }
-            })
-            .collect();
-        let offset = match request.cursor {
-            Some(cursor) => {
-                if cursor.snapshot_id != self.id {
-                    return Err(ContextError::CursorSnapshotMismatch);
-                }
-                if cursor.selection_id != selection_id {
-                    return Err(ContextError::CursorSelectionMismatch);
-                }
-                if cursor.offset > selected.len() {
-                    return Err(ContextError::InvalidCursorOffset {
-                        offset: cursor.offset,
-                        total_selected: selected.len(),
-                    });
-                }
-                cursor.offset
-            }
-            None => 0,
-        };
-        let cursor_at = |offset| {
-            (offset < selected.len()).then(|| QueryCursor {
-                snapshot_id: self.id.clone(),
-                selection_id: selection_id.clone(),
-                offset,
-            })
-        };
-        let mut response = QueryResponse {
-            snapshot_id: self.id.clone(),
-            view: ContextView::RecoveredGraph,
-            total_selected: selected.len(),
-            facts: Vec::new(),
-            next_cursor: cursor_at(offset),
-        };
-        for fact in selected.iter().skip(offset).take(request.max_facts) {
-            response.facts.push((*fact).clone());
-            response.next_cursor = cursor_at(offset + response.facts.len());
-            let bytes = logical::encoded_size(&response)?;
-            if bytes > request.max_bytes {
-                response.facts.pop();
-                if response.facts.is_empty() {
-                    return Err(ContextError::ResponseBudgetExceeded {
-                        max_bytes: request.max_bytes,
-                        required_bytes: bytes,
-                    });
-                }
-                response.next_cursor = cursor_at(offset + response.facts.len());
-                return Ok(response);
-            }
-        }
-        // Empty selections and end-position cursors still have an envelope.
-        let bytes = logical::encoded_size(&response)?;
-        if bytes > request.max_bytes {
-            return Err(ContextError::ResponseBudgetExceeded {
-                max_bytes: request.max_bytes,
-                required_bytes: bytes,
-            });
-        }
-        Ok(response)
+        query_source(&self.id, request, &mut &*self)
     }
 
     fn neighborhood(&self, anchor: &str, hops: usize) -> BTreeSet<String> {

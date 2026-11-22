@@ -1,6 +1,6 @@
 use super::{
     AcquisitionSink, HostError,
-    context::{EvidenceOption, EvidenceOptions, FrozenContext},
+    context::{EvidenceOption, EvidenceOptions, FrozenContext, FrozenFact, ScopedGraph},
 };
 use crate::{
     AppState,
@@ -165,11 +165,12 @@ impl EvidenceGuards {
         &self,
         state: &AppState,
         context: &FrozenContext,
+        fresh: &ScopedGraph,
         selected: &TaskFactSelection,
     ) -> Result<EvidenceOptions, HostError> {
         let (origin, ranges) = if selected.binding.is_some() {
             let receipt = self.receipt(state, selected)?;
-            validate_receipt_fact(&receipt, context, &selected.fact)?;
+            validate_receipt_fact(&receipt, context, fresh, &selected.fact)?;
             (
                 "captured_primary_source_metadata",
                 receipt
@@ -185,7 +186,7 @@ impl EvidenceGuards {
         } else {
             (
                 "working_tree_unverified",
-                legacy_references(context.props(&selected.fact)?)
+                legacy_references(context.props_in(&selected.fact, fresh)?)
                     .into_iter()
                     .enumerate()
                     .map(|(index, source)| EvidenceOption {
@@ -270,7 +271,7 @@ impl FrozenContext {
         }
         let (source, text, origin) = if let Some(binding) = &selected.binding {
             let receipt = guards.receipt(state, &selected)?;
-            validate_receipt_fact(&receipt, self, &fact)?;
+            validate_receipt_fact(&receipt, self, super::context::NO_ROWS, &fact)?;
             let (inventory_index, range) = receipt
                 .ranges()
                 .iter()
@@ -440,25 +441,13 @@ fn legacy_references(props: &serde_json::Value) -> Vec<EvidenceRef> {
 fn validate_receipt_fact(
     receipt: &Receipt,
     context: &FrozenContext,
+    fresh: &ScopedGraph,
     fact: &TaskFactKey,
 ) -> Result<(), HostError> {
-    let valid = match fact {
-        TaskFactKey::Node { id } => context
-            .graph
-            .0
-            .iter()
-            .find(|n| &n.id == id)
-            .is_some_and(|n| receipt.matches_node(n)),
-        TaskFactKey::Edge {
-            source,
-            label,
-            destination,
-        } => context
-            .graph
-            .1
-            .iter()
-            .find(|e| &e.src == source && &e.label == label && &e.dst == destination)
-            .is_some_and(|e| receipt.matches_edge(e)),
+    let valid = match context.fact_in(fact, fresh) {
+        Some(FrozenFact::Node(node)) => receipt.matches_node(node),
+        Some(FrozenFact::Edge(edge)) => receipt.matches_edge(edge),
+        None => false,
     };
     if valid {
         Ok(())
