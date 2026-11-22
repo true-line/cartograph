@@ -296,12 +296,43 @@ pub fn rule_excerpt_within(document: &str, number: &str, bytes: usize) -> Option
         return None;
     }
     Some(format!(
-        "\n### Rules the capabilities enforce (from 1.5)\n\n\
+        "\n{RULE_EXCERPT_HEADING}\n\n\
          Each capability's rules in domain terms, its first ones first: {kept} of {total}. A \
-         claim about what a capability enforces cites the rule's id.\n\n\
+         claim about what a capability enforces cites the rule's id and that capability, and \
+         states the rule only for that capability.\n\n\
          | Capability | Rule | Citation |\n|---|---|---|\n{table}"
     ))
 }
+
+/// The capability each rule of a [`rule_excerpt_within`] excerpt in `text`
+/// is listed under, by the rule's citation id (#2416). Empty when `text`
+/// holds no excerpt.
+pub fn excerpt_rule_capabilities(text: &str) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    let Some(at) = text.find(RULE_EXCERPT_HEADING) else {
+        return found;
+    };
+    for line in text[at..].lines().skip(1) {
+        if line.starts_with("## ") || line.starts_with("### ") {
+            break;
+        }
+        let Some(cells) = line.strip_prefix("| ").and_then(|l| l.strip_suffix(" |")) else {
+            continue;
+        };
+        let cells: Vec<&str> = cells.split(" | ").collect();
+        if let [capability, .., citation] = cells[..]
+            && cells.len() >= 3
+            && printed_ids(citation).len() == 1
+            && citation.len() == 18
+        {
+            found.insert(citation.to_owned(), capability.to_owned());
+        }
+    }
+    found
+}
+
+/// The heading a rule excerpt opens with.
+const RULE_EXCERPT_HEADING: &str = "### Rules the capabilities enforce (from 1.5)";
 
 /// Every `F-` citation id `text` prints.
 pub(super) fn printed_ids(text: &str) -> BTreeSet<String> {

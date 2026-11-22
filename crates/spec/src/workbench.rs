@@ -25,7 +25,8 @@ pub use coverage::{COVERAGE_DETAIL_REPO_LIMIT, logical_coverage_render_bound};
 mod composition;
 pub use composition::{
     CompositionFact, CompositionFacts, DerivedGroup, composition_facts, composition_source,
-    composition_text, rule_excerpt, rule_excerpt_budget, rule_excerpt_within, section_text,
+    composition_text, excerpt_rule_capabilities, rule_excerpt, rule_excerpt_budget,
+    rule_excerpt_within, section_text,
 };
 mod curated;
 pub use curated::{

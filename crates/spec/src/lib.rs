@@ -133,8 +133,8 @@ pub use workbench::{
     CATALOGUE_VERSION, CODE_LABELS, CatalogueSection, CompositionFact, CompositionFacts,
     DerivedGroup, SYSTEM_SCOPE, SectionFrame, SectionKind, SectionScopeError, SourceIdentifiers,
     catalogue_section, catalogue_sections, composition_facts, composition_source, composition_text,
-    drafted_section, rule_excerpt, rule_excerpt_budget, rule_excerpt_within, section_citation_set,
-    section_text,
+    drafted_section, excerpt_rule_capabilities, rule_excerpt, rule_excerpt_budget,
+    rule_excerpt_within, section_citation_set, section_text,
 };
 
 pub use workbench::{CitedText, Support, route_literals};
