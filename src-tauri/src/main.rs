@@ -2310,11 +2310,30 @@ fn extract_tree_packed(
         extraction.event_sites.extend(kotlin.event_sites);
 
         // Compiled classes the checkout ships without their Java or Kotlin
-        // source, each fact citing the class file's bytes (AC-1215).
+        // source, each fact citing the class file's bytes (AC-1215). A
+        // capture holding them is read from its retained bytes (the cloned
+        // commit's Git objects for a managed clone), as the source lanes are.
         let jvm_id = adapters_artifact_jvm::SourceId { repo, commit };
-        let jvm = adapters_artifact_jvm::extract_dir(root, &jvm_id, &mut |path: &str| {
-            on_file(&format!("Reading compiled JVM classes — {path}"))
-        })
+        let mut jvm_progress =
+            |path: &str| on_file(&format!("Reading compiled JVM classes — {path}"));
+        let captured_classes = captured_lane_paths(primary, ".class");
+        let jvm = if let (Some(capture), false) = (primary, captured_classes.is_empty()) {
+            adapters_artifact_jvm::extract_dir_from(
+                root,
+                &jvm_id,
+                &captured_classes,
+                &|path| match capture.file(path) {
+                    Ok(file) => Ok(file.bytes().to_vec()),
+                    // A Kotlin source outside the capture only names its
+                    // package, to decide which classes have source.
+                    Err(_) if path.ends_with(".kt") => std::fs::read(root.join(path)),
+                    Err(_) => Err(std::io::Error::other("captured class file is unavailable")),
+                },
+                &mut jvm_progress,
+            )
+        } else {
+            adapters_artifact_jvm::extract_dir(root, &jvm_id, &mut jvm_progress)
+        }
         .map_err(|error| error.to_string())?;
         layers.jvm_classes = LayerSummary {
             files: jvm.nodes.iter().filter(|node| node.label == "File").count() as u64,

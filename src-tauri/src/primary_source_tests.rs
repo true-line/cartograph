@@ -4180,6 +4180,73 @@ fn kotlin_facts_are_parsed_from_the_capture_and_cited() {
     )));
 }
 
+// AC-1215: a source's shipped `.class` files join its capture; the JVM class
+// reader parses the retained bytes, not the checkout.
+#[test]
+fn shipped_jvm_classes_are_read_from_the_capture() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../crates/adapters-artifact-jvm/tests/fixtures/classes/com/acme/pay/Ledger$Store.class"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "shipped");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::copy(fixture, root.join("lib/Store.class")).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["server".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    assert!(
+        capture
+            .manifest()
+            .files
+            .iter()
+            .any(|entry| entry.path == "lib/Store.class")
+    );
+    // The checkout changes after capture; the read must not see it.
+    std::fs::write(root.join("lib/Store.class"), b"not a class").unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let store = format!("sym:{}@lib/Store.class#Ledger.Store", source.repo_key);
+    assert!(
+        extraction.nodes.iter().any(|node| node.id == store),
+        "the captured class bytes were read"
+    );
+    assert!(
+        !extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "Gap" && node.props["path"] == "lib/Store.class")
+    );
+}
+
 // AC-1053: a source's `.tf` files join its capture when infrastructure is
 // recovered; the Terraform pass parses the retained bytes, not the checkout,
 // and each surviving Terraform fact whose provenance lies in one captured file

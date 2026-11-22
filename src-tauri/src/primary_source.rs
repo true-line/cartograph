@@ -2071,7 +2071,8 @@ impl PrimarySourceStore {
         // and Kotlin (AC-1035) lanes' files join the same capture. A lane whose files
         // cannot be listed is left out; when the combined set cannot be
         // retained, those lanes keep their ordinary uncaptured reads and the
-        // TS/JS capture stands alone.
+        // TS/JS capture stands alone. Shipped JVM class files (AC-1215) join
+        // it too, and are the first left out when it cannot hold them.
         let wants_lanes = ingest::coverage::wants(layers, ingest::coverage::APPLICATION_LAYERS);
         let lanes: Vec<String> = if wants_lanes {
             let python = adapters_lang_python::python_paths(root).unwrap_or_default();
@@ -2107,15 +2108,23 @@ impl PrimarySourceStore {
         })?);
         base.sort();
         base.dedup();
-        let combined = (!lanes.is_empty())
-            .then(|| {
-                let mut paths = base.clone();
-                paths.extend(lanes);
-                paths.sort();
-                paths.dedup();
-                capture_paths(&paths).ok()
-            })
-            .flatten();
+        let classes = if wants_lanes {
+            adapters_artifact_jvm::class_paths(root).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let with = |extra: &[String]| {
+            let mut paths = base.clone();
+            paths.extend_from_slice(&lanes);
+            paths.extend_from_slice(extra);
+            paths.sort();
+            paths.dedup();
+            capture_paths(&paths).ok()
+        };
+        let combined = (!classes.is_empty())
+            .then(|| with(&classes))
+            .flatten()
+            .or_else(|| (!lanes.is_empty()).then(|| with(&[])).flatten());
         let capture = match combined {
             Some(capture) => capture,
             None => capture_paths(&base).map_err(|_| match commit {
