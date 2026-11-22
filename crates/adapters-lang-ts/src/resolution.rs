@@ -608,7 +608,7 @@ const NODE_BUILTINS: &[&str] = &[
 /// The npm package name a bare specifier addresses (`@scope/name` or the
 /// first segment), or `None` when the specifier cannot name a package at
 /// all — `@/x`, `~/x`, and other bundler-alias spellings.
-fn package_name(spec: &str) -> Option<&str> {
+pub(crate) fn package_name(spec: &str) -> Option<&str> {
     let valid = |part: &str| {
         !part.is_empty()
             && !part.starts_with(['.', '_'])

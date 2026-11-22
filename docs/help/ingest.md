@@ -56,6 +56,25 @@ it. A value from a template (`.env.example`, `env.sample`, `.env.dist`) is
 marked as a template, and a value a real env file sets always wins over a
 template's.
 
+## Dependency type declarations
+
+Calls into a dependency (for example `send()` imported from an SDK package)
+are not shown by default, because Cartograph never reads `node_modules`. To
+let it prove them, list the packages exactly in `.cartograph/types.toml` at
+the repository's root:
+
+```toml
+read = ["@aws-sdk/client-s3", "stripe"]
+```
+
+For a listed package that is installed and declared in the importing
+`package.json`, Cartograph reads only its type declarations (`.d.ts`), or
+`@types/<name>` when it ships none, never its code. A call to a function,
+class or variable the declarations export, through a named or `* as`
+import, then appears as a call to the package's external boundary, naming
+the member and the installed version. Anything it cannot prove is left out,
+as before. It never adds a gap. A malformed list stops the ingest.
+
 ## Coverage inventory
 
 After a recovery, the Workspace lists each repo's coverage inventory before

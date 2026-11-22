@@ -48,6 +48,9 @@ pub enum ExtractError {
     /// A recovery stage's fact store refused a fact.
     #[error("facts: {0}")]
     Facts(#[from] core_graph::GraphError),
+    /// A repository configuration file refused (ADR-0078).
+    #[error("configuration: {0}")]
+    Config(String),
 }
 
 /// Facts extracted from one file or one directory walk.
@@ -105,6 +108,11 @@ pub struct Extraction {
     /// `(file, name)` of each top-level binding a file exports itself; an
     /// `export *` hop only reaches these (AC-1504).
     exported: Vec<(String, String)>,
+    /// Calls on bindings imported from bare specifiers, proven only for
+    /// allowlisted packages at directory completion (ADR-0078, AC-1506).
+    dependency_calls: Vec<dependency_types::Call>,
+    /// What the opt-in dependency type reader did on this walk (AC-1506).
+    pub dependency_types: DependencyTypesReport,
 }
 
 /// One `eval()` / `new Function()` site classified at T0 (#214, AC-0099).
@@ -320,6 +328,9 @@ fn retarget_commit(
         site.retarget(commit);
     }
     extraction.strategies.retarget(commit);
+    for call in &mut extraction.dependency_calls {
+        call.retarget(commit);
+    }
     Ok(())
 }
 
@@ -356,6 +367,7 @@ impl Extraction {
         self.strategies = strategies::Pending::default();
         self.reexports.clear();
         self.exported.clear();
+        self.dependency_calls.clear();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -584,6 +596,34 @@ fn record_exports(
             }
         }
         (None, None) => {}
+    }
+}
+
+/// A bare (package) specifier: neither relative, absolute nor `#` subpath.
+fn is_bare(spec: &str) -> bool {
+    !spec.starts_with(['.', '/', '#'])
+}
+
+/// A call on a package binding, proven or dropped at directory completion.
+fn dependency_call(
+    cx: &FileCx<'_>,
+    call: TsNode<'_>,
+    src: String,
+    spec: &str,
+    member: &str,
+) -> dependency_types::Call {
+    dependency_types::Call {
+        edge: Edge {
+            src,
+            dst: format!("mod:{spec}"),
+            label: "CALLS".into(),
+            props: serde_json::json!({
+                "prov": cx.prov(&call, &format!("CALLS {spec}#{member} at {}", call.start_byte())),
+            }),
+        },
+        spec: spec.to_string(),
+        member: member.to_string(),
+        importer: cx.path.to_string(),
     }
 }
 
@@ -1732,6 +1772,9 @@ fn extract_source_recording(
     let mut imported_names: HashMap<String, String> = HashMap::new(); // local -> exported name
     let mut imported_types: HashMap<String, (String, String)> = HashMap::new(); // local -> (file, exported type)
     let mut guessed_imports: HashSet<String> = HashSet::new(); // relative imports with no extension
+    // Bare-specifier bindings a call may prove against declarations (ADR-0078):
+    // local -> (spec, Some(exported name)) for a named import, None for `* as`.
+    let mut package_bindings: HashMap<String, (String, Option<String>)> = HashMap::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(q_imports, root, source);
     while let Some(m) = matches.next() {
@@ -1794,6 +1837,12 @@ fn extract_source_recording(
                                     .insert(local_name.clone(), sym_id(id.repo, f, &exported_name));
                                 imported_types.insert(local_name, (f.clone(), exported_name));
                             } else {
+                                if is_bare(&spec) {
+                                    package_bindings.insert(
+                                        local_name.clone(),
+                                        (spec.clone(), Some(exported_name)),
+                                    );
+                                }
                                 import_modules.insert(local_name, spec.clone());
                             }
                         }
@@ -1807,6 +1856,10 @@ fn extract_source_recording(
                                 .and_then(|index| child.named_child(index))
                         });
                         if let Some(local) = local {
+                            if target_file.is_none() && is_bare(&spec) {
+                                package_bindings
+                                    .insert(cx.text(&local).to_string(), (spec.clone(), None));
+                            }
                             import_modules.insert(cx.text(&local).to_string(), spec.clone());
                         }
                     }
@@ -3187,9 +3240,14 @@ fn extract_source_recording(
                 .unwrap_or(callee_name);
             out.pending_calls
                 .push(pending_call(&cx, call, src_sym, dst, semantic_name));
+        } else if bindings.imported(call, callee_name)
+            && let Some((spec, Some(member))) = package_bindings.get(callee_name)
+        {
+            out.dependency_calls
+                .push(dependency_call(&cx, call, src_sym, spec, member));
         }
-        // Unknown globals, builtins, callback parameters, and package calls
-        // are not useful within-repo semantic candidates and remain omitted.
+        // Unknown globals, builtins, callback parameters, and unproven
+        // package calls are not within-repo candidates and remain omitted.
     }
 
     let q_member_calls = grammar.query(
@@ -3218,6 +3276,15 @@ fn extract_source_recording(
         let Some(src_sym) = enclosing_symbol(&cx, call) else {
             continue;
         };
+        // `ns.member()` on a namespace import of a package (ADR-0078).
+        if receiver.kind() == "identifier"
+            && bindings.imported(receiver, cx.text(&receiver))
+            && let Some((spec, None)) = package_bindings.get(cx.text(&receiver))
+        {
+            out.dependency_calls
+                .push(dependency_call(&cx, call, src_sym, spec, &method));
+            continue;
+        }
         let receiver_proof = match receiver.kind() {
             "identifier" => bindings
                 .stable_declaration(receiver, cx.text(&receiver))
@@ -3488,6 +3555,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.strategies.extend(ex.strategies);
     out.reexports.extend(ex.reexports);
     out.exported.extend(ex.exported);
+    out.dependency_calls.extend(ex.dependency_calls);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3617,6 +3685,14 @@ fn complete_directory(
         id,
         &mut *facts,
     )?;
+    out.dependency_types = dependency_types::complete(
+        std::mem::take(&mut out.dependency_calls),
+        root,
+        &index,
+        id,
+        &known_files,
+        &mut *facts,
+    )?;
     strategies::complete(
         std::mem::take(&mut out.strategies),
         id.repo,
@@ -3668,7 +3744,11 @@ fn close_directory(
         EXTRACTOR_ID,
         core_graph::placeholder::label_for_id,
         |endpoint, edge| {
-            if edge.label != "IMPORTS" {
+            // A dependency call proven from its declarations (ADR-0078)
+            // reaches the same boundary as the import it goes through.
+            let proven_call = edge.label == "CALLS"
+                && edge.props["resolution"].as_str() == Some("dependency-types");
+            if edge.label != "IMPORTS" && !proven_call {
                 return None;
             }
             // A relative import of a file T0 does not parse (a stylesheet, an
@@ -3691,7 +3771,15 @@ fn close_directory(
                 });
             }
             let spec = endpoint.strip_prefix("mod:")?;
-            let importer = edge.src.strip_prefix(&file_prefix)?;
+            let importer = if proven_call {
+                // `sym:{repo}@{path}#{name}`: the calling file imports it.
+                edge.src
+                    .strip_prefix(&format!("sym:{}@", id.repo))?
+                    .split_once('#')?
+                    .0
+            } else {
+                edge.src.strip_prefix(&file_prefix)?
+            };
             Some(resolution::classify_bare_import(
                 spec,
                 importer,
@@ -3866,6 +3954,7 @@ pub mod client_routes;
 pub mod client_table;
 pub(crate) mod const_resolution;
 pub mod declarations;
+mod dependency_types;
 mod grammar;
 pub mod graphql_resolvers;
 pub mod indexeddb;
@@ -3874,6 +3963,10 @@ pub mod next_api;
 pub mod node_http;
 pub mod observed_infra;
 mod reexports;
+pub use dependency_types::{
+    CONFIG_REL_PATH as DEPENDENCY_TYPES_REL_PATH, Report as DependencyTypesReport,
+    allowlist as dependency_types_allowlist,
+};
 pub(crate) mod resolution;
 mod rule_evidence;
 mod service_worker;
