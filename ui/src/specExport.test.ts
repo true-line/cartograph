@@ -182,14 +182,29 @@ describe('Export bundle file (#1582, AC-0740)', () => {
     vi.unstubAllGlobals();
   });
 
-  it('the fixture expected file is the pre-#1582 Workbench JSON for its preview', async () => {
+  it('builds the pinned v2 bundle file for the fixture preview (ADR-0086)', async () => {
     expect(preview.artifacts.some((a) => a.content_truncated)).toBe(true);
     const artifacts = await withFullArtifacts(preview.artifacts, readFull);
     expect(artifacts).not.toBeNull();
-    const legacyFiles = Object.fromEntries(artifacts!.map((a) => [a.file_name, a.content]));
-    const legacy = JSON.stringify({ ...preview, artifacts, files: legacyFiles }, null, 2);
-    expect(legacy).toBe(bundleFileExpected);
-    expect(specBundleFileContent(preview, artifacts!)).toBe(bundleFileExpected);
+    const file = specBundleFileContent(preview, artifacts!);
+    expect(file).toBe(bundleFileExpected);
+    const parsed = JSON.parse(file);
+    expect(parsed.schema).toBe('cartograph.spec-bundle-file/v2');
+    expect(Object.keys(parsed.files)).toEqual(artifacts!.map((a) => a.file_name));
+    for (const artifact of artifacts!) {
+      expect(parsed.files[artifact.file_name]).toBe(artifact.content);
+      expect(file.split(JSON.stringify(artifact.content)).length - 1).toBe(1);
+    }
+  });
+
+  it('keeps the artifact order in files and refuses a repeated file name', async () => {
+    const artifacts = (await withFullArtifacts(preview.artifacts, readFull))!;
+    const numbered = artifacts.map((a, i) => ({ ...a, file_name: ['7', 'README.md', '0'][i] }));
+    const file = specBundleFileContent(preview, numbered);
+    const order = [...file.matchAll(/^"(7|README\.md|0)":/gm)].map((m) => m[1]);
+    expect(order).toEqual(['7', 'README.md', '0']);
+    const twice = artifacts.map((a) => ({ ...a, file_name: 'README.md' }));
+    expect(() => specBundleFileContent(preview, twice)).toThrow('two artifacts share the file name "README.md"');
   });
 
   it('in the desktop app sends only artifact identities and builds no bundle string', async () => {
