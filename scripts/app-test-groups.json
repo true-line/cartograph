@@ -28,6 +28,7 @@
         "mcp_reads::",
         "model_debug::",
         "name_unique_tests::",
+        "pipeline_activity::",
         "primary_source_tests::",
         "projects::",
         "proposals::",
