@@ -1,0 +1,278 @@
+use super::*;
+
+const LEDGER: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger.class");
+const STORE: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger$Store.class");
+const AUDIT: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger$Audit.class");
+
+const REPO: &str = "acme/pay";
+const DIR: &str = "lib/classes/com/acme/pay";
+
+fn id() -> SourceId<'static> {
+    SourceId {
+        repo: REPO,
+        commit: "workdir",
+    }
+}
+
+fn files() -> Vec<(String, Vec<u8>)> {
+    vec![
+        (format!("{DIR}/Ledger$Store.class"), STORE.to_vec()),
+        (format!("{DIR}/Ledger.class"), LEDGER.to_vec()),
+        (format!("{DIR}/Ledger$Audit.class"), AUDIT.to_vec()),
+    ]
+}
+
+fn sym(file: &str, name: &str) -> String {
+    format!("sym:{REPO}@{DIR}/{file}#{name}")
+}
+
+fn node<'a>(out: &'a Extraction, id: &str) -> &'a Node {
+    out.nodes
+        .iter()
+        .find(|node| node.id == id)
+        .unwrap_or_else(|| {
+            panic!(
+                "no node {id}: {:#?}",
+                out.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+            )
+        })
+}
+
+fn calls(out: &Extraction, src: &str) -> Vec<(String, String, Option<String>)> {
+    out.edges
+        .iter()
+        .filter(|edge| edge.label == "CALLS" && edge.src == src)
+        .map(|edge| {
+            (
+                edge.dst.clone(),
+                edge.props["opcode"].as_str().unwrap().to_string(),
+                edge.props["via"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// AC-1215: classes, methods and constructors of compiled class files are
+/// T0 Confirmed Symbols with artifact evidence, named as the Java source
+/// adapter names them.
+#[test]
+fn class_files_are_symbols_with_artifact_evidence() {
+    let out = extract(&id(), &files());
+    let ledger = node(&out, &sym("Ledger.class", "Ledger"));
+    assert_eq!(ledger.label, "Symbol");
+    assert_eq!(ledger.props["kind"], "class");
+    assert_eq!(ledger.props["binary_name"], "com.acme.pay.Ledger");
+    let store = node(&out, &sym("Ledger$Store.class", "Ledger.Store"));
+    assert_eq!(store.props["kind"], "class");
+    let audit = node(&out, &sym("Ledger$Audit.class", "Ledger.Audit"));
+    assert_eq!(audit.props["kind"], "interface");
+    for name in [
+        "Ledger.Ledger()",
+        "Ledger.total(List,int)",
+        "Ledger.open()",
+        "Ledger.post(Ledger.Audit,String)",
+    ] {
+        let method = node(&out, &sym("Ledger.class", name));
+        assert_eq!(method.label, "Symbol");
+    }
+    assert_eq!(
+        node(&out, &sym("Ledger.class", "Ledger.Ledger()")).props["kind"],
+        "constructor"
+    );
+    node(
+        &out,
+        &sym("Ledger$Store.class", "Ledger.Store.amount(String)"),
+    );
+    node(
+        &out,
+        &sym("Ledger$Audit.class", "Ledger.Audit.record(String)"),
+    );
+    // No static initializer, lambda body or other synthetic method.
+    assert!(
+        out.nodes
+            .iter()
+            .all(|n| !n.id.contains("lambda$") && !n.id.contains("<clinit>")),
+        "{:#?}",
+        out.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+    );
+
+    let prov: Provenance = serde_json::from_value(
+        node(&out, &sym("Ledger.class", "Ledger.open()")).props["prov"].clone(),
+    )
+    .unwrap();
+    assert!(prov.validate().is_ok());
+    assert_eq!(prov.tier, Tier::Deterministic);
+    assert_eq!(prov.confidence_tier, ConfidenceTier::Confirmed);
+    assert!(prov.evidence.is_empty());
+    let EvidenceBasis::Artifact { refs } = prov.basis() else {
+        panic!("artifact basis");
+    };
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].digest, digest(LEDGER));
+    assert_eq!(refs[0].kind, "jvm-class");
+    let ArtifactLocator::Offset { start, end } = refs[0].at else {
+        panic!("offset");
+    };
+    assert!(start < end && end as usize <= LEDGER.len());
+
+    let file = node(&out, &format!("file:{REPO}@{DIR}/Ledger.class"));
+    assert_eq!(file.props["language"], "jvm-class");
+    assert_eq!(file.props["artifact_digest"], digest(LEDGER));
+}
+
+/// AC-1215: call instructions between read methods are CALLS edges citing
+/// the instruction's bytes; a lambda's calls belong to its enclosing method;
+/// calls into classes not read (the JDK) are not edges.
+#[test]
+fn call_instructions_between_read_methods_are_calls() {
+    let out = extract(&id(), &files());
+    let total = calls(&out, &sym("Ledger.class", "Ledger.total(List,int)"));
+    assert_eq!(
+        total,
+        vec![(
+            sym("Ledger$Store.class", "Ledger.Store.amount(String)"),
+            "invokevirtual".into(),
+            None
+        )]
+    );
+    let open = calls(&out, &sym("Ledger.class", "Ledger.open()"));
+    assert_eq!(
+        open,
+        vec![(
+            sym("Ledger.class", "Ledger.Ledger()"),
+            "invokespecial".into(),
+            None
+        )]
+    );
+    let post = calls(
+        &out,
+        &sym("Ledger.class", "Ledger.post(Ledger.Audit,String)"),
+    );
+    let record = sym("Ledger$Audit.class", "Ledger.Audit.record(String)");
+    assert_eq!(post.iter().filter(|c| c.0 == record).count(), 3, "{post:?}");
+    assert!(
+        post.iter()
+            .all(|c| c.0 != record || c.1 == "invokeinterface")
+    );
+    assert!(post.contains(&(
+        sym("Ledger$Store.class", "Ledger.Store.amount(String)"),
+        "invokevirtual".into(),
+        Some("lambda".into())
+    )));
+    assert!(post.contains(&(
+        sym("Ledger$Store.class", "Ledger.Store.amount(String)"),
+        "invokedynamic".into(),
+        Some("method_reference".into())
+    )));
+    // The constructor calls Store's constructor; Object's is not read.
+    assert_eq!(
+        calls(&out, &sym("Ledger.class", "Ledger.Ledger()")),
+        vec![(
+            sym("Ledger$Store.class", "Ledger.Store.Store()"),
+            "invokespecial".into(),
+            None
+        )]
+    );
+    for edge in out.edges.iter().filter(|e| e.label == "CALLS") {
+        let prov: Provenance = serde_json::from_value(edge.props["prov"].clone()).unwrap();
+        let EvidenceBasis::Artifact { refs } = prov.basis() else {
+            panic!("artifact basis");
+        };
+        let ArtifactLocator::Offset { start, end } = refs[0].at else {
+            panic!("offset");
+        };
+        let bytes = if edge.src.contains("Ledger$Store") {
+            STORE
+        } else {
+            LEDGER
+        };
+        let opcode = bytes[start as usize];
+        assert!((0xb6..=0xba).contains(&opcode), "{edge:?}");
+        assert_eq!(end - start, if opcode >= 0xb9 { 5 } else { 3 });
+    }
+}
+
+/// AC-1215: referenced classes outside the class's own package and
+/// `java.lang` are IMPORTS edges from the class file.
+#[test]
+fn referenced_classes_are_imports() {
+    let out = extract(&id(), &files());
+    let imports: BTreeSet<&str> = out
+        .edges
+        .iter()
+        .filter(|e| e.label == "IMPORTS" && e.src == format!("file:{REPO}@{DIR}/Ledger.class"))
+        .map(|e| e.dst.as_str())
+        .collect();
+    assert!(imports.contains("mod:java.util.List"), "{imports:?}");
+    assert!(
+        imports.contains("mod:java.util.function.Supplier"),
+        "{imports:?}"
+    );
+    assert!(
+        imports
+            .iter()
+            .all(|m| !m.starts_with("mod:java.lang.") || m.matches('.').count() > 2)
+    );
+    assert!(
+        imports.iter().all(|m| !m.starts_with("mod:com.acme.pay")),
+        "{imports:?}"
+    );
+}
+
+/// AC-1215: the same files in another order give the same facts.
+#[test]
+fn extraction_is_order_independent() {
+    let mut reversed = files();
+    reversed.reverse();
+    assert_eq!(extract(&id(), &files()), extract(&id(), &reversed));
+}
+
+/// AC-1215: a file the reader cannot walk whole is one Gap naming why, and
+/// states no other fact.
+#[test]
+fn unreadable_class_files_are_gaps() {
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        ("Bad.class", b"not a class".to_vec(), "magic"),
+        (
+            "Cut.class",
+            LEDGER[..LEDGER.len() / 2].to_vec(),
+            "truncated",
+        ),
+        ("Tail.class", [LEDGER, b"x"].concat(), "trailing_bytes"),
+        (
+            // An empty constant pool, then a class index into it.
+            "Index.class",
+            vec![
+                0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61, 0, 1, 0, 0x21, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0,
+            ],
+            "constant_index",
+        ),
+    ];
+    for (name, bytes, code) in cases {
+        let path = format!("{DIR}/{name}");
+        let out = extract(&id(), &[(path.clone(), bytes.clone())]);
+        assert_eq!(out.nodes.len(), 1, "{name}: {:#?}", out.nodes);
+        assert!(out.edges.is_empty());
+        let gap = &out.nodes[0];
+        assert_eq!(gap.label, "Gap");
+        assert_eq!(gap.props["reason_code"], code, "{name}");
+        assert_eq!(gap.props["path"], path.as_str());
+        let prov: Provenance = serde_json::from_value(gap.props["prov"].clone()).unwrap();
+        assert_eq!(prov.confidence_tier, ConfidenceTier::Gap);
+        assert!(prov.validate().is_ok());
+    }
+}
+
+#[test]
+fn descriptors_read_as_source_spellings() {
+    assert_eq!(
+        class_file::parameter_types("(Ljava/util/List;I[J[[Lcom/a/Outer$Inner;Z)V").unwrap(),
+        vec!["List", "int", "long[]", "Outer.Inner[][]", "boolean"]
+    );
+    assert_eq!(
+        class_file::parameter_types("()V").unwrap(),
+        Vec::<String>::new()
+    );
+    assert!(class_file::parameter_types("(Lunterminated").is_none());
+}
