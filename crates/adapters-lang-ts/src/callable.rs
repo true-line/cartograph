@@ -192,7 +192,12 @@ pub(super) fn class_name(cx: &FileCx<'_>, class: TsNode<'_>) -> String {
         .map(|name| cx.text(&name).to_owned())
         .unwrap_or_else(|| "class".into());
     let scope = nearest_scope(class, false);
-    if scope.kind() == "program" && class.kind() == "class_declaration" {
+    if scope.kind() == "program"
+        && matches!(
+            class.kind(),
+            "class_declaration" | "abstract_class_declaration"
+        )
+    {
         name
     } else if scope.kind() == "program" {
         // Class-expression names are local to the expression. Two anonymous
@@ -212,7 +217,10 @@ fn scope_name(cx: &FileCx<'_>, scope: TsNode<'_>) -> String {
         if is_callable(parent) {
             return name(cx, parent);
         }
-        if matches!(parent.kind(), "class_declaration" | "class") {
+        if matches!(
+            parent.kind(),
+            "class_declaration" | "abstract_class_declaration" | "class"
+        ) {
             return class_name(cx, parent);
         }
     }
@@ -224,7 +232,12 @@ pub(super) fn direct_class(method: TsNode<'_>) -> Option<TsNode<'_>> {
         .parent()
         .filter(|parent| parent.kind() == "class_body")?
         .parent()
-        .filter(|parent| matches!(parent.kind(), "class_declaration" | "class"))
+        .filter(|parent| {
+            matches!(
+                parent.kind(),
+                "class_declaration" | "abstract_class_declaration" | "class"
+            )
+        })
 }
 
 fn object_name(cx: &FileCx<'_>, object: TsNode<'_>) -> String {
@@ -374,7 +387,12 @@ pub(super) fn enclosing(cx: &FileCx<'_>, mut node: TsNode<'_>) -> Option<String>
         {
             return None;
         }
-        if is_callable(parent) || matches!(parent.kind(), "class_declaration" | "class") {
+        if is_callable(parent)
+            || matches!(
+                parent.kind(),
+                "class_declaration" | "abstract_class_declaration" | "class"
+            )
+        {
             decorator = false;
         }
         node = parent;
@@ -555,7 +573,7 @@ impl<'tree> Bindings<'tree> {
                         }
                     }
                 }
-                "class_declaration" => {
+                "class_declaration" | "abstract_class_declaration" => {
                     if let Some(name) = node.child_by_field_name("name") {
                         add(
                             nearest_scope(node, false),
@@ -641,7 +659,12 @@ impl<'tree> Bindings<'tree> {
             if participates && self.entries.contains_key(&key) {
                 return Ok(Some(key));
             }
-            if is_callable(site) || matches!(site.kind(), "class_declaration" | "class") {
+            if is_callable(site)
+                || matches!(
+                    site.kind(),
+                    "class_declaration" | "abstract_class_declaration" | "class"
+                )
+            {
                 decorator = false;
             } else {
                 decorator |= site.kind() == "decorator";
