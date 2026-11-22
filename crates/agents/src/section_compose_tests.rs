@@ -231,3 +231,51 @@ fn an_unlisted_schema_drops_the_id_list_and_decode_still_checks_ids() {
     assert_eq!(composed.finish.claims.len(), 1);
     assert_eq!(composed.reasons["citation_not_citable"], 1);
 }
+
+#[test]
+fn a_cut_short_id_naming_one_citable_fact_is_read_as_that_fact() {
+    // AC-1326 (T-1326, #2442).
+    let citable: BTreeSet<String> = [
+        "F-24b1ecd740c17dab",
+        "F-778ec370eac8dd20",
+        "F-778ec370eac8dd2f",
+        "F-0000000000000001",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let reply = |ids: &[&str]| {
+        serde_json::json!({"claims": [{
+            "statement": "Scheduled jobs run on every host.",
+            "claim_kind": "implemented_behavior",
+            "citation_ids": ids,
+        }]})
+        .to_string()
+    };
+    // The last digit dropped: completed, and a repeat is folded once.
+    let composed = decode(
+        &address(),
+        &reply(&["F-24b1ecd740c17da", "F-24b1ecd740c17dab"]),
+        &citable,
+    )
+    .unwrap();
+    assert_eq!(
+        composed.finish.claims[0].citations,
+        vec!["F-24b1ecd740c17dab".to_owned()]
+    );
+    // A prefix of two citable ids, one too short, a non-hex one, or one of
+    // none stays as written and is left out.
+    for id in [
+        "F-778ec370eac8dd2",
+        "F-24b1ecd740c17d",
+        "F-24b1ecd740c17dz",
+        "F-99b1ecd740c17da",
+    ] {
+        let text = reply(&[id, "F-0000000000000001"]);
+        assert_eq!(
+            decode(&address(), &text, &citable).err(),
+            Some(ComposeRefusal::NoClaims),
+            "{id}"
+        );
+    }
+}
