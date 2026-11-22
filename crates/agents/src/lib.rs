@@ -31,6 +31,7 @@ pub mod gated_compose;
 pub mod investigation;
 pub mod pipeline_roster;
 pub mod prepared;
+pub mod reconciliation;
 pub mod roster;
 pub mod section_change;
 pub mod section_compose;

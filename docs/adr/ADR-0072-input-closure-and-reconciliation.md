@@ -1,16 +1,21 @@
 # ADR-0072 — Producer input closure, reconciliation results and external evidence captures
 
-- **Status:** Proposed; owner review
+- **Status:** Accepted (2026-11-22, by the project coordinator as the owner's delegate)
 - **Date:** 2026-11-18
 - **Deciders:** Cartograph owner; Claude implements
 - **Related:** #385 (parent); [SPEC-04](../SPEC-04_source-capture.md) / ADR-0022; [SPEC-05](../SPEC-05_registered-sources.md) / ADR-0023; [SPEC-06](../SPEC-06_primary-source-receipts.md) / ADR-0024; [SPEC-08](../SPEC-08_local-rule-definitions.md) / ADR-0026; [SPEC-09](../SPEC-09_captured-task-basis.md) / ADR-0027; [SPEC-12](../SPEC-12_curated-projection.md) / ADR-0061; SPEC-03 / ADR-0021; R-INT-1, R-INT-2, R-INT-3
 
-> **Needs owner review.** This ADR changes provenance and tier-adjacent
+> **Accepted 2026-11-22.** This ADR changes provenance and tier-adjacent
 > semantics: it adds a third value to what a receipt says about its inputs,
 > a derived reconciliation state for staged proposals, a new registered source
 > kind and capture kind, and (slice 7) new provenance for T1 enrichment facts,
 > which changes their fact bytes and the graph hash. It changes no tier and no
-> confidence. Nothing in it is implemented; each slice below is its own PR.
+> confidence. Each slice below is its own PR. Answers to the questions under
+> Consequences: (1) `RecaptureCorroborated` items make a record eligible,
+> counted apart from `RetainedMatch`; (2) eligibility does not require an
+> established closure until slice 6 has landed; (3) moot: external evidence
+> identity and its receipts were built under ADR-0080 and ADR-0079
+> (AC-1041..1051), which replace slices 7 and 8 here.
 
 ## Context
 
@@ -337,10 +342,9 @@ later producer slice must extend.
 
 ### Implementation slices, in order
 
-Each slice gets its own sub-issue of #385, opened when the slice starts. Its
-PR uses `Closes #<slice issue>` plus `Refs #385`, so merging a slice closes
-only that slice and #385 stays open until the last one. Each PR reserves its
-own AC/T ids at the time and carries its SPEC and traceability rows.
+Each slice's PR uses `Refs #385`, so #385 stays open until the last one.
+Each PR reserves its own AC/T ids at the time and carries its SPEC and
+traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
 
 1. **Pure reconciliation types** (`agents`). `ReconciliationResultV1`,
    canonical identity, a strict decoder, outcome derivation from supplied
@@ -348,6 +352,16 @@ own AC/T ids at the time and carries its SPEC and traceability rows.
    procedures. *Tests:* literal v1 and v2 rows; one test per item outcome;
    precedence; tampered or unknown fields rejected; result ID stable under
    reordering only where the order is not meaningful.
+   *As built (AC-1066):* `agents::reconciliation`. The host supplies one
+   `RecapturedItem` per staged item and one `RecapturedCandidate` per
+   candidate; the module derives every outcome. The slot is reported as
+   source and relation (`present`/`missing`) and Gap
+   (`present`/`missing`/`gap_resolved`); a missing endpoint makes the record
+   `missing`, and a Gap that deterministic recovery now resolves makes it
+   `changed`. `candidate-summary-v1` is `"{label}: {name}"` (`name`, else
+   `path`, else the node id); it has been the summary since staging began
+   (#384, `cb0d4a69`), so no record is `summary_procedure_unknown`. Task
+   assembly now calls it, so a change has to be a new version.
 2. **Cross-producer fixtures** (tests only, plus fixes they expose). The
    three fixtures of decision 4, run against today's TS producer.
    *Tests:* as listed there.
