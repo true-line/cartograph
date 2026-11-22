@@ -56,6 +56,19 @@ pub struct ProxyConfig {
     pub max_response_bytes: usize,
 }
 
+/// The authorized completion's own limits for this step; the proxy applies
+/// the tighter of these and its fixed ones before any egress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallLimits {
+    /// Largest request body forwarded this step.
+    pub max_request_bytes: usize,
+    /// Largest upstream response body returned this step.
+    pub max_response_bytes: usize,
+    /// Output tokens the request may ask for (`num_predict` for Ollama,
+    /// `max_tokens` or `max_completion_tokens` otherwise); it must ask.
+    pub max_output_tokens: u32,
+}
+
 /// Why the proxy refused or failed a model request. The runtime sees only an
 /// HTTP status; the host sees the code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -82,6 +95,9 @@ pub enum ProxyRefusal {
     /// host sent this step.
     #[error("trailing messages are not the authorized texts")]
     Unauthorized,
+    /// The request asked for no output-token limit or a larger one.
+    #[error("output-token limit missing or above the step's")]
+    OutputTokens,
     /// The host's interrupt fired before a request arrived.
     #[error("interrupted before a model request")]
     Interrupted,
@@ -146,18 +162,19 @@ impl ModelProxy {
 
     /// Serves exactly one model request for this step. `authorized` holds the
     /// texts the host sent the runtime since the model's last answer, in
-    /// order; `interrupt` is polled while no request has arrived and ends the
+    /// order; `limits` are the step's own; `interrupt` is polled while no request has arrived and ends the
     /// wait when it returns `true`; `dispatching` records the request size and
     /// may refuse the egress.
     pub fn serve_one(
         &self,
         authorized: &[String],
+        limits: &CallLimits,
         deadline: Instant,
         interrupt: &dyn Fn() -> bool,
         dispatching: &dyn Fn(u64) -> bool,
     ) -> Result<ProxyExchange, ProxyRefusal> {
         let mut stream = self.accept(deadline, interrupt)?;
-        let outcome = self.handle(&mut stream, authorized, deadline, dispatching);
+        let outcome = self.handle(&mut stream, authorized, limits, deadline, dispatching);
         if let Err(refusal) = &outcome {
             let status = match refusal {
                 ProxyRefusal::Token => "401 Unauthorized",
@@ -209,10 +226,16 @@ impl ModelProxy {
         &self,
         stream: &mut TcpStream,
         authorized: &[String],
+        limits: &CallLimits,
         deadline: Instant,
         dispatching: &dyn Fn(u64) -> bool,
     ) -> Result<ProxyExchange, ProxyRefusal> {
-        let (path, headers, body) = read_request(stream, self.config.max_request_bytes)?;
+        let max_request = self.config.max_request_bytes.min(limits.max_request_bytes);
+        let max_response = self
+            .config
+            .max_response_bytes
+            .min(limits.max_response_bytes);
+        let (path, headers, body) = read_request(stream, max_request)?;
         let expected = format!("/{}{}", self.config.run_id, self.config.backend.path());
         if path != expected {
             return Err(ProxyRefusal::Path);
@@ -242,6 +265,17 @@ impl ModelProxy {
             if !frozen {
                 return Err(ProxyRefusal::ContextWindow);
             }
+        }
+        let asked = match self.config.backend {
+            ProxyBackend::Ollama => request.pointer("/options/num_predict"),
+            ProxyBackend::OpenAiCompatible => request
+                .get("max_tokens")
+                .or_else(|| request.get("max_completion_tokens")),
+        }
+        .and_then(Value::as_u64);
+        if !asked.is_some_and(|tokens| (1..=u64::from(limits.max_output_tokens)).contains(&tokens))
+        {
+            return Err(ProxyRefusal::OutputTokens);
         }
         if trailing_texts(&request).as_deref() != Some(authorized) {
             return Err(ProxyRefusal::Unauthorized);
@@ -273,10 +307,10 @@ impl ModelProxy {
             .to_owned();
         let mut upstream = Vec::new();
         response
-            .take(self.config.max_response_bytes as u64 + 1)
+            .take(max_response as u64 + 1)
             .read_to_end(&mut upstream)
             .map_err(|_| ProxyRefusal::Upstream)?;
-        if upstream.len() > self.config.max_response_bytes {
+        if upstream.len() > max_response {
             return Err(ProxyRefusal::Upstream);
         }
         write!(

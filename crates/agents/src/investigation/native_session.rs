@@ -11,7 +11,7 @@
 //! A failed step leaves no call pending, so the next step restarts the
 //! runtime from the full authorized payload.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
@@ -26,7 +26,7 @@ use llm::{CompletionPayload, LlmProvider};
 use serde_json::{Value, json};
 
 use super::native_bridge::{BridgeConversation, BridgeTurn, StartReason};
-use super::native_proxy::{ModelProxy, ProxyBackend, ProxyExchange, ProxyRefusal};
+use super::native_proxy::{CallLimits, ModelProxy, ProxyBackend, ProxyExchange, ProxyRefusal};
 
 /// The tool result sent for a second tool call in one model answer. The
 /// bounded loop takes one action per step, so only the first call runs.
@@ -154,9 +154,8 @@ pub struct SessionConfig {
     pub lane: RuntimeLane,
     /// Model turns the runtime may take before it stops on its own.
     pub max_turns: u32,
-    /// Output tokens per model call.
-    pub max_output_tokens: Option<u32>,
-    /// Conversation byte budget before the bridge restarts the runtime.
+    /// Conversation byte budget before the bridge restarts the runtime; a
+    /// step's own request limit can lower it.
     pub budget_bytes: usize,
 }
 
@@ -252,10 +251,11 @@ impl<L: RuntimeLink> NativeSession<L> {
     }
 
     /// Runs one bounded step: one model call for `payload`, which the
-    /// firewall authorized for this step.
+    /// firewall authorized for this step under `limits`.
     pub fn step(
         &mut self,
         payload: &CompletionPayload,
+        limits: &CallLimits,
         deadline: Instant,
         check: &dyn Fn() -> CallDirective,
         dispatching: &dyn Fn(u64) -> bool,
@@ -267,11 +267,14 @@ impl<L: RuntimeLink> NativeSession<L> {
             // No call to answer: the next turn is a start.
             self.bridge = BridgeConversation::new();
         }
+        // The whole conversation travels in each request, JSON-escaped, so it
+        // keeps to half the step's request limit.
+        let budget = self.config.budget_bytes.min(limits.max_request_bytes / 2);
         let turn = self
             .bridge
-            .next_turn(payload, self.config.budget_bytes)
+            .next_turn(payload, budget)
             .map_err(|_| not_sent(FailureCode::InvalidInput))?;
-        let outcome = self.drive(turn, deadline, check, dispatching);
+        let outcome = self.drive(turn, limits, deadline, check, dispatching);
         if outcome.is_err() {
             self.pending_call = None;
         }
@@ -281,6 +284,7 @@ impl<L: RuntimeLink> NativeSession<L> {
     fn drive(
         &mut self,
         turn: BridgeTurn,
+        limits: &CallLimits,
         deadline: Instant,
         check: &dyn Fn() -> CallDirective,
         dispatching: &dyn Fn(u64) -> bool,
@@ -292,7 +296,7 @@ impl<L: RuntimeLink> NativeSession<L> {
                 tools,
                 reason,
             } => {
-                self.start(&system, &prompt, &tools, deadline)?;
+                self.start(&system, &prompt, &tools, limits.max_output_tokens, deadline)?;
                 (vec![prompt], Some(reason))
             }
             BridgeTurn::ToolResult { content } => {
@@ -307,7 +311,7 @@ impl<L: RuntimeLink> NativeSession<L> {
                 (vec![content], None)
             }
         };
-        let exchange = self.serve(&mut authorized, deadline, check, dispatching)?;
+        let exchange = self.serve(&mut authorized, limits, deadline, check, dispatching)?;
         if !(200..300).contains(&exchange.status) {
             return Err(answered(FailureCode::HttpStatus));
         }
@@ -359,6 +363,7 @@ impl<L: RuntimeLink> NativeSession<L> {
         system: &str,
         prompt: &str,
         tools: &[super::native_tools::ToolDefinition],
+        max_output_tokens: u32,
         deadline: Instant,
     ) -> Result<(), BoundedCallError> {
         self.stop();
@@ -396,12 +401,10 @@ impl<L: RuntimeLink> NativeSession<L> {
             "tools": tools,
             "hooks": [],
             "max_turns": self.config.max_turns,
+            "max_output_tokens": max_output_tokens,
         });
         if let Some(window) = proxy.context_window {
             start["context_window"] = json!(window);
-        }
-        if let Some(tokens) = self.config.max_output_tokens {
-            start["max_output_tokens"] = json!(tokens);
         }
         if self.config.lane == RuntimeLane::Pi {
             start["backend"] = json!(match proxy.backend {
@@ -417,10 +420,12 @@ impl<L: RuntimeLink> NativeSession<L> {
 
     /// Serves the step's one model request. Hooks are allowed and a second
     /// tool call in the same answer is refused with [`EXTRA_CALL`], which then
-    /// belongs to the texts the request must carry.
+    /// belongs to the texts the request must carry. The host's control is
+    /// checked again at the last point before dispatch.
     fn serve(
         &mut self,
         authorized: &mut Vec<String>,
+        limits: &CallLimits,
         deadline: Instant,
         check: &dyn Fn() -> CallDirective,
         dispatching: &dyn Fn(u64) -> bool,
@@ -442,15 +447,21 @@ impl<L: RuntimeLink> NativeSession<L> {
                         }
                     }
                 };
+                let stopped = Cell::new(None);
+                let guarded = |bytes| guard_dispatch(check, dispatching, &stopped, bytes);
                 let result = self
                     .proxy
-                    .serve_one(authorized, deadline, &interrupt, dispatching);
-                (result, polled.into_inner())
+                    .serve_one(authorized, limits, deadline, &interrupt, &guarded);
+                (
+                    result.map_err(|refusal| (refusal, stopped.get())),
+                    polled.into_inner(),
+                )
             };
             match result {
                 Ok(exchange) => return Ok(exchange),
-                Err(ProxyRefusal::Interrupted) => {}
-                Err(refusal) => return Err(refused(refusal)),
+                Err((ProxyRefusal::Interrupted, _)) => {}
+                Err((_, Some(stopped))) => return Err(stopped),
+                Err((refusal, None)) => return Err(refused(refusal)),
             }
             if let Some(error) = directive_error(check()) {
                 return Err(error);
@@ -498,6 +509,23 @@ impl<L: RuntimeLink> Drop for NativeSession<L> {
     }
 }
 
+/// The last check before a request leaves: a run cancelled or no longer owned
+/// records and sends nothing, and says why in `stopped`.
+fn guard_dispatch(
+    check: &dyn Fn() -> CallDirective,
+    dispatching: &dyn Fn(u64) -> bool,
+    stopped: &Cell<Option<BoundedCallError>>,
+    bytes: u64,
+) -> bool {
+    match directive_error(check()) {
+        Some(error) => {
+            stopped.set(Some(error));
+            false
+        }
+        None => dispatching(bytes),
+    }
+}
+
 fn refused(refusal: ProxyRefusal) -> BoundedCallError {
     match refusal {
         ProxyRefusal::Deadline => not_sent(FailureCode::DeadlineExceeded),
@@ -511,6 +539,7 @@ fn refused(refusal: ProxyRefusal) -> BoundedCallError {
         | ProxyRefusal::Request
         | ProxyRefusal::Model
         | ProxyRefusal::ContextWindow
+        | ProxyRefusal::OutputTokens
         | ProxyRefusal::Unauthorized => not_sent(FailureCode::InvalidResponse),
     }
 }
@@ -630,8 +659,15 @@ impl<L: RuntimeLink> LlmProvider for NativeToolProvider<L> {
             .lock()
             .map_err(|_| not_sent(FailureCode::Transport))?;
         let dispatching = |bytes| control.dispatching.is_none_or(|record| record(bytes));
+        let values = request.limits().values();
+        let limits = CallLimits {
+            max_request_bytes: usize::try_from(values.request_bytes).unwrap_or(usize::MAX),
+            max_response_bytes: usize::try_from(values.response_bytes).unwrap_or(usize::MAX),
+            max_output_tokens: values.max_output_tokens,
+        };
         let output = session.step(
             request.payload(),
+            &limits,
             control.deadline,
             control.check,
             &dispatching,
