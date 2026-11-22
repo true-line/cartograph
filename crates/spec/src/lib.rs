@@ -50,6 +50,7 @@ pub(crate) fn spec_rule(rule: &str) -> core_prov::ProducingMethod {
 }
 mod rules;
 mod test_drift;
+pub use rules::compact_rule_payloads;
 pub use rules::journey::{
     self, AssumedGoal, AssumptionKind, ENTRY_CALLBACK_LIMITATION, EntrySearchSummary, ForwardHop,
     GoalBasis, JOURNEY_RULE, JOURNEY_RULE_VERSION, JourneyAssumption, JourneyBudget,

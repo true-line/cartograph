@@ -7,7 +7,7 @@ use crate::workbench::largest_groups;
 use crate::{ExportMode, SpecAssertion, provenance};
 use core_graph::rules::{
     BranchPolarity, DefinitionExpressionKind, DependencyResolution, GuardedExitEvidence,
-    KnownLiteral, LiteralEvidence, LocalExit, SourceExpression,
+    KnownLiteral, LiteralEvidence, LocalExit, RuleValidationError, SourceExpression,
 };
 use core_graph::{Edge, Node};
 use core_prov::{EvidenceRef, Provenance};
@@ -650,7 +650,7 @@ fn observations<'a>(
     rules
         .iter()
         .map(|node| {
-            let parsed = GuardedExitEvidence::from_value(node.props["rule"].clone()).ok();
+            let parsed = rule_payload(node).ok();
             let mut assertions = vec![Assertion {
                 source: AssertionSource::Node {
                     node,
@@ -1125,13 +1125,46 @@ pub(crate) fn logical_workspace_bytes(bytes: usize, rows: usize, values: usize) 
     ])
 }
 
+/// A `BusinessRule` node's `rule` payload, typed. Every spec reader goes
+/// through here, so the payload may be held as the object the store keeps or
+/// as its JSON text (see [`compact_rule_payloads`]): both parse alike.
+pub(crate) fn rule_payload(node: &Node) -> Result<GuardedExitEvidence, RuleValidationError> {
+    let value = match &node.props["rule"] {
+        serde_json::Value::String(text) => {
+            serde_json::from_str(text).map_err(|_| RuleValidationError::MalformedPayload)?
+        }
+        value => value.clone(),
+    };
+    GuardedExitEvidence::from_value(value)
+}
+
+/// Hold each `BusinessRule` payload as its compact JSON text instead of a
+/// decoded object, for a base that only the spec compiler reads from here
+/// on. A decoded payload costs about six times its text: each JSON object is
+/// a B-tree leaf of some 620 bytes however few keys it has, and on REA the
+/// rules' payloads were 1.0 GB of a 3.0 GB base (#2215). [`rule_payload`]
+/// parses the text to the same value the object gives. Only object payloads
+/// are rewritten, so a malformed one stays as it was read.
+pub fn compact_rule_payloads(nodes: &mut [Node]) {
+    for node in nodes.iter_mut().filter(|node| node.label == "BusinessRule") {
+        let Some(rule) = node.props.get_mut("rule") else {
+            continue;
+        };
+        if rule.is_object() {
+            let mut text = serde_json::to_string(rule).expect("a JSON value serializes");
+            text.shrink_to_fit();
+            *rule = serde_json::Value::String(text);
+        }
+    }
+}
+
 /// Relationships actually queried by the source-rule inventory renderer.
 pub(crate) const PARTITION_EDGE_LABELS: &[&str] = &["GOVERNS", "DEPENDS_ON"];
 
 /// Graph identities dereferenced by rendering one typed observation. Lexical
 /// binding IDs are not graph nodes and are deliberately not acquired.
 pub(crate) fn partition_references(node: &Node) -> BTreeSet<String> {
-    let Ok(rule) = GuardedExitEvidence::from_value(node.props["rule"].clone()) else {
+    let Ok(rule) = rule_payload(node) else {
         return BTreeSet::new();
     };
     let mut ids = BTreeSet::from([rule.owner_id]);
@@ -1633,6 +1666,51 @@ mod tests {
                 .unwrap()
                 .contains("sym:hidden")
         );
+    }
+
+    // AC-1207: a base whose rule payloads are held as JSON text compiles to
+    // the same bundle, byte for byte, in both modes, malformed payloads and
+    // their fixed diagnostic included (#2215).
+    #[test]
+    fn compacted_rule_payloads_compile_to_the_same_bundle() {
+        let mut invalid_version = serde_json::to_value(payload()).unwrap();
+        invalid_version["schema_version"] = json!(999);
+        let mut nodes = base();
+        for (id, rule) in [
+            ("rule:valid", serde_json::to_value(payload()).unwrap()),
+            ("rule:text", json!("synthetic-private-payload")),
+            ("rule:version", invalid_version),
+        ] {
+            let mut node = rule_node(id, Tier::Deterministic, ConfidenceTier::Confirmed);
+            node.props["rule"] = rule;
+            nodes.push(node);
+        }
+        let edges = vec![edge(
+            "rule:valid",
+            "sym:owner",
+            "GOVERNS",
+            Tier::Deterministic,
+            ConfidenceTier::Confirmed,
+        )];
+        let mut compacted = nodes.clone();
+        compact_rule_payloads(&mut compacted);
+        let held = |id: &str| compacted.iter().find(|n| n.id == id).unwrap().props["rule"].clone();
+        assert!(held("rule:valid").is_string());
+        assert!(held("rule:version").is_string());
+        assert_eq!(held("rule:text"), json!("synthetic-private-payload"));
+        for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+            let stored = compile_spec(&nodes, &edges, &[], mode, &BTreeSet::new());
+            let text = compile_spec(&compacted, &edges, &[], mode, &BTreeSet::new());
+            assert!(
+                artifact(&stored)
+                    .content
+                    .contains("Source-rule payload unavailable: malformed or unsupported schema")
+            );
+            assert_eq!(
+                serde_json::to_string(&stored).unwrap(),
+                serde_json::to_string(&text).unwrap()
+            );
+        }
     }
 
     #[test]
