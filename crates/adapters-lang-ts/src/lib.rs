@@ -3313,7 +3313,7 @@ fn extract_source_recording(
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
         state_machines::extract(&cx, &syntax_nodes, &mut out);
         strategies::sites(&cx, &syntax_nodes, &mut out.strategies);
-        instances::sites(&cx, &syntax_nodes, &mut out.instances);
+        instances::sites(&cx, &syntax_nodes, &import_modules, &mut out.instances);
     }
     if let Some(evidence) = service_worker {
         service_worker::mark(

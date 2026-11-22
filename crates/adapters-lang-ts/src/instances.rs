@@ -36,6 +36,10 @@
 //!   to `C.m` of each such repository class. Resolution
 //!   `configured-lookup`.
 //!
+//! A class name the file imports from a non-relative module (a package, or
+//! a path alias not yet resolved) is not the repository class of that name,
+//! so neither hop through it is linked from that file.
+//!
 //! Both are InferredStrong: which instance runs is chosen by stored data at
 //! runtime. A hop with more candidates than [`MAX_ALTERNATIVES`] is not
 //! linked, and a hop with none adds nothing.
@@ -44,7 +48,7 @@ use super::{FileCx, TsNode, enclosing_symbol, sym_id};
 use core_graph::facts::FactAccess;
 use core_graph::{Edge, GraphError};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The extractor id on every configured-instance edge.
 pub(crate) const EXTRACTOR: &str = "t0.ts-configured-instance";
@@ -345,8 +349,21 @@ fn looked_up(cx: &FileCx<'_>, call: TsNode<'_>, receiver: &str) -> Vec<String> {
 }
 
 /// The file's configured instances, forwarding classes and calls.
-pub(super) fn sites(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Pending) {
+/// `import_modules` maps each imported local name to its module specifier.
+pub(super) fn sites(
+    cx: &FileCx<'_>,
+    nodes: &[TsNode<'_>],
+    import_modules: &HashMap<String, String>,
+    out: &mut Pending,
+) {
     let test_file = super::target_tests::is_test_file(cx.path);
+    // A name bound by a non-relative import is that module's, not the
+    // repository class sharing its name.
+    let external = |name: &str| {
+        import_modules
+            .get(name)
+            .is_some_and(|spec| !spec.starts_with('.'))
+    };
     let forwarded_before = out.forwards.len();
     let calls_before = out.calls.len();
     for node in nodes {
@@ -368,6 +385,9 @@ pub(super) fn sites(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Pending) {
                 ) else {
                     continue;
                 };
+                if external(cx.text(&class)) {
+                    continue;
+                }
                 let methods = super::strategies::object_methods(cx, object);
                 if methods.is_empty() {
                     continue;
@@ -414,7 +434,7 @@ pub(super) fn sites(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Pending) {
                         continue;
                     };
                     let classes = looked_up(cx, *node, cx.text(&receiver));
-                    if classes.is_empty() {
+                    if classes.is_empty() || classes.iter().any(|name| external(name)) {
                         continue;
                     }
                     Target::Lookup {
@@ -649,6 +669,20 @@ export const freeShipping = new ShippingCalculator({
         {
             const calculator = this.allCalculators[this.calculator.code];
         }
+    }
+}
+",
+        );
+        // A package's class of the same name is not the repository's.
+        write(
+            "src/plugin/external.ts",
+            "import { ShippingCalculator } from '@other/shipping';
+export const external = new ShippingCalculator({ calculate: (ctx) => ({ price: 2 }) });
+export class Quotes {
+    private readonly calculators: Record<string, ShippingCalculator> = {};
+    quote(code: string, ctx: Ctx) {
+        const calculator = this.calculators[code];
+        return calculator.calculate(ctx);
     }
 }
 ",
