@@ -131,11 +131,36 @@ pub(in crate::mcp_reads) fn descriptor(tool: ReadTool, graph: SnapshotReadLimits
                 ),
             )
         }
-        // Not offered in scoped sessions (AC-1809); never listed.
-        ReadTool::Query => (
-            "Unavailable in scoped-session mode.",
-            object(json!({}), &[]),
-        ),
+        ReadTool::Query => {
+            let cursor = object(
+                json!({"snapshot_id":{"type":"string"},"selection_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),
+                &["snapshot_id", "selection_id", "offset"],
+            );
+            let mut props = session();
+            props["anchor"] = json!({"type":"string","description":"Exact node identity, for example a discovery candidate's id."});
+            props["hops"] =
+                json!({"type":"integer","minimum":1,"maximum":context_hub::MAX_NEIGHBORHOOD_HOPS});
+            props["kind"] = json!({"enum":["node","edge",null]});
+            props["labels"] = json!({"type":"array","items":{"type":"string"},"description":"Exact labels; empty selects every label."});
+            props["max_facts"] =
+                json!({"type":"integer","minimum":1,"maximum":context_hub::MAX_FACTS});
+            props["max_bytes"] = json!({"type":"integer","minimum":1,"description":"Maximum entire MCP response bytes including protocol envelope."});
+            props["cursor"] = json!({"anyOf":[cursor,{"type":"null"}]});
+            (
+                "Read one bounded page of a node's induced neighborhood (the visible nodes within hops and the edges among them) at this revision. Acquisition beyond the window limits returns a limit, never a partial neighborhood; no global absence claim.",
+                object(
+                    props,
+                    &[
+                        "session_id",
+                        "session_basis_id",
+                        "anchor",
+                        "hops",
+                        "max_facts",
+                        "max_bytes",
+                    ],
+                ),
+            )
+        }
     };
     json!({"name":tool.name(),"description":description,"inputSchema":schema,"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
@@ -168,5 +193,5 @@ pub(super) fn capabilities(
     limits: DispatchLimits,
     evidence: EvidenceWorkLimits,
 ) -> Value {
-    json!({"mode":"scoped","session_id":session_id,"session_basis_id":basis,"revision":revision,"coverage_id":coverage_id,"matching_policy":context_hub::discovery::DISCOVERY_POLICY,"implemented_tools":TOOLS.iter().map(|t|t.name()).collect::<Vec<_>>(),"structured_content_required":true,"complete_system":false,"global_absence_available":false,"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":true,"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":true,"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"h3_curated_available":H3_CURATED_AVAILABLE,"h3_curated_unavailable_reason":H3_CURATED_UNAVAILABLE_REASON,"artifact_content_available":true,"artifact_availability":"enumerated_by_cartograph_artifacts","unknown_degrees":true,"remaining_row_totals":"unknown","cursor_lower_bound":"caller_selected_exclusive_primary_key","exhaustion":"raw_tail_only_not_global_absence","worker_reservation_model":super::super::worker::SCOPED_WORKER_MODEL,"limits":{"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"window":{"max_rows":graph.max_rows,"hard_max_rows":SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"evidence":{"max_file_validation_bytes":evidence.max_file_validation_bytes.get(),"max_span_bytes":evidence.max_span_bytes.get()}}})
+    json!({"mode":"scoped","session_id":session_id,"session_basis_id":basis,"revision":revision,"coverage_id":coverage_id,"matching_policy":context_hub::discovery::DISCOVERY_POLICY,"implemented_tools":TOOLS.iter().map(|t|t.name()).collect::<Vec<_>>(),"structured_content_required":true,"complete_system":false,"global_absence_available":false,"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":true,"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":true,"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"h3_curated_available":H3_CURATED_AVAILABLE,"h3_curated_unavailable_reason":H3_CURATED_UNAVAILABLE_REASON,"artifact_content_available":true,"artifact_availability":"enumerated_by_cartograph_artifacts","relations_access":{"via":ReadTool::Query.name(),"query_tool_available":TOOLS.contains(&ReadTool::Query),"scopes":["neighborhood"],"max_neighborhood_hops":context_hub::MAX_NEIGHBORHOOD_HOPS,"max_facts":context_hub::MAX_FACTS,"acquisition":"bounded_window_limit_not_partial"},"unknown_degrees":true,"remaining_row_totals":"unknown","cursor_lower_bound":"caller_selected_exclusive_primary_key","exhaustion":"raw_tail_only_not_global_absence","worker_reservation_model":super::super::worker::SCOPED_WORKER_MODEL,"limits":{"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"window":{"max_rows":graph.max_rows,"hard_max_rows":SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"evidence":{"max_file_validation_bytes":evidence.max_file_validation_bytes.get(),"max_span_bytes":evidence.max_span_bytes.get()}}})
 }

@@ -385,5 +385,7 @@ impl ScopedReadSession {
 mod admission;
 mod discovery;
 mod partition;
+mod relations;
+pub(crate) use relations::ScopedRelationsRequest;
 #[cfg(test)]
 mod tests;

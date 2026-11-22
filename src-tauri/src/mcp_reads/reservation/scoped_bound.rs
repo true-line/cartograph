@@ -185,6 +185,27 @@ pub(crate) fn required_bytes(limits: WorkerLimits) -> Option<usize> {
         json_bytes(w)?,
         json_bytes(w)?,
     ])?;
+    // AC-1810: the raw neighborhood payload and its decode workspace, the
+    // owned visible clones moved into one ContextSnapshot (facts, node set and
+    // adjacency) plus its content-identity DOM, and the page and its scoped
+    // wrapper Values. The reader's cumulative limits bound the raw payload.
+    let rows = limits.graph.max_rows;
+    let relations = sum(&[
+        graph,
+        limits.graph.max_bytes,
+        slots::<&Node>(rows)?,
+        slots::<&Edge>(rows)?,
+        graph,
+        digest(limits.graph)?,
+        set::<String>(rows)?,
+        map::<String, std::collections::BTreeSet<String>>(rows)?,
+        set::<String>(rows.checked_mul(2)?)?,
+        slots::<context_hub::ContextFact>(rows)?,
+        set::<String>(rows)?,
+        json_bytes(w)?,
+        json_bytes(w)?,
+        coverage.retained,
+    ])?;
     let scoped = sum(&[
         complete.retained_session_bytes,
         ids,
@@ -197,7 +218,8 @@ pub(crate) fn required_bytes(limits: WorkerLimits) -> Option<usize> {
         selected
             .checked_add(candidates)?
             .max(evidence)
-            .max(partition_phase),
+            .max(partition_phase)
+            .max(relations),
     ])?;
     Some(full.max(scoped))
 }
