@@ -19,6 +19,8 @@ enum Answer {
     Calls(usize),
     /// Text only: the runtime ends.
     Text,
+    /// One call that sets a host-owned field, which the bridge refuses.
+    Refused,
 }
 
 struct FakeLink {
@@ -90,11 +92,19 @@ fn runtime(answers: Vec<Answer>, seen: Arc<Mutex<Vec<Value>>>, runner: &'static 
                 .unwrap()
                 .status();
             assert!(status.is_success(), "the proxy forwarded the call");
-            let Answer::Calls(calls) = answer else {
-                outbox
-                    .send(json!({"type": "done", "reason": "stopped"}))
-                    .unwrap();
-                return;
+            let (calls, arguments) = match answer {
+                Answer::Calls(calls) => (calls, query_arguments()),
+                Answer::Refused => {
+                    let mut arguments = query_arguments();
+                    arguments["context_id"] = json!(CONTEXT);
+                    (1, arguments)
+                }
+                Answer::Text => {
+                    outbox
+                        .send(json!({"type": "done", "reason": "stopped"}))
+                        .unwrap();
+                    return;
+                }
             };
             messages.push(json!({"role": "assistant", "content": ""}));
             outbox
@@ -106,7 +116,7 @@ fn runtime(answers: Vec<Answer>, seen: Arc<Mutex<Vec<Value>>>, runner: &'static 
                 outbox
                     .send(
                         json!({"type": "tool_call", "call_id": format!("call-{call}"),
-                        "name": "query_context", "arguments": query_arguments()}),
+                        "name": "query_context", "arguments": arguments}),
                     )
                     .unwrap();
                 let Ok(result) = inbox.recv() else { return };
@@ -470,4 +480,38 @@ fn the_runtime_asks_for_the_steps_output_limit() {
         .step(&payload(1), &tight, soon(), &go, &|_| true)
         .unwrap();
     assert_eq!(h.hits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_refused_call_reaches_the_worker_undecodable_and_its_feedback_returns_as_a_tool_error() {
+    let mut h = harness(vec![vec![Answer::Refused, Answer::Calls(1)]]);
+    let first = h
+        .session
+        .step(&payload(1), &LIMITS, soon(), &go, &|_| true)
+        .unwrap();
+    let action: Value = serde_json::from_str(&first.text).unwrap();
+    assert_eq!(action["type"], REFUSED_CALL, "the step keeps the run going");
+    assert_eq!(action["tool"], "query_context");
+    assert_eq!(action["refusal"], "host_owned_field");
+    assert_eq!(action["arguments"]["context_id"], CONTEXT);
+    let mut refused = payload(2);
+    let mut prompt: Value = serde_json::from_str(&refused.prompt).unwrap();
+    prompt["turn_progress"]["action_feedback"] = json!({"reason": "invalid_action",
+        "invocation_ordinal": 1, "action_hash": "a", "choices_hash": "c"});
+    refused.prompt = prompt.to_string();
+    let second = h
+        .session
+        .step(&refused, &LIMITS, soon(), &go, &|_| true)
+        .unwrap();
+    assert_eq!(second.started, None, "the refusal answers the refused call");
+    let seen = h.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["call_id"], "call-0");
+    assert_eq!(seen[0]["is_error"], true);
+    assert!(
+        seen[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("invalid_action")
+    );
 }
