@@ -18,6 +18,13 @@ GAP_REASONS = {
 }
 
 
+def shown(endpoint_id):
+    """`ep:<repo>@METHOD:path` as `METHOD path`. The repository part is a
+    hash of the run's local checkout path, so the report leaves it out."""
+    method, _, path = endpoint_id.split("@", 1)[-1].partition(":")
+    return f"{method} {path}"
+
+
 def line_ranges(text: bytes):
     starts = [0]
     for i, b in enumerate(text):
@@ -80,13 +87,13 @@ def main():
         links = [(d, p) for d, p in mine if not d.startswith("gap:")]
         gaps = [(d, p) for d, p in mine if d.startswith("gap:")]
         truths = truth_endpoint(repo, call) or []
-        entry = {"call": f"{test_key}:{call['line']}", "expect": call["expect"], "links": [d for d, _ in links], "gaps": [p.get("reason") for _, p in gaps]}
+        entry = {"call": f"{test_key}:{call['line']}", "expect": call["expect"], "links": [shown(d) for d, _ in links], "gaps": [p.get("reason") for _, p in gaps]}
         for d, p in links:
             prec_total += 1
             if d in truths:
                 prec_ok += 1
             else:
-                report["misses"].append({"call": entry["call"], "reason": f"links to {d}, truth {call['truth']}"})
+                report["misses"].append({"call": entry["call"], "reason": f"links to {shown(d)}, truth {call['truth']}"})
             key = (test_id, d)
             lab = edge_labels.setdefault(key, {"statuses": set(), "keys": set(), "redirect": False, "props": p})
             if call["expect"].startswith("link"):
