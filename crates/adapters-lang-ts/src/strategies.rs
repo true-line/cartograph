@@ -116,6 +116,44 @@ struct Property {
     interface: String,
 }
 
+/// How many objects and pairs up from a configured pair its
+/// `default…Config` declaration may be.
+const MAX_CONFIG_DEPTH: usize = 16;
+
+/// Whether `pair` sits in the object a top-level `defaultConfig` (any
+/// `default…Config` name) declaration initializes (AC-1054).
+fn in_default_config(cx: &FileCx<'_>, pair: TsNode<'_>) -> bool {
+    let mut up = pair;
+    // A configuration key sits a few objects deep; a bound keeps deeply
+    // nested literals linear.
+    for _ in 0..MAX_CONFIG_DEPTH {
+        let Some(parent) = up.parent() else {
+            return false;
+        };
+        match parent.kind() {
+            "object" | "pair" => up = parent,
+            "variable_declarator" => {
+                let declared = parent
+                    .parent()
+                    .and_then(|d| d.parent())
+                    .is_some_and(|scope| {
+                        scope.kind() == "program"
+                            || (scope.kind() == "export_statement"
+                                && scope.parent().is_some_and(|p| p.kind() == "program"))
+                    });
+                return declared
+                    && parent.child_by_field_name("value") == Some(up)
+                    && parent.child_by_field_name("name").is_some_and(|n| {
+                        let name = cx.text(&n);
+                        name.starts_with("default") && name.ends_with("Config")
+                    });
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// A class configured for an interface by name: `stockLocationStrategy:
 /// new MultiChannelStockLocationStrategy()` in a configuration object
 /// (AC-1054).
@@ -535,8 +573,10 @@ pub(super) fn sites(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Pending) {
             // A configured instance: `stockLocationStrategy: new
             // MultiChannelStockLocationStrategy()` makes that class an
             // implementation of `StockLocationStrategy` though it only
-            // `extends` a base (AC-1054).
-            "pair" => {
+            // `extends` a base (AC-1054). Only a pair inside the default
+            // configuration (`const defaultConfig = { … }`) counts: a test
+            // fixture or other local object configures nothing.
+            "pair" if in_default_config(cx, *node) => {
                 let (Some(key), Some(value)) = (
                     node.child_by_field_name("key")
                         .filter(|k| k.kind() == "property_identifier"),
@@ -786,6 +826,23 @@ mod tests {
     catalogOptions: { stockLocationStrategy: new MultiChannelStockLocationStrategy() },
     taxOptions: { taxZoneStrategy: new TwiceTaxZoneStrategy(), other: new MultiChannelStockLocationStrategy() },
 };
+",
+        );
+        // A fixture's configuration is not the default one.
+        write(
+            "src/config/catalog/test-stock-location-strategy.ts",
+            "export class TestStockLocationStrategy extends BaseStockLocationStrategy {
+    async getAvailableStock() {
+        return { stockOnHand: 1, stockAllocated: 0 };
+    }
+}
+export const testConfig = {
+    catalogOptions: { stockLocationStrategy: new TestStockLocationStrategy() },
+};
+export function configure() {
+    const defaultConfig = { stockLocationStrategy: new TestStockLocationStrategy() };
+    return defaultConfig;
+}
 ",
         );
         write(

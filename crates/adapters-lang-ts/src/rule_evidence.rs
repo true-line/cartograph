@@ -1295,14 +1295,15 @@ fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
             }))
 }
 
-/// Whether `name` is a total the callable accumulates (AC-1054): a `let
-/// name = <number>` declared earlier in a block that encloses it, in the
-/// same callable, which a `return` of that callable gives back (`return
+/// Whether `name` is a total the callable accumulates (AC-1054): its
+/// nearest declaration, in a block that encloses it within the same
+/// callable, is a `let name = <number>` before it, no loop or catch binder
+/// shadows it, and a `return` of that callable gives it back (`return
 /// name`, or `{ name }` / `{ key: name }` in a returned object).
 fn accumulated_total(cx: &FileCx<'_>, name: TsNode<'_>) -> bool {
     let spelled = cx.text(&name);
     let mut up = name;
-    let mut declared = false;
+    let mut declared = None;
     let callable = loop {
         let Some(parent) = up.parent() else {
             return false;
@@ -1310,28 +1311,45 @@ fn accumulated_total(cx: &FileCx<'_>, name: TsNode<'_>) -> bool {
         if callable::is_callable(parent) {
             break parent;
         }
-        if !declared && parent.kind() == "statement_block" {
+        let binder = match parent.kind() {
+            "for_in_statement" => parent.child_by_field_name("left"),
+            "catch_clause" => parent.child_by_field_name("parameter"),
+            "for_statement" => parent.child_by_field_name("initializer"),
+            _ => None,
+        };
+        if declared.is_none() && binder.is_some_and(|b| binds(cx, b, spelled)) {
+            return false;
+        }
+        if declared.is_none() && parent.kind() == "statement_block" {
+            // The nearest block that declares the name decides.
             let mut cursor = parent.walk();
             for statement in parent.named_children(&mut cursor) {
-                if statement.kind() != "lexical_declaration"
-                    || statement.end_byte() > name.start_byte()
-                    || statement.child(0).is_none_or(|k| k.kind() != "let")
-                {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
                     continue;
                 }
                 let mut inner = statement.walk();
-                declared |= statement.named_children(&mut inner).any(|d| {
-                    d.kind() == "variable_declarator"
+                for d in statement.named_children(&mut inner) {
+                    let declares = d.kind() == "variable_declarator"
                         && d.child_by_field_name("name")
-                            .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == spelled)
-                        && d.child_by_field_name("value")
-                            .is_some_and(|v| v.kind() == "number")
-                });
+                            .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == spelled);
+                    if declares && declared.is_none() {
+                        declared = Some(
+                            statement.kind() == "lexical_declaration"
+                                && statement.end_byte() <= name.start_byte()
+                                && statement.child(0).is_some_and(|k| k.kind() == "let")
+                                && d.child_by_field_name("value")
+                                    .is_some_and(|v| v.kind() == "number"),
+                        );
+                    }
+                }
             }
         }
         up = parent;
     };
-    declared && returns_name(cx, callable, spelled, 0)
+    declared == Some(true) && returns_name(cx, callable, spelled, 0)
 }
 
 /// Whether a `return` of `node` (not of a nested callable) gives `name`

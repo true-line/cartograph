@@ -894,7 +894,8 @@ fn a_guarded_addition_to_a_returned_total_is_a_change() {
     // AC-1054 (T-1054): `+=` or `-=` on a `let` the callable starts at a
     // number and returns (alone or in a returned object) is a guarded
     // change; a total not returned, one not started at a number, another
-    // operator, or a total of a nested callable is not.
+    // operator, a shadowing declaration or binder of the same name, or a
+    // total of a nested callable is not.
     let code = r#"export class MultiChannelStockLocationStrategy {
     async getAvailableStock(ctx: any, id: any, stockLevels: any[]) {
         let stockOnHand = 0;
@@ -909,6 +910,18 @@ fn a_guarded_addition_to_a_returned_total_is_a_change() {
                 ignored += stockLevel.stockOnHand;
                 named += stockLevel.name;
                 stockOnHand *= 2;
+            }
+            // A nearer declaration of the same name is another value.
+            if (stockLevel.named) {
+                let stockOnHand = '';
+                if (stockLevel.x) {
+                    stockOnHand += stockLevel.name;
+                }
+            }
+        }
+        for (let stockAllocated of stockLevels) {
+            if (ctx.y) {
+                stockAllocated += 1;
             }
         }
         const nested = () => {
