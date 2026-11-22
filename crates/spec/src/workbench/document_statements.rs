@@ -659,9 +659,12 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                 ) => Some(format!("the {}", words(key))),
                 // A signed value read back (`signer.unsign(s, max_age=600)`,
                 // `serializer.loads(s, max_age=600)`): the value with its
-                // signature checked, and its age when one is given.
-                ([_, .., "unsign" | "loads"], [Arg::Pos(value), rest @ ..])
+                // signature checked, and its age when one is given. A
+                // `loads` without `max_age` (`json.loads(s)`) checks nothing,
+                // so only an age limit marks it as signed (AC-1036).
+                ([_, .., method @ ("unsign" | "loads")], [Arg::Pos(value), rest @ ..])
                     if rest.len() <= 1
+                        && (*method == "unsign" || rest.len() == 1)
                         && rest.iter().all(
                             |a| matches!(a, Arg::Kw(k, Expr::Lit(Lit::Num(_))) if k == "max_age"),
                         ) =>
