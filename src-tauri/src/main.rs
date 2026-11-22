@@ -2285,13 +2285,46 @@ fn extract_tree_packed(
         let tf_id = iac::SourceId { repo, commit };
         let mut tf_progress =
             |path: &str| on_file(&format!("Reading infrastructure (Terraform) — {path}"));
-        let (tf, stats) = iac::extract_dir_incremental_with_progress(
-            root,
-            &tf_id,
-            &mut cache.tf,
-            &mut tf_progress,
-        )
-        .map_err(|e| e.to_string())?;
+        // A capture holding `.tf` files is parsed from its retained bytes,
+        // with provenance-only Terraform receipts (AC-1053). Local module
+        // directories are still listed in the checkout, and a module file
+        // outside the capture is read there and stays uncited.
+        let captured_tf = captured_lane_paths(primary, ".tf");
+        let (tf, stats) = if let (Some(capture), false) = (primary, captured_tf.is_empty()) {
+            let (tf, stats) = iac::extract_dir_from_sources(
+                root,
+                &tf_id,
+                &captured_tf,
+                &|path| {
+                    capture
+                        .file(path)
+                        .map(|file| file.bytes().to_vec())
+                        .map_err(|_| {
+                            std::io::Error::other("captured Terraform file is unavailable")
+                        })
+                },
+                &mut tf_progress,
+            )
+            .map_err(|e| e.to_string())?;
+            stage_lane_publication_receipts(
+                adapters_lang_ts::captured::Grammar::Terraform,
+                capture,
+                &captured_tf,
+                &adapters_lang_ts::SourceId { repo, commit },
+                &tf.nodes,
+                &tf.edges,
+                receipts,
+            );
+            (tf, stats)
+        } else {
+            iac::extract_dir_incremental_with_progress(
+                root,
+                &tf_id,
+                &mut cache.tf,
+                &mut tf_progress,
+            )
+            .map_err(|e| e.to_string())?
+        };
         delta.add(
             stats.recomputed_files,
             stats.reused_files,

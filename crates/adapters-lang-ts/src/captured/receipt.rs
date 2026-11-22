@@ -35,9 +35,9 @@ struct Contract {
 }
 
 /// The producer contract a receipt of `version` and `grammar` was minted
-/// under. Python (AC-1024), Go (AC-1026), Java (AC-1031), Rust (AC-1033) and
-/// Kotlin (AC-1035) receipts exist only in the v3 shape and carry primary
-/// provenance alone; each lane's own prefix and domain keep it distinct from
+/// under. Python (AC-1024), Go (AC-1026), Java (AC-1031), Rust (AC-1033),
+/// Kotlin (AC-1035) and Terraform (AC-1053) receipts exist only in the v3
+/// shape and carry primary provenance alone; each lane's own prefix and domain keep it distinct from
 /// every TypeScript receipt.
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
     let lane = match grammar {
@@ -79,6 +79,14 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             domain: b"cartograph:kt-primary-receipt:v1\0",
             grammar_package: KOTLIN_GRAMMAR_PACKAGE,
             parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        Grammar::Terraform => Some(Contract {
+            prefix: "tf-primary-v1:",
+            producer: "t0.adapter-iac/direct-lexical-v1",
+            domain: b"cartograph:tf-primary-receipt:v1\0",
+            grammar_package: TERRAFORM_PARSER_PACKAGE,
+            parser_package: TERRAFORM_PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
         Grammar::ObservedInput => Some(Contract {
@@ -157,6 +165,9 @@ const JAVA_GRAMMAR_PACKAGE: &str = "tree-sitter-java@0.23.5";
 const RUST_GRAMMAR_PACKAGE: &str = "tree-sitter-rust@0.24.2";
 // The Kotlin adapter's exact grammar pin (crates/adapters-lang-kotlin).
 const KOTLIN_GRAMMAR_PACKAGE: &str = "tree-sitter-kotlin-ng@1.1.0";
+// The Terraform adapter's exact HCL parser pin (crates/iac): `hcl-edit` is
+// both its grammar and its parser.
+const TERRAFORM_PARSER_PACKAGE: &str = "hcl-edit@0.9.8";
 // Observation inputs are JSON documents (state, Pulumi) or JSON lines
 // (OTLP), cited by the byte spans the T1 producers record (ADR-0079).
 const OBSERVED_INPUT_FORMAT: &str = "json/jsonl";
@@ -203,6 +214,8 @@ pub enum Grammar {
     Rust,
     /// `.kt` and `.kts` files, parsed by the Kotlin adapter (AC-1035).
     Kotlin,
+    /// `.tf` files, parsed by the Terraform adapter (AC-1053).
+    Terraform,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -214,7 +227,13 @@ impl Grammar {
     pub(super) fn provenance_only(self) -> bool {
         matches!(
             self,
-            Self::Python | Self::Go | Self::Java | Self::Rust | Self::Kotlin | Self::ObservedInput
+            Self::Python
+                | Self::Go
+                | Self::Java
+                | Self::Rust
+                | Self::Kotlin
+                | Self::Terraform
+                | Self::ObservedInput
         )
     }
 
@@ -241,6 +260,8 @@ impl Grammar {
             Self::Rust
         } else if path.ends_with(".kt") || path.ends_with(".kts") {
             Self::Kotlin
+        } else if path.ends_with(".tf") {
+            Self::Terraform
         } else {
             Self::Tsx
         }
@@ -803,7 +824,8 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
             || file.path.ends_with(".java")
             || file.path.ends_with(".rs")
             || file.path.ends_with(".kt")
-            || file.path.ends_with(".kts"))
+            || file.path.ends_with(".kts")
+            || file.path.ends_with(".tf"))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }

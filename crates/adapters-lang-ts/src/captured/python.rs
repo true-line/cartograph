@@ -1,7 +1,8 @@
 //! Provenance-only receipts for the captured Python (AC-1024), Go (AC-1026),
-//! Java (AC-1031), Rust (AC-1033) and Kotlin (AC-1035) lanes (#385).
+//! Java (AC-1031), Rust (AC-1033), Kotlin (AC-1035) and Terraform (AC-1053)
+//! lanes (#385).
 //!
-//! Each adapter parses a captured `.py`, `.go`, `.java`, `.rs`, `.kt` or
+//! Each adapter parses a captured `.py`, `.go`, `.tf`, `.java`, `.rs`, `.kt` or
 //! `.kts` file's retained bytes; this module binds a lane's facts to the exact
 //! captured spans their primary provenance cites. Rules and facts citing more
 //! than one file get none. Facts are bound in their final form, after

@@ -1278,3 +1278,52 @@ fn root_module_scoping_is_deterministic() {
         serde_json::to_string(&a.edges).unwrap()
     );
 }
+
+// AC-1053: a captured source's `.tf` files are parsed from the bytes the
+// host supplies, never the checkout; a local module file outside them is
+// still read, from the checkout, so the module expands as before.
+#[test]
+fn supplied_terraform_bytes_are_parsed_instead_of_the_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("modules/queue")).unwrap();
+    std::fs::write(
+        dir.path().join("main.tf"),
+        "resource \"aws_sqs_queue\" \"checkout\" {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("modules/queue/queue.tf"),
+        "resource \"aws_sqs_queue\" \"inner\" {}\n",
+    )
+    .unwrap();
+    let paths = tf_paths(dir.path()).unwrap();
+    assert_eq!(paths, ["main.tf", "modules/queue/queue.tf"]);
+    let captured = "module \"queue\" {\n  source = \"./modules/queue\"\n}\nresource \"aws_sqs_queue\" \"captured\" {}\n";
+    let (extraction, stats) = extract_dir_from_sources(
+        dir.path(),
+        &id(),
+        &paths[..1],
+        &|path| {
+            assert_eq!(path, "main.tf");
+            Ok(captured.as_bytes().to_vec())
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    let ids: Vec<&str> = extraction
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    assert!(
+        ids.iter().any(|id| id.ends_with("aws_sqs_queue.captured")),
+        "{ids:?}"
+    );
+    assert!(!ids.iter().any(|id| id.ends_with("aws_sqs_queue.checkout")));
+    assert!(
+        ids.iter()
+            .any(|id| id.ends_with("module.queue.aws_sqs_queue.inner")),
+        "{ids:?}"
+    );
+    assert_eq!(stats.distinct_files, 2);
+}

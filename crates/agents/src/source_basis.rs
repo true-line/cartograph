@@ -221,6 +221,7 @@ fn receipt(value: &str) -> bool {
         || prefixed(value, "java-primary-v1:")
         || prefixed(value, "rs-primary-v1:")
         || prefixed(value, "kt-primary-v1:")
+        || prefixed(value, "tf-primary-v1:")
 }
 impl TaskFactKey {
     fn valid(&self) -> bool {

@@ -358,6 +358,7 @@ fn receipt_v2_accepts_frozen_pre_upgrade_parser_pin_but_rejects_arbitrary_value(
         Grammar::Java,
         Grammar::Rust,
         Grammar::Kotlin,
+        Grammar::Terraform,
     ] {
         assert!(
             !contract(3, grammar)

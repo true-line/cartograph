@@ -2089,6 +2089,12 @@ impl PrimarySourceStore {
         } else {
             Vec::new()
         };
+        // Terraform's `.tf` files (AC-1053) join it when infrastructure is
+        // recovered, under the same fallback.
+        let mut lanes = lanes;
+        if ingest::coverage::wants(layers, ingest::coverage::INFRA_LAYERS) {
+            lanes.extend(iac::tf_paths(root).unwrap_or_default());
+        }
         let combined = (!lanes.is_empty())
             .then(|| {
                 let mut paths = selection.files.clone();
