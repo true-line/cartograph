@@ -121,7 +121,7 @@
       "tolerance": 1.0
     },
     "max_rss_bytes": {
-      "baseline": 2650939392,
+      "baseline": 1790631936,
       "direction": "max",
       "tolerance": 0.5
     }
