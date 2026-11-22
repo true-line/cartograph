@@ -577,7 +577,8 @@ pub(crate) async fn section_compose_preview(
     crate::off_ui_thread(move || {
         let state = app.state::<AppState>();
         let prepared = prepare(&state, &catalogue_version, &document, &section, &scope)?;
-        let provider = crate::egress::escalation_provider("cloud")?;
+        let provider =
+            crate::egress::escalation_provider("cloud", llm::OllamaProvider::DEFAULT_PORT)?;
         let bounded = firewall(&state)?
             .prepare_bounded(provider.as_ref(), &prepared.action, &limits()?)
             .map_err(|error| error.to_string())?;
@@ -633,7 +634,10 @@ pub(crate) async fn run_section_compose(
     let worker = app.clone();
     let result = crate::off_ui_thread_for_job(execution.clone(), move |execution| {
         let state = worker.state::<AppState>();
-        let provider = crate::egress::escalation_provider(&mode)?;
+        let provider = crate::egress::escalation_provider(
+            &mode,
+            crate::settings::saved_ollama_port(&state.settings)?,
+        )?;
         run_blocking(
             &state,
             execution,
@@ -663,7 +667,9 @@ fn gated_provider(state: &AppState) -> Result<Box<dyn LlmProvider>, String> {
         .model;
     Ok(Box::new(
         llm::OllamaProvider::with_models(
-            llm::OllamaProvider::DEFAULT_URL,
+            &llm::OllamaProvider::loopback_url(crate::settings::saved_ollama_port(
+                &state.settings,
+            )?),
             llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
             model,
             std::time::Duration::from_secs(MAX_REQUEST_TIMEOUT_MS / 1000),

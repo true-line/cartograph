@@ -351,7 +351,8 @@ fn showcase_ask_areas() {
             .grant_consent("T3", r#"{"provider":"showcase-ask","network":true}"#)
             .unwrap();
     }
-    let provider = crate::egress::escalation_provider(&mode).unwrap();
+    let provider =
+        crate::egress::escalation_provider(&mode, llm::OllamaProvider::DEFAULT_PORT).unwrap();
     let choices = areas(&state).unwrap();
     let mut records = Vec::new();
     let mut report = String::from("# Topic expert answers\n");

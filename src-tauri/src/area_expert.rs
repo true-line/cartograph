@@ -265,7 +265,8 @@ pub(crate) async fn area_ask_preview(
     crate::off_ui_thread(move || {
         let state = app.state::<AppState>();
         let prepared = prepare(&state, &area, &question, &turns)?;
-        let provider = crate::egress::escalation_provider("cloud")?;
+        let provider =
+            crate::egress::escalation_provider("cloud", llm::OllamaProvider::DEFAULT_PORT)?;
         let bounded = crate::section_compose::firewall(&state)?
             .prepare_bounded(
                 provider.as_ref(),
@@ -331,7 +332,10 @@ pub(crate) async fn run_area_ask(
     let worker = app.clone();
     let result = crate::off_ui_thread_for_job(execution.clone(), move |execution| {
         let state = worker.state::<AppState>();
-        let provider = crate::egress::escalation_provider(&mode)?;
+        let provider = crate::egress::escalation_provider(
+            &mode,
+            crate::settings::saved_ollama_port(&state.settings)?,
+        )?;
         run_blocking(
             &state,
             execution,

@@ -4829,11 +4829,7 @@ fn installed_local_models(port: u16) -> Result<Vec<llm::catalog::LocalModel>, St
 
 /// The saved loopback Ollama port, or the default when none is saved (#1653).
 fn saved_ollama_port(state: &AppState) -> Result<u16, String> {
-    let store = state.settings.lock().map_err(|e| e.to_string())?;
-    Ok(store
-        .local_ollama_port()
-        .map_err(|e| e.to_string())?
-        .unwrap_or(llm::OllamaProvider::DEFAULT_PORT))
+    settings::saved_ollama_port(&state.settings)
 }
 
 #[tauri::command]
@@ -4998,8 +4994,11 @@ async fn check_provider_connection(
 /// Whether the local model server answers and which catalog models are
 /// installed, with the command for each missing one (#1795). Loopback only.
 #[tauri::command]
-async fn local_lane_status() -> Result<provider_checks::LocalLaneStatus, String> {
-    off_ui_thread(|| Ok(provider_checks::probe_local_lane())).await
+async fn local_lane_status(
+    state: State<'_, AppState>,
+) -> Result<provider_checks::LocalLaneStatus, String> {
+    let port = saved_ollama_port(&state)?;
+    off_ui_thread(move || Ok(provider_checks::probe_local_lane(port))).await
 }
 
 /// Live egress summary for the status bar (#103's seam, now real).
@@ -5146,7 +5145,8 @@ async fn gap_strategies(
             .contains(&agent_task.edge_label);
         let payload_bytes = if let Some(task) = prepared.filter(|_| edge_label_allowed) {
             let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
-            let local = llm::OllamaProvider::local_default().map_err(|e| e.to_string())?;
+            let local = llm::OllamaProvider::local_on_port(saved_ollama_port(&state)?)
+                .map_err(|e| e.to_string())?;
             let preview = broker
                 .preview_prepared(&local, &firewall, task)
                 .map_err(|e| e.to_string())?;
@@ -5197,7 +5197,7 @@ async fn escalation_preview(
             .map_err(|e| e.to_string())?
             .egress_policy()
             .map_err(|e| e.to_string())?;
-        let provider = egress::escalation_provider("cloud")?;
+        let provider = egress::escalation_provider("cloud", llm::OllamaProvider::DEFAULT_PORT)?;
         agents::AgentBroker::bounded_default()
             .preview_prepared(provider.as_ref(), &llm::EgressFirewall::new(policy), &task)
             .map_err(|e| e.to_string())
@@ -5244,7 +5244,8 @@ async fn run_escalation(
         settings_store.egress_policy().map_err(|e| e.to_string())
     })()
     .map_err(&fail)?;
-    let provider = egress::escalation_provider(&mode).map_err(&fail)?;
+    let provider = egress::escalation_provider(&mode, saved_ollama_port(&state).map_err(&fail)?)
+        .map_err(&fail)?;
     // #1767: a cloud payload is recorded when it is handed to the provider,
     // so a call that then fails or times out is counted. If the record
     // cannot be written the call is not made.
@@ -5348,7 +5349,8 @@ async fn run_class_escalation(
         settings_store.egress_policy().map_err(|e| e.to_string())
     })()
     .map_err(&fail)?;
-    let provider = egress::escalation_provider(&mode).map_err(&fail)?;
+    let provider = egress::escalation_provider(&mode, saved_ollama_port(&state).map_err(&fail)?)
+        .map_err(&fail)?;
     let firewall = llm::EgressFirewall::new(policy);
     let broker = agents::AgentBroker::bounded_default();
 
@@ -7182,7 +7184,8 @@ async fn semantic_preview(
                 Some(semantic::evaluation::report::DecisionReason::IncompatibleEvidence),
             ),
         };
-        let provider = llm::OllamaProvider::local_default().map_err(|error| error.to_string())?;
+        let provider = llm::OllamaProvider::local_on_port(saved_ollama_port(&state)?)
+            .map_err(|error| error.to_string())?;
         let preview = build_reviewed_semantic_preview(
             &provider,
             worker_cache,
