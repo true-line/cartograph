@@ -143,6 +143,7 @@ fn ledger(with_receipt: bool) -> InvestigationInputLedger {
     let receipt = format!("ts-primary-v2:{}", hash("receipt"));
     let mut ledger = InvestigationInputLedger {
         coverage_reads: vec![],
+        artifact_reads: vec![],
         schema_version: 1,
         coverage: None,
         graph_snapshot_id: format!("context-v1:{}", hash("graph")),
