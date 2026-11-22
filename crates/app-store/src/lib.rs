@@ -15,6 +15,8 @@
     allow(dead_code, unused_imports)
 )]
 
+#[path = "../../../src-tauri/src/agent_pool_store.rs"]
+pub mod agent_pool_store;
 #[path = "../../../src-tauri/src/edge_merge.rs"]
 pub mod edge_merge;
 #[path = "../../../src-tauri/src/findings.rs"]
@@ -35,5 +37,7 @@ pub mod operator_limits;
 pub mod paths;
 #[path = "../../../src-tauri/src/primary_source.rs"]
 pub mod primary_source;
+#[path = "../../../src-tauri/src/settings.rs"]
+pub mod settings;
 #[path = "../../../src-tauri/src/sources.rs"]
 pub mod sources;
