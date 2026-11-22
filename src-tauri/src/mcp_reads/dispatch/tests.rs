@@ -737,3 +737,151 @@ fn query_reads_a_nodes_visible_neighborhood_with_its_relations() {
     assert_eq!(error["error"]["code"], -32602);
     assert!(!error.to_string().contains("ledger"));
 }
+
+// #250 worked example: an external agent answers "what handles POST
+// /owners/new" purely through the MCP reads, every step citing exact facts,
+// and the same reads return byte-identical responses.
+#[test]
+fn agent_answers_what_handles_an_endpoint_through_mcp_reads_alone() {
+    let session = || {
+        let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+        let prov = |id: &str, path: &str| {
+            Provenance::new(
+                Tier::Deterministic,
+                ConfidenceTier::Confirmed,
+                vec![EvidenceRef {
+                    repo: "fixture/petclinic".into(),
+                    path: path.into(),
+                    byte_start: 0,
+                    byte_end: 8,
+                    commit_sha: "fixed".into(),
+                }],
+                "fixture",
+                id.as_bytes(),
+            )
+            .unwrap()
+        };
+        let controller = "src/main/kotlin/OwnerController.kt";
+        for (id, label, props) in [
+            (
+                "ep:petclinic@POST:/owners/new",
+                "Endpoint",
+                json!({"method":"POST","path":"/owners/new"}),
+            ),
+            (
+                "ep:petclinic@GET:/owners/new",
+                "Endpoint",
+                json!({"method":"GET","path":"/owners/new"}),
+            ),
+            (
+                "sym:OwnerController.kt#processCreationForm",
+                "Symbol",
+                json!({"name":"processCreationForm"}),
+            ),
+            (
+                "sym:OwnerController.kt#initCreationForm",
+                "Symbol",
+                json!({"name":"initCreationForm"}),
+            ),
+            (
+                "sym:OwnerRepository.kt#save",
+                "Symbol",
+                json!({"name":"save"}),
+            ),
+        ] {
+            let mut props = props;
+            props["prov"] = serde_json::to_value(prov(id, controller)).unwrap();
+            graph
+                .put_node(&Node {
+                    id: id.into(),
+                    label: label.into(),
+                    props,
+                })
+                .unwrap();
+        }
+        for (src, dst, label) in [
+            (
+                "ep:petclinic@POST:/owners/new",
+                "sym:OwnerController.kt#processCreationForm",
+                "HANDLES",
+            ),
+            (
+                "ep:petclinic@GET:/owners/new",
+                "sym:OwnerController.kt#initCreationForm",
+                "HANDLES",
+            ),
+            (
+                "sym:OwnerController.kt#processCreationForm",
+                "sym:OwnerRepository.kt#save",
+                "CALLS",
+            ),
+        ] {
+            let id = format!("{src}>{dst}");
+            graph
+                .put_edge(&core_graph::Edge {
+                    src: src.into(),
+                    dst: dst.into(),
+                    label: label.into(),
+                    props: json!({"prov":prov(&id, controller)}),
+                })
+                .unwrap();
+        }
+        ReadSession::acquire(
+            &Mutex::new(graph),
+            &Mutex::new(DecisionLog::open(":memory:").unwrap()),
+            || Ok(vec![]),
+            SnapshotReadLimits::default(),
+            CoverageReadLimits::default(),
+            spec::ExportMode::VerifiedOnly,
+        )
+        .unwrap()
+    };
+    let answer = |dispatch: &mut Dispatcher, base: usize| {
+        // 1. Find the endpoint by text; the candidate names an exact node.
+        let mut args = identity(dispatch);
+        args["request"] = json!({"request":{"query":{"by":"text","text":"POST:/owners/new"},"labels":["Endpoint"],"max_candidates":5,"max_bytes":65536}});
+        let found = call(dispatch, base + 2, "cartograph_discover", args);
+        let candidates = &found["result"]["structuredContent"]["context"]["response"]["candidates"];
+        assert_eq!(candidates.as_array().unwrap().len(), 1, "{found}");
+        let endpoint = candidates[0]["reference"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(endpoint, "ep:petclinic@POST:/owners/new");
+        // 2. Follow its HANDLES relation, then what the handler calls.
+        let handles = json!({"scope":{"type":"neighborhood","anchor":endpoint,"hops":1},"kind":"edge","labels":["HANDLES"],"max_facts":10,"max_bytes":65536});
+        let args = query_args(dispatch, handles);
+        let handled = call(dispatch, base + 3, "cartograph_query", args);
+        assert_eq!(
+            references(&handled),
+            ["ep:petclinic@POST:/owners/new-HANDLES->sym:OwnerController.kt#processCreationForm"]
+        );
+        let fact = &handled["result"]["structuredContent"]["context"]["response"]["facts"][0];
+        // Every answer element carries checkable provenance.
+        assert_eq!(fact["confidence_tier"], "Confirmed", "{fact}");
+        assert!(fact.to_string().contains("OwnerController.kt"));
+        let handler = fact["reference"]["destination"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let calls = json!({"scope":{"type":"neighborhood","anchor":handler,"hops":1},"kind":"edge","labels":["CALLS"],"max_facts":10,"max_bytes":65536});
+        let args = query_args(dispatch, calls);
+        let called = call(dispatch, base + 4, "cartograph_query", args);
+        assert_eq!(
+            references(&called),
+            ["sym:OwnerController.kt#processCreationForm-CALLS->sym:OwnerRepository.kt#save"]
+        );
+        // Request ids differ; the read results must not.
+        [found, handled, called].map(|response| response["result"].clone())
+    };
+    let mut dispatch =
+        Dispatcher::new(session(), "opaque-fixture-session".into(), limits()).unwrap();
+    init(&mut dispatch);
+    let one = answer(&mut dispatch, 0);
+    // Identical reads against the same basis are byte-identical.
+    let two = answer(&mut dispatch, 10);
+    assert_eq!(
+        serde_json::to_vec(&one).unwrap(),
+        serde_json::to_vec(&two).unwrap()
+    );
+}
