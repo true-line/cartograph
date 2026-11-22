@@ -175,8 +175,7 @@ pub fn definition_fingerprint() -> String {
     let unlisted = unlisted_response_schema();
     crate::source_basis::domain_hash(
         b"cartograph:section-composer-definition:v1\0",
-        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{schema}\0{unlisted}")
-            .as_bytes(),
+        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{schema}\0{unlisted}").as_bytes(),
     )
 }
 
