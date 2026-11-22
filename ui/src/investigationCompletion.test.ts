@@ -3,7 +3,7 @@ import supportedWire from './fixtures/completion-v7-supported.json';
 import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import terminalWire from './fixtures/completion-v7-terminal.json';
 import insufficientWire from './fixtures/completion-v7-insufficient.json';
-import type { InvestigationDetail, InvestigationResult } from './investigationTypes';
+import type { InvestigationDetail, InvestigationObligationObservation, InvestigationResult } from './investigationTypes';
 import { queryHistoryDetail, queryHistoryResult, expandedCompletionCatalog, completionDetail, completionResult,
   analyst27Correction, gapTriagerDetail, gapTriagerResult, specWriterDetail, specWriterResult, specWriterV2Detail, specWriterV2Result } from './completionFixtures';
 import { validCompletionDetail, validCompletionResult, validCompletionSummary } from './investigationCompletion';
@@ -55,6 +55,28 @@ describe('V7 completion wire coherence (AC-0266)', () => {
     const inventory = detail.completion!.obligations.obligations.find((item) => item.kind === 'inventory')!;
     if (inventory.kind === 'inventory') inventory.target.context_id = `context-v2:${'f'.repeat(64)}`;
     expect(validCompletionDetail(detail.completion, detail, result)).toBe(false);
+  });
+  // AC-1430 (T-1430): a capacity-disclosed row is accepted only on a supported
+  // result that names it in a top-level limitation, and only as a never-read gap.
+  it('accepts a capacity-disclosed obligation only when the limitations name it', () => {
+    const detail = completionDetail(); const result = completionResult();
+    const disclose = (row: InvestigationObligationObservation) => {
+      row.attempted = false; row.acquired = false; row.exactly_supplied = false; row.unmet = null;
+      delete row.last_attempt_outcome; row.capacity_disclosed = true;
+    };
+    const unnamed = structuredClone(result); disclose(unnamed.completion!.assessment[0]);
+    expect(validCompletionResult(unnamed.completion, unnamed)).toBe(false);
+    const named = structuredClone(unnamed);
+    named.limitations = [...named.limitations, `${named.completion!.assessment[0].obligation_id.slice(0, 12)} was not read (capacity).`];
+    expect(validCompletionResult(named.completion, named)).toBe(true);
+    const shown = structuredClone(detail); disclose(shown.completion!.assessment[0]);
+    expect(validCompletionDetail(shown.completion, shown, named)).toBe(true);
+    const attempted = structuredClone(named);
+    attempted.completion!.assessment[0].attempted = true; attempted.completion!.assessment[0].last_attempt_outcome = 'unavailable';
+    expect(validCompletionResult(attempted.completion, attempted)).toBe(false);
+    const flagFalse = structuredClone(named);
+    (flagFalse.completion!.assessment[0] as unknown as Record<string, unknown>).capacity_disclosed = false;
+    expect(validCompletionResult(flagFalse.completion, flagFalse)).toBe(false);
   });
   it('retains the actual first-refusal assessment while the next step is pending', () => {
     const detail = completionDetail('inv-completion', { status: 'awaiting_consent', has_result: false, completion_outcome: undefined, obligation_status: 'unmet' });
