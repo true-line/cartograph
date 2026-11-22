@@ -35,6 +35,7 @@ export function CompletionAssessment({ completion, outcome }: {
             observed.last_attempt_outcome === 'unavailable' ? 'Evidence unavailable' : 'Firewall refused the representation'}.</p>}
           {observed.unmet && <p>{REASON[observed.unmet]}.</p>}
           {!observed.unmet && observed.acquired && !observed.exactly_supplied && <p>Acquired earlier, not exactly supplied at finish.</p>}
+          {observed.capacity_disclosed && <p>Not read: excluded by prompt capacity. Disclosed in the result's limitations, not met.</p>}
         </>}
         <details><summary>Exact obligation identity</summary><code>{item.obligation_id}</code>
           {item.kind === 'inventory' && <><p>Context <code>{item.target.context_id}</code></p><p>Inventory <code>{item.target.inventory_hash}</code></p></>}
