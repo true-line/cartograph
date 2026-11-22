@@ -3312,6 +3312,7 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
             &layers,
             Some(&commit),
             source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
         )
         .unwrap();
     let capture = input.capture.as_ref().unwrap();
@@ -3365,6 +3366,7 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
             &infra,
             Some(&commit),
             source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
         )
         .unwrap();
     assert!(matches!(
@@ -3388,10 +3390,49 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
             &layers,
             Some(&commit),
             source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
         )
         .err()
         .unwrap();
     assert!(error.contains("cloned commit's Git objects"), "{error}");
+}
+
+// AC-1802 (#1653): the TS/JS selection walk takes its file bound from the
+// capture limits and its entry bound from the caller, so a project's raised
+// or lowered limits reach the selection, not only the capture.
+#[test]
+fn the_selection_walk_follows_the_projects_capture_and_entry_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "local");
+    std::fs::write(root.join("a.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("b.ts"), STABLE_B).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let prepare = |max_files, max_visited_entries| {
+        state.primary_sources.prepare_at(
+            &source,
+            source.root(),
+            &[],
+            None,
+            source_capture::CaptureLimits {
+                max_files,
+                ..source_capture::CaptureLimits::default()
+            },
+            max_visited_entries,
+        )
+    };
+    let error = prepare(1, adapters_lang_ts::captured::MAX_VISITED_ENTRIES)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("captured safely (") && error.contains("selected files"),
+        "{error}"
+    );
+    let error = prepare(2, 1).err().unwrap();
+    assert!(error.contains("visited entries"), "{error}");
+    let input = prepare(2, adapters_lang_ts::captured::MAX_VISITED_ENTRIES).unwrap();
+    assert_eq!(input.capture.as_ref().unwrap().manifest().files.len(), 2);
 }
 
 // AC-1024: a source's `.py` files join its capture; the Python pass parses
