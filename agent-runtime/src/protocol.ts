@@ -140,7 +140,7 @@ function validateStart(value: Record<string, unknown>): StartMessage {
   }
   const backend = value.backend ?? "ollama";
   if (backend !== "ollama" && backend !== "vllm") throw new Error("start.backend must be ollama or vllm");
-  if (backend !== "ollama" && value.lane !== "pi") throw new Error("start.backend applies to the pi lane only");
+  if (value.backend !== undefined && value.lane !== "pi") throw new Error("start.backend applies to the pi lane only");
   const maxTurns = value.max_turns;
   if (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 256) {
     throw new Error("start.max_turns must be 1..256");

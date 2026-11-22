@@ -97,6 +97,9 @@ test("protocol refuses a non-loopback model endpoint and undeclared hook points"
   assert.throws(() => parseHostMessage(line({ base_url: "https://api.anthropic.com" })), /loopback/);
   assert.throws(() => parseHostMessage(line({ hooks: ["on_compact"] })), /not exposed/);
   assert.throws(() => parseHostMessage(line({ lane: "openai" })), /lane/);
+  assert.throws(() => parseHostMessage(line({ backend: "tgi" })), /backend/);
+  assert.throws(() => parseHostMessage(line({ lane: "claude", backend: "ollama" })), /pi lane only/);
+  assert.equal((parseHostMessage(line({ backend: "vllm" })) as StartMessage).backend, "vllm");
   assert.throws(() => parseHostMessage(JSON.stringify({ type: "exec", command: "ls" })), /unknown/);
   assert.equal(parseHostMessage(line({})).type, "start");
 });
