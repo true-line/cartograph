@@ -176,7 +176,6 @@ impl<'tree, G: FnMut(RuleGapReason, TsNode<'tree>) -> String> Recovery<'_, 'tree
         }
         // Bound ancestor work before the existing actual-callable resolver.
         bounded_ancestors(site)?;
-        supported_owner_path(site)?;
         let (declaration, invalidated) = self
             .bindings
             .definition_binding(site, self.cx.text(&site))
@@ -213,9 +212,14 @@ impl<'tree, G: FnMut(RuleGapReason, TsNode<'tree>) -> String> Recovery<'_, 'tree
             .parent()
             .filter(|node| node.kind() == "statement_block")
             .ok_or(RuleGapReason::DefinitionScopeUnsupported)?;
-        // Reject unsupported control regions on BOTH paths, even when they
-        // contain the common block (e.g. two statements inside one loop body).
-        supported_owner_path(declaration)?;
+        // Reject unsupported control regions on BOTH paths. A loop around
+        // the common block is allowed (AC-1052): a `const` declared in a
+        // loop body is bound afresh each pass, so the value that reaches a
+        // use later in that body is this pass's (`for (const line of
+        // lines) { const stock = f(line); if (stock < 1) … }`).
+        supported_path(site, Some(block))?;
+        supported_path(declaration, Some(block))?;
+        supported_path(block, None)?;
         let mut child = site;
         for _ in 0..MAX_ANCESTORS {
             let parent = child
@@ -532,34 +536,44 @@ fn bounded_ancestors(mut node: TsNode<'_>) -> Result<(), RuleGapReason> {
     Err(RuleGapReason::DefinitionLimit)
 }
 
-fn supported_owner_path(mut node: TsNode<'_>) -> Result<(), RuleGapReason> {
+/// Whether the control regions from `node` up to `block` (or, with none,
+/// to its callable) are supported. Loops are refused below `block` and
+/// allowed above it, where they enclose both the definition and its use.
+fn supported_path(mut node: TsNode<'_>, block: Option<TsNode<'_>>) -> Result<(), RuleGapReason> {
     for _ in 0..MAX_ANCESTORS {
         let parent = node
             .parent()
             .ok_or(RuleGapReason::DefinitionScopeUnsupported)?;
-        if callable::is_callable(parent) {
+        if callable::is_callable(parent) || Some(parent) == block {
             return Ok(());
         }
-        if matches!(
-            parent.kind(),
-            "for_statement"
-                | "for_in_statement"
-                | "while_statement"
-                | "do_statement"
-                | "switch_statement"
-                | "switch_body"
-                | "switch_case"
-                | "switch_default"
-                | "try_statement"
-                | "catch_clause"
-                | "finally_clause"
-                | "with_statement"
-                | "class"
-                | "class_declaration"
-                | "class_body"
-                | "class_static_block"
-                | "public_field_definition"
-        ) {
+        let around = block.is_none()
+            && matches!(
+                parent.kind(),
+                "for_statement" | "for_in_statement" | "while_statement" | "do_statement"
+            );
+        if !around
+            && matches!(
+                parent.kind(),
+                "for_statement"
+                    | "for_in_statement"
+                    | "while_statement"
+                    | "do_statement"
+                    | "switch_statement"
+                    | "switch_body"
+                    | "switch_case"
+                    | "switch_default"
+                    | "try_statement"
+                    | "catch_clause"
+                    | "finally_clause"
+                    | "with_statement"
+                    | "class"
+                    | "class_declaration"
+                    | "class_body"
+                    | "class_static_block"
+                    | "public_field_definition"
+            )
+        {
             return Err(RuleGapReason::DefinitionScopeUnsupported);
         }
         node = parent;

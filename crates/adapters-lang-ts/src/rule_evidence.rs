@@ -376,7 +376,51 @@ fn answers_a_choice(cx: &FileCx<'_>, exit: TsNode<'_>) -> bool {
             return true;
         }
     }
+    if computed_otherwise(cx, callable, exit, value) {
+        return true;
+    }
     callable.kind() == "method_definition" && !private && implements_a_strategy(cx, callable)
+}
+
+/// The value a callable computes when none of its guards returned first
+/// (AC-1052): an arithmetic `return a - b - c` that is a statement of the
+/// callable's own body, after an `if` that returns a value. The guarded
+/// returns are rules already; this one says what is returned otherwise.
+fn computed_otherwise(
+    cx: &FileCx<'_>,
+    callable: TsNode<'_>,
+    exit: TsNode<'_>,
+    value: TsNode<'_>,
+) -> bool {
+    let arithmetic = value.kind() == "binary_expression"
+        && value
+            .child_by_field_name("operator")
+            .is_some_and(|op| matches!(cx.text(&op), "+" | "-" | "*" | "/" | "%"));
+    let Some(body) = callable.child_by_field_name("body") else {
+        return false;
+    };
+    if !arithmetic || exit.parent() != Some(body) {
+        return false;
+    }
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .take_while(|statement| statement.end_byte() <= exit.start_byte())
+        .filter(|statement| statement.kind() == "if_statement")
+        .any(|guard| returns_a_value(guard, 0))
+}
+
+/// Whether `node` holds a `return v;` outside nested callables, within a
+/// bounded depth.
+fn returns_a_value(node: TsNode<'_>, depth: usize) -> bool {
+    if depth > 16 || callable::is_callable(node) {
+        return false;
+    }
+    if node.kind() == "return_statement" {
+        return exit_value(node).is_some();
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| returns_a_value(child, depth + 1))
 }
 
 /// Whether `node` is a `.find(…)` call, through parentheses and `await`.
@@ -988,6 +1032,28 @@ pub(super) fn extract<'tree>(
             } else {
                 builder.control_gap(RuleGapReason::AnalysisLimit, read);
             }
+            // A push onto a collected list (AC-1052) and an accumulated
+            // total (AC-1054) keep the definitions their conditions test, so
+            // a reader learns what decides what is collected; other changes
+            // keep none, which bounds every file's rule payload.
+            let local_definitions =
+                if collected_push(cx, read) || read.kind() == "augmented_assignment_expression" {
+                    let seeds = std::mem::take(&mut builder.definition_seeds);
+                    let (definitions, mut withheld) = super::local_definitions::recover(
+                        cx,
+                        bindings,
+                        &owner_id,
+                        &seeds,
+                        &mut |reason, at| {
+                            builder.control_gap(reason, at);
+                            builder.gap(reason, at)
+                        },
+                    );
+                    redactions.append(&mut withheld);
+                    definitions
+                } else {
+                    Vec::new()
+                };
             let evidence = GuardedExitEvidence {
                 schema_version: RULE_EVIDENCE_SCHEMA_VERSION,
                 kind: RuleKind::GuardedEffect,
@@ -997,7 +1063,7 @@ pub(super) fn extract<'tree>(
                 conditions,
                 effect,
                 dependencies: builder.dependencies,
-                local_definitions: Some(Vec::new()),
+                local_definitions: Some(local_definitions),
                 interpretation: Interpretation {
                     execution_predicate: InterpretationStatus::NotEstablished,
                     consumer_effect: InterpretationStatus::NotEstablished,
@@ -1145,6 +1211,21 @@ fn effect_statement<'t>(cx: &FileCx<'_>, node: TsNode<'t>) -> Option<EffectKind<
                 .then_some(EffectKind::Assign { target, value })?
         }
         "call_expression" => effect_call(cx, inner).then_some(EffectKind::Call { call: inner })?,
+        // `stockOnHand += stockLevel.stockOnHand` on a total the callable
+        // starts at a number and returns (AC-1054). The value kept is the
+        // whole statement, so its operator is kept with it.
+        "augmented_assignment_expression" => {
+            let target = inner.child_by_field_name("left")?;
+            let adds = inner
+                .child_by_field_name("operator")
+                .is_some_and(|op| matches!(cx.text(&op), "+=" | "-="));
+            (adds && target.kind() == "identifier" && accumulated_total(cx, target)).then_some(
+                EffectKind::Assign {
+                    target,
+                    value: inner,
+                },
+            )?
+        }
         _ => return None,
     };
     let mut up = node;
@@ -1175,6 +1256,11 @@ fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
         return false;
     };
     let verb = cx.text(&property);
+    // `found.push(line.productVariant)` on a list the callable starts empty
+    // (`const found = []`): a value collected for a later check (AC-1050).
+    if verb == "push" && object.kind() == "identifier" && collected_list(cx, object) {
+        return true;
+    }
     if REPOSITORY_WRITES.contains(&verb) {
         let repository = object.kind() == "call_expression"
             && object
@@ -1207,6 +1293,191 @@ fn effect_call(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
                     rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase())
                 })
             }))
+}
+
+/// Whether `name` is a total the callable accumulates (AC-1054): its
+/// nearest declaration, in a block that encloses it within the same
+/// callable, is a `let name = <number>` before it, no loop or catch binder
+/// shadows it, and a `return` of that callable gives it back (`return
+/// name`, or `{ name }` / `{ key: name }` in a returned object).
+fn accumulated_total(cx: &FileCx<'_>, name: TsNode<'_>) -> bool {
+    let spelled = cx.text(&name);
+    let mut up = name;
+    let mut declared = None;
+    let callable = loop {
+        let Some(parent) = up.parent() else {
+            return false;
+        };
+        if callable::is_callable(parent) {
+            break parent;
+        }
+        let binder = match parent.kind() {
+            "for_in_statement" => parent.child_by_field_name("left"),
+            "catch_clause" => parent.child_by_field_name("parameter"),
+            "for_statement" => parent.child_by_field_name("initializer"),
+            _ => None,
+        };
+        if declared.is_none() && binder.is_some_and(|b| binds(cx, b, spelled)) {
+            return false;
+        }
+        if declared.is_none() && parent.kind() == "statement_block" {
+            // The nearest block that declares the name decides.
+            let mut cursor = parent.walk();
+            for statement in parent.named_children(&mut cursor) {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    continue;
+                }
+                let mut inner = statement.walk();
+                for d in statement.named_children(&mut inner) {
+                    let declares = d.kind() == "variable_declarator"
+                        && d.child_by_field_name("name")
+                            .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == spelled);
+                    if declares && declared.is_none() {
+                        declared = Some(
+                            statement.kind() == "lexical_declaration"
+                                && statement.end_byte() <= name.start_byte()
+                                && statement.child(0).is_some_and(|k| k.kind() == "let")
+                                && d.child_by_field_name("value")
+                                    .is_some_and(|v| v.kind() == "number"),
+                        );
+                    }
+                }
+            }
+        }
+        up = parent;
+    };
+    declared == Some(true) && returns_name(cx, callable, spelled, 0)
+}
+
+/// Whether a `return` of `node` (not of a nested callable) gives `name`
+/// back, alone or as a property of a returned object.
+fn returns_name(cx: &FileCx<'_>, node: TsNode<'_>, name: &str, depth: usize) -> bool {
+    if depth > 24 {
+        return false;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(|child| {
+        if callable::is_callable(child) {
+            return false;
+        }
+        if child.kind() == "return_statement" {
+            let Some(value) = exit_value(child).map(unparenthesized) else {
+                return false;
+            };
+            return match value.kind() {
+                "identifier" => cx.text(&value) == name,
+                "object" => {
+                    let mut walk = value.walk();
+                    value
+                        .named_children(&mut walk)
+                        .any(|member| match member.kind() {
+                            "shorthand_property_identifier" => cx.text(&member) == name,
+                            "pair" => member
+                                .child_by_field_name("value")
+                                .is_some_and(|v| v.kind() == "identifier" && cx.text(&v) == name),
+                            _ => false,
+                        })
+                }
+                _ => false,
+            };
+        }
+        returns_name(cx, child, name, depth + 1)
+    })
+}
+
+/// Whether a binder (a pattern or declaration) binds `name` anywhere in
+/// it, within a bounded depth.
+fn binds(cx: &FileCx<'_>, node: TsNode<'_>, name: &str) -> bool {
+    fn walk(cx: &FileCx<'_>, node: TsNode<'_>, name: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        if matches!(
+            node.kind(),
+            "identifier" | "shorthand_property_identifier_pattern"
+        ) {
+            return cx.text(&node) == name;
+        }
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .any(|child| walk(cx, child, name, depth + 1))
+    }
+    walk(cx, node, name, 0)
+}
+
+/// Whether `call` is `found.push(v)` on a [`collected_list`].
+fn collected_push(cx: &FileCx<'_>, call: TsNode<'_>) -> bool {
+    call.kind() == "call_expression"
+        && call
+            .child_by_field_name("function")
+            .filter(|f| f.kind() == "member_expression")
+            .is_some_and(|f| {
+                f.child_by_field_name("property")
+                    .is_some_and(|p| cx.text(&p) == "push")
+                    && f.child_by_field_name("object")
+                        .is_some_and(|o| o.kind() == "identifier" && collected_list(cx, o))
+            })
+}
+
+/// Whether `name` reads a `const name = []` (optionally typed) declared
+/// earlier in a block that encloses it, within the same callable
+/// (AC-1050). A `const` cannot be rebound, so every value it holds was
+/// pushed into it.
+fn collected_list(cx: &FileCx<'_>, name: TsNode<'_>) -> bool {
+    let spelled = cx.text(&name);
+    let mut up = name;
+    for _ in 0..256 {
+        let Some(parent) = up.parent() else {
+            return false;
+        };
+        if callable::is_callable(parent) {
+            return false;
+        }
+        // A loop or catch binder of the same name shadows any outer list
+        // (`for (const found of groups) { found.push(v) }`): not one.
+        let binder = match parent.kind() {
+            "for_in_statement" => parent.child_by_field_name("left"),
+            "catch_clause" => parent.child_by_field_name("parameter"),
+            "for_statement" => parent.child_by_field_name("initializer"),
+            _ => None,
+        };
+        if binder.is_some_and(|b| binds(cx, b, spelled)) {
+            return false;
+        }
+        if parent.kind() == "statement_block" {
+            // The nearest block that declares the name decides.
+            let mut cursor = parent.walk();
+            for statement in parent.named_children(&mut cursor) {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    continue;
+                }
+                let mut inner = statement.walk();
+                for declarator in statement.named_children(&mut inner) {
+                    let declares = declarator.kind() == "variable_declarator"
+                        && declarator
+                            .child_by_field_name("name")
+                            .is_some_and(|n| n.kind() == "identifier" && cx.text(&n) == spelled);
+                    if !declares {
+                        continue;
+                    }
+                    return statement.kind() == "lexical_declaration"
+                        && statement.end_byte() <= name.start_byte()
+                        && statement.child(0).is_some_and(|k| k.kind() == "const")
+                        && declarator
+                            .child_by_field_name("value")
+                            .is_some_and(|v| v.kind() == "array" && v.named_child_count() == 0);
+                }
+            }
+        }
+        up = parent;
+    }
+    false
 }
 
 /// Cached unchanged source still belongs to the revision being ingested now.

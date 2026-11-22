@@ -116,6 +116,53 @@ struct Property {
     interface: String,
 }
 
+/// How many objects and pairs up from a configured pair its
+/// `default…Config` declaration may be.
+const MAX_CONFIG_DEPTH: usize = 16;
+
+/// Whether `pair` sits in the object a top-level `defaultConfig` (any
+/// `default…Config` name) declaration initializes (AC-1054).
+fn in_default_config(cx: &FileCx<'_>, pair: TsNode<'_>) -> bool {
+    let mut up = pair;
+    // A configuration key sits a few objects deep; a bound keeps deeply
+    // nested literals linear.
+    for _ in 0..MAX_CONFIG_DEPTH {
+        let Some(parent) = up.parent() else {
+            return false;
+        };
+        match parent.kind() {
+            "object" | "pair" => up = parent,
+            "variable_declarator" => {
+                let declared = parent
+                    .parent()
+                    .and_then(|d| d.parent())
+                    .is_some_and(|scope| {
+                        scope.kind() == "program"
+                            || (scope.kind() == "export_statement"
+                                && scope.parent().is_some_and(|p| p.kind() == "program"))
+                    });
+                return declared
+                    && parent.child_by_field_name("value") == Some(up)
+                    && parent.child_by_field_name("name").is_some_and(|n| {
+                        let name = cx.text(&n);
+                        name.starts_with("default") && name.ends_with("Config")
+                    });
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A class configured for an interface by name: `stockLocationStrategy:
+/// new MultiChannelStockLocationStrategy()` in a configuration object
+/// (AC-1054).
+#[derive(Debug, Clone)]
+struct Configured {
+    interface: String,
+    class: String,
+}
+
 /// A file's strategy implementations and calls, awaiting the directory.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pending {
@@ -123,6 +170,9 @@ pub(crate) struct Pending {
     objects: Vec<ObjectImplementation>,
     properties: Vec<Property>,
     calls: Vec<Call>,
+    /// Every declared class, with its file.
+    classes: Vec<(String, String)>,
+    configured: Vec<Configured>,
 }
 
 impl Pending {
@@ -131,6 +181,8 @@ impl Pending {
         self.objects.extend(other.objects);
         self.properties.extend(other.properties);
         self.calls.extend(other.calls);
+        self.classes.extend(other.classes);
+        self.configured.extend(other.configured);
     }
 
     pub(crate) fn retarget(&mut self, commit: &str) {
@@ -518,10 +570,40 @@ pub(super) fn sites(cx: &FileCx<'_>, nodes: &[TsNode<'_>], out: &mut Pending) {
                     }
                 }
             }
+            // A configured instance: `stockLocationStrategy: new
+            // MultiChannelStockLocationStrategy()` makes that class an
+            // implementation of `StockLocationStrategy` though it only
+            // `extends` a base (AC-1054). Only a pair inside the default
+            // configuration (`const defaultConfig = { … }`) counts: a test
+            // fixture or other local object configures nothing.
+            "pair" if in_default_config(cx, *node) => {
+                let (Some(key), Some(value)) = (
+                    node.child_by_field_name("key")
+                        .filter(|k| k.kind() == "property_identifier"),
+                    node.child_by_field_name("value")
+                        .filter(|v| v.kind() == "new_expression"),
+                ) else {
+                    continue;
+                };
+                let (Some(interface), Some(class)) = (
+                    interface_of(cx.text(&key)),
+                    value
+                        .child_by_field_name("constructor")
+                        .filter(|c| c.kind() == "identifier"),
+                ) else {
+                    continue;
+                };
+                out.configured.push(Configured {
+                    interface,
+                    class: cx.text(&class).to_string(),
+                });
+            }
             "class_declaration" => {
                 let Some(class) = node.child_by_field_name("name") else {
                     continue;
                 };
+                out.classes
+                    .push((cx.text(&class).to_string(), cx.path.to_string()));
                 for interface in implemented(cx, *node) {
                     out.implementations.push(Implementation {
                         interface,
@@ -587,8 +669,27 @@ pub(crate) fn complete(
     known_symbols: &HashSet<String>,
     facts: &mut impl FactAccess,
 ) -> Result<(), GraphError> {
+    // A configured class is an implementation when exactly one class of
+    // that name is declared (AC-1054).
+    let mut configured: Vec<Implementation> = Vec::new();
+    for c in &pending.configured {
+        let mut declared = pending.classes.iter().filter(|(name, _)| *name == c.class);
+        if let (Some((_, path)), None) = (declared.next(), declared.next())
+            && !pending
+                .implementations
+                .iter()
+                .chain(&configured)
+                .any(|i| i.interface == c.interface && i.class == c.class && i.path == *path)
+        {
+            configured.push(Implementation {
+                interface: c.interface.clone(),
+                class: c.class.clone(),
+                path: path.clone(),
+            });
+        }
+    }
     let mut by_interface: BTreeMap<&str, Vec<&Implementation>> = BTreeMap::new();
-    for implementation in &pending.implementations {
+    for implementation in pending.implementations.iter().chain(&configured) {
         by_interface
             .entry(implementation.interface.as_str())
             .or_default()
@@ -689,6 +790,93 @@ pub(crate) fn complete(
 #[cfg(test)]
 mod tests {
     use crate::{SourceId, extract_dir};
+
+    // AC-1054 (T-1054): a class configured by name (`stockLocationStrategy:
+    // new MultiChannelStockLocationStrategy()`) implements the interface
+    // even when it only `extends` a base, so the strategy call reaches it;
+    // a class declared twice, or configured under another name, does not.
+    #[test]
+    fn a_configured_class_implements_the_interface_it_is_configured_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "src/config/catalog/multi-channel-stock-location-strategy.ts",
+            "export class MultiChannelStockLocationStrategy extends BaseStockLocationStrategy {
+    async getAvailableStock(ctx: any, id: any, levels: any[]) {
+        return { stockOnHand: 0, stockAllocated: 0 };
+    }
+}
+",
+        );
+        write(
+            "src/config/tax/twice.ts",
+            "export class TwiceTaxZoneStrategy { determineTaxZone() { return 1; } }\n",
+        );
+        write(
+            "src/config/tax/twice-again.ts",
+            "export class TwiceTaxZoneStrategy { determineTaxZone() { return 2; } }\n",
+        );
+        write(
+            "src/config/default-config.ts",
+            "export const defaultConfig = {
+    catalogOptions: { stockLocationStrategy: new MultiChannelStockLocationStrategy() },
+    taxOptions: { taxZoneStrategy: new TwiceTaxZoneStrategy(), other: new MultiChannelStockLocationStrategy() },
+};
+",
+        );
+        // A fixture's configuration is not the default one.
+        write(
+            "src/config/catalog/test-stock-location-strategy.ts",
+            "export class TestStockLocationStrategy extends BaseStockLocationStrategy {
+    async getAvailableStock() {
+        return { stockOnHand: 1, stockAllocated: 0 };
+    }
+}
+export const testConfig = {
+    catalogOptions: { stockLocationStrategy: new TestStockLocationStrategy() },
+};
+export function configure() {
+    const defaultConfig = { stockLocationStrategy: new TestStockLocationStrategy() };
+    return defaultConfig;
+}
+",
+        );
+        write(
+            "src/service/stock-level.service.ts",
+            "export class StockLevelService {
+    async getAvailableStock(ctx: any, id: any) {
+        const { stockLocationStrategy, taxZoneStrategy } = this.configService.catalogOptions;
+        taxZoneStrategy.determineTaxZone();
+        return stockLocationStrategy.getAvailableStock(ctx, id, []);
+    }
+}
+",
+        );
+        let out = extract_dir(
+            dir.path(),
+            &SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let edges: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.label == "CALLS" && e.props["resolution"] == "strategy-implementation")
+            .collect();
+        assert_eq!(edges.len(), 1, "{edges:#?}");
+        assert_eq!(
+            edges[0].dst,
+            "sym:repo@src/config/catalog/multi-channel-stock-location-strategy.ts#MultiChannelStockLocationStrategy.getAvailableStock"
+        );
+        assert_eq!(edges[0].props["interface"], "StockLocationStrategy");
+        assert_eq!(edges[0].props["alternatives"], 1);
+    }
 
     // AC-0953: a call on a receiver named for an interface is linked to the
     // method of every repository class that implements it, InferredStrong

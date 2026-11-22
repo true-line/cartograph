@@ -97,6 +97,8 @@ enum Expr {
     Not(Box<Expr>),
     /// `a + b`: a sum of values (AC-1030).
     Sum(Vec<Expr>),
+    /// `a - b - c`: the first value less the others (AC-1052).
+    Difference(Vec<Expr>),
     /// `flags & FLAG`: a bit mask (AC-1030).
     Mask(Box<Expr>, Box<Expr>),
     And(Vec<Expr>),
@@ -283,6 +285,13 @@ impl Parser {
             return Some(Expr::Mask(Box::new(first), Box::new(mask)));
         }
         let mut terms = vec![first];
+        if self.op("-") {
+            while self.op("-") {
+                self.bump();
+                terms.push(self.operand()?);
+            }
+            return (!self.op("+")).then_some(Expr::Difference(terms));
+        }
         while self.op("+") {
             self.bump();
             terms.push(self.operand()?);
@@ -616,6 +625,39 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
     match expr {
         Expr::Ref(path) => {
             let last = path.last()?;
+            // JavaScript's integer bounds (AC-1052).
+            if let [number, bound] = &path[..]
+                && number == "Number"
+            {
+                match bound.as_str() {
+                    "MAX_SAFE_INTEGER" => {
+                        return Some("the largest safe integer (9007199254740991)".to_owned());
+                    }
+                    "MIN_SAFE_INTEGER" => {
+                        return Some("the smallest safe integer (-9007199254740991)".to_owned());
+                    }
+                    _ => {}
+                }
+            }
+            // An enum member: `GlobalFlag.FALSE` is “FALSE” (AC-1052).
+            if let [.., owner, member] = &path[..]
+                && owner.starts_with(|c: char| c.is_ascii_uppercase())
+                && owner.chars().any(|c| c.is_ascii_lowercase())
+                && !["Config", "Settings", "Constants", "Defaults", "Env"]
+                    .iter()
+                    .any(|n| owner.contains(n))
+                && member.len() > 1
+                && member.starts_with(|c: char| c.is_ascii_uppercase())
+                && member
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            {
+                return Some(if member.contains('_') {
+                    format!("“{}”", words(member))
+                } else {
+                    format!("“{member}”")
+                });
+            }
             // A configured constant: `config.MAX_FREE`, `MAX_FREE`.
             if last.len() > 1
                 && last
@@ -977,6 +1019,7 @@ fn predicate_verb(name: &str) -> Option<(&'static str, &str)> {
         ("should_", "should"),
         ("must_", "must"),
         ("needs_", "needs"),
+        ("applies_", "applies"),
     ] {
         if let Some(rest) = name.strip_prefix(prefix).filter(|r| !r.is_empty()) {
             return Some((verb, rest));
@@ -1010,6 +1053,7 @@ fn negated_verb(verb: &str) -> &'static str {
         "can" => "cannot",
         "should" => "should not",
         "must" => "must not",
+        "applies" => "does not apply",
         _ => "does not need",
     }
 }
@@ -1046,6 +1090,15 @@ fn flag(path: &[String], negated: bool, cx: &Context<'_>) -> Option<String> {
         });
     }
     let who = subject(owner, cx)?;
+    if last == "length" && !owner.is_empty() {
+        // A list's length tested for truth: `found.length` reads "the
+        // found are not empty" (AC-1050).
+        return Some(if negated {
+            format!("{who} are empty")
+        } else {
+            format!("{who} are not empty")
+        });
+    }
     if predicate_verb(last).is_none() && !state_word(last) {
         // A value tested for presence: `user.trial_end` reads "the user's
         // trial end is set".
@@ -1266,7 +1319,12 @@ fn render(expr: &Expr, negated: bool, cx: &Context<'_>) -> Option<String> {
             positive(if negated { flipped } else { op })
         }
         Expr::Apply(path, args) => applied(path, args, negated, cx),
-        Expr::Lit(_) | Expr::Set(_) | Expr::Shift(..) | Expr::Sum(_) | Expr::Mask(..) => None,
+        Expr::Lit(_)
+        | Expr::Set(_)
+        | Expr::Shift(..)
+        | Expr::Sum(_)
+        | Expr::Difference(_)
+        | Expr::Mask(..) => None,
     }
 }
 
@@ -1884,10 +1942,45 @@ fn line_breaks_removed(target: &str, value: &str, cx: &Context<'_>) -> Option<St
 /// alias is no longer enabled"; `alias.delete_on = arrow.now().shift(days=+N)`
 /// is "the alias's delete on is set to N days from now"; otherwise "the
 /// alias's note is set to the note". `None` outside these rules.
+/// `found.push(line.productVariant)`, which the adapter admits only for a
+/// list the callable starts empty (AC-1050): "the line's product variant
+/// is added to the found".
+fn pushed(call: &str, cx: &Context<'_>) -> Option<String> {
+    let Expr::Apply(path, args) = parse(call.trim())? else {
+        return None;
+    };
+    let ([list, push], [Arg::Pos(value)]) = (&path[..], &args[..]) else {
+        return None;
+    };
+    if push != "push" {
+        return None;
+    }
+    Some(format!(
+        "{} is added to {}",
+        noun(value, cx)?,
+        noun(&Expr::Ref(vec![list.clone()]), cx)?
+    ))
+}
+
 fn assigned(target: &str, value: &str, cx: &Context<'_>) -> Option<String> {
     let Expr::Ref(path) = parse(target.trim())? else {
         return None;
     };
+    // An accumulated total (AC-1054): the adapter keeps the whole
+    // `total += x`, so "x is added to the total".
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (operator, verb) in [("+=", "added to"), ("-=", "taken from")] {
+        if let Some(rest) = compact
+            .strip_prefix(target.trim())
+            .and_then(|r| r.trim_start().strip_prefix(operator))
+        {
+            return Some(format!(
+                "{} is {verb} {}",
+                noun(&parse(rest.trim().trim_end_matches(';'))?, cx)?,
+                subject(&path, cx)?
+            ));
+        }
+    }
     let names: Vec<&str> = path.iter().map(String::as_str).collect();
     let value = value.trim();
     // The acting user of a request (Flask `g.user`, Django `request.user`).
@@ -2149,7 +2242,7 @@ pub(super) fn with_outcome(
                 constant,
                 failed: failed.get(i).and_then(Option::as_deref),
             };
-            condition(c.expression.display.as_str(), c.polarity, &cx)
+            condition(&tested_text(evidence, c), c.polarity, &cx)
         })
         .collect();
     let conditions = said_once(conditions?);
@@ -2161,6 +2254,121 @@ pub(super) fn with_outcome(
     Some(sentence)
         .filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
         .map(|said| with_definitions(said, evidence, constant))
+}
+
+/// What a condition tests, as text to render: a bare local name whose one
+/// recorded definition is itself a test (`const inventoryNotTracked = a
+/// === X || b`) reads as that test (AC-1052), so "When the variant's track
+/// inventory is “FALSE”, …" rather than "When an inventory not tracked is
+/// given". Any other condition reads as written.
+fn tested_text<'e>(
+    evidence: &'e GuardedExitEvidence,
+    c: &'e core_graph::rules::BranchCondition,
+) -> std::borrow::Cow<'e, str> {
+    let shown = c.expression.display.as_str();
+    let bare = shown
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    if bare.is_empty()
+        || !bare
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return shown.into();
+    }
+    let within = |u: &core_prov::EvidenceRef| {
+        c.expression.source.byte_start <= u.byte_start && u.byte_end <= c.expression.source.byte_end
+    };
+    let mut found = evidence
+        .local_definitions
+        .iter()
+        .flatten()
+        .filter(|d| d.uses.iter().any(within));
+    let (Some(definition), None) = (found.next(), found.next()) else {
+        return shown.into();
+    };
+    // The recorded root must itself be a test: `a || b`, `a && b` or a
+    // comparison, through parentheses; a string or call that merely
+    // spells one is not.
+    use core_graph::rules::{BinaryOperator as B, DefinitionExpressionKind as K, LogicalOperator};
+    let nodes = &definition.expression.nodes;
+    let mut at = definition.expression.root as usize;
+    if let Some(tested) = predicate_method_test(definition) {
+        return tested.into();
+    }
+    let is_test = loop {
+        match nodes.get(at).map(|n| &n.kind) {
+            Some(K::Parenthesized { value } | K::Await { value }) => at = *value as usize,
+            Some(K::Logical { operator, .. }) => {
+                break matches!(operator, LogicalOperator::And | LogicalOperator::Or);
+            }
+            Some(K::Binary { operator, .. }) => {
+                break matches!(
+                    operator,
+                    B::LooseEqual
+                        | B::LooseNotEqual
+                        | B::StrictEqual
+                        | B::StrictNotEqual
+                        | B::LessThan
+                        | B::LessThanOrEqual
+                        | B::GreaterThan
+                        | B::GreaterThanOrEqual
+                );
+            }
+            _ => break false,
+        }
+    };
+    if definition.initializer.capture != core_graph::rules::ExpressionCapture::CompleteSyntax
+        || !is_test
+    {
+        return shown.into();
+    }
+    format!("({})", one_line(definition.initializer.display.as_str())).into()
+}
+
+/// A local set from a predicate method of one of its arguments, `const
+/// applies = await this.stockLevelAppliesToActiveChannel(ctx, stockLevel)`,
+/// read as that test of the argument, `stockLevel.appliesToActiveChannel`:
+/// "the stock level applies to active channel" (AC-1054). Only a complete
+/// `this.<method>(<names>)` initializer, optionally awaited, qualifies; what
+/// the method returns is not established.
+fn predicate_method_test(definition: &core_graph::rules::LocalDefinition) -> Option<String> {
+    if definition.initializer.capture != core_graph::rules::ExpressionCapture::CompleteSyntax {
+        return None;
+    }
+    let text = one_line(definition.initializer.display.as_str());
+    let call = text.strip_prefix("await ").unwrap_or(&text);
+    let (method, args) = call
+        .strip_prefix("this.")?
+        .strip_suffix(')')?
+        .split_once('(')?;
+    let name = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !name(method) {
+        return None;
+    }
+    let args: Vec<&str> = args
+        .split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .collect();
+    if !args.iter().all(|a| name(a)) {
+        return None;
+    }
+    args.iter().find_map(|arg| {
+        let rest = method.strip_prefix(arg)?;
+        let mut chars = rest.chars();
+        let first = chars.next().filter(char::is_ascii_uppercase)?;
+        let rest = format!("{}{}", first.to_ascii_lowercase(), chars.as_str());
+        predicate_verb(&rest)
+            .is_some()
+            .then(|| format!("{arg}.{rest}"))
+    })
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Conditions with repeats dropped: nested guards may test the same thing
@@ -2210,12 +2418,19 @@ fn with_definitions(
     let Some(definitions) = evidence.local_definitions.as_deref() else {
         return said;
     };
+    // A value a callable returns with no guard (AC-1052) is said with
+    // the locals it reads, as a tested condition's are.
+    let returned = match &evidence.effect {
+        LocalExit::Return { value: Some(value) } if evidence.conditions.is_empty() => Some(value),
+        _ => None,
+    };
     // Each definition's name, read off a use inside a stored expression.
     let spelled = |at: &core_prov::EvidenceRef| -> Option<String> {
         let within = evidence
             .conditions
             .iter()
             .map(|c| &c.expression)
+            .chain(returned)
             .chain(definitions.iter().map(|d| &d.initializer))
             .find(|e| {
                 e.capture == core_graph::rules::ExpressionCapture::CompleteSyntax
@@ -2237,6 +2452,8 @@ fn with_definitions(
                 evidence.conditions.iter().any(|c| {
                     c.expression.source.byte_start <= u.byte_start
                         && u.byte_end <= c.expression.source.byte_end
+                }) || returned.is_some_and(|r| {
+                    r.source.byte_start <= u.byte_start && u.byte_end <= r.source.byte_end
                 })
             });
             Some((name, d.initializer.display.as_str(), tested))
@@ -2281,6 +2498,13 @@ fn with_definitions(
             say(&mut out, &what, &is);
             continue;
         }
+        // `cond ? a : b` (AC-1052): "a when cond, and otherwise b".
+        if let Some((_, init, _)) = named.iter().find(|(n, ..)| n == name)
+            && let Some(is) = chosen_noun(init, &cx)
+        {
+            say(&mut out, &what, &is);
+            continue;
+        }
         // Outside the textual rules, the recorded expression is read node by
         // node, and each local name it reads is said in a sentence of its
         // own (AC-1040).
@@ -2310,6 +2534,51 @@ fn with_definitions(
         }
     }
     out
+}
+
+/// A conditional value as a noun phrase (AC-1052): `variant.useGlobal ?
+/// threshold : variant.threshold` is "the threshold when the variant's use
+/// global is set, and otherwise the variant's threshold". A nested
+/// conditional, or a part outside the rendering rules, says nothing.
+fn chosen_noun(init: &str, cx: &Context<'_>) -> Option<String> {
+    let text = one_line(init);
+    let bytes = text.as_bytes();
+    let (mut depth, mut quote, mut ask, mut colon) = (0usize, None::<u8>, None, None);
+    for (i, &b) in bytes.iter().enumerate() {
+        if let Some(q) = quote {
+            if b == q && bytes.get(i.wrapping_sub(1)) != Some(&b'\\') {
+                quote = None;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = Some(b),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'?' if depth == 0
+                && bytes.get(i + 1) != Some(&b'?')
+                && bytes.get(i + 1) != Some(&b'.')
+                && i.checked_sub(1).and_then(|p| bytes.get(p)) != Some(&b'?') =>
+            {
+                if ask.is_some() {
+                    return None;
+                }
+                ask = Some(i);
+            }
+            b':' if depth == 0 && ask.is_some() => {
+                if colon.is_some() {
+                    return None;
+                }
+                colon = Some(i);
+            }
+            _ => {}
+        }
+    }
+    let (ask, colon) = (ask?, colon?);
+    let test = condition(text[..ask].trim(), BranchPolarity::TruthyBranch, cx)?;
+    let yes = noun(&parse(text[ask + 1..colon].trim())?, cx)?;
+    let no = noun(&parse(text[colon + 1..].trim())?, cx)?;
+    Some(format!("{yes} when {test}, and otherwise {no}"))
 }
 
 /// The most "Here … is …" sentences one statement carries.
@@ -3033,7 +3302,7 @@ fn rendered(
                 constant,
                 failed: failed.get(i).and_then(Option::as_deref),
             };
-            condition(c.expression.display.as_str(), c.polarity, &cx)
+            condition(&tested_text(evidence, c), c.polarity, &cx)
         })
         .collect();
     let conditions = said_once(conditions?);
@@ -3100,7 +3369,10 @@ fn rendered(
             value.display.as_str(),
             &cx,
         )?),
-        LocalExit::Call { value } => Some(called(value.display.as_str())?),
+        LocalExit::Call { value } => match pushed(value.display.as_str(), &cx) {
+            Some(added) => Some(added),
+            None => Some(called(value.display.as_str())?),
+        },
         LocalExit::Return { .. } | LocalExit::Throw { .. } => None,
     };
     if let Some(outcome) = changed {
@@ -3216,11 +3488,34 @@ fn rendered(
         // is "active subscription".
         let named = method.trim_start_matches('_');
         let named = named.strip_prefix("get_").unwrap_or(named);
+        // `getSaleableStockLevel` is "saleable stock level" (AC-1052).
+        let named = named
+            .strip_prefix("get")
+            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+            .unwrap_or(named);
+        // A service's value is its entity's: `ProductVariantService` reads
+        // "the product variant's".
+        let class = class.map(|c| {
+            c.strip_suffix("Service")
+                .filter(|entity| !entity.is_empty())
+                .unwrap_or(c)
+        });
         let what = match class {
             Some(class) => format!("the {}'s {}", words(class), words(named)),
             None => format!("the {}", words(named)),
         };
-        let Some(given) = noun(&parsed, &cx) else {
+        // A returned difference (AC-1052): `return stockOnHand -
+        // stockAllocated` is "the stock on hand minus the stock allocated".
+        // A compared one stays outside the rules.
+        let given = match &parsed {
+            Expr::Difference(terms) => terms
+                .iter()
+                .map(|t| noun(t, &cx))
+                .collect::<Option<Vec<_>>>()
+                .map(|parts| parts.join(" minus ")),
+            other => noun(other, &cx),
+        };
+        let Some(given) = given else {
             // A test the method answers with (AC-1030): `return
             // self.get_active_subscription() is not None` after `if
             // self.lifetime: return True` reads "Otherwise, the user's
@@ -4186,6 +4481,56 @@ export class TaxRateService {
             Some(
                 "A tax rate's test holds when the tax category's ID equals the category ID, \
                  and the zone's ID equals the zone ID."
+            )
+        );
+    }
+
+    // AC-1052: a bare tested local reads as its definition only when the
+    // recorded definition is a test, not a string or call spelling one.
+    #[test]
+    fn a_tested_local_reads_as_its_definition_only_when_that_is_a_test() {
+        let out = adapters_lang_ts::extract_source(
+            b"export function a(variant: any) {
+    const untracked = variant.track === 'FALSE' || variant.flag === false;
+    if (untracked) {
+        throw new Error('x');
+    }
+}
+export function b(variant: any) {
+    const label = 'a || b';
+    if (label) {
+        throw new Error('x');
+    }
+}
+",
+            "src/tested.ts",
+            &adapters_lang_ts::SourceId {
+                repo: "repo",
+                commit: "c0ffee",
+            },
+        )
+        .unwrap();
+        let said = |owner: &str| {
+            let rule = out
+                .nodes
+                .iter()
+                .filter(|n| n.label == "BusinessRule")
+                .map(|n| GuardedExitEvidence::from_value(n.props["rule"].clone()).unwrap())
+                .find(|r| r.owner_id.ends_with(owner))
+                .unwrap();
+            statement(&rule, owner, None, &[])
+        };
+        assert_eq!(
+            said("#a").as_deref(),
+            Some(
+                "When the variant's track is \u{201c}FALSE\u{201d} or the variant's flag is \
+                 false, it fails with an error."
+            )
+        );
+        assert_eq!(
+            said("#b").as_deref(),
+            Some(
+                "When a label is given, it fails with an error. Here the label is \u{201c}a || b\u{201d}."
             )
         );
     }

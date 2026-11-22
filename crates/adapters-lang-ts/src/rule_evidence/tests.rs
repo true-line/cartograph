@@ -712,6 +712,147 @@ export class OrderService {
 }
 
 #[test]
+fn a_push_onto_a_list_the_callable_starts_empty_is_a_change() {
+    // AC-1050 (T-1050): `found.push(v)` under a guard is a recorded change
+    // only when `found` is a `const` the callable starts as `[]`; a list
+    // that starts with values, a `let`, a parameter, a list declared after
+    // the push, or a loop or catch binder shadowing the list is not.
+    let code = r#"function check(order: any, given: any[]) {
+    const found: any[] = [];
+    const seeded = [1];
+    let loose = [];
+    for (const line of order.lines) {
+        if (line.quantity > 3) {
+            found.push(line.productVariant);
+            seeded.push(line.productVariant);
+            loose.push(line.productVariant);
+            given.push(line.productVariant);
+            later.push(line.productVariant);
+        }
+    }
+    const later = [];
+    // A loop or catch binder of the same name shadows the outer list.
+    for (const found of order.groups) {
+        if (order.bad) {
+            found.push(order.code);
+        }
+    }
+    try {
+        order.run();
+    } catch (found) {
+        if (order.bad) {
+            found.push(order.code);
+        }
+    }
+    if (found.length) {
+        return 'message.cannot-transition-to-payment-due-to-insufficient-stock';
+    }
+}
+"#;
+    let out = recover(code);
+    let pushes: Vec<String> = rules(&out)
+        .into_iter()
+        .filter(|(_, rule)| rule.kind == RuleKind::GuardedEffect)
+        .filter_map(|(_, rule)| match &rule.effect {
+            LocalExit::Call { value } => Some(value.display.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pushes, ["found.push(line.productVariant)"], "{pushes:?}");
+}
+
+#[test]
+fn an_arithmetic_return_after_a_guarded_value_is_its_otherwise_rule() {
+    // AC-1052 (T-1052): the unguarded `return a - b - c` of a callable
+    // whose guard returns a value first is a rule; without such a guard,
+    // or for a non-arithmetic value, it is not.
+    let code = r#"export class ProductVariantService {
+    async getSaleableStockLevel(ctx: any, variant: any): Promise<number> {
+        if (variant.untracked) {
+            return Number.MAX_SAFE_INTEGER;
+        }
+        const threshold = variant.useGlobal ? 1 : variant.threshold;
+        return variant.stockOnHand - variant.stockAllocated - threshold;
+    }
+    total(a: number, b: number): number {
+        return a - b;
+    }
+    label(variant: any): string {
+        if (variant.untracked) {
+            return 'none';
+        }
+        return variant.name;
+    }
+}
+"#;
+    let out = recover(code);
+    let unguarded: Vec<(String, usize)> = rules(&out)
+        .into_iter()
+        .filter(|(_, rule)| rule.conditions.is_empty())
+        .map(|(_, rule)| {
+            let LocalExit::Return { value: Some(value) } = &rule.effect else {
+                panic!("{:?}", rule.effect);
+            };
+            (
+                value.display.as_str().to_owned(),
+                rule.local_definitions.iter().flatten().count(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        unguarded,
+        [(
+            "variant.stockOnHand - variant.stockAllocated - threshold".to_owned(),
+            1
+        )],
+        "{unguarded:?}"
+    );
+}
+
+#[test]
+fn a_const_in_a_loop_body_is_a_definition_of_its_own_pass() {
+    // AC-1052 (T-1052): a `const` declared and tested in one loop body is
+    // recorded for the push it guards; one declared outside the loop and
+    // tested inside it is not (AC-0165).
+    let code = r#"async function check(order: any, ready: boolean) {
+    const found: any[] = [];
+    const outside = ready;
+    for (const line of order.lines) {
+        const stock = await this.variants.getSaleableStockLevel(line.productVariant);
+        if (line.quantity > stock) {
+            found.push(line.productVariant);
+        }
+        if (outside) {
+            found.push(line);
+        }
+    }
+    if (found.length) {
+        return 'message.cannot-transition-to-payment-due-to-insufficient-stock';
+    }
+}
+"#;
+    let out = recover(code);
+    let pushes: Vec<(String, usize)> = rules(&out)
+        .into_iter()
+        .filter(|(_, rule)| rule.kind == RuleKind::GuardedEffect)
+        .map(|(_, rule)| {
+            (
+                rule.conditions[0].expression.display.as_str().to_owned(),
+                rule.local_definitions.iter().flatten().count(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        pushes,
+        [
+            ("(line.quantity > stock)".to_owned(), 1),
+            ("(outside)".to_owned(), 0)
+        ],
+        "{pushes:?}"
+    );
+}
+
+#[test]
 fn a_file_stopped_at_the_rule_cap_counts_what_it_did_not_record() {
     // AC-1048 (T-1048): the Gap that ends a file's rule recovery counts the
     // guarded exits and effects from the stop on.
@@ -746,4 +887,69 @@ fn a_file_stopped_at_the_rule_cap_counts_what_it_did_not_record() {
     assert_eq!(stops.len(), 1);
     assert_eq!(stops[0].props["reason_code"], "analysis_limit");
     assert_eq!(stops[0].props["omitted_rule_sites"], 44 + effects);
+}
+
+#[test]
+fn a_guarded_addition_to_a_returned_total_is_a_change() {
+    // AC-1054 (T-1054): `+=` or `-=` on a `let` the callable starts at a
+    // number and returns (alone or in a returned object) is a guarded
+    // change; a total not returned, one not started at a number, another
+    // operator, a shadowing declaration or binder of the same name, or a
+    // total of a nested callable is not.
+    let code = r#"export class MultiChannelStockLocationStrategy {
+    async getAvailableStock(ctx: any, id: any, stockLevels: any[]) {
+        let stockOnHand = 0;
+        let stockAllocated = 0;
+        let ignored = 0;
+        let named = 'x';
+        for (const stockLevel of stockLevels) {
+            const applies = await this.stockLevelAppliesToActiveChannel(ctx, stockLevel);
+            if (applies) {
+                stockOnHand += stockLevel.stockOnHand;
+                stockAllocated -= stockLevel.stockAllocated;
+                ignored += stockLevel.stockOnHand;
+                named += stockLevel.name;
+                stockOnHand *= 2;
+            }
+            // A nearer declaration of the same name is another value.
+            if (stockLevel.named) {
+                let stockOnHand = '';
+                if (stockLevel.x) {
+                    stockOnHand += stockLevel.name;
+                }
+            }
+        }
+        for (let stockAllocated of stockLevels) {
+            if (ctx.y) {
+                stockAllocated += 1;
+            }
+        }
+        const nested = () => {
+            let inner = 0;
+            if (ctx.x) {
+                stockOnHand += 1;
+            }
+            return inner;
+        };
+        return { stockOnHand, allocated: stockAllocated, named };
+    }
+}
+"#;
+    let out = recover(code);
+    let totals: Vec<String> = rules(&out)
+        .into_iter()
+        .filter(|(_, rule)| rule.kind == RuleKind::GuardedEffect)
+        .filter_map(|(_, rule)| match &rule.effect {
+            LocalExit::Assign { value, .. } => Some(value.display.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        totals,
+        [
+            "stockOnHand += stockLevel.stockOnHand",
+            "stockAllocated -= stockLevel.stockAllocated"
+        ],
+        "{totals:?}"
+    );
 }
