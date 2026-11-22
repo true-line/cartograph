@@ -31,6 +31,9 @@ pub const SOURCE_CAPTURE_MAX_FILES: &str = "source_capture_max_files";
 pub const SOURCE_CAPTURE_MAX_MIB: &str = "source_capture_max_mib";
 const MIB: u64 = 1024 * 1024;
 
+/// Directory entries one TS/JS selection walk may examine (AC-1802).
+pub const TS_SELECTION_MAX_VISITED_ENTRIES: &str = "ts_selection_max_visited_entries";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -81,6 +84,14 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: source_capture::HARD_MAX_CAPTURE_BYTES / MIB,
         advanced: true,
         description: "MiB of source one recovery may retain for citations. Larger values use more disk and memory.",
+    },
+    LimitSpec {
+        key: TS_SELECTION_MAX_VISITED_ENTRIES,
+        default: adapters_lang_ts::captured::MAX_VISITED_ENTRIES as u64,
+        min: 10_000,
+        max: adapters_lang_ts::captured::HARD_MAX_VISITED_ENTRIES as u64,
+        advanced: true,
+        description: "Directory entries, including ignored ones, one recovery may examine when selecting TS/JS source. Larger values let big trees finish selection but take longer.",
     },
 ];
 
@@ -273,6 +284,32 @@ mod tests {
         assert!(limits.validate().is_ok());
         assert!(matches!(
             write(&conn, SOURCE_CAPTURE_MAX_FILES, Some(files.max + 1)),
+            Err(OperatorLimitError::OutOfRange { .. })
+        ));
+    }
+
+    // AC-1802 / #1653: the TS/JS selection walk key defaults to the
+    // adapter's historical bound and stops at its hard ceiling.
+    #[test]
+    fn selection_walk_key_stops_at_the_adapter_hard_ceiling() {
+        let entries = spec(TS_SELECTION_MAX_VISITED_ENTRIES).unwrap();
+        assert_eq!(
+            entries.default,
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES as u64
+        );
+        assert_eq!(
+            entries.max,
+            adapters_lang_ts::captured::HARD_MAX_VISITED_ENTRIES as u64
+        );
+        assert!(entries.advanced);
+        let conn = conn();
+        write(&conn, TS_SELECTION_MAX_VISITED_ENTRIES, Some(entries.max)).unwrap();
+        assert!(matches!(
+            write(
+                &conn,
+                TS_SELECTION_MAX_VISITED_ENTRIES,
+                Some(entries.max + 1)
+            ),
             Err(OperatorLimitError::OutOfRange { .. })
         ));
     }

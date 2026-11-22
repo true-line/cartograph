@@ -1997,7 +1997,14 @@ impl PrimarySourceStore {
         root: &Path,
         layers: &[String],
     ) -> Result<PrimaryInput, String> {
-        self.prepare_at(source, root, layers, None, CaptureLimits::default())
+        self.prepare_at(
+            source,
+            root,
+            layers,
+            None,
+            CaptureLimits::default(),
+            captured::MAX_VISITED_ENTRIES,
+        )
     }
 
     /// [`Self::prepare`], reading the selected files from the exact local Git
@@ -2014,6 +2021,7 @@ impl PrimarySourceStore {
         layers: &[String],
         commit: Option<&str>,
         limits: CaptureLimits,
+        max_visited_entries: usize,
     ) -> Result<PrimaryInput, String> {
         // A managed clone's commit is captured whenever the TS pass runs,
         // including for Pulumi infrastructure alone (AC-1022).
@@ -2033,7 +2041,17 @@ impl PrimarySourceStore {
         let guard = self.guard(&source.source_id, false)?;
         // CapturedError's diagnostics are fixed strings that never carry
         // source contents, so the reason is safe to name (#1229).
-        let selection = captured::enumerate_selection(root).map_err(|error| format!("Selected TS/JS source could not be captured safely ({error}); recovery was not published."))?;
+        // The walk selects as many files as the capture may retain, so a
+        // raised capture file limit (AC-1800) reaches the TS/JS selection
+        // (AC-1802).
+        let selection = captured::enumerate_selection_within(
+            root,
+            captured::SelectionLimits {
+                max_visited_entries,
+                max_files: limits.max_files,
+            },
+        )
+        .map_err(|error| format!("Selected TS/JS source could not be captured safely ({error}); recovery was not published."))?;
         let id = source_id(&source.source_id)?;
         let capture_paths = |paths: &[String]| match commit {
             Some(commit) => source_capture::capture_git(root, &id, commit, paths, limits),
