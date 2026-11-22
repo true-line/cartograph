@@ -324,7 +324,12 @@ impl PreparedCapturedSource {
         if receipt != self.receipt {
             return Err(HostError::InputChanged);
         }
-        validate_receipt_fact(&receipt, context, &self.target.fact)?;
+        validate_receipt_fact(
+            &receipt,
+            context,
+            crate::investigations::context::NO_ROWS,
+            &self.target.fact,
+        )?;
         if self.target.graph_snapshot_id != self.base_ledger.graph_snapshot_id
             || self.target.fact_digest != selected.fact_digest
         {

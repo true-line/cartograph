@@ -587,3 +587,6 @@ pub use adjacency::{AdjacencyPage, ScopedGraphReader, ScopedReadUsage};
 
 mod neighborhood;
 pub use neighborhood::NeighborhoodGraph;
+
+mod selection;
+pub use selection::{FactFilter, MAX_FILTER_LABELS};

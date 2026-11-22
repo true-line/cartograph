@@ -763,8 +763,11 @@ fn investigation_query_pages_include_evidence_inventory_and_preserve_continuatio
     let fixture = Fixture::new(&provider);
     let state = fixture.app.state::<AppState>();
     let mut context = FrozenContext::prepare(&state, &fixture.request, &[]).unwrap();
-    let expected = context
-        .snapshot
+    // A whole-system context pages from the store (AC-1058); its pages are
+    // the complete graph's own.
+    let complete = state.graph.lock().unwrap().read_snapshot().unwrap();
+    let expected = context_hub::ContextSnapshot::new(complete.0, complete.1)
+        .unwrap()
         .query(context_hub::QueryRequest {
             max_facts: 32,
             max_bytes: 32768,

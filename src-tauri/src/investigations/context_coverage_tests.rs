@@ -689,8 +689,8 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
                 .unwrap();
         let previous_qualified = scoped.with_coverage(qualification).unwrap();
         let before = take_projection_work();
-        assert!(!previous_qualified.shares_snapshot(&previous.snapshot));
-        assert_eq!(Arc::strong_count(&previous.snapshot), 1);
+        assert!(!previous_qualified.shares_snapshot(previous.snapshot.held().unwrap()));
+        assert_eq!(Arc::strong_count(previous.snapshot.held().unwrap()), 1);
         previous.ledger.schema_version = 2;
         previous.ledger.coverage = Some(previous_qualified.durable_proof().unwrap());
         previous.ledger.validate().unwrap();
@@ -698,8 +698,8 @@ fn qualified_preparation_shares_one_scoped_projection_and_halves_construction_wo
         let prepared = fixture.prepare(&requested).unwrap();
         let after = take_projection_work();
         let qualified = prepared.qualified.as_ref().unwrap();
-        assert!(qualified.shares_snapshot(&prepared.snapshot));
-        assert_eq!(Arc::strong_count(&prepared.snapshot), 2);
+        assert!(qualified.shares_snapshot(prepared.snapshot.held().unwrap()));
+        assert_eq!(Arc::strong_count(prepared.snapshot.held().unwrap()), 2);
         // `All` halves the full-read work; a neighborhood (AC-1301) builds only
         // its scope's projection, its complete identity streamed instead.
         let expected = if matches!(scope, InvestigationScope::All) {
@@ -812,7 +812,7 @@ fn qualified_neighborhood_preparation_keeps_large_facts_without_response_pages()
                 .qualified
                 .as_ref()
                 .unwrap()
-                .shares_snapshot(&prepared.snapshot)
+                .shares_snapshot(prepared.snapshot.held().unwrap())
         );
         requested.scope = InvestigationScope::Neighborhood {
             anchor: "missing".into(),
@@ -939,9 +939,21 @@ fn query_workspace_covers_real_prepared_ledger_and_raw_response() {
                     })
                     .unwrap();
             }
-            None => {
-                frozen.snapshot.query(core_request).unwrap();
-            }
+            None => match &frozen.snapshot {
+                ScopeFacts::Held(snapshot) => {
+                    snapshot.query(core_request).unwrap();
+                }
+                ScopeFacts::Paged { id } => assert!(
+                    paged::query_at(
+                        &fixture.state,
+                        frozen.scoped_revision.as_ref().unwrap(),
+                        frozen.graph_limits,
+                        id,
+                        core_request,
+                    )
+                    .is_ok()
+                ),
+            },
         }
         assert!(matches!(
             frozen.prepare_query(&fixture.state, single),
@@ -1048,6 +1060,8 @@ fn an_area_scope_freezes_the_areas_files_and_what_they_define() {
     let prepared = fixture.prepare(&requested).unwrap();
     let references = prepared
         .snapshot
+        .held()
+        .unwrap()
         .references_in_scope(QueryScope::All)
         .unwrap();
     let node = |id: &str| FactReference::Node { id: id.into() };
@@ -1134,6 +1148,8 @@ fn an_area_scope_is_resolved_for_a_role_without_coverage_qualification() {
     assert_eq!(
         prepared
             .snapshot
+            .held()
+            .unwrap()
             .references_in_scope(QueryScope::All)
             .unwrap()
             .len(),
@@ -1229,6 +1245,8 @@ fn scoped_preparation_keeps_both_identities_and_retains_only_the_scope() {
                 retained,
                 prepared
                     .snapshot
+                    .held()
+                    .unwrap()
                     .references_in_scope(QueryScope::All)
                     .unwrap()
                     .len()
@@ -1237,15 +1255,14 @@ fn scoped_preparation_keeps_both_identities_and_retains_only_the_scope() {
             assert!(!prepared.graph.0.iter().any(|node| node.id == "mod:0"));
         }
     }
-    // `All` still freezes the complete graph.
+    // A qualified `All` task still freezes the complete graph.
     let all = fixture.prepare(&request()).unwrap();
     assert!(all.scoped_revision.is_none());
 }
 
 // AC-1301 (#1602): preparation cost tracks the scope, not the estate. Under retained
 // limits the whole graph exceeds, a neighborhood task still prepares (the identity
-// pass streams one row at a time under the ADR-0052 ceilings), while an `All` task
-// stops at the limit as before.
+// pass streams one row at a time under the ADR-0052 ceilings).
 #[test]
 fn a_scope_prepares_under_limits_the_whole_graph_exceeds() {
     let (fixture, _) = area_fixture();
@@ -1269,10 +1286,7 @@ fn a_scope_prepares_under_limits_the_whole_graph_exceeds() {
     let mut legacy = request();
     legacy.schema_version = 1;
     legacy.specialist_id = SpecialistId::DomainAnalystV1;
-    assert!(matches!(
-        FrozenContext::prepare_bounded(&fixture.state, &legacy, &[], retained),
-        Err(HostError::LimitExceeded)
-    ));
+    // A legacy `All` task pages instead (AC-1058, below).
     legacy.scope = InvestigationScope::Neighborhood {
         anchor: "sym:alias".into(),
         hops: 1,
@@ -1285,6 +1299,217 @@ fn a_scope_prepares_under_limits_the_whole_graph_exceeds() {
             .graph_snapshot_id
     );
     assert_eq!(prepared.graph.0.len(), 3);
+}
+
+// AC-1058 (#1602): a whole-system task prepares under limits the whole graph exceeds,
+// holds no facts, and keeps the complete graph's identity.
+#[test]
+fn a_whole_system_task_prepares_without_holding_the_graph() {
+    let (fixture, _) = area_fixture();
+    for index in 0..60 {
+        fixture
+            .state
+            .graph
+            .lock()
+            .unwrap()
+            .put_node(&Node {
+                id: format!("pad:{index:03}"),
+                label: "Module".into(),
+                props: json!({"name": index}),
+            })
+            .unwrap();
+    }
+    let retained = SnapshotReadLimits {
+        max_rows: 40,
+        ..SnapshotReadLimits::default()
+    };
+    let mut legacy = request();
+    legacy.schema_version = 1;
+    legacy.specialist_id = SpecialistId::DomainAnalystV1;
+    let prepared = FrozenContext::prepare_bounded(&fixture.state, &legacy, &[], retained).unwrap();
+    let complete = complete_graph_context(&fixture, &legacy);
+    assert_eq!(
+        prepared.ledger.graph_snapshot_id,
+        complete.ledger.graph_snapshot_id
+    );
+    assert_eq!(
+        prepared.ledger.scope_snapshot_id,
+        complete.ledger.scope_snapshot_id
+    );
+    assert!(prepared.scoped_revision.is_some());
+    assert!(prepared.snapshot.held().is_none());
+    assert!(prepared.graph.0.is_empty() && prepared.graph.1.is_empty());
+}
+
+// AC-1058 (#1602): every page a whole-system task reads from the store, at its pinned
+// revision, is the page the complete in-memory snapshot gives, cursor for cursor, for
+// each scope, kind and label filter; refusals match too.
+#[test]
+fn whole_system_pages_are_the_complete_snapshot_pages() {
+    let (fixture, _) = area_fixture();
+    let mut legacy = request();
+    legacy.schema_version = 1;
+    legacy.specialist_id = SpecialistId::DomainAnalystV1;
+    let prepared = FrozenContext::prepare(&fixture.state, &legacy, &[]).unwrap();
+    let complete = complete_graph_context(&fixture, &legacy);
+    let held = complete.snapshot.held().unwrap();
+    let revision = prepared.scoped_revision.clone().unwrap();
+    let id = prepared.snapshot.id().to_owned();
+    assert_eq!(id, held.id());
+    let selections = [
+        (QueryScope::All, None, vec![]),
+        (QueryScope::All, Some(FactKind::Node), vec![]),
+        (QueryScope::All, Some(FactKind::Edge), vec![]),
+        (
+            QueryScope::All,
+            None,
+            vec!["Symbol".to_owned(), "CALLS".to_owned()],
+        ),
+        (
+            QueryScope::All,
+            Some(FactKind::Edge),
+            vec!["DEFINED_IN".to_owned()],
+        ),
+        (QueryScope::All, None, vec!["Absent".to_owned()]),
+        (
+            QueryScope::Node {
+                id: "sym:alias".into(),
+            },
+            None,
+            vec![],
+        ),
+        (
+            QueryScope::Node {
+                id: "sym:alias".into(),
+            },
+            Some(FactKind::Edge),
+            vec![],
+        ),
+        (
+            QueryScope::Neighborhood {
+                anchor: "sym:alias".into(),
+                hops: 1,
+            },
+            None,
+            vec![],
+        ),
+        (
+            QueryScope::Neighborhood {
+                anchor: "file:alias".into(),
+                hops: 2,
+            },
+            Some(FactKind::Node),
+            vec![],
+        ),
+    ];
+    for (scope, kind, labels) in selections {
+        // A byte budget that fits about one fact stops a five-fact page early.
+        let one = held
+            .query(QueryRequest {
+                scope: scope.clone(),
+                kind,
+                labels: labels.clone(),
+                max_facts: 1,
+                max_bytes: 32 * 1024,
+                cursor: None,
+            })
+            .unwrap();
+        let tight = context_hub::logical::count(&one).unwrap() + 1;
+        for (max_facts, max_bytes) in [(1, 32 * 1024), (2, 32 * 1024), (5, 32 * 1024), (5, tight)] {
+            let mut cursor = None;
+            let mut pages = 0;
+            loop {
+                let request = QueryRequest {
+                    scope: scope.clone(),
+                    kind,
+                    labels: labels.clone(),
+                    max_facts,
+                    max_bytes,
+                    cursor: cursor.clone(),
+                };
+                let expected = match held.query(request.clone()) {
+                    Ok(expected) => expected,
+                    // A fact larger than the tight budget is refused alike.
+                    Err(_) if max_bytes == tight => break,
+                    Err(error) => panic!("{error}"),
+                };
+                let (page, rows) = match paged::query_at(
+                    &fixture.state,
+                    &revision,
+                    SnapshotReadLimits::investigation(),
+                    &id,
+                    request,
+                ) {
+                    Ok(read) => read,
+                    Err(_) => panic!("{scope:?} {kind:?} {labels:?}"),
+                };
+                assert_eq!(page, expected, "{scope:?} {kind:?} {labels:?} {max_facts}");
+                // The stored copies are exactly the returned facts.
+                assert_eq!(rows.0.len() + rows.1.len(), page.facts.len());
+                pages += 1;
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+                assert!(pages < 64);
+            }
+        }
+    }
+    for scope in [
+        QueryScope::Node {
+            id: "sym:none".into(),
+        },
+        QueryScope::Neighborhood {
+            anchor: "sym:none".into(),
+            hops: 1,
+        },
+    ] {
+        let request = QueryRequest {
+            scope: scope.clone(),
+            max_facts: 4,
+            max_bytes: 32 * 1024,
+            ..Default::default()
+        };
+        let expected = held.query(request.clone()).unwrap_err();
+        match paged::query_at(
+            &fixture.state,
+            &revision,
+            SnapshotReadLimits::investigation(),
+            &id,
+            request,
+        ) {
+            Err(paged::PagedError::Context(error)) => {
+                assert_eq!(error.to_string(), expected.to_string())
+            }
+            _ => panic!("{scope:?}"),
+        }
+    }
+    // A store that moved past the pinned revision is a changed input.
+    fixture
+        .state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "late".into(),
+            label: "Module".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    assert!(matches!(
+        paged::query_at(
+            &fixture.state,
+            &revision,
+            SnapshotReadLimits::investigation(),
+            &id,
+            QueryRequest {
+                max_facts: 4,
+                max_bytes: 32 * 1024,
+                ..Default::default()
+            },
+        ),
+        Err(paged::PagedError::Host(HostError::InputChanged))
+    ));
 }
 
 // AC-1311 (#1602): completion choices for a neighborhood or area read only the

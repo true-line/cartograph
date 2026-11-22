@@ -107,10 +107,10 @@ impl ScopedGraphReader<'_> {
     pub(crate) fn connection(&self) -> &Connection {
         self.connection
     }
-    fn keys(&self, keys: &[&str]) -> Result<(), GraphError> {
+    pub(super) fn keys(&self, keys: &[&str]) -> Result<(), GraphError> {
         validate_request(self.limits, Some(&self.revision), false, keys)
     }
-    fn read(
+    pub(super) fn read(
         &mut self,
         kind: Kind,
         suffix: &str,
