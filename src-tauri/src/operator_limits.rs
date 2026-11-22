@@ -31,6 +31,10 @@ pub const SOURCE_CAPTURE_MAX_FILES: &str = "source_capture_max_files";
 pub const SOURCE_CAPTURE_MAX_MIB: &str = "source_capture_max_mib";
 const MIB: u64 = 1024 * 1024;
 
+/// MiB and captures the retained-source capture store may hold (AC-1801).
+pub const CAPTURE_STORE_MAX_MIB: &str = "capture_store_max_mib";
+pub const CAPTURE_STORE_MAX_CAPTURES: &str = "capture_store_max_captures";
+
 /// Every limit a project may change. Adding a key here is the only way to
 /// make a limit configurable; its consumer reads it with [`read`].
 pub const REGISTRY: &[LimitSpec] = &[
@@ -81,6 +85,22 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: source_capture::HARD_MAX_CAPTURE_BYTES / MIB,
         advanced: true,
         description: "MiB of source one recovery may retain for citations. Larger values use more disk and memory.",
+    },
+    LimitSpec {
+        key: CAPTURE_STORE_MAX_MIB,
+        default: source_capture::MAX_STORE_BYTES / MIB,
+        min: 256,
+        max: source_capture::MAX_STORE_BYTES / MIB,
+        advanced: true,
+        description: "MiB of retained source kept across all recoveries. Lowering it keeps what is stored but refuses new captures until space is freed.",
+    },
+    LimitSpec {
+        key: CAPTURE_STORE_MAX_CAPTURES,
+        default: source_capture::MAX_STORED_CAPTURES,
+        min: 100,
+        max: source_capture::MAX_STORED_CAPTURES,
+        advanced: true,
+        description: "Retained source captures kept across all recoveries. Lowering it keeps what is stored but refuses new captures until space is freed.",
     },
 ];
 
@@ -275,6 +295,26 @@ mod tests {
             write(&conn, SOURCE_CAPTURE_MAX_FILES, Some(files.max + 1)),
             Err(OperatorLimitError::OutOfRange { .. })
         ));
+    }
+
+    // AC-1801 / #1653: the capture store quota keys default to, and stop
+    // at, the store's hard maxima, so the quota can only be lowered.
+    #[test]
+    fn capture_store_keys_lower_only_within_the_store_maxima() {
+        let mib = spec(CAPTURE_STORE_MAX_MIB).unwrap();
+        let captures = spec(CAPTURE_STORE_MAX_CAPTURES).unwrap();
+        assert_eq!(mib.default * MIB, source_capture::MAX_STORE_BYTES);
+        assert_eq!(mib.max, mib.default);
+        assert_eq!(captures.default, source_capture::MAX_STORED_CAPTURES);
+        assert_eq!(captures.max, captures.default);
+        assert!(mib.advanced && captures.advanced);
+        let conn = conn();
+        assert!(matches!(
+            write(&conn, CAPTURE_STORE_MAX_MIB, Some(mib.max + 1)),
+            Err(OperatorLimitError::OutOfRange { .. })
+        ));
+        write(&conn, CAPTURE_STORE_MAX_CAPTURES, Some(captures.min)).unwrap();
+        assert_eq!(read(&conn, CAPTURE_STORE_MAX_CAPTURES).unwrap(), 100);
     }
 
     // AC-1418 / #1653: defaults apply until a value is saved; a saved value

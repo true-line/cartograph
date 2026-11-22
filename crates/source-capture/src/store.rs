@@ -118,6 +118,16 @@ impl CaptureStore {
         )
     }
 
+    /// Replace the retention capacity new captures are admitted within
+    /// (#1653). Limits above the hard maxima are refused and leave the store
+    /// unchanged. Lowering below what is already retained removes nothing: it
+    /// only refuses further captures until space is freed.
+    pub fn set_limits(&mut self, limits: StoreLimits) -> Result<()> {
+        limits.validate()?;
+        self.limits = limits;
+        Ok(())
+    }
+
     /// Create an ephemeral store with the same validation and transaction rules.
     pub fn in_memory(limits: StoreLimits) -> Result<Self> {
         limits.validate()?;
@@ -810,6 +820,40 @@ mod tests {
                 .unwrap();
             assert_eq!(timeout, 5_000);
         }
+    }
+
+    // AC-1801 (#1653): an operator may lower the store quota at runtime.
+    // What is retained stays readable, a new capture past the quota is
+    // refused, raising it back admits it, and limits above the hard maxima
+    // are refused without changing the quota.
+    #[test]
+    fn lowered_store_quota_keeps_what_is_held_and_refuses_new_captures() {
+        let mut store = CaptureStore::in_memory(StoreLimits::default()).unwrap();
+        let first = captured("a.ts", b"first");
+        store.persist(&first).unwrap();
+        store
+            .set_limits(StoreLimits {
+                max_bytes: MAX_STORE_BYTES,
+                max_captures: 1,
+            })
+            .unwrap();
+        assert_eq!(store.load(first.id()).unwrap().id(), first.id());
+        let second = captured("b.ts", b"second");
+        assert!(matches!(
+            store.persist(&second),
+            Err(CaptureError::Limit("store capacity"))
+        ));
+        assert!(
+            store
+                .set_limits(StoreLimits {
+                    max_bytes: MAX_STORE_BYTES + 1,
+                    max_captures: 2,
+                })
+                .is_err()
+        );
+        assert!(store.persist(&second).is_err());
+        store.set_limits(StoreLimits::default()).unwrap();
+        store.persist(&second).unwrap();
     }
 
     fn captured(name: &str, bytes: &[u8]) -> Capture {
