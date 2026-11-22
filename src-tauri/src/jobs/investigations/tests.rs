@@ -16,6 +16,9 @@ use agents::{TaskFactKey, TaskFactSelection, TaskSourceAssociation};
 #[path = "chat_tests.rs"]
 mod chat_tests;
 
+#[path = "held_recovery_tests.rs"]
+mod held_recovery_tests;
+
 struct Fixture {
     directory: tempfile::TempDir,
     store: JobStore,
