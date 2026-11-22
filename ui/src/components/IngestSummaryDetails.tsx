@@ -95,6 +95,15 @@ export function IngestSummaryDetails({
               {summary.layers.kotlin.edges} edges
             </dd>
           </div>
+          {summary.layers.jvm_classes && summary.layers.jvm_classes.files > 0 ? (
+            <div>
+              <dt>JVM classes</dt>
+              <dd data-testid="jvm-classes-layer-summary">
+                {summary.layers.jvm_classes.files} files · {summary.layers.jvm_classes.nodes}{' '}
+                nodes · {summary.layers.jvm_classes.edges} edges
+              </dd>
+            </div>
+          ) : null}
           <div>
             <dt>Terraform</dt>
             <dd data-testid="tf-layer-summary">

@@ -2124,6 +2124,8 @@ impl PrimarySourceStore {
         // selection, are tried with the lanes first. When the whole set
         // cannot be retained, the lanes are retained without them and the
         // readers read the checkout, so they never cost a lane its capture.
+        // Shipped JVM class files (AC-1215) are tried with them first, and
+        // are the first left out.
         let environments = ingest::environments::environment_paths(root).ok();
         let starts = ingest::schedules::schedule_paths(root)
             .and_then(|mut paths| {
@@ -2139,9 +2141,21 @@ impl PrimarySourceStore {
             .flatten()
             .cloned()
             .collect();
-        let mut capture = (environments.is_some() || starts.is_some() || toolchain.is_some())
-            .then(|| capture_paths(&with(&readers)).ok())
-            .flatten();
+        let classes = if wants_lanes {
+            adapters_artifact_jvm::class_paths(root).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut capture = None;
+        if !classes.is_empty() {
+            let mut extra = readers.clone();
+            extra.extend_from_slice(&classes);
+            capture = capture_paths(&with(&extra)).ok();
+        }
+        if capture.is_none() && (environments.is_some() || starts.is_some() || toolchain.is_some())
+        {
+            capture = capture_paths(&with(&readers)).ok();
+        }
         let environments_captured = capture.is_some() && environments.is_some();
         let starts_captured = capture.is_some() && starts.is_some();
         let toolchain_captured = capture.is_some() && toolchain.is_some();

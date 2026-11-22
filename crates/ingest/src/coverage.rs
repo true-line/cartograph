@@ -473,6 +473,12 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
     ("t0.adapter-rust", "Rust", Some(APPLICATION_LAYERS)),
     ("t0.adapter-java", "Java", Some(APPLICATION_LAYERS)),
     ("t0.adapter-kotlin", "Kotlin", Some(APPLICATION_LAYERS)),
+    // Compiled classes shipped without their source (AC-1215).
+    (
+        "t0.artifact-jvm",
+        "compiled JVM class",
+        Some(APPLICATION_LAYERS),
+    ),
     ("t0.iac-terraform", "Terraform", Some(INFRA_LAYERS)),
     (
         crate::toolchain::TOOLCHAIN_EXTRACTOR_ID,
