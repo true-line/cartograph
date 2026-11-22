@@ -4191,3 +4191,60 @@ fn facts_citing_several_captured_files_are_cited_and_read_back() {
         BTreeSet::from(["bp.py".to_string(), "views.py".to_string()])
     );
 }
+
+#[test]
+fn a_java_only_source_is_captured_and_its_symbols_read_back() {
+    // AC-1312 (#1727): a source with no TS/JS still gets a capture equal to its
+    // Java files, and a Java symbol is described and read back from it.
+    const JAVA: &str =
+        "package demo;\n\nclass Orders {\n  int total(int a, int b) {\n    return a + b;\n  }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "java-only");
+    std::fs::write(root.join("Orders.java"), JAVA).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {
+        std::fs::write(root.join("Orders.java"), "class Changed {}\n").unwrap();
+    });
+    let paths: Vec<_> = parsed
+        .input
+        .capture
+        .as_ref()
+        .unwrap()
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    assert_eq!(paths, ["Orders.java"]);
+    let symbol = parsed
+        .extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Symbol" && node.id.contains("total"))
+        .expect("the captured Java method is recovered")
+        .clone();
+    let bindings = publish(&state, &source, &parsed);
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding.receipt_id.starts_with("java-primary-v1:"))
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+    let fact = FactKey::from_node(&symbol);
+    let description = primary_source::describe(&state, &fact).unwrap();
+    assert!(description.receipt_id.starts_with("java-primary-v1:"));
+    assert_eq!(description.scope, "primary_source_only");
+    assert!(!description.ranges.is_empty());
+    for range in &description.ranges {
+        let read =
+            primary_source::read(&state, &fact, &description.receipt_id, range.index).unwrap();
+        assert_eq!(read.path, "Orders.java");
+        assert_eq!(
+            read.text.as_bytes(),
+            &JAVA.as_bytes()[range.byte_start as usize..range.byte_end as usize]
+        );
+        assert!(read.text.contains("total"));
+    }
+}
