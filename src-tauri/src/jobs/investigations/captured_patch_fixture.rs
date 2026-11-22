@@ -87,7 +87,7 @@ impl CapturedSourceInvocationFixture {
         (current, prepared, invoked)
     }
 
-    pub(crate) fn assert_volatile_patch_after_capture(
+    pub fn assert_volatile_patch_after_capture(
         mut self,
         provider: &dyn llm::LlmProvider,
         firewall: &llm::EgressFirewall,

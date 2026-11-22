@@ -7,7 +7,7 @@ use rusqlite::Transaction;
 use serde_json::Value;
 
 // Refusal-local, thread-local and consumed once. Production has no failure hook.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_AFTER_REFUSAL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -16,7 +16,7 @@ impl JobStore {
     /// Host-only refusal publication. The worker supplies the reason from its
     /// continuation proof; this method authenticates durable write authority.
     /// No public start route or provider/tool execution is introduced here.
-    pub(crate) fn refuse_next_prompt_capacity(
+    pub fn refuse_next_prompt_capacity(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
@@ -32,7 +32,7 @@ impl JobStore {
             admission_journal::RefusalReason::Capacity(reason),
         )
     }
-    pub(crate) fn refuse_next_prompt(
+    pub fn refuse_next_prompt(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
@@ -203,7 +203,7 @@ fn refuse(
         return Err(InvestigationStoreError::Invalid);
     }
     storage::save_next_prompt_task(tx, &next, task.detail.summary.revision, false)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FAIL_AFTER_REFUSAL_WRITE.with(|failure| failure.replace(false)) {
         // Injected failure after the final write and real capacity check, before
         // the caller can commit or acknowledge. This is not natural exhaustion.
@@ -212,10 +212,10 @@ fn refuse(
     Ok(next)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "admission_transition_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "admission_owner_tests.rs"]
 mod owner_tests;
