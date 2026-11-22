@@ -45,7 +45,13 @@ thiserror = { workspace = true }
 # Test fixtures the app's tests share (test-support only).
 tempfile = { version = "3", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Provider keys live in the login Keychain (#1763, ADR-0057).
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
 [target.'cfg(windows)'.dependencies]
+# Provider keys live in the Windows Credential Manager (#1763, ADR-0057).
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
