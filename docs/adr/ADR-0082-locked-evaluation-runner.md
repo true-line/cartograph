@@ -73,6 +73,9 @@ The owner chose a locked store and runner with no human reviewer
    family parameters, never calibration labels, so the app recomputes it
    from the receipt and its own parameters without a runner change
    (AC-1511).
+   The app's store holds `runner-key.txt`, `locked-receipt.json`,
+   `policy.json` and `corpora.json`; the receipt arrives by a tool step
+   over the restricted key, never by an app network call (AC-1512).
 
 ## Consequences
 
