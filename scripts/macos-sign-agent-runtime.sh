@@ -143,7 +143,7 @@ check() {
   fi
   echo "$bundle: $jit on cartograph-agent only"
   # Claude Code ships as a resource, so nothing here re-signs it.
-  codesign --verify --strict -R="=$claude_requirement" "$bundle/Contents/Resources/claude-code/claude" \
+  codesign --verify --strict -R "=$claude_requirement" "$bundle/Contents/Resources/claude-code/claude" \
     || { echo "$bundle: Claude Code lost Anthropic's signature" >&2; exit 1; }
   echo "$bundle: Claude Code signed by $claude_team"
 }
