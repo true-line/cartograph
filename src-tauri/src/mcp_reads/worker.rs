@@ -477,7 +477,7 @@ fn response_cap(
     limits: WorkerLimits,
 ) -> usize {
     let requested = match (limits.acquisition_mode, tool) {
-        (AcquisitionMode::Complete, ReadTool::Discover) => arguments
+        (AcquisitionMode::Complete, ReadTool::Discover | ReadTool::Query) => arguments
             .get("request")
             .and_then(|v| v.get("request"))
             .and_then(|v| v.get("max_bytes")),
@@ -1249,7 +1249,8 @@ mod native_tests {
                 .await
                 .unwrap();
             let tools = client.read().await.unwrap().unwrap();
-            assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 5);
+            // AC-1809: the four complete reads, cartograph_query and evidence.
+            assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 6);
             client.write(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cartograph_capabilities","arguments":{}}})).await.unwrap();
             let capabilities = client.read().await.unwrap().unwrap();
             let basis = capabilities["result"]["structuredContent"]["basis_id"]

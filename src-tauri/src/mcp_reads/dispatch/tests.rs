@@ -101,14 +101,14 @@ fn discovery_args(dispatch: &Dispatcher) -> Value {
 }
 
 #[test]
-fn lifecycle_and_real_schemas_advertise_only_four_implemented_reads() {
+fn lifecycle_and_real_schemas_advertise_only_five_implemented_reads() {
     let mut dispatch = new(limits());
     let before = respond(dispatch.receive(rpc(json!(0), "tools/list", json!({}))));
     assert!(before.get("error").is_some());
     init(&mut dispatch);
     let response = respond(dispatch.receive(rpc(json!(1), "tools/list", json!({}))));
     let tools = response["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
     assert_eq!(
         tools
             .iter()
@@ -569,4 +569,171 @@ fn omitted_error_preserves_closed_code_and_explicit_kind() {
         );
         assert_eq!(response["result"]["isError"], true);
     }
+}
+
+/// orders -CALLS-> payments (Confirmed) -CALLS-> ledger (InferredWeak node
+/// and edge), so a verified-only session hides the ledger and its relation.
+fn relations_session(mode: spec::ExportMode) -> ReadSession {
+    let mut graph = SqliteGraphStore::open_in_memory().unwrap();
+    let prov = |tier: ConfidenceTier, id: &str| {
+        Provenance::new(
+            Tier::Deterministic,
+            tier,
+            vec![EvidenceRef {
+                repo: "fixture/repo".into(),
+                path: "main.tf".into(),
+                byte_start: 0,
+                byte_end: 8,
+                commit_sha: "fixed".into(),
+            }],
+            "fixture",
+            id.as_bytes(),
+        )
+        .unwrap()
+    };
+    for (id, tier) in [
+        ("svc:orders", ConfidenceTier::Confirmed),
+        ("svc:payments", ConfidenceTier::Confirmed),
+        ("svc:ledger", ConfidenceTier::InferredWeak),
+    ] {
+        graph
+            .put_node(&Node {
+                id: id.into(),
+                label: "Service".into(),
+                props: json!({"name":id,"prov":prov(tier, id)}),
+            })
+            .unwrap();
+    }
+    for (src, dst, tier) in [
+        ("svc:orders", "svc:payments", ConfidenceTier::Confirmed),
+        ("svc:payments", "svc:ledger", ConfidenceTier::InferredWeak),
+    ] {
+        graph
+            .put_edge(&core_graph::Edge {
+                src: src.into(),
+                dst: dst.into(),
+                label: "CALLS".into(),
+                props: json!({"prov":prov(tier, &format!("{src}>{dst}"))}),
+            })
+            .unwrap();
+    }
+    ReadSession::acquire(
+        &Mutex::new(graph),
+        &Mutex::new(DecisionLog::open(":memory:").unwrap()),
+        || Ok(vec![]),
+        SnapshotReadLimits::default(),
+        CoverageReadLimits::default(),
+        mode,
+    )
+    .unwrap()
+}
+fn query_args(dispatch: &Dispatcher, request: Value) -> Value {
+    let mut args = identity(dispatch);
+    args["request"] = json!({"request":request});
+    args
+}
+fn references(response: &Value) -> Vec<String> {
+    response["result"]["structuredContent"]["context"]["response"]["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fact| match fact["reference"]["kind"].as_str().unwrap() {
+            "node" => fact["reference"]["id"].as_str().unwrap().to_owned(),
+            _ => format!(
+                "{}-{}->{}",
+                fact["reference"]["source"].as_str().unwrap(),
+                fact["reference"]["label"].as_str().unwrap(),
+                fact["reference"]["destination"].as_str().unwrap()
+            ),
+        })
+        .collect()
+}
+
+// AC-1809 (#250): a complete session answers "what does this node relate
+// to" over MCP with the in-app query contract: a node's induced
+// neighborhood, only from the session's visible projection, paged under the
+// issuing context and refused on a stale basis or an unknown field.
+#[test]
+fn query_reads_a_nodes_visible_neighborhood_with_its_relations() {
+    let mut dispatch = Dispatcher::new(
+        relations_session(spec::ExportMode::VerifiedOnly),
+        "opaque-fixture-session".into(),
+        limits(),
+    )
+    .unwrap();
+    init(&mut dispatch);
+    let capabilities = call(&mut dispatch, 1, "cartograph_capabilities", json!({}));
+    let relations = &capabilities["result"]["structuredContent"]["relations_access"];
+    assert_eq!(relations["via"], "cartograph_query");
+    assert_eq!(relations["query_tool_available"], true);
+    assert_eq!(relations["max_neighborhood_hops"], 3);
+
+    let neighborhood = |hops: usize| json!({"scope":{"type":"neighborhood","anchor":"svc:orders","hops":hops},"max_facts":50,"max_bytes":65536});
+    let args = query_args(&dispatch, neighborhood(1));
+    let one = call(&mut dispatch, 2, "cartograph_query", args);
+    assert_eq!(one["result"]["isError"], false, "{one}");
+    assert_eq!(
+        references(&one),
+        [
+            "svc:orders",
+            "svc:payments",
+            "svc:orders-CALLS->svc:payments"
+        ]
+    );
+    // Two hops reach the ledger only where the session shows it.
+    let args = query_args(&dispatch, neighborhood(2));
+    let two = call(&mut dispatch, 3, "cartograph_query", args);
+    assert_eq!(references(&two), references(&one));
+
+    let mut best = Dispatcher::new(
+        relations_session(spec::ExportMode::BestEffort),
+        "opaque-fixture-session".into(),
+        limits(),
+    )
+    .unwrap();
+    init(&mut best);
+    let args = query_args(&best, neighborhood(2));
+    let all = call(&mut best, 1, "cartograph_query", args);
+    assert_eq!(
+        references(&all),
+        [
+            "svc:ledger",
+            "svc:orders",
+            "svc:payments",
+            "svc:orders-CALLS->svc:payments",
+            "svc:payments-CALLS->svc:ledger"
+        ]
+    );
+    // Edges only, one per page, continued under the issuing context.
+    let request = json!({"scope":{"type":"neighborhood","anchor":"svc:payments","hops":1},"kind":"edge","labels":["CALLS"],"max_facts":1,"max_bytes":65536});
+    let args = query_args(&best, request.clone());
+    let first = call(&mut best, 2, "cartograph_query", args);
+    let context = &first["result"]["structuredContent"]["context"];
+    assert_eq!(context["response"]["total_selected"], 2);
+    assert_eq!(references(&first), ["svc:orders-CALLS->svc:payments"]);
+    let mut next = query_args(&best, request);
+    next["request"]["context_id"] = context["context_id"].clone();
+    next["request"]["request"]["cursor"] = context["response"]["next_cursor"].clone();
+    let second = call(&mut best, 3, "cartograph_query", next.clone());
+    assert_eq!(references(&second), ["svc:payments-CALLS->svc:ledger"]);
+    assert!(second["result"]["structuredContent"]["context"]["response"]["next_cursor"].is_null());
+
+    // A forged basis, an unknown field, a radius past the bound and an
+    // anchor the session does not show are refused.
+    let mut stale = next.clone();
+    stale["basis_id"] = json!("forged");
+    let error = call(&mut best, 4, "cartograph_query", stale);
+    assert_eq!(error["result"]["structuredContent"]["error"], "stale_basis");
+    let mut unknown = next;
+    unknown["request"]["request"]["sql"] = json!("DELETE FROM graph");
+    let error = call(&mut best, 5, "cartograph_query", unknown);
+    assert_eq!(error["error"]["code"], -32602);
+    let args = query_args(&best, neighborhood(4));
+    let error = call(&mut best, 6, "cartograph_query", args);
+    assert_eq!(error["error"]["code"], -32602);
+    let hidden = json!({"scope":{"type":"node","id":"svc:ledger"},"max_facts":1,"max_bytes":65536});
+    let args = query_args(&dispatch, hidden);
+    let error = call(&mut dispatch, 4, "cartograph_query", args);
+    assert_eq!(error["error"]["code"], -32602);
+    assert!(!error.to_string().contains("ledger"));
 }

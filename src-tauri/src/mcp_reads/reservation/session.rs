@@ -194,6 +194,23 @@ pub(crate) fn discovery_peak_bytes(limits: WorkerLimits) -> Option<usize> {
     )
 }
 
+/// Additional `cartograph_query` workspace (AC-1809): the core query over the
+/// session's borrowed projection, its neighborhood sets and page, and the
+/// coverage wrapper. The request is at most one admitted frame; transport
+/// framing and the response DOM are charged with the other roles.
+pub(crate) fn query_peak_bytes(limits: WorkerLimits) -> Option<usize> {
+    Some(
+        logical::qualified_query_workspace(
+            limits.graph,
+            limits.coverage,
+            limits.scope.max_sources.get(),
+            limits.scope.max_source_registry_bytes.get(),
+            limits.max_request_frame_bytes.get(),
+        )?
+        .peak_bytes,
+    )
+}
+
 impl SessionReservation {
     pub(crate) fn for_limits(limits: WorkerLimits) -> Option<Self> {
         let scope = scope_reservation(limits.scope)?;

@@ -30,9 +30,9 @@ use context_hub::coverage::{
     CoverageContext, CoverageQualification, MAX_COVERAGE_IDENTITY_BYTES, MAX_COVERAGE_REPOS,
     QualifiedRequest, QualifiedResponse, ScopedRepo,
 };
-use context_hub::{ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResponse};
-#[cfg(test)]
-use context_hub::{QueryRequest, QueryResponse};
+use context_hub::{
+    ContextError, ContextSnapshot, DiscoveryRequest, DiscoveryResponse, QueryRequest, QueryResponse,
+};
 use core_graph::coverage::{CoverageReadLimits, StoredCoverage};
 use core_graph::overlay::{OverlayFact, OverlayIdentity, OverlayRead, OverlayStore};
 #[cfg(test)]
@@ -467,7 +467,7 @@ impl ReadSession {
         &self.basis
     }
 
-    #[cfg(test)]
+    /// One bounded page of this session's visible projection (AC-1809).
     pub(crate) fn query(
         &self,
         request: QualifiedRequest<QueryRequest>,

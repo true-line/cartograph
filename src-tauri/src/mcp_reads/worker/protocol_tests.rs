@@ -58,7 +58,7 @@ fn mcp_worker_protocol_survives_failed_acquisition_and_keeps_one_id_ledger() {
                 .await
                 .unwrap();
             assert!(
-                matches!(list, DispatchAction::Respond(v) if v["result"]["tools"].as_array().is_some_and(|tools| tools.len() == if mode == AcquisitionMode::Complete {5} else {6}))
+                matches!(list, DispatchAction::Respond(v) if v["result"]["tools"].as_array().is_some_and(|tools| tools.len() == 6))
             );
             let call = |id| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"cartograph_capabilities","arguments":{}}});
             let DispatchAction::Respond(error) = worker.receive(call(3)).await.unwrap() else {

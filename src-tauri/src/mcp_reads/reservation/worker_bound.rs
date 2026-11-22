@@ -67,6 +67,7 @@ impl WorkerReservation {
         let freshness = session::freshness_snapshot_peak_bytes(limits.graph)?;
         let evidence = evidence::evidence_peak_bytes(freshness, limits.evidence)?;
         let discovery = session::discovery_peak_bytes(limits)?;
+        let query = session::query_peak_bytes(limits)?;
         let protocol = dispatch::logical_protocol_workspace_bytes(limits)?;
         let read = limits.max_request_frame_bytes.get();
         let (ids, current_id) =
@@ -84,6 +85,7 @@ impl WorkerReservation {
             artifact_basis,
             evidence,
             discovery,
+            query,
             protocol,
         ]
         .into_iter()

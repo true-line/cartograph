@@ -164,6 +164,8 @@ impl<'a> ScopedDispatcher<'a> {
         cap: usize,
     ) -> Result<Value, ReadError> {
         match tool {
+            // Not offered in scoped sessions; admission never routes it here.
+            ReadTool::Query => Err(ReadError::InvalidRequest),
             ReadTool::Capabilities => {
                 let _: Empty = parse(args)?;
                 self.session.check_current(ctx)?;

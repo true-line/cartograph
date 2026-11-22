@@ -23,6 +23,9 @@ pub enum ReadTool {
     ReadArtifact,
     /// Describe or read retained evidence.
     Evidence,
+    /// Select one bounded page of facts: all, one exact node, or a node's
+    /// induced neighborhood (AC-1809).
+    Query,
 }
 
 impl ReadTool {
@@ -35,6 +38,7 @@ impl ReadTool {
             Self::Artifacts => "cartograph_artifacts",
             Self::ReadArtifact => "cartograph_read_artifact",
             Self::Evidence => "cartograph_evidence",
+            Self::Query => "cartograph_query",
         }
     }
 }

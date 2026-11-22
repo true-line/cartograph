@@ -10,7 +10,10 @@ use super::{
     artifacts::{ArtifactCompilation, ArtifactLimit},
 };
 use context_hub::coverage::QualifiedRequest;
-use context_hub::{DiscoveryCursor, DiscoveryQuery, DiscoveryRequest};
+use context_hub::{
+    DiscoveryCursor, DiscoveryQuery, DiscoveryRequest, FactKind, QueryCursor, QueryRequest,
+    QueryScope,
+};
 use mcp_wire::admission::{Action, Admission, ReadTool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -19,11 +22,12 @@ use std::{
     num::NonZeroUsize,
 };
 
-pub(super) const IMPLEMENTED: [ReadTool; 4] = [
+pub(super) const IMPLEMENTED: [ReadTool; 5] = [
     ReadTool::Capabilities,
     ReadTool::Discover,
     ReadTool::Artifacts,
     ReadTool::ReadArtifact,
+    ReadTool::Query,
 ];
 
 mod evidence;
@@ -133,7 +137,7 @@ impl<'state> Dispatcher<'state> {
         arguments: Map<String, Value>,
     ) -> DispatchAction {
         let requested = match tool {
-            ReadTool::Discover => arguments
+            ReadTool::Discover | ReadTool::Query => arguments
                 .get("request")
                 .and_then(|qualified| qualified.get("request"))
                 .and_then(|request| request.get("max_bytes")),
@@ -279,6 +283,33 @@ impl<'state> Dispatcher<'state> {
                 }
             }
             ReadTool::Evidence => self.call_evidence(id, arguments),
+            ReadTool::Query => {
+                let args: QueryArgs = parse(arguments)?;
+                self.check_session(&args.session_id, &args.basis_id)?;
+                let mut request: QualifiedRequest<QueryRequest> = args.request.into();
+                // Reject invalid original caps before subtraction could hide one.
+                if request.request.max_bytes == 0
+                    || request.request.max_bytes > context_hub::MAX_RESPONSE_BYTES
+                {
+                    return Err(ReadError::InvalidRequest);
+                }
+                let total_cap = request
+                    .request
+                    .max_bytes
+                    .min(self.limits.max_response_bytes.get());
+                let template = success(
+                    id,
+                    "Qualified fact page.",
+                    json!({"session_id":self.session_id,"basis_id":self.basis_id,"context":Value::Null}),
+                );
+                request.request.max_bytes = inner_cap(&template, total_cap)?;
+                let response = self.session.query(request)?;
+                Ok(success(
+                    id,
+                    "Qualified fact page.",
+                    json!({"session_id":self.session_id,"basis_id":self.basis_id,"context":response}),
+                ))
+            }
         }
     }
 
@@ -304,7 +335,7 @@ fn capabilities_value(
     limits: DispatchLimits,
     evidence: Option<EvidenceWorkLimits>,
 ) -> Value {
-    json!({"session_id":session_id,"basis_id":basis_id,"basis":basis,"implemented_tools":tools.iter().copied().map(ReadTool::name).collect::<Vec<_>>(),"worker_reservation_model":super::worker::WORKER_MODEL,"structured_content_required":true,"h3_curated_available":basis.h3_curated_available,"curated_access":{"via":"official_artifact","artifact_id":super::curated_read::ARTIFACT_ID,"structured_artifact_id":super::curated_read::JSON_ARTIFACT_ID,"revision":"basis.curated"},"evidence_available":evidence.is_some(),"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":evidence.is_some(),"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":evidence.is_some(),"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"context_fact_kinds":["node","edge"],"discovery_fact_kinds":["node"],"relations_access":{"via":"official_artifacts","query_tool_available":false},"flows_access":{"via":"official_artifact","artifact_id":"flow-dossiers"},"limits":{"graph":{"scope":"complete_recovered_graph","max_rows":graph.max_rows,"hard_max_rows":core_graph::SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"evidence":evidence.map(|e|json!({"max_file_validation_bytes":e.max_file_validation_bytes.get(),"max_span_bytes":e.max_span_bytes.get()})),"trace":{"max_flows":limits.trace.max_flows,"max_hops":limits.trace.max_hops,"max_output_bytes":limits.trace.max_output_bytes},"selected_compile":{"max_bytes":limits.compile.max_bytes,"adr":{"max_rows":limits.compile.adr.max_rows,"max_output_bytes":limits.compile.adr.max_output_bytes}}}})
+    json!({"session_id":session_id,"basis_id":basis_id,"basis":basis,"implemented_tools":tools.iter().copied().map(ReadTool::name).collect::<Vec<_>>(),"worker_reservation_model":super::worker::WORKER_MODEL,"structured_content_required":true,"h3_curated_available":basis.h3_curated_available,"curated_access":{"via":"official_artifact","artifact_id":super::curated_read::ARTIFACT_ID,"structured_artifact_id":super::curated_read::JSON_ARTIFACT_ID,"revision":"basis.curated"},"evidence_available":evidence.is_some(),"evidence_absence_reason_available":false,"forgotten_receipt_classification":{"available":evidence.is_some(),"scope":"exact_current_basis_binding_receipt_id","partial":true,"omitted_available":false,"unknown_is_forgotten":false},"receipt_omission_classification":{"available":evidence.is_some(),"scope":"exact_current_fact_same_transaction_omission","partial":true,"kinds":["declarations","rules","store_capacity"],"unknown_is_omitted":false,"not_omitted_is_receipt_available":false},"context_fact_kinds":["node","edge"],"discovery_fact_kinds":["node"],"relations_access":{"via":ReadTool::Query.name(),"query_tool_available":tools.contains(&ReadTool::Query),"scopes":["all","node","neighborhood"],"max_neighborhood_hops":context_hub::MAX_NEIGHBORHOOD_HOPS,"max_facts":context_hub::MAX_FACTS},"flows_access":{"via":"official_artifact","artifact_id":"flow-dossiers"},"limits":{"graph":{"scope":"complete_recovered_graph","max_rows":graph.max_rows,"hard_max_rows":core_graph::SnapshotReadLimits::MAX_ROWS,"max_bytes":graph.max_bytes,"max_depth":graph.max_depth,"max_values":graph.max_values},"max_response_bytes":limits.max_response_bytes.get(),"max_request_ids":limits.max_request_ids.get(),"evidence":evidence.map(|e|json!({"max_file_validation_bytes":e.max_file_validation_bytes.get(),"max_span_bytes":e.max_span_bytes.get()})),"trace":{"max_flows":limits.trace.max_flows,"max_hops":limits.trace.max_hops,"max_output_bytes":limits.trace.max_output_bytes},"selected_compile":{"max_bytes":limits.compile.max_bytes,"adr":{"max_rows":limits.compile.adr.max_rows,"max_output_bytes":limits.compile.adr.max_output_bytes}}}})
 }
 mod logical;
 pub(crate) use logical::logical_protocol_workspace_bytes;
@@ -369,6 +400,76 @@ struct ArtifactArgs {
     offset: usize,
     max_content_bytes: NonZeroUsize,
     max_bytes: NonZeroUsize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryArgs {
+    session_id: String,
+    basis_id: String,
+    request: QualifiedQuery,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualifiedQuery {
+    request: StrictQueryRequest,
+    #[serde(default)]
+    context_id: Option<String>,
+}
+/// [`QueryRequest`] with every budget required and no unknown field, so a
+/// typo is refused rather than read as "select everything" (AC-1809).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictQueryRequest {
+    scope: StrictScope,
+    #[serde(default)]
+    kind: Option<FactKind>,
+    #[serde(default)]
+    labels: Vec<String>,
+    max_facts: usize,
+    max_bytes: usize,
+    #[serde(default)]
+    cursor: Option<StrictQueryCursor>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictScope {
+    All,
+    Node { id: String },
+    Neighborhood { anchor: String, hops: usize },
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictQueryCursor {
+    snapshot_id: String,
+    selection_id: String,
+    offset: usize,
+}
+impl From<QualifiedQuery> for QualifiedRequest<QueryRequest> {
+    fn from(value: QualifiedQuery) -> Self {
+        let request = value.request;
+        Self {
+            context_id: value.context_id,
+            request: QueryRequest {
+                scope: match request.scope {
+                    StrictScope::All => QueryScope::All,
+                    StrictScope::Node { id } => QueryScope::Node { id },
+                    StrictScope::Neighborhood { anchor, hops } => {
+                        QueryScope::Neighborhood { anchor, hops }
+                    }
+                },
+                kind: request.kind,
+                labels: request.labels,
+                max_facts: request.max_facts,
+                max_bytes: request.max_bytes,
+                cursor: request.cursor.map(|cursor| QueryCursor {
+                    snapshot_id: cursor.snapshot_id,
+                    selection_id: cursor.selection_id,
+                    offset: cursor.offset,
+                }),
+            },
+        }
+    }
 }
 
 impl From<QualifiedDiscovery> for QualifiedRequest<DiscoveryRequest> {
@@ -546,6 +647,31 @@ pub(super) fn tool_descriptor(tool: ReadTool) -> Value {
             )
         }
         ReadTool::Evidence => evidence::descriptor(),
+        ReadTool::Query => {
+            let scope = json!({"oneOf":[
+                object_schema(json!({"type":{"const":"all"}}),&["type"]),
+                object_schema(json!({"type":{"const":"node"},"id":{"type":"string"}}),&["type","id"]),
+                object_schema(json!({"type":{"const":"neighborhood"},"anchor":{"type":"string","description":"Exact node identity; its undirected neighborhood and the edges among those nodes are selected."},"hops":{"type":"integer","minimum":1,"maximum":context_hub::MAX_NEIGHBORHOOD_HOPS}}),&["type","anchor","hops"]),
+            ]});
+            let cursor = object_schema(
+                json!({"snapshot_id":{"type":"string"},"selection_id":{"type":"string"},"offset":{"type":"integer","minimum":0}}),
+                &["snapshot_id", "selection_id", "offset"],
+            );
+            let request = object_schema(
+                json!({"scope":scope,"kind":{"enum":["node","edge",null]},"labels":{"type":"array","items":{"type":"string"},"description":"Exact labels; empty selects every label."},"max_facts":{"type":"integer","minimum":1,"maximum":context_hub::MAX_FACTS},"max_bytes":{"type":"integer","minimum":1,"maximum":context_hub::MAX_RESPONSE_BYTES,"description":"Maximum complete MCP response bytes, including qualification and protocol envelopes."},"cursor":{"anyOf":[cursor,{"type":"null"}]}}),
+                &["scope", "max_facts", "max_bytes"],
+            );
+            let qualified = object_schema(
+                json!({"request":request,"context_id":{"type":["string","null"],"description":"Required with a cursor: the context that issued it."}}),
+                &["request"],
+            );
+            let mut properties = session_properties();
+            properties["request"] = qualified;
+            (
+                "Read one bounded page of recovered facts: all facts, one exact node, or a node's induced neighborhood, with their relations.",
+                object_schema(properties, &["session_id", "basis_id", "request"]),
+            )
+        }
     };
     json!({"name":tool.name(),"description":description,"inputSchema":input_schema,"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}})
 }
