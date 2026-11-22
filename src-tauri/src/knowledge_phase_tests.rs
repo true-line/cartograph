@@ -1081,7 +1081,9 @@ fn commits_of_the_ingested_history_are_embedded_without_author_identity() {
         }
     }
     let provider = Recording(Mutex::new(Vec::new()));
-    let history = |heads: &BTreeMap<String, String>| source_history(&registry, heads);
+    let history = |heads: &BTreeMap<String, String>, held: &BTreeSet<String>| {
+        source_history(&registry, heads, held)
+    };
     let report = run_with_sources(
         &host.graph,
         &host.cache,
@@ -1140,5 +1142,40 @@ fn ingested_heads_need_one_full_commit_per_repository() {
     assert_eq!(
         ingested_heads(&nodes),
         BTreeMap::from([("one".to_string(), sha)])
+    );
+}
+
+// AC-1516: the path cap keeps the base's files a commit touched, a commit
+// touching none of them is not read, and a shallow clone's history ends
+// before its boundary commit instead of calling its whole tree changed.
+#[test]
+fn commit_paths_keep_base_files_and_history_stops_at_a_shallow_boundary() {
+    let repo = tempfile::tempdir().unwrap();
+    let git = git2::Repository::init(repo.path()).unwrap();
+    let wide: Vec<String> = (0..70).map(|i| format!("a/{i:03}.ts")).collect();
+    let mut files: Vec<(&str, &str)> = wide.iter().map(|path| (path.as_str(), "x\n")).collect();
+    files.push(("z.ts", "z\n"));
+    let first = git_commit(&git, Some("HEAD"), &files, "Wide import", &[]);
+    let parent = git.find_commit(first).unwrap();
+    let head = git_commit(
+        &git,
+        Some("HEAD"),
+        &[("z.ts", "zz\n")],
+        "Touch z",
+        &[&parent],
+    )
+    .to_string();
+    let held = BTreeSet::from(["file:r@z.ts".to_string()]);
+    let read = repository_history(repo.path(), "r", &head, &held).unwrap();
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[1].paths.len(), knowledge_ingest::MAX_COMMIT_PATHS);
+    assert_eq!(read[1].paths[..2], ["z.ts", "a/000.ts"]);
+    let none = repository_history(repo.path(), "r", &head, &BTreeSet::new()).unwrap();
+    assert!(none.is_empty());
+    std::fs::write(git.path().join("shallow"), format!("{first}\n")).unwrap();
+    let read = repository_history(repo.path(), "r", &head, &held).unwrap();
+    assert_eq!(
+        read.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(),
+        [head.as_str()]
     );
 }
