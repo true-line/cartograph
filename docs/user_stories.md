@@ -1124,6 +1124,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agent-runtime`, `app` · ADR-0085 · T-1427
 - **AC-1428** Given a tool-calling run, when the worker hands the runtime its next firewall-authorized payload, then the first step starts the runtime with the full payload and each later step answers the model's last tool call with only what changed (prompt fields set or removed, evidence spans added or dropped), so every byte sent was authorized for that step; when the offered tools, the system text or the prompt shape change, or the conversation would exceed its byte budget, the runtime restarts from the full authorized payload, and a tool call becomes the bounded loop's exact action bytes with the step's `context_id` (ADR-0085).
 - **Trace:** H4 · `agents` · ADR-0085 · T-1428
+- **AC-1429** Given the expanded profile, when the catalog lists analysts, then `domain-analyst@29` is offered beside the current @28: its prompt is @28's with the one-JSON-object sentence replaced by a one-tool-call sentence, it carries every @28 capability plus `native_tool_runtime`, a start on a cloud provider or without the installed runtime is refused before anything runs, and each run gets its own runtime process and loopback proxy around the provider the start resolved, whose identity is unchanged; every other version keeps the bounded loop (ADR-0085).
+- **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1429
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned

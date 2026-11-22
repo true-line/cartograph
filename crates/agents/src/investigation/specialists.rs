@@ -85,6 +85,9 @@ pub enum SpecialistId {
     DomainAnalystV27,
     #[serde(rename = "domain-analyst@28")]
     DomainAnalystV28,
+    /// @28 driven as native tool calls by a tool-calling runtime (ADR-0085).
+    #[serde(rename = "domain-analyst@29")]
+    DomainAnalystV29,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
@@ -223,6 +226,9 @@ The supported wrapper example above and this insufficient-evidence wrapper are t
 /// @28 (#1335): the selected schema is shown, not merely referenced by hash.
 const VISIBLE_ACTION_SCHEMA_V28: &str = "Visible schema@1: turn_progress.response_schema is this call's exact response schema, identical to the provider schema field; return one object matching it. Host admission remains authoritative.";
 
+/// @29 (ADR-0085): each action is a native tool; one call per turn.
+const NATIVE_TOOLS_V29: &str = "Native tools@1: each offered action is a tool whose parameters are turn_progress.response_schema's action. Call exactly one tool per turn; its result is your next turn's input, and a refusal says what to change. Do not answer in text. Host admission remains authoritative.";
+
 /// The @13 sentence naming the compiled analyst templates by content hash.
 fn compiled_schema_hashes() -> String {
     format!(
@@ -318,6 +324,12 @@ impl SpecialistId {
         self.has(Capability::VisibleActionSchema)
     }
 
+    /// @29 only: each step is one native tool call in a tool-calling runtime
+    /// (ADR-0085); the bounded JSON loop keeps every earlier version.
+    pub fn uses_native_tool_runtime(self) -> bool {
+        self.has(Capability::NativeToolRuntime)
+    }
+
     pub fn uses_exact_source_reservation(self) -> bool {
         self.has(Capability::ExactSourceReservation)
     }
@@ -355,9 +367,20 @@ impl SpecialistId {
             || system == Self::DomainAnalystV23.prompt()
             || system == Self::DomainAnalystV24.prompt()
             || system == Self::DomainAnalystV28.prompt()
+            || system == Self::DomainAnalystV29.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV29 {
+            // ADR-0085: the actions arrive as native tools, so the sentence
+            // asking for one JSON object becomes one asking for one tool call;
+            // every other @28 byte is retained.
+            return Self::DomainAnalystV28.prompt().replacen(
+                &format!("\n{VISIBLE_ACTION_SCHEMA_V28}"),
+                &format!("\n{NATIVE_TOOLS_V29}"),
+                1,
+            );
+        }
         if self == Self::DomainAnalystV28 {
             // Show the selected schema instead of naming compiled templates by
             // hash. Replacing that one sentence keeps the unchanged 16 KiB
@@ -387,6 +410,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::DomainAnalystV28
+                | Self::DomainAnalystV29
         ) {
             return format!(
                 "{}\nFinish feedback@3: combined entries identify all detected corrections: replay_at gives one-based sentence ranges that may span fields; paraphrase without source quotes. limitation_denies_evidence: correct the scoped denial. enumeration_at: verify literal entries or remove the universal claim. configuration_at: cite the named configuration binding or remove the claim. rewrite_schema_placeholders: use plain prose. paraphrase_provider_metadata: avoid copying metadata. omitted counts additional corrections; recheck the entire finish. excluded_by_capacity remains unresolved, unattempted, unacquired. Single correction allowance unchanged.",
@@ -499,7 +523,8 @@ impl SpecialistId {
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
             | Self::DomainAnalystV27
-            | Self::DomainAnalystV28 => {
+            | Self::DomainAnalystV28
+            | Self::DomainAnalystV29 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -636,6 +661,7 @@ impl SpecialistId {
                 | Self::DomainAnalystV26
                 | Self::DomainAnalystV27
                 | Self::DomainAnalystV28
+                | Self::DomainAnalystV29
         ) {
             prompt + PROGRESS_GUIDANCE_V11
         } else {
@@ -711,7 +737,8 @@ impl SpecialistId {
             | Self::DomainAnalystV25
             | Self::DomainAnalystV26
             | Self::DomainAnalystV27
-            | Self::DomainAnalystV28 => (
+            | Self::DomainAnalystV28
+            | Self::DomainAnalystV29 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1281,6 +1308,57 @@ mod capacity_exclusion_identity_tests {
         assert_eq!(
             serde_json::from_str::<SpecialistId>("\"domain-analyst@27\"").unwrap(),
             role
+        );
+    }
+
+    // AC-1429 (ADR-0085): @29 is @28 with its one-JSON-object sentence turned
+    // into a one-tool-call sentence; everything else, flags included, is @28's.
+    #[test]
+    fn analyst29_is_analyst28_asking_for_one_tool_call() {
+        let old = SpecialistId::DomainAnalystV28;
+        let role = SpecialistId::DomainAnalystV29;
+        let measured =
+            |id: SpecialistId| context_hub::logical::count(&(id, id.version(), &id.prompt()));
+        assert!(measured(role).unwrap() <= 16 * 1024);
+        assert_eq!(role.version(), 29);
+        assert_eq!(role.prompt_generation(), old.prompt_generation());
+        assert_eq!(
+            role.prompt(),
+            old.prompt().replacen(
+                &format!("\n{VISIBLE_ACTION_SCHEMA_V28}"),
+                &format!("\n{NATIVE_TOOLS_V29}"),
+                1
+            )
+        );
+        assert_eq!(role.prompt().matches(NATIVE_TOOLS_V29).count(), 1);
+        assert!(!role.prompt().contains("Visible schema@1"));
+        assert!(SpecialistId::is_typed_citation_prompt(&role.prompt()));
+        assert!(role.uses_native_tool_runtime());
+        assert!(
+            SpecialistId::all()
+                .filter(|id| *id != role)
+                .all(|id| !id.uses_native_tool_runtime())
+        );
+        assert_eq!(
+            role.capabilities()
+                .iter()
+                .filter(|flag| *flag != Capability::NativeToolRuntime)
+                .collect::<Vec<_>>(),
+            old.capabilities().iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            role.availability(),
+            crate::investigation::Availability::Offered
+        );
+        let definition = role.definition().unwrap();
+        assert_eq!(definition.operations, old.definition().unwrap().operations);
+        assert_ne!(
+            definition.prompt_fingerprint,
+            old.definition().unwrap().prompt_fingerprint
+        );
+        assert_eq!(
+            serde_json::to_string(&role).unwrap(),
+            "\"domain-analyst@29\""
         );
     }
 

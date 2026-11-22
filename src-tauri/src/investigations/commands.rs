@@ -26,6 +26,29 @@ fn offered_for_start(id: SpecialistId) -> Result<(), InvestigationStartError> {
     }
 }
 
+/// ADR-0085: a tool-calling version starts only where its runtime can run:
+/// on a local model, with the runtime installed. Nothing is dispatched.
+fn runnable_for_start(
+    id: SpecialistId,
+    mode: InvestigationProviderMode,
+) -> Result<(), InvestigationStartError> {
+    if !id.uses_native_tool_runtime() {
+        Ok(())
+    } else if mode != InvestigationProviderMode::Local {
+        Err(rejected(
+            "invalid_input",
+            "This specialist version runs only on a local model for now.",
+        ))
+    } else if super::tool_runtime::RuntimeCommand::from_env().is_none() {
+        Err(rejected(
+            "invalid_input",
+            "The tool-calling runtime is not installed.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// The offered specialists whose desktop runs use the saved run limits
 /// (#1757): exactly those the worker starts through next-prompt admission.
 fn configured_limit_specialists() -> Vec<SpecialistId> {
@@ -240,7 +263,9 @@ pub(super) fn start_access<R: tauri::Runtime>(
     };
     // ADR-0071 decision 2: every start path offers only catalog versions. A
     // committed retry still recovers its saved run.
-    if let Err(refused) = offered_for_start(request.specialist_id) {
+    if let Err(refused) = offered_for_start(request.specialist_id)
+        .and_then(|()| runnable_for_start(request.specialist_id, request.provider_mode))
+    {
         if let Some(prior) = existing()? {
             return Ok(prior.summary);
         }
@@ -931,6 +956,39 @@ mod policy_catalog_tests {
         }
     }
 
+    // AC-1429 (ADR-0085): a tool-calling version is refused before anything
+    // runs when its runtime cannot run; bounded-loop versions are unaffected.
+    #[test]
+    fn a_tool_calling_start_needs_a_local_model_and_the_runtime() {
+        let refused = |id, mode| {
+            matches!(
+                runnable_for_start(id, mode),
+                Err(InvestigationStartError::Rejected {
+                    code: "invalid_input",
+                    definitive: true,
+                    ..
+                })
+            )
+        };
+        for mode in [
+            InvestigationProviderMode::Local,
+            InvestigationProviderMode::Cloud,
+        ] {
+            assert!(runnable_for_start(SpecialistId::DomainAnalystV28, mode).is_ok());
+        }
+        assert!(refused(
+            SpecialistId::DomainAnalystV29,
+            InvestigationProviderMode::Cloud
+        ));
+        assert_eq!(
+            refused(
+                SpecialistId::DomainAnalystV29,
+                InvestigationProviderMode::Local
+            ),
+            super::super::tool_runtime::RuntimeCommand::from_env().is_none()
+        );
+    }
+
     // AC-0584 (#1757): the catalog, not the client, says which offered
     // specialists use the saved run limits, and it says exactly what the
     // worker's admission predicate says.
@@ -952,6 +1010,7 @@ mod policy_catalog_tests {
                 SpecialistId::DomainAnalystV23,
                 SpecialistId::DomainAnalystV27,
                 SpecialistId::DomainAnalystV28,
+                SpecialistId::DomainAnalystV29,
             ] {
                 assert!(named.contains(&id), "{id:?}");
             }
@@ -1112,6 +1171,7 @@ mod policy_catalog_tests {
             SpecialistId::DomainAnalystV23,
             SpecialistId::DomainAnalystV27,
             SpecialistId::DomainAnalystV28,
+            SpecialistId::DomainAnalystV29,
         ] {
             assert_eq!(
                 available_specialists().contains(&role),
