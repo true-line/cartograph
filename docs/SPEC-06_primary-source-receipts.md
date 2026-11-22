@@ -324,5 +324,9 @@ refuse, is still read from disk, but its evidence keeps the uncaptured form
 (empty repo and commit) and the producer's coverage reason names it as not
 captured, so unverified. A published recovery retains each input capture
 beside its source's captures; the retained-source preview counts it and a
-forget removes it (AC-1043). Observed facts carry no receipt yet, so none is
-verified.
+forget removes it (AC-1043). Each fact whose observed evidence cites one
+captured input file gets a provenance-only `obs-input-v1` receipt for those
+exact spans, owned by the input identity and stored within its source's
+receipt share; the preview counts them and a forget reclaims them (AC-1045,
+ADR-0079). Until observed bindings are published (AC-1047), no observed fact
+is verified.

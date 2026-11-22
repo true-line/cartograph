@@ -25,11 +25,13 @@ pub use python::{
     mint_kotlin_file_receipts, mint_python_file_receipts, mint_rust_file_receipts,
     stage_lane_receipts,
 };
+mod observed;
+pub use observed::mint_observed_receipts;
 mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_OTHER_FILES, MAX_RECEIPT_RANGES, MintedHeader,
     MintedReceipt, RangeRole, Receipt, ReceiptRange, ReceiptSourceSizes, fact_match_workspace,
-    fact_match_workspace_bytes,
+    fact_match_workspace_bytes, is_input_source,
 };
 
 /// Maximum directory entries examined, including excluded entries.
