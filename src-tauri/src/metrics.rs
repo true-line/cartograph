@@ -127,7 +127,7 @@ struct Tally<'a> {
     files_by_extractor: BTreeMap<String, BTreeSet<String>>,
     // Canonical fact lines, sorted before hashing so store order is
     // irrelevant: identity + per-fact content hash.
-    lines: Vec<String>,
+    lines: spec::FactLines,
 }
 
 impl<'a> Tally<'a> {
@@ -141,7 +141,7 @@ impl<'a> Tally<'a> {
             facts: 0,
             facts_by_extractor: BTreeMap::new(),
             files_by_extractor: BTreeMap::new(),
-            lines: Vec::new(),
+            lines: spec::FactLines::default(),
         }
     }
 
@@ -194,7 +194,7 @@ impl<'a> Tally<'a> {
             .strip_prefix("repo:")
             .is_some_and(|key| self.coverage_repos.contains(key));
         if self.in_recorded_scope(&provenance) || own_registration {
-            self.lines.push(spec::node_fact_line(node, &provenance));
+            self.lines.push_node(node, &provenance);
         }
     }
 
@@ -203,14 +203,14 @@ impl<'a> Tally<'a> {
         let provenance = spec::provenance(&edge.props, &identity);
         self.count(&provenance);
         if self.in_recorded_scope(&provenance) {
-            self.lines.push(spec::edge_fact_line(edge, &provenance));
+            self.lines.push_edge(edge, &provenance);
         }
     }
 
     fn finish(self, scope: &BTreeMap<String, u64>) -> GraphMetrics {
         // One definition of the graph content hash, shared with the export
         // manifest (#1765, AC-0593): sorted lines, so store order is irrelevant.
-        let content_hash = spec::hash_fact_lines(self.lines);
+        let content_hash = self.lines.hash();
         // Scope-declared extractors always appear — a covering adapter that
         // produced zero facts is a 0% row, not a missing row.
         let mut extractors: BTreeSet<String> = scope.keys().cloned().collect();

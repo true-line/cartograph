@@ -584,26 +584,29 @@ impl Origin {
             .unwrap_or_else(|| SharedOmission(std::sync::Arc::new(Omission::classify(fallback))))
     }
 }
+/// The stored origin of each gap fact, by its key. Only gap facts are held,
+/// so a large graph's resolved facts take no entry (#2215).
 pub(super) struct Origins<'a> {
-    edges: BTreeMap<(&'a str, &'a str, &'a str), Option<Origin>>,
-    nodes: BTreeMap<&'a str, Option<Origin>>,
+    edges: BTreeMap<(&'a str, &'a str, &'a str), Origin>,
+    nodes: BTreeMap<&'a str, Origin>,
 }
 impl<'a> Origins<'a> {
     pub(super) fn new(nodes: &[&'a Node], edges: &[&'a Edge]) -> Self {
         Self {
             edges: edges
                 .iter()
+                .filter(|e| provenance(&e.props, "").confidence_tier == ConfidenceTier::Gap)
                 .map(|e| {
                     (
                         (e.src.as_str(), e.label.as_str(), e.dst.as_str()),
-                        (provenance(&e.props, "").confidence_tier == ConfidenceTier::Gap)
-                            .then(|| Origin::new(&e.props)),
+                        Origin::new(&e.props),
                     )
                 })
                 .collect(),
             nodes: nodes
                 .iter()
-                .map(|n| (n.id.as_str(), is_gap_node(n).then(|| Origin::new(&n.props))))
+                .filter(|n| is_gap_node(n))
+                .map(|n| (n.id.as_str(), Origin::new(&n.props)))
                 .collect(),
         }
     }
@@ -621,8 +624,7 @@ impl<'a> Origins<'a> {
         Some(
             self.edges
                 .get(&hop.stored_edge())
-                .and_then(Option::as_ref)
-                .or_else(|| self.nodes.get(hop.dst.as_str()).and_then(Option::as_ref))
+                .or_else(|| self.nodes.get(hop.dst.as_str()))
                 .map(|o| o.resolve(fallback))
                 .unwrap_or_else(|| {
                     SharedOmission(std::sync::Arc::new(Omission::classify(fallback)))
@@ -645,8 +647,8 @@ pub(super) fn logical_origin_bytes(rows: usize) -> Option<usize> {
     use super::accounting::{map_slots, slots, sum};
     sum(&[
         std::mem::size_of::<Origins<'_>>(),
-        map_slots::<(&str, &str, &str), Option<Origin>>(rows)?,
-        map_slots::<&str, Option<Origin>>(rows)?,
+        map_slots::<(&str, &str, &str), Origin>(rows)?,
+        map_slots::<&str, Origin>(rows)?,
         slots::<Omission>(rows)?,
         slots::<[usize; 2]>(rows)?, // cached Origin Arc counters, beside candidate Arcs
         super::accounting::typed::omission_heap(0, rows)?, // fixed classifier text per cached omission

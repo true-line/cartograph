@@ -64,19 +64,92 @@ pub fn hash_fact_lines(mut lines: Vec<String>) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// Canonical fact lines held end to end in one buffer, so a graph of
+/// millions of facts holds its lines' bytes and one span per line instead of
+/// one allocation per line (#2215). [`FactLines::hash`] is
+/// [`hash_fact_lines`] of the same lines.
+#[derive(Debug, Default)]
+pub struct FactLines {
+    text: String,
+    spans: Vec<(usize, usize)>,
+}
+
+impl FactLines {
+    /// Room for `lines` spans.
+    pub fn with_capacity(lines: usize) -> Self {
+        Self {
+            text: String::new(),
+            spans: Vec::with_capacity(lines),
+        }
+    }
+
+    /// Append the line `write` writes to the buffer.
+    pub fn push_with(&mut self, write: impl FnOnce(&mut String)) {
+        let start = self.text.len();
+        write(&mut self.text);
+        self.spans.push((start, self.text.len()));
+    }
+
+    /// [`node_fact_line`] of `node`.
+    pub fn push_node(&mut self, node: &Node, provenance: &Provenance) {
+        self.push_with(|text| {
+            for part in [
+                "n ",
+                &node.id,
+                " ",
+                &node.label,
+                " ",
+                &provenance.content_hash,
+            ] {
+                text.push_str(part);
+            }
+        });
+    }
+
+    /// [`edge_fact_line`] of `edge`.
+    pub fn push_edge(&mut self, edge: &Edge, provenance: &Provenance) {
+        self.push_with(|text| {
+            for part in [
+                "e ",
+                &edge.src,
+                " ",
+                &edge.label,
+                " ",
+                &edge.dst,
+                " ",
+                &provenance.content_hash,
+            ] {
+                text.push_str(part);
+            }
+        });
+    }
+
+    /// The hash of the held lines, sorted and joined by a newline.
+    pub fn hash(mut self) -> String {
+        let text = self.text.as_bytes();
+        self.spans
+            .sort_unstable_by(|a, b| text[a.0..a.1].cmp(&text[b.0..b.1]));
+        let mut hasher = blake3::Hasher::new();
+        for (index, &(start, end)) in self.spans.iter().enumerate() {
+            if index > 0 {
+                hasher.update(b"\n");
+            }
+            hasher.update(&text[start..end]);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+}
+
 /// Content hash of every given base fact, in any order.
 pub fn graph_content_hash(nodes: &[Node], edges: &[Edge]) -> String {
-    let mut lines = Vec::with_capacity(nodes.len() + edges.len());
+    let mut lines = FactLines::with_capacity(nodes.len() + edges.len());
     for node in nodes {
-        lines.push(node_fact_line(node, &provenance(&node.props, &node.id)));
+        lines.push_node(node, &provenance(&node.props, &node.id));
     }
     for edge in edges {
-        lines.push(edge_fact_line(
-            edge,
-            &provenance(&edge.props, &edge_identity(edge)),
-        ));
+        lines.push_edge(edge, &provenance(&edge.props, &edge_identity(edge)));
     }
-    hash_fact_lines(lines)
+    lines.hash()
 }
 
 #[cfg(test)]
@@ -141,6 +214,39 @@ mod tests {
         let changed = [node("sym:b", "b"), node("sym:a", "changed")];
         assert_ne!(hash, graph_content_hash(&changed, &edges));
         assert_ne!(hash, graph_content_hash(&nodes, &edges[..1]));
+    }
+
+    // AC-1210 (T-1210): lines held in one buffer hash as the sorted lines
+    // joined by a newline, whatever their order, lengths and shared prefixes.
+    #[test]
+    fn fact_lines_in_one_buffer_hash_as_the_sorted_lines() {
+        let lines = ["n b", "n a b", "n a", "", "e a CALLS b x", "n é", "n a"];
+        let mut held = FactLines::default();
+        for line in lines {
+            held.push_with(|text| text.push_str(line));
+        }
+        let mut sorted = lines.map(String::from).to_vec();
+        sorted.sort();
+        assert_eq!(
+            held.hash(),
+            core_prov::content_hash(sorted.join("\n").as_bytes())
+        );
+        assert_eq!(
+            hash_fact_lines(lines.map(String::from).to_vec()),
+            core_prov::content_hash(sorted.join("\n").as_bytes())
+        );
+        let node = node("sym:a", "a");
+        let mut one = FactLines::default();
+        one.push_node(&node, &provenance(&node.props, &node.id));
+        let edge = edge("sym:a", "sym:b", "ab");
+        one.push_edge(&edge, &provenance(&edge.props, &edge_identity(&edge)));
+        assert_eq!(
+            one.hash(),
+            hash_fact_lines(vec![
+                node_fact_line(&node, &provenance(&node.props, &node.id)),
+                edge_fact_line(&edge, &provenance(&edge.props, &edge_identity(&edge))),
+            ])
+        );
     }
 
     // AC-0593: a bundle compiled without a basis serializes exactly as before,
