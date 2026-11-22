@@ -197,6 +197,11 @@ fn render(node: &Node, section_text: Option<&str>) -> String {
     };
     if let Some(props) = node.props.as_object() {
         for (key, value) in props {
+            // A `prov` the base holds as its text is the nested object it
+            // stands for, left out as that object is (#2215).
+            if key == "prov" && core_graph::stored::compact_text(value).is_some() {
+                continue;
+            }
             let value = match value {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Number(n) => n.to_string(),

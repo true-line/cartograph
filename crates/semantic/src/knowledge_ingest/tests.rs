@@ -117,6 +117,28 @@ fn units_follow_the_recipe_order_and_render_scalars_only() {
     assert_eq!(units[2].key().len(), 64);
 }
 
+// AC-1209 (T-1209): a base whose `prov` is held as its text renders the
+// units, keys and all, that the stored base renders.
+#[test]
+fn a_compacted_prov_renders_the_units_of_the_stored_base() {
+    let stored = base();
+    let mut held = base();
+    for node in &mut held {
+        if let Some(prov) = node.props.get_mut("prov") {
+            core_graph::stored::compact_borrowable(prov);
+        }
+    }
+    assert!(core_graph::stored::compact_text(&held[0].props["prov"]).is_some());
+    let text = |nodes: &[Node]| {
+        units(nodes)
+            .0
+            .iter()
+            .map(|unit| (unit.text.clone(), unit.key()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(text(&held), text(&stored));
+}
+
 #[test]
 fn units_past_the_cap_are_counted_and_long_text_is_bounded() {
     let mut nodes: Vec<_> = (0..MAX_UNITS + 2)

@@ -795,6 +795,8 @@ fn published_producer_node_census_counts_all_four_and_skips_edges() {
 // AC-1202/T-1202: the phase reads its base streamed, in the materialized
 // read's order and revision, with BusinessRule props left out; every other
 // row is unchanged and the producers derive the identical facts from it.
+// AC-1209/T-1209: each fact's `prov` is held as its text, and restored it is
+// the stored `prov`.
 #[test]
 fn the_phase_base_leaves_out_only_props_no_producer_reads() {
     let host = host();
@@ -840,16 +842,33 @@ fn the_phase_base_leaves_out_only_props_no_producer_reads() {
     let base = read_base(&graph, PHASE_LIMITS).unwrap();
     drop(graph);
     assert_eq!(base.revision, full.revision);
-    assert_eq!(base.graph.1, full.graph.1);
+    let held =
+        |props: &serde_json::Value| core_graph::stored::compact_text(&props["prov"]).is_some();
+    let restored = |props: &serde_json::Value| {
+        let mut props = props.clone();
+        core_graph::stored::restore_prov(&mut props);
+        props
+    };
+    assert_eq!(base.graph.1.len(), full.graph.1.len());
+    for (read, stored) in base.graph.1.iter().zip(&full.graph.1) {
+        assert_eq!(
+            (&read.src, &read.label, &read.dst),
+            (&stored.src, &stored.label, &stored.dst)
+        );
+        assert_eq!(held(&read.props), stored.props["prov"].is_object());
+        assert_eq!(restored(&read.props), stored.props);
+    }
     assert_eq!(base.graph.0.len(), full.graph.0.len());
     for (read, stored) in base.graph.0.iter().zip(&full.graph.0) {
         assert_eq!((&read.id, &read.label), (&stored.id, &stored.label));
         if stored.label == "BusinessRule" {
             assert_eq!(read.props, serde_json::json!({}));
         } else {
-            assert_eq!(read.props, stored.props);
+            assert_eq!(held(&read.props), stored.props["prov"].is_object());
+            assert_eq!(restored(&read.props), stored.props);
         }
     }
+    assert!(base.graph.0.iter().any(|node| held(&node.props)));
     let facts =
         |snapshot: &RevisionedSnapshot| serde_json::to_string(&derive(snapshot).facts).unwrap();
     let derived = facts(&full);
