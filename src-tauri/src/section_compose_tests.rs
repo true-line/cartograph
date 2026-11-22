@@ -434,6 +434,9 @@ fn an_uncited_figure_or_endpoint_claim_is_left_out_with_its_reason() {
         left_out_stage(&[&outcome]),
         "composed: 1 staged, 2 left out (endpoint_not_cited 1, number_not_cited 1)"
     );
+    // A gated composition counts its gate drops, staged or not.
+    assert_eq!(gated_reasons(3), BTreeMap::from([("gated_check", 3)]));
+    assert!(gated_reasons(0).is_empty());
     // The reasons are part of what the command returns.
     let returned = serde_json::to_value(&outcome).unwrap();
     assert_eq!(returned["left_out_reasons"]["number_not_cited"], 1);

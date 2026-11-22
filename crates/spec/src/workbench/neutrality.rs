@@ -403,10 +403,10 @@ fn contains_version(text: &str, digits: &str) -> bool {
                 .chars()
                 .next_back()
                 .is_some_and(char::is_alphanumeric);
-            let after = !text[end..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit());
+            // `v2.1` continues `v2`, so it does not show it.
+            let rest = &text.as_bytes()[end..];
+            let after = !(rest.first().is_some_and(u8::is_ascii_digit)
+                || (rest.first() == Some(&b'.') && rest.get(1).is_some_and(u8::is_ascii_digit)));
             before && after
         })
     })
@@ -908,6 +908,9 @@ mod tests {
             Some("v3")
         );
         assert_eq!(text.uncited_number("Aliases use v2.", c), Some("v2"));
+        // A longer version does not show a shorter one.
+        assert!(!contains_version("served at /api/v2.1/alias", "2"));
+        assert!(contains_version("served at /api/v2/alias.", "2"));
         // A section reference and a route are not figures.
         assert_eq!(
             text.uncited_number("As section 1.2 says, see §1.3.", c),

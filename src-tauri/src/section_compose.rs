@@ -797,6 +797,7 @@ pub(crate) fn compose_gated(
     let Some(finish) = outcome.finish else {
         return Ok(ComposeOutcome {
             left_out: outcome.left_out,
+            left_out_reasons: gated_reasons(outcome.left_out),
             gated: Some(stats),
             ..ComposeOutcome::none("no_claim_admitted")
         });
@@ -807,10 +808,7 @@ pub(crate) fn compose_gated(
         Composed {
             finish,
             left_out: outcome.left_out,
-            reasons: BTreeMap::from([("gated_check", outcome.left_out)])
-                .into_iter()
-                .filter(|(_, count)| *count > 0)
-                .collect(),
+            reasons: gated_reasons(outcome.left_out),
         },
         job_id,
         (
@@ -1000,6 +998,15 @@ fn finish_job(
         Err(error) => crate::report_failure(app, state, execution, error),
     }
     Ok(())
+}
+
+/// The reason a gated composition's `left_out` claims are counted under:
+/// they failed one of its gates (#2349).
+fn gated_reasons(left_out: usize) -> BTreeMap<&'static str, usize> {
+    BTreeMap::from([("gated_check", left_out)])
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect()
 }
 
 /// The job stage a finished composition records: claims staged and left
