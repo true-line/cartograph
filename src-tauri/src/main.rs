@@ -34,6 +34,7 @@ mod model_debug;
 #[cfg(test)]
 mod name_unique_tests;
 mod observation_inputs;
+mod operator_limits;
 use app_store::paths;
 mod primary_source;
 #[cfg(test)]
@@ -4886,6 +4887,30 @@ fn set_read_deny_rules(
         .map_err(|e| e.to_string())
 }
 
+/// Every configurable operator limit with its range and value (#1653).
+#[tauri::command]
+fn get_operator_limits(
+    state: State<'_, AppState>,
+) -> Result<Vec<operator_limits::OperatorLimit>, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.operator_limits().map_err(|e| e.to_string())
+}
+
+/// Save one operator limit, or clear it (`value` null) so its default
+/// applies; a key outside the registry or a value outside its range changes
+/// nothing (#1653).
+#[tauri::command]
+fn set_operator_limit(
+    key: String,
+    value: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<operator_limits::OperatorLimit, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .set_operator_limit(&key, value)
+        .map_err(|e| e.to_string())
+}
+
 /// The local completion model for new desktop investigations (#1643).
 #[tauri::command]
 fn get_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelChoice, String> {
@@ -8688,6 +8713,8 @@ fn main() {
             get_local_ollama_port,
             set_local_ollama_port,
             get_read_deny_rules,
+            get_operator_limits,
+            set_operator_limit,
             set_read_deny_rules,
             provider_key_status,
             knowledge_phase::knowledge_phase_status,

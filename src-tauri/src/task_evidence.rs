@@ -433,7 +433,16 @@ fn assemble_from_snapshot(
     action_id: &str,
     after_guards: impl FnOnce(),
 ) -> Result<AssembledTask, TaskPreparationError> {
-    let plan = planning::plan(&graph.0, &graph.1, gap_id, action_id)?;
+    // The project's T3 search radius (#1653); a stored value that no longer
+    // validates stops preparation rather than silently using the default.
+    let context_hops = state
+        .settings
+        .lock()
+        .map_err(|_| "Settings are unavailable.".to_string())?
+        .operator_limit(crate::operator_limits::T3_CONTEXT_HOPS)
+        .map_err(|error| error.to_string())?;
+    let context_hops = u32::try_from(context_hops).map_err(|_| "Invalid limit.".to_string())?;
+    let plan = planning::plan(&graph.0, &graph.1, gap_id, action_id, context_hops)?;
     let mut selection_report = report(&plan);
     let mut keys: Vec<_> = plan
         .requests
