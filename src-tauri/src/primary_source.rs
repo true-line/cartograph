@@ -2520,7 +2520,7 @@ pub(crate) struct RetentionPreview {
 struct LockedPreview {
     preview: RetentionPreview,
     pins: std::collections::BTreeSet<String>,
-    /// This source's receipts the current graph binds.
+    /// This source's receipts, and its inputs', the current graph binds.
     bound: std::collections::BTreeSet<String>,
 }
 
@@ -2550,16 +2550,26 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             store.ids(input_id(&source.source_id)?.as_str())?,
         )
     };
-    let current = state
-        .graph
-        .lock()
-        .map_err(storage_error)?
-        .source_bindings_for_repo(&source.repo_key)
-        .map_err(storage_error)?;
+    let (current, observed) = {
+        let graph = state.graph.lock().map_err(storage_error)?;
+        (
+            graph
+                .source_bindings_for_repo(&source.repo_key)
+                .map_err(storage_error)?,
+            // The observed role binds the input's receipts (ADR-0079).
+            graph
+                .source_observations_for_repo(&source.repo_key)
+                .map_err(storage_error)?,
+        )
+    };
     let current_count = current
         .iter()
         .filter(|binding| receipt_ids.binary_search(&binding.receipt_id).is_ok())
-        .count();
+        .count()
+        + observed
+            .iter()
+            .filter(|binding| input_receipt_ids.binary_search(&binding.receipt_id).is_ok())
+            .count();
     // Bind the complete associations, not only their count: retained receipts
     // can become current again without changing the capture/receipt inventory.
     // This records the associations observed at preview/recheck; it does not
@@ -2576,6 +2586,18 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         })
         .collect();
     current_bindings.sort_unstable();
+    let mut current_observations: Vec<_> = observed
+        .iter()
+        .map(|binding| {
+            (
+                &binding.fact,
+                &binding.repo_key,
+                &binding.receipt_id,
+                &binding.emitted_fact_digest,
+            )
+        })
+        .collect();
+    current_observations.sort_unstable();
     let capture_ids: Vec<_> = inventory
         .iter()
         .map(|capture| capture.capture_id.clone())
@@ -2625,6 +2647,7 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             &receipt_ids,
             &input_receipt_ids,
             &current_bindings,
+            &current_observations,
             &staged_references,
             &investigation_references,
             &packet_references,
@@ -2644,6 +2667,11 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
     let bound = current
         .iter()
         .filter(|binding| receipt_ids.binary_search(&binding.receipt_id).is_ok())
+        .chain(
+            observed
+                .iter()
+                .filter(|binding| input_receipt_ids.binary_search(&binding.receipt_id).is_ok()),
+        )
         .map(|binding| binding.receipt_id.clone())
         .collect();
     Ok(LockedPreview {
@@ -2665,7 +2693,8 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             receipts: receipt_ids.len() + input_receipt_ids.len(),
             input_receipts: input_receipt_ids.len(),
             current_references: current_count,
-            historical_references: receipt_ids.len().saturating_sub(current_count),
+            historical_references: (receipt_ids.len() + input_receipt_ids.len())
+                .saturating_sub(current_count),
             staged_references: staged_references.len(),
             investigation_references: investigation_references.len(),
             packet_references: packet_references.len(),
@@ -2788,12 +2817,19 @@ pub(crate) fn reclaim_superseded_with(
         .cloned()
         .chain(in_flight)
         .collect();
-    state
+    let mut store = state
         .primary_sources
         .receipts
         .lock()
-        .map_err(storage_error)?
-        .reclaim_superseded(source, &[capture_id.to_owned()], &keep)
+        .map_err(storage_error)?;
+    let reclaimed = store.reclaim_superseded(source, &[capture_id.to_owned()], &keep)?;
+    // Observed receipts the published observed role no longer binds are
+    // reclaimed with the recovery that superseded them (ADR-0079, AC-1047).
+    if locked.preview.input_receipts == 0 {
+        return Ok(reclaimed);
+    }
+    let owner = source.owning_as(input_id(&source.source_id)?.as_str().to_owned());
+    Ok(reclaimed + store.reclaim_superseded(&owner, &[capture_id.to_owned()], &keep)?)
 }
 
 #[tauri::command]
