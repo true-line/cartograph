@@ -5660,7 +5660,13 @@ fn run_ingest<R: tauri::Runtime>(
     let mut on_file = detail_throttle(app, job_id);
     let primary = state
         .primary_sources
-        .prepare(source, root, &[])
+        .prepare_at(
+            source,
+            root,
+            &[],
+            None,
+            capture_limits(state).map_err(&fail)?,
+        )
         .map_err(&fail)?;
     let mut receipts = Vec::new();
     let mut reads = ProducerReads {
