@@ -287,8 +287,8 @@ fn collect_saved(
     let database = app_data.join("state.db");
     let jobs = JobStore::open(&database).map_err(|e| e.to_string())?;
     // This production reader authenticates the saved task and specialist metadata.
-    let (detail, result, ledger, events) =
-        super::super::completion::execution::read_expanded_state(&jobs, analyst_id)?;
+    let ((detail, result, ledger, events), diagnostics) =
+        super::super::completion::execution::read_expanded_receipt_state(&jobs, analyst_id)?;
     let family = receipt_family(&request.specialist_id, detail.summary.specialist_id, role)?;
     if !matches!(
         detail.summary.status,
@@ -344,9 +344,6 @@ fn collect_saved(
         "invocations":invocations,"capacity_refusals":capacity,"finish_refusals":finish,
         "tokenizer_context_capacity":"unknown","full_obligation_acceptance":"not_established",
         "auditor":"requires_separate_independent_review_and_execution"});
-    let diagnostics = jobs
-        .investigation_refusal_diagnostics(analyst_id)
-        .map_err(|e| e.to_string())?;
     // Historical receipts retain their exact serialized shape and bytes.
     if !diagnostics.is_empty() {
         receipt["finish_diagnostics"] =

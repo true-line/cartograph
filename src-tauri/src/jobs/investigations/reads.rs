@@ -530,54 +530,65 @@ impl JobStore {
             validate(&tx, &self.namespace)?;
             require_request_owner(&tx, id, client)?;
             let task = load_execution_task(&tx, id)?;
-            if after_sequence > journal_event_limit(&task)? {
-                return Err(InvestigationStoreError::Invalid);
-            }
-            let sequences=tx.prepare("SELECT sequence FROM investigation_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT 51")?
-            .query_map(params![id,signed(after_sequence)?],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
-            let mut items = Vec::new();
-            let mut remaining = 256 * 1024 - 4096;
-            let mut next_sequence = after_sequence;
-            let mut has_more = false;
-            for sequence in sequences {
-                let event: InvestigationEvent =
-                    read_body(&tx, "investigation_events", "sequence", id, &sequence)?
-                        .ok_or(InvestigationStoreError::Invalid)?;
-                super::query_refusal::validate_event(&tx, &task, &event)?;
-                if event.investigation_id != id
-                    || signed(event.sequence)? != sequence
-                    || event.sequence != next_sequence + 1
-                    || event.sequence > task.detail.summary.last_event_sequence
-                    || event.revision > task.detail.summary.revision
-                    || event.summary.len() > 1024
-                    || redacted_history_text(&event.summary, 1024)? != event.summary
-                    || event.step_id.as_ref().is_some_and(|v| !id_valid(v))
-                    || event.created_at.len() > 32
-                {
-                    return Err(InvestigationStoreError::Invalid);
-                }
-                let size = encode(&event, 16 * 1024)?.len() + 1;
-                if items.len() == 50 || size > remaining {
-                    has_more = true;
-                    break;
-                }
-                remaining -= size;
-                next_sequence = event.sequence;
-                items.push(event);
-            }
-            if !has_more && next_sequence < task.detail.summary.last_event_sequence {
-                return Err(InvestigationStoreError::Invalid);
-            }
-            let page = InvestigationEventPage {
-                investigation_id: id.into(),
-                items,
-                next_sequence,
-                has_more,
-            };
-            encode(&page, 256 * 1024)?;
+            let page = event_page(&tx, &task, id, after_sequence)?;
             tx.commit()?;
             Ok(page)
         })
+    }
+
+    /// Detail, result, ledger and the whole event journal from one validated
+    /// snapshot: the same checks as the separate reads, with one task load
+    /// instead of one per read and per event page.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn investigation_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<InvestigationSnapshot, InvestigationStoreError> {
+        self.snapshot(id, false).map(|(snapshot, _)| snapshot)
+    }
+
+    /// `investigation_snapshot` plus the refusal diagnostics, from the same
+    /// transaction and task load.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn investigation_receipt_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<ReceiptSnapshot, InvestigationStoreError> {
+        self.snapshot(id, true)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn snapshot(
+        &self,
+        id: &str,
+        diagnostics: bool,
+    ) -> Result<ReceiptSnapshot, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        require_request_owner(&tx, id, None)?;
+        let task = load_execution_task(&tx, id)?;
+        let result = load_result(&tx, &task)?;
+        let ledger = load_ledger(&tx, &task)?;
+        let mut events = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = event_page(&tx, &task, id, after)?;
+            events.extend(page.items);
+            if !page.has_more {
+                break;
+            }
+            if page.next_sequence <= after {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            after = page.next_sequence;
+        }
+        let sidecars = if diagnostics {
+            super::refusal_diagnostics::project_loaded(&tx, &task, id, result.as_ref())?
+        } else {
+            Vec::new()
+        };
+        tx.commit()?;
+        Ok(((task.detail, result, ledger, events), sidecars))
     }
 
     pub fn investigation_receipt_references(
@@ -802,3 +813,73 @@ fn ascii_case_insensitive_contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[cfg(any(test, feature = "test-support"))]
 #[path = "reads_tests.rs"]
 mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub type InvestigationSnapshot = (
+    InvestigationDetail,
+    Option<InvestigationResult>,
+    Option<InvestigationInputLedger>,
+    Vec<InvestigationEvent>,
+);
+
+/// An `InvestigationSnapshot` with its refusal diagnostics.
+#[cfg(any(test, feature = "test-support"))]
+pub type ReceiptSnapshot = (
+    InvestigationSnapshot,
+    Vec<agents::investigation::diagnostic_sidecar::Sidecar>,
+);
+
+/// One bounded, validated page of `task`'s event journal after `after_sequence`.
+fn event_page(
+    tx: &Connection,
+    task: &StoredTask,
+    id: &str,
+    after_sequence: u64,
+) -> Result<InvestigationEventPage, InvestigationStoreError> {
+    if after_sequence > journal_event_limit(task)? {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let sequences=tx.prepare("SELECT sequence FROM investigation_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT 51")?
+    .query_map(params![id,signed(after_sequence)?],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
+    let mut items = Vec::new();
+    let mut remaining = 256 * 1024 - 4096;
+    let mut next_sequence = after_sequence;
+    let mut has_more = false;
+    for sequence in sequences {
+        let event: InvestigationEvent =
+            read_body(tx, "investigation_events", "sequence", id, &sequence)?
+                .ok_or(InvestigationStoreError::Invalid)?;
+        super::query_refusal::validate_event(tx, task, &event)?;
+        if event.investigation_id != id
+            || signed(event.sequence)? != sequence
+            || event.sequence != next_sequence + 1
+            || event.sequence > task.detail.summary.last_event_sequence
+            || event.revision > task.detail.summary.revision
+            || event.summary.len() > 1024
+            || redacted_history_text(&event.summary, 1024)? != event.summary
+            || event.step_id.as_ref().is_some_and(|v| !id_valid(v))
+            || event.created_at.len() > 32
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        let size = encode(&event, 16 * 1024)?.len() + 1;
+        if items.len() == 50 || size > remaining {
+            has_more = true;
+            break;
+        }
+        remaining -= size;
+        next_sequence = event.sequence;
+        items.push(event);
+    }
+    if !has_more && next_sequence < task.detail.summary.last_event_sequence {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let page = InvestigationEventPage {
+        investigation_id: id.into(),
+        items,
+        next_sequence,
+        has_more,
+    };
+    encode(&page, 256 * 1024)?;
+    Ok(page)
+}

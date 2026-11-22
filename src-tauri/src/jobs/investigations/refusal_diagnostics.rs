@@ -220,18 +220,32 @@ pub(super) fn project(
         return Err(InvestigationStoreError::Invalid);
     }
     let task = load_execution_task(connection, id)?;
-    let refusals = completion::raw_refusals(connection, &task)?;
+    let result = load_result(connection, &task)?;
+    project_loaded(connection, &task, id, result.as_ref())
+}
+
+/// `project` for a task and result the caller already loaded and validated
+/// in this same transaction.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn project_loaded(
+    connection: &Connection,
+    task: &StoredTask,
+    id: &str,
+    result: Option<&InvestigationResult>,
+) -> Result<Vec<Sidecar>, InvestigationStoreError> {
+    if connection.is_autocommit() {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    let refusals = completion::raw_refusals(connection, task)?;
     for (index, refusal) in refusals.iter().enumerate() {
         admission_journal::AuthenticatedRefusalBasis::load(
             connection,
-            &task,
+            task,
             index as u32 + 1,
             refusal,
         )?;
     }
-    let result = load_result(connection, &task)?;
     let withheld = result
-        .as_ref()
         .and_then(|r| r.completion.as_ref())
         .and_then(|c| c.withholding.as_ref())
         .is_some();
