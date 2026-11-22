@@ -143,6 +143,9 @@ pub struct InvestigationArtifactPage {
     pub next_offset: Option<usize>,
     /// Total artifact content bytes.
     pub total_content_bytes: usize,
+    /// False when the artifact was compiled from a scoped projection (an
+    /// Area or Neighborhood investigation): it describes only the scope.
+    pub complete_system: bool,
     /// The page's UTF-8 content.
     pub content: String,
 }

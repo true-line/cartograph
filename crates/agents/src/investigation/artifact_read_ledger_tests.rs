@@ -19,6 +19,7 @@ fn page_raw(
         offset,
         next_offset: (end < total).then_some(end),
         total_content_bytes: total,
+        complete_system: false,
         content: content.into(),
     })
     .unwrap()

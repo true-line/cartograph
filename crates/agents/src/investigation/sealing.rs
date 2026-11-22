@@ -452,6 +452,7 @@ pub(super) fn seal_admission_inner(
                 || actual_page.offset != original.offset
                 || actual_page.next_offset != original.next_offset
                 || actual_page.total_content_bytes != original.total_content_bytes
+                || actual_page.complete_system != original.complete_system
             {
                 return Err(InvestigationError::InvalidInput);
             }
