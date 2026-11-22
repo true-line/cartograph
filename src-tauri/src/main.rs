@@ -1068,7 +1068,8 @@ fn system_contents_for(state: &AppState) -> Result<Vec<SystemRepo>, String> {
 fn system_contents_of(nodes: &[Node]) -> Vec<SystemRepo> {
     let mut repos: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for node in nodes {
-        let evidence = &node.props["prov"]["evidence"][0];
+        let prov = core_graph::stored::stored_prov(&node.props);
+        let evidence = &prov["evidence"][0];
         // A captured observation input is not a source registration (ADR-0080).
         let Some(repo) = evidence["repo"].as_str().filter(|repo| {
             !repo.is_empty() && !repo.starts_with(observation_inputs::INPUT_REPO_PREFIX)
@@ -7465,7 +7466,9 @@ fn read_spec(
 ) -> Result<SpecRead, String> {
     #[cfg(test)]
     SPEC_READS.with(|count| count.set(count.get() + 1));
-    let (revision, ((nodes, edges), coverage)) = curated::read_graph(graph)?;
+    // Each fact's `prov` and rule payload is held as text as it is read, so
+    // the whole graph is never decoded at once (#2215).
+    let (revision, ((nodes, edges), coverage)) = curated::read_graph_compacted(graph)?;
     let assertion_decisions = decisions
         .list_assertions()
         .map_err(|error| error.to_string())?;
@@ -7538,7 +7541,7 @@ impl SpecRead {
             .filter(|record| record.decision == agents::AssertionDecision::Rejected)
             .map(|record| record.assertion.provenance.content_hash.clone())
             .collect();
-        let mut base = core_graph::RevisionedSnapshot {
+        let base = core_graph::RevisionedSnapshot {
             revision,
             graph: (nodes, edges),
         };
@@ -7575,9 +7578,6 @@ impl SpecRead {
             }
             None => (CuratedInput::NotRead, None),
         };
-        // The graph basis, flows and projection read the payloads as stored;
-        // from here only the spec compiler reads them, as text (#2215).
-        spec::compact_rule_payloads(&mut base.graph.0);
         SpecInputs {
             base,
             knowledge,

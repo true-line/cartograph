@@ -658,14 +658,16 @@ fn match_stored<'a>(
         if wanted.is_empty() {
             return;
         }
-        let Some(prov) = props.get("prov") else {
+        if props.get("prov").is_none() {
             continue;
-        };
+        }
+        let prov = core_graph::stored::stored_prov(props);
         let Some(hash) = prov.get("content_hash").and_then(|hash| hash.as_str()) else {
             continue;
         };
         if wanted.contains(hash)
-            && serde_json::from_value::<Provenance>(prov.clone()).is_ok_and(|prov| curatable(&prov))
+            && <Provenance as serde::Deserialize>::deserialize(&*prov)
+                .is_ok_and(|prov| curatable(&prov))
             && let Some(hash) = wanted.take(hash)
         {
             current.insert(hash);
@@ -881,6 +883,17 @@ pub(crate) fn read_graph(
 ) -> Result<(StoreRevision, core_graph::coverage::CoveredSnapshot), String> {
     graph
         .read_snapshot_with_coverage_and_revision()
+        .map_err(|error| error.to_string())
+}
+
+/// [`read_graph`] with each fact held as an export's compiler reads it:
+/// its `prov` and rule payload as text (`spec::compact_node`), so the whole
+/// graph is never decoded at once (#2215).
+pub(crate) fn read_graph_compacted(
+    graph: &SqliteGraphStore,
+) -> Result<(StoreRevision, core_graph::coverage::CoveredSnapshot), String> {
+    graph
+        .read_snapshot_with_coverage_and_revision_each(spec::compact_node, spec::compact_edge)
         .map_err(|error| error.to_string())
 }
 
