@@ -129,10 +129,10 @@ export function validReportedTaskUsage(value: unknown): boolean {
 /** ADR-0085: an app-only runtime identity; a malformed one rejects the detail. */
 export function validRunRuntime(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !== 'lane,runtime,version') return false;
-  const { lane, runtime, version } = value as Record<string, unknown>;
+      Object.keys(value).sort().join(',') !== 'lane,runner,runtime,version') return false;
+  const { lane, runtime, version, runner } = value as Record<string, unknown>;
   const field = (text: unknown) => typeof text === 'string' && /^[A-Za-z0-9.\-_+@]{1,64}$/.test(text);
-  return (lane === 'pi' || lane === 'claude') && field(runtime) && field(version);
+  return (lane === 'pi' || lane === 'claude') && field(runtime) && field(version) && field(runner);
 }
 
 const HEX_HASH = /^[0-9a-f]{64}(?![\s\S])/;

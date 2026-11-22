@@ -241,7 +241,7 @@ export interface ReportedTaskUsage {
 
 /** ADR-0085: the tool-calling runtime a run executed on (app-only read). */
 export interface RunRuntime {
-  lane: 'pi' | 'claude'; runtime: string; version: string;
+  lane: 'pi' | 'claude'; runtime: string; version: string; runner: string;
 }
 
 /** Definition/provider are the saved identities, not the current catalog entries. */
