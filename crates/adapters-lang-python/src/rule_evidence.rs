@@ -17,6 +17,8 @@ use core_redact::{SecretKind, is_sensitive_name, is_token_shaped, recognized_sec
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tree_sitter::Node as TsNode;
 
+mod definitions;
+
 const MAX_DEPENDENCIES: usize = 128;
 const MAX_CONDITIONS: usize = 32;
 const MAX_ANCESTOR_STEPS: usize = 256;
@@ -162,21 +164,23 @@ fn parameter_name(parameter: TsNode<'_>) -> Option<TsNode<'_>> {
 /// them is not a stable declaration. Nested functions, lambdas, classes and
 /// comprehensions are their own scopes: only a `nonlocal` there (or a walrus
 /// in a comprehension, which binds in the enclosing function) rebinds here.
-fn rebound(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
+/// Every name `function` binds in its own scope, with the nodes that bind
+/// it (parameters aside).
+fn bindings<'t>(cx: &FileCx<'_>, function: TsNode<'t>) -> BTreeMap<String, Vec<TsNode<'t>>> {
     #[derive(Clone, Copy, PartialEq)]
     enum Scope {
         Own,
         Comprehension,
         Nested,
     }
-    let mut out = BTreeSet::new();
+    let mut out: BTreeMap<String, Vec<TsNode<'t>>> = BTreeMap::new();
     let Some(body) = function.child_by_field_name("body") else {
         return out;
     };
     let mut stack = vec![(body, Scope::Own)];
     while let Some((node, scope)) = stack.pop() {
         let kind = node.kind();
-        let targets: Vec<TsNode<'_>> = match (kind, scope) {
+        let targets: Vec<TsNode<'t>> = match (kind, scope) {
             ("nonlocal_statement", _) => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor).collect()
@@ -202,7 +206,7 @@ fn rebound(cx: &FileCx<'_>, function: TsNode<'_>) -> BTreeSet<String> {
             let mut inner = vec![target];
             while let Some(t) = inner.pop() {
                 if t.kind() == "identifier" {
-                    out.insert(cx.text(&t).to_owned());
+                    out.entry(cx.text(&t).to_owned()).or_default().push(t);
                 } else if matches!(
                     t.kind(),
                     "pattern_list"
@@ -261,6 +265,8 @@ struct RuleBuilder<'cx, 'src, 'tree> {
     rule_id: String,
     gaps: BTreeMap<String, (String, TsNode<'tree>)>,
     dependencies: Vec<RuleDependency>,
+    /// Condition names bound by one assignment, with it (AC-1034).
+    seeds: Vec<(TsNode<'tree>, TsNode<'tree>)>,
 }
 
 impl<'tree> RuleBuilder<'_, '_, 'tree> {
@@ -333,6 +339,17 @@ impl<'tree> RuleBuilder<'_, '_, 'tree> {
                             gap_id: self.gap(RuleGapReason::UnresolvedCall, node),
                         })
                     })
+            } else if is_value_identifier(node)
+                && role == DependencyRole::Condition
+                && let Some(assignment) =
+                    definitions::sole_assignment(self.cx.text(&node), node, scope)
+            {
+                // A local assigned once before the condition (AC-1034).
+                self.seeds.push((node, assignment));
+                Some(DependencyResolution::Binding {
+                    binding_id: definitions::binding_id(self.cx, assignment),
+                    declaration: source(self.cx, assignment),
+                })
             } else if is_value_identifier(node) {
                 let name = self.cx.text(&node);
                 Some(
@@ -378,6 +395,45 @@ struct Scope<'a, 'tree> {
     locals: &'a HashMap<String, String>,
     parameters: BTreeMap<String, TsNode<'tree>>,
     rebound: BTreeSet<String>,
+    bindings: BTreeMap<String, Vec<TsNode<'tree>>>,
+}
+
+impl<'a, 'tree> Scope<'a, 'tree> {
+    fn new(cx: &FileCx<'_>, function: TsNode<'tree>, locals: &'a HashMap<String, String>) -> Self {
+        let bindings = bindings(cx, function);
+        Scope {
+            locals,
+            parameters: parameters(cx, function),
+            rebound: bindings.keys().cloned().collect(),
+            bindings,
+        }
+    }
+}
+
+impl<'tree> RuleBuilder<'_, '_, 'tree> {
+    /// The definitions this rule's condition names lead to (AC-1034); a
+    /// use whose definition is not recorded falls back to a Gap.
+    fn definitions(
+        &mut self,
+        scope: &Scope<'_, 'tree>,
+        redactions: &mut Vec<SourceRedaction>,
+    ) -> Vec<LocalDefinition> {
+        let seeds = std::mem::take(&mut self.seeds);
+        let (found, mut withheld, dropped) = definitions::recover(self, scope, &seeds);
+        redactions.append(&mut withheld);
+        for usage in dropped {
+            let at = source(self.cx, usage);
+            let gap_id = self.gap(RuleGapReason::DefinitionLimit, usage);
+            for dependency in &mut self.dependencies {
+                if dependency.role == DependencyRole::Condition && dependency.source == at {
+                    dependency.resolution = DependencyResolution::Unresolved {
+                        gap_id: gap_id.clone(),
+                    };
+                }
+            }
+        }
+        found
+    }
 }
 
 fn is_value_identifier(node: TsNode<'_>) -> bool {
@@ -396,9 +452,15 @@ type Branch<'t> = (TsNode<'t>, TsNode<'t>, BranchPolarity);
 /// The `if` / `elif` / `else` branches around `exit` up to its function,
 /// outermost first: the taken branch's condition truthy, and every earlier
 /// condition of the same `if` falsy.
+///
+/// A `try` handler is a branch too (AC-1036): an exit in `except T:` runs
+/// when `T` is raised, and an exit that is itself a statement of the `try`
+/// body returns only while none of its handlers' types is raised. A bare
+/// `except:` or one naming several types states no branch.
 fn branches(mut exit: TsNode<'_>) -> (Vec<Branch<'_>>, bool) {
     let mut conditions: Vec<Branch<'_>> = Vec::new();
     let mut steps = 0;
+    let statement = exit;
     while let Some(parent) = exit.parent() {
         if matches!(
             parent.kind(),
@@ -409,6 +471,24 @@ fn branches(mut exit: TsNode<'_>) -> (Vec<Branch<'_>>, bool) {
         steps += 1;
         if steps > MAX_ANCESTOR_STEPS || conditions.len() >= MAX_CONDITIONS {
             return (conditions, true);
+        }
+        if parent.kind() == "except_clause"
+            && exit.kind() == "block"
+            && let Some(caught) = caught(parent)
+        {
+            conditions.push((parent, caught, BranchPolarity::RaisedBranch));
+        }
+        if parent.kind() == "try_statement"
+            && parent.child_by_field_name("body") == Some(exit)
+            && statement.parent() == Some(exit)
+        {
+            let mut cursor = parent.walk();
+            let handlers: Vec<_> = parent
+                .named_children(&mut cursor)
+                .filter(|c| c.kind() == "except_clause")
+                .filter_map(|c| Some((c, caught(c)?, BranchPolarity::UnraisedBranch)))
+                .collect();
+            conditions.extend(handlers.into_iter().rev());
         }
         let statement = match parent.kind() {
             "if_statement" => Some(parent),
@@ -458,6 +538,25 @@ fn branches(mut exit: TsNode<'_>) -> (Vec<Branch<'_>>, bool) {
     let limited = conditions.len() > MAX_CONDITIONS;
     conditions.truncate(MAX_CONDITIONS);
     (conditions, limited)
+}
+
+/// The one error type an `except` clause names (`except T:` or
+/// `except T as e:`); `None` for a bare `except:`, an `except*`, or one
+/// naming several types.
+fn caught(clause: TsNode<'_>) -> Option<TsNode<'_>> {
+    let mut cursor = clause.walk();
+    if clause.children(&mut cursor).any(|c| c.kind() == "*") {
+        return None;
+    }
+    let mut cursor = clause.walk();
+    let values: Vec<_> = clause
+        .children_by_field_name("value", &mut cursor)
+        .collect();
+    // `except (A, B):` is one tuple value naming several types.
+    match values[..] {
+        [one] if one.kind() != "tuple" => Some(one),
+        _ => None,
+    }
 }
 
 /// The value a `return` returns or a `raise` raises; `None` for a bare one.
@@ -607,11 +706,7 @@ pub(super) fn extract(
             continue;
         }
         let function = functions[&owner_id];
-        let scope = Scope {
-            locals,
-            parameters: parameters(cx, function),
-            rebound: rebound(cx, function),
-        };
+        let scope = Scope::new(cx, function, locals);
         // A method that answers `True` or `False` somewhere is a predicate
         // whatever its name (`lifetime_or_active_subscription`, AC-1030).
         // Only a method: its rows state the earlier exits as "otherwise",
@@ -655,6 +750,7 @@ pub(super) fn extract(
                 rule_id: rule_id.clone(),
                 gaps: BTreeMap::new(),
                 dependencies: Vec::new(),
+                seeds: Vec::new(),
             };
             builder.control_gap(RuleGapReason::ExecutionPredicateUnknown, exit);
             builder.control_gap(RuleGapReason::ConsumerSemanticsUnknown, exit);
@@ -702,6 +798,7 @@ pub(super) fn extract(
                 Some(value) if exit.kind() == "raise_statement" => LocalExit::Throw { value },
                 value => LocalExit::Return { value },
             };
+            let local_definitions = builder.definitions(&scope, &mut redactions);
             let evidence = GuardedExitEvidence {
                 schema_version: RULE_EVIDENCE_SCHEMA_VERSION,
                 kind: RuleKind::GuardedExit,
@@ -710,8 +807,8 @@ pub(super) fn extract(
                 source_order: order as u32,
                 conditions,
                 effect,
+                local_definitions: Some(local_definitions),
                 dependencies: builder.dependencies,
-                local_definitions: Some(Vec::new()),
                 interpretation: Interpretation {
                     execution_predicate: InterpretationStatus::NotEstablished,
                     consumer_effect: InterpretationStatus::NotEstablished,
@@ -757,11 +854,7 @@ pub(super) fn extract(
             continue;
         }
         let function = functions[&owner_id];
-        let scope = Scope {
-            locals,
-            parameters: parameters(cx, function),
-            rebound: rebound(cx, function),
-        };
+        let scope = Scope::new(cx, function, locals);
         let owner_exits = exits_by_owner.get(&owner_id).map_or(&[][..], Vec::as_slice);
         for (order, effect) in owner_effects.iter().enumerate() {
             let at = effect.statement;
@@ -781,6 +874,7 @@ pub(super) fn extract(
                 rule_id: format!("{owner_id}#effects"),
                 gaps: BTreeMap::new(),
                 dependencies: Vec::new(),
+                seeds: Vec::new(),
             };
             builder.control_gap(RuleGapReason::ExecutionPredicateUnknown, at);
             builder.control_gap(RuleGapReason::ConsumerSemanticsUnknown, at);
@@ -834,6 +928,7 @@ pub(super) fn extract(
             } else {
                 builder.control_gap(RuleGapReason::AnalysisLimit, read);
             }
+            let local_definitions = builder.definitions(&scope, &mut redactions);
             let evidence = GuardedExitEvidence {
                 schema_version: RULE_EVIDENCE_SCHEMA_VERSION,
                 kind: RuleKind::GuardedEffect,
@@ -842,8 +937,8 @@ pub(super) fn extract(
                 source_order: order as u32,
                 conditions,
                 effect: local,
+                local_definitions: Some(local_definitions),
                 dependencies: builder.dependencies,
-                local_definitions: Some(Vec::new()),
                 interpretation: Interpretation {
                     execution_predicate: InterpretationStatus::NotEstablished,
                     consumer_effect: InterpretationStatus::NotEstablished,

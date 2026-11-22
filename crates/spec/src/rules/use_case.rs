@@ -568,6 +568,8 @@ fn polarity(value: BranchPolarity) -> &'static str {
     match value {
         BranchPolarity::TruthyBranch => "truthy",
         BranchPolarity::FalsyBranch => "falsy",
+        BranchPolarity::RaisedBranch => "raised",
+        BranchPolarity::UnraisedBranch => "not raised",
     }
 }
 

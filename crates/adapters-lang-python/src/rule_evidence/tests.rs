@@ -700,3 +700,94 @@ def must_pay(user):
         ]
     );
 }
+
+#[test]
+fn a_condition_local_assigned_once_carries_its_initializer() {
+    // AC-1034 (T-1034): a condition's name bound once by `name = value`
+    // before the condition is a Binding with its initializer recorded, and
+    // a name that initializer reads is followed the same way. A name bound
+    // twice, or assigned after the condition, stays unresolved.
+    let code = r#"
+from flask import request, g
+
+def authorize_request():
+    api_code = request.headers.get("Authentication")
+    api_key = ApiKey.get_by(code=api_code)
+    if not api_key:
+        return "Wrong api key", 401
+    g.user = api_key.user
+
+def several():
+    try:
+        return load()
+    except (ValueError, TypeError):
+        return "bad", 400
+
+def twice(data):
+    suffix = data.get("s")
+    suffix = suffix.strip()
+    if not suffix:
+        return "no suffix", 400
+    late = 1
+    return None
+"#;
+    let out = recover(code);
+    let all = rules(&out);
+    let (_, refusal) = all
+        .iter()
+        .find(|(_, r)| r.owner_id.ends_with("authorize_request") && value(r).0 == "return")
+        .unwrap();
+    refusal.validate().unwrap();
+    let definitions = refusal.local_definitions.as_ref().unwrap();
+    let shown: Vec<&str> = definitions
+        .iter()
+        .map(|d| d.initializer.display.as_str())
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "ApiKey.get_by(code=api_code)",
+            "request.headers.get(\"Authentication\")"
+        ]
+    );
+    assert!(matches!(
+        definitions[0].expression.nodes[0].kind,
+        DefinitionExpressionKind::Call { .. }
+    ));
+    assert!(
+        definitions[0]
+            .expression
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, DefinitionExpressionKind::KeywordArgument { .. }))
+    );
+    assert!(
+        refusal
+            .dependencies
+            .iter()
+            .any(|d| d.role == DependencyRole::Condition
+                && matches!(d.resolution, DependencyResolution::Binding { .. }))
+    );
+    let (_, twice) = all
+        .iter()
+        .find(|(_, r)| r.owner_id.ends_with("twice"))
+        .unwrap();
+    twice.validate().unwrap();
+    assert!(twice.local_definitions.as_ref().unwrap().is_empty());
+    assert!(
+        twice
+            .dependencies
+            .iter()
+            .all(|d| d.role != DependencyRole::Condition
+                || matches!(d.resolution, DependencyResolution::Unresolved { .. }))
+    );
+    // A handler naming several types states no branch (AC-1036).
+    assert!(all.iter().all(|(_, r)| !r.owner_id.ends_with("several")
+        || r.conditions.iter().all(|c| !matches!(
+            c.polarity,
+            BranchPolarity::RaisedBranch | BranchPolarity::UnraisedBranch
+        ))));
+    for (_, rule) in &all {
+        rule.validate().unwrap();
+    }
+}

@@ -94,6 +94,12 @@ pub enum BranchPolarity {
     TruthyBranch,
     /// The branch selected when its expression is falsy.
     FalsyBranch,
+    /// A handler selected when the guarded body raises one of the error
+    /// types its expression names (Python `except T:`, AC-1036).
+    RaisedBranch,
+    /// The guarded body itself, reached only while none of the error types
+    /// its handler's expression names is raised (AC-1036).
+    UnraisedBranch,
 }
 
 /// Sanitized display text supplied by a source-aware producer.

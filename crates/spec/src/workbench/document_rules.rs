@@ -41,7 +41,10 @@ use super::statements::Constants;
 use crate::workbench::capabilities::{Stories, Story, Support, area_name};
 use crate::workbench::citation_id;
 use crate::workbench::render::{Assertions, Literal, RenderLimit, Text};
-use core_graph::rules::{BranchPolarity, GuardedExitEvidence, LocalExit, SourceExpression};
+use core_graph::rules::{
+    BranchPolarity, DefinitionExpressionKind, DefinitionExpressionNode, GuardedExitEvidence,
+    LocalExit, SourceExpression,
+};
 use core_graph::{Edge, FactKey, Node};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -222,6 +225,9 @@ fn atomic(text: &str) -> bool {
 /// truthy one is parenthesized too.
 fn holds(shown: &str, polarity: BranchPolarity, alone: bool) -> String {
     match polarity {
+        // A handler's error types (AC-1036): `raised X`, `not raised X`.
+        BranchPolarity::RaisedBranch => format!("raised {shown}"),
+        BranchPolarity::UnraisedBranch => format!("not raised {shown}"),
         BranchPolarity::FalsyBranch => match shown.strip_prefix("not ") {
             Some(inner) if atomic(inner.trim_start()) => inner.trim_start().to_owned(),
             _ if atomic(shown) => format!("not {shown}"),
@@ -872,7 +878,31 @@ impl<'a> Index<'a> {
         asserted: &mut BTreeSet<String>,
         out: &mut Text,
     ) -> Result<(), RenderLimit> {
-        for name in called_names(&row.when) {
+        // A condition's local assigned a call of a plain function name is
+        // followed into that function too (AC-1036): `alias_suffix =
+        // check_suffix_signature(signed_suffix)` under `not alias_suffix`.
+        let mut scan = row.when.clone();
+        if let Ok(parsed) = GuardedExitEvidence::from_value(row.rule.props["rule"].clone()) {
+            for definition in parsed.local_definitions.iter().flatten() {
+                // Only a recorded call of a plain name: an unsupported
+                // initializer (`a() if f else b()`) is not one call's value.
+                let nodes = &definition.expression.nodes;
+                let plain_call = match nodes.get(definition.expression.root as usize) {
+                    Some(DefinitionExpressionNode {
+                        kind: DefinitionExpressionKind::Call { callee, .. },
+                        ..
+                    }) => nodes.get(*callee as usize).is_some_and(|c| {
+                        matches!(c.kind, DefinitionExpressionKind::Identifier { .. })
+                    }),
+                    _ => false,
+                };
+                if plain_call {
+                    scan.push_str(" and ");
+                    scan.push_str(&one_line(definition.initializer.display.as_str()));
+                }
+            }
+        }
+        for name in called_names(&scan) {
             let named = self
                 .by_name
                 .get(name)
@@ -2534,6 +2564,99 @@ def update_alias(alias_id, user):
             ),
             "{text}"
         );
+    }
+
+    // AC-1034 (T-1034), AC-1036 (T-1036): a condition's local is stated
+    // with what it was assigned, a header read by its name and a lookup by
+    // its keys; a local assigned a function's result is followed into that
+    // function, whose `try` / `except` returns read as raised / not raised
+    // errors, keeping the call's keyword inputs.
+    #[test]
+    fn a_condition_local_is_stated_with_its_assignment_and_followed() {
+        let source = r#"
+import itsdangerous
+from flask import jsonify, request, g
+
+def check_suffix_signature(signed_suffix):
+    try:
+        return signer.unsign(signed_suffix, max_age=600).decode()
+    except itsdangerous.BadSignature:
+        return None
+
+def authorize_request():
+    api_code = request.headers.get("Authentication")
+    api_key = ApiKey.get_by(code=api_code)
+    if not api_key:
+        return jsonify(error="Wrong api key"), 401
+    g.user = api_key.user
+
+def get_alias(alias_id):
+    alias = Alias.get(alias_id)
+    if not alias:
+        return jsonify(error="Unknown error"), 400
+    entry = cache.get(alias_id)
+    if not entry:
+        return jsonify(error="Gone"), 410
+
+def pick(signed_suffix):
+    picked = check_suffix_signature(signed_suffix) if signed_suffix else None
+    if not picked:
+        return jsonify(error="No suffix"), 409
+
+def new_custom_alias(signed_suffix):
+    try:
+        alias_suffix = check_suffix_signature(signed_suffix)
+        if not alias_suffix:
+            return jsonify(error="Alias creation time is expired, please retry"), 412
+    except Exception:
+        return jsonify(error="Tampered suffix"), 400
+"#;
+        let (text, _) = python_rows(source, "authorize_request");
+        assert!(
+            text.contains(
+                "When no API key is given, the request is refused with status 401 (“Wrong api key”). Here the API key is the API key whose code is the “Authentication” header."
+            ),
+            "{text}"
+        );
+        let (text, _) = python_rows(source, "get_alias");
+        assert!(
+            text.contains(
+                "When no alias is given, the request is refused with status 400 (“Unknown error”). Here the alias is the alias found by the alias ID. |"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "When no entry is given, the request is refused with status 410 (“Gone”). |"
+            ),
+            "{text}"
+        );
+        // An initializer that is not one call is not followed.
+        let (text, _) = python_rows(source, "pick");
+        assert!(text.contains("409"), "{text}");
+        assert!(!text.contains("check suffix signature"), "{text}");
+        let (text, _) = python_rows(source, "new_custom_alias");
+        assert!(
+            text.contains(
+                "| ↳ | The check “check suffix signature” decides as follows (matched by name, inferred, 2 call hops): |"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("when raised itsdangerous.BadSignature: returns None |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("When a bad signature error is raised"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "When no bad signature error is raised, the check suffix signature is the signer's unsign for the signed suffix and max age 600."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("When an error is raised, the request is refused with status 400 (“Tampered suffix”)."), "{text}");
     }
 
     // AC-0915 (T-0915): a check several functions share a name with is
