@@ -372,6 +372,11 @@ fn reason_text(reason: StateReason) -> (&'static str, &'static str) {
             "The source associations of the facts the proposal used have changed since it was \
              made.",
         ),
+        CitedFilesUnchanged => (
+            "cited_files_unchanged",
+            "The graph has changed since the proposal was made, but every file its evidence \
+             cites is unchanged, so it can be re-confirmed as it is.",
+        ),
         EvidenceNotAssessed => (
             "evidence_not_assessed",
             "A captured evidence item has no availability result.",
