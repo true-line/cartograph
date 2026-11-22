@@ -98,7 +98,7 @@ fn next_prompt_job_cancel_pending_source_keeps_claim_and_validation_charge() {
         fixture::refresh(&mut f);
         let before_usage = f.task.detail.usage.clone();
         let owner = candidate(&f);
-        let (store, _directory, _, detail) = recover(f, owner);
+        let (_directory, store, _, detail) = recover(f, owner);
         assert_eq!(detail.summary.status, InvestigationStatus::OutcomeUnknown);
         assert_eq!(detail.usage, before_usage);
         let tx = store.conn.unchecked_transaction().unwrap();

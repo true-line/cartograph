@@ -49,7 +49,6 @@ fn staged_schema_rejects_excess_rows_and_multibyte_sql() {
 }
 
 struct Fixture {
-    directory: tempfile::TempDir,
     store: JobStore,
     execution: JobExecution,
     id: String,
@@ -57,6 +56,8 @@ struct Fixture {
     input: InvestigationInput,
     finish: StagedFinish,
     response: InvestigationResponseMeta,
+    /// Dropped last: Windows cannot remove it while a store holds files in it (#1307).
+    directory: tempfile::TempDir,
 }
 impl Fixture {
     fn new() -> Self {

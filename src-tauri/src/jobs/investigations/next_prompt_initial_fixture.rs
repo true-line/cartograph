@@ -2,7 +2,6 @@
 //! supplies only independent request/archive fixture data, never task authority.
 use super::*;
 pub(in crate::jobs::investigations) struct InitialFixture {
-    pub directory: tempfile::TempDir,
     pub store: JobStore,
     pub execution: JobExecution,
     pub task: StoredTask,
@@ -10,6 +9,8 @@ pub(in crate::jobs::investigations) struct InitialFixture {
     pub archive: InvestigationCoverageArchive,
     pub ledger: InvestigationInputLedger,
     pub metadata: ProtectedCompletionMetadata,
+    /// Dropped last: Windows cannot remove it while a store holds files in it (#1307).
+    pub directory: tempfile::TempDir,
 }
 pub(in crate::jobs::investigations) fn initial_fixture(
     mode: InvestigationProviderMode,
