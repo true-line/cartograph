@@ -4,7 +4,7 @@ use super::*;
 use agents::investigation::semantic_audit::{AuditFailure, SemanticAuditReply};
 use llm::bounded::{BoundedCompletion, PreparedBoundedCompletion};
 
-pub(crate) struct SemanticAuditResponse<'a> {
+pub struct SemanticAuditResponse<'a> {
     pub input: &'a InvestigationInput,
     pub original_prepared: &'a PreparedBoundedCompletion,
     pub audit_prepared: &'a PreparedBoundedCompletion,
@@ -132,7 +132,7 @@ impl JobStore {
     /// Persist advisory outcome and the timely, uncancelled candidate. Historical
     /// contracts continue to require a pass. No retry, repair, or new provider
     /// call is authorized by this writer.
-    pub(crate) fn settle_next_prompt_semantic_audit(
+    pub fn settle_next_prompt_semantic_audit(
         &mut self,
         execution: &JobExecution,
         revision: u64,

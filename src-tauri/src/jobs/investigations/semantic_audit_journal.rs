@@ -10,14 +10,14 @@ const OWNED: &str = "name GLOB 'candidate_audit_*' OR (tbl_name GLOB 'candidate_
 /// Configured identity reported by the caller, not an attestation of executed weights.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SeparateAuditor {
+pub struct SeparateAuditor {
     pub profile: ProviderProfile,
     pub reported_model_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyst_reported_model_digest: Option<String>,
 }
 impl SeparateAuditor {
-    pub(crate) fn validate(&self) -> Result<(), InvestigationStoreError> {
+    pub fn validate(&self) -> Result<(), InvestigationStoreError> {
         if self.profile.locality != llm::Locality::Local
             || [
                 &self.reported_model_digest,
@@ -39,7 +39,7 @@ impl SeparateAuditor {
         encode(self, MAX_MANIFEST_BYTES)?;
         Ok(())
     }
-    pub(crate) fn validate_against_model(
+    pub fn validate_against_model(
         &self,
         analyst_model: &str,
     ) -> Result<(), InvestigationStoreError> {
@@ -205,7 +205,7 @@ pub(super) fn stored_bytes(
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
     fn invocation() -> AuditInvocation {

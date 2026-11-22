@@ -12,7 +12,7 @@ pub(super) struct StoredSemanticAudit {
     candidate_hash: Option<String>,
 }
 
-pub(crate) struct SemanticAuditStart<'a> {
+pub struct SemanticAuditStart<'a> {
     pub separate_auditor: Option<&'a super::semantic_audit_journal::SeparateAuditor>,
     pub input: &'a InvestigationInput,
     pub original_prepared: &'a llm::bounded::PreparedBoundedCompletion,
@@ -25,7 +25,7 @@ impl JobStore {
     /// Reconstruct the audit payload from the retained finishing input only
     /// after authenticating its durable candidate and exact sealed disclosure.
     /// Read-only: this grants no dispatch and consumes no reserved invocation.
-    pub(crate) fn prepare_next_prompt_semantic_audit(
+    pub fn prepare_next_prompt_semantic_audit(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -71,7 +71,7 @@ impl JobStore {
     /// Commit the one reserved audit invocation before the worker can dispatch.
     /// Revalidate the original input and the exact firewall authorization inside
     /// this transaction; a failed write leaves both journal and charge absent.
-    pub(crate) fn begin_next_prompt_semantic_audit(
+    pub fn begin_next_prompt_semantic_audit(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -174,7 +174,7 @@ impl JobStore {
     /// Internal worker boundary, not a public task mutation or execution grant.
     /// Install only on a fresh local @20 task before its first model invocation.
     /// The worker must reserve the complete audit workspace before calling this.
-    pub(crate) fn enable_next_prompt_semantic_audit(
+    pub fn enable_next_prompt_semantic_audit(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -661,7 +661,7 @@ pub(super) fn hold_candidate(
     task.semantic_audit.as_ref().unwrap().validate(task)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fixture_enabled_account(
     task: &StoredTask,
 ) -> Result<StoredSemanticAudit, InvestigationStoreError> {
@@ -674,7 +674,7 @@ pub(super) fn fixture_enabled_account(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 
