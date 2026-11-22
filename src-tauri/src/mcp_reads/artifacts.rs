@@ -439,7 +439,7 @@ fn fits(value: &impl Serialize, cap: usize) -> bool {
     serde_json::to_writer(Counter(cap), value).is_ok()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;
 
 #[cfg(all(test, unix))]
