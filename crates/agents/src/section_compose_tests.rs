@@ -63,7 +63,7 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
     assert!(guide < prompt.find("<section>").unwrap());
     // 1.3 is grounded in its capabilities and their rules (#2375).
     let overview = guidance("1.3").unwrap();
-    // Operations in domain terms, no route or port (#2408).
+    // AC-1323 (T-1323): operations in domain terms, no route or port (#2408).
     assert!(overview.contains("never spell out a route, URL path, HTTP method or port"));
     assert!(overview.contains("not use the words endpoint or route"));
     assert!(
