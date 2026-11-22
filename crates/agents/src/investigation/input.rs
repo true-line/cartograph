@@ -825,8 +825,10 @@ impl InvestigationInput {
         if candidate.input_ledger_hash != hash {
             return Err(InvestigationError::InvalidInput);
         }
+        // A firewall-refused read has no span either: the auditor sees exactly
+        // the supplied sources (#679).
         let citations = self
-            .ledger
+            .citable_ledger()?
             .citations
             .iter()
             // Graph metadata citations have no acquired source span. Keep the
