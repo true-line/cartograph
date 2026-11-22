@@ -120,6 +120,22 @@ fn locked_runner_scores_once_and_returns_aggregates_only() {
 }
 
 #[test]
+fn locked_runner_commits_one_of_two_concurrent_policies() {
+    let (store, dataset) = make_store("separate-reviewer");
+    let provider = provider();
+    let (first, second) = std::thread::scope(|s| {
+        let a = s.spawn(|| score(store.path(), &request(dataset.path(), 0.9), &provider));
+        let b = s.spawn(|| score(store.path(), &request(dataset.path(), 0.8), &provider));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let outcomes = [first.is_ok(), second.is_ok()];
+    assert_eq!(outcomes.iter().filter(|ok| **ok).count(), 1);
+    let refused = if first.is_ok() { second } else { first };
+    assert_eq!(refused, Err(Code::PolicyAlreadyCommitted));
+    assert_eq!(log_lines(store.path()).len(), 2);
+}
+
+#[test]
 fn locked_runner_refuses_malformed_requests_with_fixed_codes() {
     let (store, dataset) = make_store("separate-reviewer");
     let provider = provider();

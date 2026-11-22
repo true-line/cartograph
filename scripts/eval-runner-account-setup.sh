@@ -10,7 +10,12 @@ set -euo pipefail
 U=cartograph-eval
 H=/Users/$U
 PUB=${1:?public key line required}
-case "$PUB" in ssh-ed25519\ *) ;; *) echo "expected an ssh-ed25519 public key" >&2; exit 2 ;; esac
+# Exactly one key line: a newline or any other control character could add a
+# second, unrestricted entry to authorized_keys.
+KEY_RE='^ssh-ed25519 [A-Za-z0-9+/]{68}(=){0,2}( [[:print:]]{0,128})?$'
+if [[ ! "$PUB" =~ $KEY_RE ]] || [[ "$PUB" == *[[:cntrl:]]* ]]; then
+  echo "expected exactly one ssh-ed25519 public key line" >&2; exit 2
+fi
 
 if id "$U" >/dev/null 2>&1; then echo "account $U already exists; stopping" >&2; exit 1; fi
 

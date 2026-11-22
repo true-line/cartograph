@@ -256,6 +256,15 @@ fn submissions(store: &Path) -> Result<u64, Code> {
 /// writes itself: `cache.db`, `dataset/review-envelope.json`,
 /// `commitment.json`, `receipt.json` and the append-only `submissions.jsonl`.
 pub fn score(store: &Path, request: &[u8], provider: &dyn LlmProvider) -> Result<Vec<u8>, Code> {
+    // Concurrent sessions are serialized from the commitment check through the
+    // receipt and the log entry, so two policies can never both be committed.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(store.join("runner.lock"))
+        .map_err(|_| Code::StoreIo)?;
+    lock.lock().map_err(|_| Code::StoreIo)?;
     let at = now()?;
     let result = score_inner(store, request, provider, at);
     let outcome = match &result {
