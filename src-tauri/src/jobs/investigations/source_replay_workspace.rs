@@ -5,7 +5,7 @@ use std::mem::size_of;
 
 /// Retained SavedRead and complete compatible load peak. Row bodies are capped
 /// at 131072 by read/preflight, before serde or smaller semantic validation.
-pub(crate) fn next_prompt_read_reservation_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_read_reservation_workspace() -> Option<(usize, usize)> {
     let wire = 131_072usize;
     if MAX_MANIFEST_BYTES != wire {
         return None;
@@ -54,7 +54,7 @@ pub(crate) fn next_prompt_read_reservation_workspace() -> Option<(usize, usize)>
 /// Pending source authority replay. Borrowed task, saved reservation, second
 /// call core, response and hashes survive their nested validation phases.
 /// Excludes source acquisition, publication, outer result loading and RSS.
-pub(crate) fn next_prompt_pending_source_workspace() -> Option<usize> {
+pub fn next_prompt_pending_source_workspace() -> Option<usize> {
     let (task, _) = next_prompt_record_workspace(MAX_RECORD_BYTES)?;
     let (saved, load) = next_prompt_read_reservation_workspace()?;
     let (core, core_peak) = next_prompt_saved_call_workspace()?;
@@ -101,7 +101,7 @@ pub(crate) fn next_prompt_pending_source_workspace() -> Option<usize> {
 /// at most MAX_TASKS distinct 128-byte keys, including charges/dispositions via
 /// their reservation foreign keys. Historical rows are replayed one at a time.
 /// Borrowed caller task/projection and native SQLite/allocator/RSS are separate.
-pub(crate) fn next_prompt_source_capacity_workspace() -> Option<(usize, usize)> {
+pub fn next_prompt_source_capacity_workspace() -> Option<(usize, usize)> {
     let retained = sum(&[
         size_of::<CapacitySnapshot>(),
         map::<String, CapacityCharge>(MAX_TASKS)?,

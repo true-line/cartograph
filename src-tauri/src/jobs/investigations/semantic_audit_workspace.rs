@@ -67,7 +67,7 @@ pub(super) fn receipt_replay_workspace() -> Option<usize> {
 /// also compiles in the native ownership harness without the application host.
 /// Nested task replay includes its own second task copy.
 #[cfg(unix)]
-pub(crate) fn next_prompt_audit_transaction_workspace(
+pub fn next_prompt_audit_transaction_workspace(
     source_validation: usize,
     limits: &llm::bounded::CompletionLimits,
 ) -> Option<usize> {
