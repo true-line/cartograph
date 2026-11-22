@@ -153,3 +153,28 @@ access. Unknown absence is never omission; `NotOmitted` does not mean a receipt
 is available. This separate partial capability also leaves broad
 `evidence_absence_reason_available` false. Complete and scoped modes advertise
 this support independently; check the current session's live capabilities.
+
+## Worked example: what handles `POST /owners/new`
+
+Answer it from the recovered system alone, citing each step:
+
+1. Find the endpoint: `cartograph_discover` with
+   `{ query: { by: "text", text: "POST:/owners/new" }, labels: ["Endpoint"] }`.
+   Use the candidate's exact `reference.id` (for example
+   `ep:petclinic@POST:/owners/new`); never build an ID by hand.
+2. Follow what handles it: `cartograph_query` with
+   `{ scope: { type: "neighborhood", anchor: endpointId, hops: 1 }, kind: "edge", labels: ["HANDLES"] }`.
+   For each edge whose `reference.source` is the endpoint, `reference.destination`
+   is a handler, and the fact carries its
+   tier, confidence and evidence references.
+3. Follow what the handler does: the same query anchored on the handler with
+   `labels: ["CALLS"]`. Neighborhoods are undirected, so the page also holds
+   the handler's callers: keep only edges whose `reference.source` is the
+   handler for what it calls, and report edges whose `reference.destination`
+   is the handler as its callers. Use `hops: 2` for a wider view.
+4. Quote source only through `cartograph_evidence` for a fact you cite.
+
+Report the handler with the endpoint and edge references you read, and their
+confidence tiers. An empty `HANDLES` page means this session shows no handler,
+not that none exists. The same reads at the same basis return identical results,
+so a reviewer can replay them.
