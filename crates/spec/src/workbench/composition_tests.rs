@@ -265,9 +265,9 @@ fn an_overview_reads_the_rules_its_capabilities_enforce() {
     assert!(!excerpt.contains("A shared refusal") && !excerpt.contains("| Shared"));
     assert!(excerpt.contains("4 of 4"));
     assert!(printed_ids(&excerpt).contains(&id(5)));
-    // 1.1 reads a smaller excerpt; other sections and a 1.5 with no stated
-    // rule read none.
-    assert!(rule_excerpt(&document, "1.1").is_some());
+    // AC-1327 (T-1327): 1.1, other sections and a 1.5 with no stated rule
+    // read none (#2446).
+    assert_eq!(rule_excerpt(&document, "1.1"), None);
     assert_eq!(rule_excerpt(&document, "1.4"), None);
     assert_eq!(
         rule_excerpt("# D1\n\n## 1.5 Business rules (F)\n\nNone.\n", "1.3"),
@@ -279,22 +279,26 @@ fn an_overview_reads_the_rules_its_capabilities_enforce() {
 fn a_rule_excerpt_stops_at_its_budget() {
     let header = "| Where | Rule | Source | Citation |\n|---|---|---|---|\n";
     let mut document = String::from("# D1\n\n## 1.5 Business rules (F)\n\n");
-    for n in 0..400u16 {
+    for n in 0..800u16 {
         document.push_str(&format!(
             "### Capability {n}\n\n{header}| f() | Rule number {n} holds for every caller of it. | when x: 403 | F-{:016x} |\n\n",
             u64::from(n)
         ));
     }
-    let excerpt = rule_excerpt(&document, "1.1").unwrap();
-    assert!(excerpt.len() < 6 * 1024 + 512, "{}", excerpt.len());
-    assert!(excerpt.contains(" of 400.") && !excerpt.contains("400 of 400"));
+    let excerpt = rule_excerpt(&document, "1.3").unwrap();
+    assert!(excerpt.len() < 16 * 1024 + 512, "{}", excerpt.len());
+    assert!(excerpt.contains(" of 800.") && !excerpt.contains("800 of 800"));
     // A smaller byte allowance shortens it; none leaves no excerpt (#2386).
-    let short = rule_excerpt_within(&document, "1.1", 1024).unwrap();
+    let short = rule_excerpt_within(&document, "1.3", 1024).unwrap();
     assert!(short.len() < 1024 + 512 && short.len() < excerpt.len());
-    assert_eq!(rule_excerpt_within(&document, "1.1", 0), None);
+    assert_eq!(rule_excerpt_within(&document, "1.3", 0), None);
     assert_eq!(
-        (rule_excerpt_budget("1.1"), rule_excerpt_budget("1.4")),
-        (Some(6 * 1024), None)
+        (
+            rule_excerpt_budget("1.3"),
+            rule_excerpt_budget("1.1"),
+            rule_excerpt_budget("1.4")
+        ),
+        (Some(16 * 1024), None, None)
     );
 }
 

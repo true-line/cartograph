@@ -188,8 +188,10 @@ fn summary_text(text: &str) -> String {
 /// Sections whose system composition also reads an excerpt of the rules
 /// the capabilities enforce, with its byte budget (#2375). Capability facts
 /// carry only a title, so without the rules an overview has nothing to
-/// show what each capability does beyond its name and operations.
-const RULE_EXCERPTS: &[(&str, usize)] = &[("1.3", 16 * 1024), ("1.1", 6 * 1024)];
+/// show what each capability does beyond its name and operations. 1.1 reads
+/// none: with one its overview stated rule edge cases instead of the
+/// system's purpose (#2446).
+const RULE_EXCERPTS: &[(&str, usize)] = &[("1.3", 16 * 1024)];
 
 /// The `###` headings 1.5 generates over rows that are not one capability's
 /// rules: state machines, rules several capabilities share, and the rate
