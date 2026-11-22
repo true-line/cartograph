@@ -229,6 +229,8 @@ fn an_overview_reads_the_rules_its_capabilities_enforce() {
          ### Alias\n\n#### Create alias\n\n{header}{}{}{}\
          #### Rules in the Alias area's own code\n\n{header}{}\
          #### Block senders\n\n{header}{}\
+         #### Rate limits management\n\n{header}{}\
+         ### Shared rejections\n\n{header}{}\
          ### Rate limits\n\n| Capability | Operation | Limit | Citation |\n|---|---|---|---|\n\
          | Create alias | POST /a | 5/min | {} |\n\n## 1.6 Flows (P)\n\nB\n",
         row("A premium user may create an alias.", 1),
@@ -239,6 +241,8 @@ fn an_overview_reads_the_rules_its_capabilities_enforce() {
         row("An alias name is unique.", 3),
         row("An area rule.", 4),
         row("A blocked sender is refused.", 5),
+        row("A limit has an owner.", 7),
+        row("A shared refusal.", 8),
         id(6),
     );
     let excerpt = rule_excerpt(&document, "1.3").unwrap();
@@ -255,7 +259,11 @@ fn an_overview_reads_the_rules_its_capabilities_enforce() {
             && !excerpt.contains("An area rule")
             && !excerpt.contains(&id(6))
     );
-    assert!(excerpt.contains("3 of 3"));
+    // A capability named like a generated heading keeps its rules; rules
+    // several capabilities share are not one capability's.
+    assert!(excerpt.contains("| Rate limits management | A limit has an owner. |"));
+    assert!(!excerpt.contains("A shared refusal") && !excerpt.contains("| Shared"));
+    assert!(excerpt.contains("4 of 4"));
     assert!(printed_ids(&excerpt).contains(&id(5)));
     // 1.1 reads a smaller excerpt; other sections and a 1.5 with no stated
     // rule read none.

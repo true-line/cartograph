@@ -191,9 +191,28 @@ fn summary_text(text: &str) -> String {
 /// show what each capability does beyond its name and operations.
 const RULE_EXCERPTS: &[(&str, usize)] = &[("1.3", 16 * 1024), ("1.1", 6 * 1024)];
 
-/// Headings of 1.5 whose rows are not one capability's rules: an area's own
-/// code, a state machine, or the rate limits, whose citations are derived.
-const NOT_A_CAPABILITY: &[&str] = &["Rules in the ", "State machine", "Rate limits"];
+/// The `###` headings 1.5 generates over rows that are not one capability's
+/// rules: state machines, rules several capabilities share, and the rate
+/// limits, whose citations are derived.
+const NOT_A_CAPABILITY: &[&str] = &[
+    "State machines",
+    "Shared rejections",
+    "Shared changes",
+    "Rate limits",
+];
+
+/// Whether a 1.5 heading of `depth` hashes is one 1.5 generates over rows
+/// that are not one capability's rules, rather than a capability's name: a
+/// `####` heading only when it is a state machine or an area's own code.
+fn generated_heading(depth: usize, heading: &str) -> bool {
+    match depth {
+        3 => NOT_A_CAPABILITY.contains(&heading),
+        _ => {
+            heading.starts_with("State machine: ")
+                || (heading.starts_with("Rules in the ") && heading.ends_with(" area's own code"))
+        }
+    }
+}
 
 /// The excerpt of 1.5 that a system composition of section `number` reads
 /// (#2375): each capability's rules stated in domain terms with their
@@ -207,17 +226,16 @@ pub fn rule_excerpt(document: &str, number: &str) -> Option<String> {
     let mut by_capability: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
     let mut current: Option<usize> = None;
     for line in rules.lines() {
-        if let Some(heading) = line
-            .strip_prefix("#### ")
-            .or_else(|| line.strip_prefix("### "))
-        {
-            current = if NOT_A_CAPABILITY
-                .iter()
-                .any(|lead| heading.starts_with(lead))
-            {
+        let heading = match (line.strip_prefix("#### "), line.strip_prefix("### ")) {
+            (Some(heading), _) => Some((4, heading.trim())),
+            (None, Some(heading)) => Some((3, heading.trim())),
+            _ => None,
+        };
+        if let Some((depth, heading)) = heading {
+            current = if generated_heading(depth, heading) {
                 None
             } else {
-                by_capability.push((heading.trim(), Vec::new()));
+                by_capability.push((heading, Vec::new()));
                 Some(by_capability.len() - 1)
             };
             continue;
