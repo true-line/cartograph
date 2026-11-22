@@ -194,6 +194,7 @@ export const COMPOSE_REFUSAL: Record<string, string> = {
   endpoint_not_cited: 'Every claim was about endpoints or routes without citing an endpoint, so none was staged.',
   claim_not_supported: 'Every claim asserted more than its cited facts show, so none was staged.',
   rule_capability_not_cited: 'Every claim stated a rule without citing the capability it belongs to, so none was staged.',
+  claim_overreaches: 'The review found every claim said more than its cited facts show, so none was staged.',
   graph_changed: 'The graph changed while the section was being composed. Compose it again.',
   no_claim_admitted: 'No drafted claim passed the gates, so nothing was staged.',
   gated_composition_section_unsupported: 'Only section 1.5 is drafted through the gated workflow.',
