@@ -20,8 +20,8 @@ contains `flask_client.`, it takes the 20 with the lowest sha256 of
 Each call records:
 
 - **truth**: the view function that actually serves the request, as
-  `<file>::<function>`. It is `flask-admin:<view>` for a Flask-Admin view and
-  `none` when no route serves the request.
+  `<file>::<function>`, or `<file>::<View>.index` for a Flask-Admin view
+  (amendment 1). It is `none` when no route serves the request.
 - **expect**: the outcome the W10a contract (AC-0343) requires.
   - `link`: a `REQUESTS` edge to the truth Endpoint.
   - `link:follows_redirects`: the same, marked `follows_redirects`, with no
@@ -35,7 +35,7 @@ Each call records:
   response name. An `if` condition, `>=`, `in [..]` or whole-body equality
   asserts nothing here; the notes mark each such case.
 
-The sample contains 19 `link` calls (3 of them `follows_redirects`) and 7
+The sample contains 22 `link` calls (4 of them `follows_redirects`) and 4
 `gap` calls. It also contains SimpleLogin's own test bug: line 751 of
 `tests/api/test_alias.py` posts to `/api/aliases/random/new`, which no route
 serves.
@@ -46,10 +46,10 @@ Score one exported run of the showcase manifest at the commit above.
 
 | Measure | Definition | Pass |
 |---|---|---|
-| Link recall | `link` calls cited by a `REQUESTS` edge from their test to the Endpoint of their truth view and method | ≥ 18 / 19 |
+| Link recall | `link` calls cited by a `REQUESTS` edge from their test to the Endpoint of their truth view and method | ≥ 21 / 22 |
 | Link precision | edges citing a sampled call whose Endpoint is that call's truth | 100 % |
-| Gap accuracy | `gap` calls that are a Gap naming the call whose reason means the labelled one, and are not linked | 7 / 7 |
-| Redirects | `follows_redirects` set on exactly the three labelled edges, with no statuses or keys | 3 / 3 |
+| Gap accuracy | `gap` calls that are a Gap naming the call whose reason means the labelled one, and are not linked | 4 / 4 |
+| Redirects | `follows_redirects` set on exactly the four labelled edges, with no statuses or keys | 4 / 4 |
 | Status precision / recall | pairs of (edge, status) against the union of the edge's labelled calls | 100 % / ≥ 90 % |
 | Key precision / recall | the same for (edge, key) | 100 % / ≥ 90 % |
 
@@ -60,40 +60,49 @@ The pass thresholds were frozen by the owner's one-line go on 2026-11-22.
 Any later change to a threshold or a label needs a new go and is recorded
 here with the reason.
 
-## Result: first scored run (2026-11-22)
+### Amendment 1 (2026-11-22, owner's go)
+
+The three Flask-Admin calls (`tests/admin/test_email_search.py:254` and
+`:557`, `tests/admin/test_custom_domain_search.py:204`) are relabelled from
+`gap:unknown_endpoint_name` to `link`, the one at line 557 as
+`link:follows_redirects`. Their truth views are `EmailSearchAdmin.index`
+and `CustomDomainSearchAdmin.index`.
+
+Reason: a Flask-Admin view is a Flask route. `@expose("/")` on a view
+registered by `add_view(..., endpoint=...)` (`app/admin/index.py:44-47`)
+serves `/admin/<endpoint>/`, and `url_for(admin.<endpoint>.index)` resolves
+to it. The old labels predate Flask-Admin support in the route model.
+
+The counts move with the labels: 22 links, 4 of them redirects, and 4 Gaps.
+The tolerance is unchanged: at most one link miss, no Gap or redirect miss.
+
+## Result: rescore after amendment 1 (2026-11-22)
 
 Run: the showcase manifest (`docs/showcases/simplelogin.md`, gap 1) at
 Cartograph `40ff457`, with the app at the commit above, the extension at
-`d18b40fc` and Android at `ab6e7103`. Scored by
-[`score.py`](score.py) (`python3 -I score.py <app checkout> <graph.db>`).
-The report is in [`scores.json`](scores.json).
+`d18b40fc` and Android at `ab6e7103`. This is the same run as the first
+score; only the labels changed. Scored by [`score.py`](score.py)
+(`python3 -I score.py <app checkout> <graph.db>`). The report is in
+[`scores.json`](scores.json).
 
 | Measure | Result | Pass |
 |---|---|---|
-| Link recall | 19 / 19 | yes |
-| Link precision | 19 / 22 | no |
-| Gap accuracy | 4 / 7 | no |
-| Redirects | 3 / 3, plus 1 extra | no |
-| Status precision / recall | 11 / 13 and 11 / 11 | no / yes |
+| Link recall | 22 / 22 | yes |
+| Link precision | 22 / 22 | yes |
+| Gap accuracy | 4 / 4 | yes |
+| Redirects | 4 / 4, no extra | yes |
+| Status precision / recall | 13 / 13 and 13 / 13 | yes / yes |
 | Key precision / recall | 7 / 7 and 7 / 7 | yes / yes |
 
-**The run fails against the frozen labels.** All eight misses come from the
-three Flask-Admin calls (`url_for(admin.email_search.index)` at
-`tests/admin/test_email_search.py:254` and `:557`, and
-`url_for(admin.custom_domain_search.index)` at
-`tests/admin/test_custom_domain_search.py:204`). The labels expect
-`gap:unknown_endpoint_name` for them, because Flask-Admin views were out of
-the route model when the labels were written. This run recovers them as
-Endpoints: `GET /admin/admin.email_search/` and
-`GET /admin/admin.custom_domain_search/`. Those URLs match
-`app/admin/index.py:44-47`, where the view's `endpoint=` is also its URL.
-The three calls therefore link instead of becoming Gaps. Their statuses
-(200 at lines 254 and 204) appear on the edges but are not labelled, and
-`follow_redirects=True` at line 557 marks one more edge `follows_redirects`.
+**The run passes W10a.** Every call links to its truth view with its line,
+the four Gaps carry the labelled reasons, and every labelled status and key
+is on its edge with nothing extra.
 
-On the other 23 calls the run matches every label: 19 links with no wrong
-endpoint, 4 Gaps with the labelled reasons, 3 redirect edges, and every
-labelled status and key.
+### First score, before amendment 1
 
-The labels are not changed here. Relabelling the three Flask-Admin calls
-needs a new go.
+Against the original labels the run failed: link precision 19 / 22, gap
+accuracy 4 / 7, one extra redirect edge and status precision 11 / 13. All
+eight misses were the three Flask-Admin calls, which the run recovered as
+`GET /admin/admin.email_search/` and `GET /admin/admin.custom_domain_search/`
+and linked instead of reporting as Gaps. On the other 23 calls it matched
+every label.

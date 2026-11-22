@@ -66,7 +66,7 @@ def main():
     link_total = link_hit = 0
     prec_total = prec_ok = 0
     gap_total = gap_hit = 0
-    redirect_hit = 0
+    redirect_hit = redirect_total = 0
     redirect_extra = []
     edge_labels = {}
     for call in labels["calls"]:
@@ -100,6 +100,7 @@ def main():
             if not ok:
                 report["misses"].append({"call": entry["call"], "reason": "no REQUESTS edge to the truth endpoint citing this line" + (f"; Gap: {entry['gaps']}" if gaps else "")})
             if call["expect"] == "link:follows_redirects":
+                redirect_total += 1
                 good = [p for d, p in links if d in truths and p.get("follows_redirects") is True and not p.get("statuses") and not p.get("keys")]
                 redirect_hit += bool(good)
         else:
@@ -130,10 +131,10 @@ def main():
 
     ratio = lambda a, b: f"{a}/{b}"
     report["scores"] = {
-        "link_recall": {"value": ratio(link_hit, link_total), "pass": link_hit >= 18},
+        "link_recall": {"value": ratio(link_hit, link_total), "pass": link_hit >= link_total - 1},
         "link_precision": {"value": ratio(prec_ok, prec_total), "pass": prec_ok == prec_total},
-        "gap_accuracy": {"value": ratio(gap_hit, gap_total), "pass": gap_hit == gap_total == 7},
-        "redirects": {"value": ratio(redirect_hit, 3), "extra": redirect_extra, "pass": redirect_hit == 3 and not redirect_extra},
+        "gap_accuracy": {"value": ratio(gap_hit, gap_total), "pass": gap_hit == gap_total},
+        "redirects": {"value": ratio(redirect_hit, redirect_total), "extra": redirect_extra, "pass": redirect_hit == redirect_total and not redirect_extra},
         "status_precision": {"value": ratio(st_tp, st_pred), "pass": st_tp == st_pred},
         "status_recall": {"value": ratio(st_tp, st_lab), "pass": st_lab == 0 or st_tp / st_lab >= 0.9},
         "key_precision": {"value": ratio(k_tp, k_pred), "pass": k_tp == k_pred},
