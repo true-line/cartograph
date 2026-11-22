@@ -118,6 +118,18 @@ impl Retrieval {
         edges: &[Edge],
         derived: &[OverlayFact],
     ) -> Result<Self, RetrievalError> {
+        Self::build_with_sources(nodes, edges, derived, &knowledge_ingest::SectionText::new())
+    }
+
+    /// [`Self::build_with_flows`] with the section text the host read for
+    /// the embedding phase, so a documentation section is indexed by the
+    /// same text that phase embedded (AC-1505).
+    pub fn build_with_sources(
+        nodes: &[Node],
+        edges: &[Edge],
+        derived: &[OverlayFact],
+        section_text: &knowledge_ingest::SectionText,
+    ) -> Result<Self, RetrievalError> {
         let flows: Vec<(&Node, &OverlayFact)> = derived
             .iter()
             .filter_map(|fact| match &fact.item {
@@ -126,7 +138,8 @@ impl Retrieval {
             })
             .collect();
         let flow_nodes: Vec<&Node> = flows.iter().map(|(node, _)| *node).collect();
-        let (units, omitted) = knowledge_ingest::units_with_flows(nodes, &flow_nodes);
+        let (units, omitted) =
+            knowledge_ingest::units_with_sources(nodes, &flow_nodes, section_text);
         let base_ids: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
         let mut flow_cites: BTreeMap<String, Vec<BaseRef>> = BTreeMap::new();
         for (node, fact) in flows {

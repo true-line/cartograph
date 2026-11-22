@@ -433,6 +433,13 @@ fn provenance(evidence: EvidenceRef, fact: &[u8]) -> Provenance {
     .with_method(crate::spec_rule(DOCUMENT_EXTRACTOR_ID))
 }
 
+/// The `content_hash` a `DocSection`'s provenance carries for `text`, its
+/// section's bytes: a host that reads a section's span from the source
+/// checks it against the graph before using the text (AC-1505).
+pub fn section_content_hash(section_id: &str, text: &str) -> String {
+    core_prov::content_hash(&hashed(&(section_id, text)))
+}
+
 /// The id of the document at `path` in `repo`.
 pub fn document_id(repo: &str, path: &str) -> String {
     format!("doc:{repo}@{path}")

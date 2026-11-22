@@ -1181,3 +1181,25 @@ fn an_index_built_from_keys_and_detailed_nodes_equals_the_whole_graph_index() {
     assert_eq!(whole.endpoints, 2);
     assert!(!whole.labels.contains_key("gap:r@1"));
 }
+
+// AC-1505: a host that reads a section's span from the source can check it
+// against the section's provenance before using the text.
+#[test]
+fn section_content_hash_matches_the_section_provenance() {
+    let markdown = "# Shop\n\nIntro.\n\n## Refunds\n\nRefunds settle nightly.\n";
+    let (nodes, _) = pass(markdown);
+    let section = nodes
+        .iter()
+        .find(|node| node.id == "docsec:local/shop@README.md#1")
+        .unwrap();
+    let cited = &prov(&section.props).evidence[0];
+    let text = &markdown[cited.byte_start as usize..cited.byte_end as usize];
+    assert_eq!(
+        crate::documents::section_content_hash(&section.id, text),
+        prov(&section.props).content_hash
+    );
+    assert_ne!(
+        crate::documents::section_content_hash(&section.id, "## Refunds\n\nchanged\n"),
+        prov(&section.props).content_hash
+    );
+}

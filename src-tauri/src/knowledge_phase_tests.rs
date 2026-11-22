@@ -93,6 +93,8 @@ fn no_provider_publishes_the_overlay_as_a_named_omission() {
             omitted: 0,
             omission: Some(knowledge_ingest::NO_PROVIDER),
             published: true,
+            sections_read: 0,
+            sections_unread: 0,
             derived: 0,
             oversized: 0,
             derived_omission: None,
@@ -166,6 +168,7 @@ fn a_base_past_the_interactive_default_is_read_and_published() {
         &host.overlay,
         None,
         SnapshotReadLimits::default(),
+        &no_sections,
     )
     .unwrap();
     assert_eq!(skipped.omission, Some(BASE_BOUNDS));
@@ -183,7 +186,15 @@ fn a_base_past_the_snapshot_bounds_is_a_named_omission() {
         max_rows: 1,
         ..SnapshotReadLimits::default()
     };
-    let report = run_within(&host.graph, &host.cache, &host.overlay, None, limits).unwrap();
+    let report = run_within(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        None,
+        limits,
+        &no_sections,
+    )
+    .unwrap();
     assert_eq!(
         (report.omission, report.published),
         (Some(BASE_BOUNDS), false)
@@ -728,6 +739,7 @@ fn the_status_sent_to_the_ui_carries_the_named_reasons() {
             max_rows: 1,
             ..SnapshotReadLimits::default()
         },
+        &no_sections,
     );
     let status = serde_json::to_value(KnowledgeStatus::from(report)).unwrap();
     assert_eq!(status["report"]["omission"], BASE_BOUNDS);
@@ -843,4 +855,102 @@ fn the_phase_base_leaves_out_only_props_no_producer_reads() {
     let derived = facts(&full);
     assert!(derived.contains("Capability") && derived.contains("DomainEntity"));
     assert_eq!(facts(&base), derived);
+}
+
+struct Recording(Mutex<Vec<String>>);
+impl LlmProvider for Recording {
+    fn id(&self) -> &str {
+        "recording"
+    }
+    fn locality(&self) -> Locality {
+        Locality::Local
+    }
+    fn capabilities(&self) -> ProviderCaps {
+        ProviderCaps {
+            embeddings: true,
+            chat: false,
+            tool_use: false,
+        }
+    }
+    fn embedding_cache_identity(&self) -> Result<Option<EmbeddingIdentity>, ProviderError> {
+        Fixture { fail: false }.embedding_cache_identity()
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+        self.0.lock().unwrap().extend_from_slice(texts);
+        Ok(texts.iter().map(|t| vec![1.0, t.len() as f32]).collect())
+    }
+}
+
+// AC-1505: a documentation section is embedded with its text, read from the
+// registered source's span only while it still hashes to the section's
+// provenance (ADR-0065 keeps the text out of the graph); a section whose
+// file moved since ingest is embedded by its heading alone and counted.
+#[test]
+fn sections_are_embedded_with_text_read_from_their_source() {
+    let host = host();
+    let repo = tempfile::tempdir().unwrap();
+    // A run of whitespace past the text bound never crowds out the prose
+    // after it: the bound applies to the collapsed text.
+    let readme = format!(
+        "# Shop\n\nIntro.\n\n## Refunds\n\n{}Refunds settle nightly.\n",
+        " ".repeat(5000)
+    );
+    std::fs::write(repo.path().join("README.md"), &readme).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut registry =
+        crate::sources::SourceRegistry::open(data.path().join("sources.db"), data.path()).unwrap();
+    let source = registry.register_local(repo.path()).unwrap();
+    let registry = Mutex::new(registry);
+    let facts = spec::extract_documents(repo.path(), &source.repo_key, "workdir").unwrap();
+    assert_eq!(facts.counts.sections, 2);
+    {
+        let mut graph = host.graph.lock().unwrap();
+        for node in &facts.nodes {
+            graph.put_node(node).unwrap();
+        }
+    }
+    let provider = Recording(Mutex::new(Vec::new()));
+    let reader = |sections: &[&Node]| source_sections(&registry, sections);
+    let report = run_with_sections(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        Some(&provider),
+        &reader,
+    )
+    .unwrap();
+    assert_eq!((report.sections_read, report.sections_unread), (2, 0));
+    let sent = provider.0.lock().unwrap().clone();
+    let refunds = sent
+        .iter()
+        .find(|text| text.contains("heading: Refunds"))
+        .expect("the Refunds section is a unit");
+    assert!(
+        refunds.contains("text: ## Refunds Refunds settle nightly."),
+        "{refunds}"
+    );
+
+    // The file changed after ingest, keeping its length: both sections'
+    // spans (the title section holds the Refunds one) still read, but no
+    // longer hash to the graph.
+    std::fs::write(
+        repo.path().join("README.md"),
+        readme.replace("nightly", "Weekly!"),
+    )
+    .unwrap();
+    let provider = Recording(Mutex::new(Vec::new()));
+    let report = run_with_sections(
+        &host.graph,
+        &host.cache,
+        &host.overlay,
+        Some(&provider),
+        &reader,
+    )
+    .unwrap();
+    assert_eq!((report.sections_read, report.sections_unread), (0, 2));
+    let sent = provider.0.lock().unwrap().clone();
+    assert!(sent.iter().all(|text| !text.contains("Weekly")), "{sent:?}");
+    // Without a provider nothing is read and nothing is counted.
+    let report = run_with_sections(&host.graph, &host.cache, &host.overlay, None, &reader).unwrap();
+    assert_eq!((report.sections_read, report.sections_unread), (0, 0));
 }
