@@ -227,8 +227,10 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
         }
     }
 
-    // Every emitted method of the read classes, by (owner, name, descriptor).
-    let mut methods: BTreeMap<(String, String, String), String> = BTreeMap::new();
+    // Every emitted method of the read classes, by (owner, name, descriptor),
+    // then by the path of each file that declares it: a checkout may ship
+    // the same binary class more than once.
+    let mut methods: Methods<'_> = BTreeMap::new();
     for read in &reads {
         for method in &read.class.methods {
             if !emitted(method) {
@@ -237,14 +239,14 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
             if let Some(name) =
                 method_name(&read.nested, &read.class, &method.name, &method.descriptor)
             {
-                methods.insert(
-                    (
+                methods
+                    .entry((
                         read.class.this_class.clone(),
                         method.name.clone(),
                         method.descriptor.clone(),
-                    ),
-                    symbol_id(id.repo, read.path, &name),
-                );
+                    ))
+                    .or_default()
+                    .insert(read.path, symbol_id(id.repo, read.path, &name));
             }
         }
     }
@@ -255,12 +257,10 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
     out
 }
 
-fn emit_class(
-    id: &SourceId<'_>,
-    read: &Read<'_>,
-    methods: &BTreeMap<(String, String, String), String>,
-    out: &mut Extraction,
-) {
+/// Method symbols by (owner, name, descriptor), then by declaring path.
+type Methods<'a> = BTreeMap<(String, String, String), BTreeMap<&'a str, String>>;
+
+fn emit_class(id: &SourceId<'_>, read: &Read<'_>, methods: &Methods<'_>, out: &mut Extraction) {
     let Read {
         path,
         digest,
@@ -365,7 +365,13 @@ fn emit_class(
                 target.name.clone(),
                 target.descriptor.clone(),
             );
-            let Some(dst) = methods.get(&key) else {
+            // A call into this file's own class names this file's method;
+            // a call into a class shipped more than once names no one copy.
+            let Some(dst) = methods.get(&key).and_then(|paths| {
+                paths
+                    .get(&**path)
+                    .or_else(|| (paths.len() == 1).then(|| paths.values().next()).flatten())
+            }) else {
                 continue;
             };
             if !seen.insert((dst.clone(), span)) {
@@ -530,15 +536,79 @@ fn source_stems(paths: &[String]) -> BTreeSet<String> {
     stems
 }
 
-/// Whether the repository holds the source of `internal` (a class's
-/// internal name): a `.java` file at its outer class's package path, or a
-/// `.kt` file for it or for its `…Kt` file facade.
-fn has_source(stems: &BTreeSet<String>, internal: &str) -> bool {
+/// The Java and Kotlin sources of a checkout, as far as deciding whether a
+/// class was compiled from one of them.
+#[derive(Default)]
+struct Sources {
+    /// [`source_stems`] of every source path.
+    stems: BTreeSet<String>,
+    /// Kotlin file name to the internal package names its files declare.
+    kotlin_packages: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// The internal package name a Kotlin file's `package` header declares,
+/// empty for the default package.
+fn kotlin_package(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("package "))
+        .and_then(|rest| rest.split([';', ' ', '\t']).next())
+        .map(|name| name.replace('.', "/"))
+        .unwrap_or_default()
+}
+
+fn sources(paths: &[String], read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>) -> Sources {
+    let mut kotlin_packages: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for path in paths.iter().filter(|path| path.ends_with(".kt")) {
+        let Ok(bytes) = read(path) else {
+            continue;
+        };
+        let name = path.rsplit('/').next().unwrap_or(path);
+        kotlin_packages
+            .entry(name.to_string())
+            .or_default()
+            .insert(kotlin_package(&String::from_utf8_lossy(&bytes)));
+    }
+    Sources {
+        stems: source_stems(paths),
+        kotlin_packages,
+    }
+}
+
+/// Whether the checkout holds the source of `class`: a `.java` or `.kt`
+/// file at its outer class's package path or for its `…Kt` file facade,
+/// the file its `SourceFile` attribute names at its package path, or a
+/// Kotlin file of that name declaring its package (Kotlin files need not
+/// sit at their package path, nor be named for their classes).
+fn has_source(sources: &Sources, class: &ClassFile) -> bool {
+    let internal = class.this_class.as_str();
     let outer = internal.split('$').next().unwrap_or(internal);
-    stems.contains(outer)
+    if sources.stems.contains(outer)
         || outer
             .strip_suffix("Kt")
-            .is_some_and(|facade| stems.contains(facade))
+            .is_some_and(|facade| sources.stems.contains(facade))
+    {
+        return true;
+    }
+    let Some(file) = class.source_file.as_deref() else {
+        return false;
+    };
+    let package = package_of(internal);
+    let stem = file
+        .strip_suffix(".java")
+        .or_else(|| file.strip_suffix(".kt"));
+    let at_package = stem.is_some_and(|stem| {
+        sources.stems.contains(&if package.is_empty() {
+            stem.to_string()
+        } else {
+            format!("{package}/{stem}")
+        })
+    });
+    at_package
+        || sources
+            .kotlin_packages
+            .get(file)
+            .is_some_and(|packages| packages.contains(package))
 }
 
 /// Read the compiled classes of the checkout at `root`: every `.class` file
@@ -552,21 +622,61 @@ pub fn extract_dir(
     id: &SourceId<'_>,
     on_file: &mut dyn FnMut(&str),
 ) -> std::io::Result<Extraction> {
+    let (classes, source_paths) = walk(root)?;
+    let read = |rel: &str| std::fs::read(root.join(rel));
+    extract_selected(id, &classes, &source_paths, &read, on_file)
+}
+
+/// [`extract_dir`] over `classes`, `.class` paths whose bytes `read`
+/// returns (a capture's retained bytes, not the checkout). The checkout's
+/// Java and Kotlin source paths still decide which classes have source; a
+/// Kotlin file's package header is read through `read` too.
+pub fn extract_dir_from(
+    root: &std::path::Path,
+    id: &SourceId<'_>,
+    classes: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<Extraction> {
+    let (_, source_paths) = walk(root)?;
+    extract_selected(id, classes, &source_paths, read, on_file)
+}
+
+/// The `.class` files the ordinary walk of `root` selects, sorted: the
+/// paths [`extract_dir`] reads, for a capture to retain.
+pub fn class_paths(root: &std::path::Path) -> std::io::Result<Vec<String>> {
+    Ok(walk(root)?.0)
+}
+
+/// The walk's `.class` paths and its Java and Kotlin source paths, sorted.
+fn walk(root: &std::path::Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
     let walked = source_walk::files(root, &skipped_dir, source_walk::Gitignores::Honor)?;
-    let (classes, sources): (Vec<_>, Vec<_>) = walked
+    let (mut classes, mut source_paths): (Vec<_>, Vec<_>) = walked
         .into_iter()
         .map(|file| file.rel)
         .filter(|rel| rel.ends_with(".class") || rel.ends_with(".java") || rel.ends_with(".kt"))
         .partition(|rel| rel.ends_with(".class"));
-    let stems = source_stems(&sources);
+    classes.sort();
+    source_paths.sort();
+    Ok((classes, source_paths))
+}
+
+fn extract_selected(
+    id: &SourceId<'_>,
+    classes: &[String],
+    source_paths: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<Extraction> {
+    let sources = sources(source_paths, read);
     let mut files = Vec::new();
     for rel in classes {
-        on_file(&rel);
-        let bytes = std::fs::read(root.join(&rel))?;
+        on_file(rel);
+        let bytes = read(rel)?;
         let covered = bytes.len() <= MAX_CLASS_BYTES
-            && class_file::parse(&bytes).is_ok_and(|class| has_source(&stems, &class.this_class));
+            && class_file::parse(&bytes).is_ok_and(|class| has_source(&sources, &class));
         if !covered {
-            files.push((rel, bytes));
+            files.push((rel.clone(), bytes));
         }
     }
     Ok(extract(id, &files))

@@ -345,8 +345,107 @@ fn a_checkout_reads_the_classes_it_ships_without_source() {
     assert!(class_files(&out).is_empty(), "{:?}", class_files(&out));
 
     // A Kotlin file facade (`LedgerKt`) is left to the Kotlin adapter too.
-    let stems = source_stems(&["app/src/com/acme/Ledger.kt".to_string()]);
-    assert!(has_source(&stems, "com/acme/LedgerKt"));
-    assert!(has_source(&stems, "com/acme/Ledger$Inner"));
-    assert!(!has_source(&stems, "com/other/Ledger"));
+    let kotlin = Sources {
+        stems: source_stems(&["app/src/com/acme/Ledger.kt".to_string()]),
+        ..Sources::default()
+    };
+    assert!(has_source(&kotlin, &compiled("com/acme/LedgerKt", None)));
+    assert!(has_source(
+        &kotlin,
+        &compiled("com/acme/Ledger$Inner", None)
+    ));
+    assert!(!has_source(&kotlin, &compiled("com/other/Ledger", None)));
+}
+
+fn compiled(internal: &str, source_file: Option<&str>) -> ClassFile {
+    ClassFile {
+        access: 0,
+        this_class: internal.into(),
+        super_class: None,
+        interfaces: Vec::new(),
+        header_span: (0, 0),
+        class_refs: Vec::new(),
+        fields: Vec::new(),
+        methods: Vec::new(),
+        nesting: None,
+        source_file: source_file.map(str::to_string),
+    }
+}
+
+/// AC-1215: a class declared in a source file named otherwise (a Kotlin
+/// file of several classes, a non-public Java class) is left to its source
+/// adapter, found through the file its `SourceFile` attribute names.
+#[test]
+fn a_class_declared_in_another_named_file_has_source() {
+    let paths = [
+        "src/main/java/com/acme/pay/Payments.java".to_string(),
+        "app/Models.kt".to_string(),
+    ];
+    let read = |path: &str| match path {
+        "app/Models.kt" => Ok(
+            b"// models\n@file:JvmName(\"M\")\npackage com.acme.model\n\nclass Ledger\n".to_vec(),
+        ),
+        _ => Err(std::io::Error::other("not read")),
+    };
+    let sources = sources(&paths, &read);
+    assert!(has_source(
+        &sources,
+        &compiled("com/acme/pay/Refund", Some("Payments.java"))
+    ));
+    assert!(!has_source(
+        &sources,
+        &compiled("com/other/Refund", Some("Payments.java"))
+    ));
+    assert!(has_source(
+        &sources,
+        &compiled("com/acme/model/Ledger", Some("Models.kt"))
+    ));
+    assert!(!has_source(
+        &sources,
+        &compiled("com/acme/other/Ledger", Some("Models.kt"))
+    ));
+    assert_eq!(kotlin_package("package a.b.c;\n"), "a/b/c");
+    assert_eq!(kotlin_package("class Top\n"), "");
+}
+
+/// AC-1215: a binary class shipped at two paths keeps each copy's calls to
+/// its own methods, and a call into a class shipped twice names no copy.
+#[test]
+fn a_class_shipped_twice_keeps_its_own_calls() {
+    let files = vec![
+        ("a/Ledger.class".to_string(), LEDGER.to_vec()),
+        ("b/Ledger.class".to_string(), LEDGER.to_vec()),
+        ("a/Ledger$Store.class".to_string(), STORE.to_vec()),
+    ];
+    let out = extract(&id(), &files);
+    for copy in ["a", "b"] {
+        let open = format!("sym:{REPO}@{copy}/Ledger.class#Ledger.open()");
+        let own = format!("sym:{REPO}@{copy}/Ledger.class#Ledger.Ledger()");
+        let dsts: Vec<&str> = out
+            .edges
+            .iter()
+            .filter(|edge| edge.label == "CALLS" && edge.src == open)
+            .map(|edge| edge.dst.as_str())
+            .collect();
+        assert_eq!(dsts, [own.as_str()]);
+    }
+    // Store is shipped once, so both copies' constructors call it.
+    let store = format!("sym:{REPO}@a/Ledger$Store.class#Ledger.Store.Store()");
+    assert_eq!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.label == "CALLS" && edge.dst == store)
+            .count(),
+        2
+    );
+    // With Store shipped twice, neither copy is named.
+    let mut twice = files.clone();
+    twice.push(("b/Ledger$Store.class".to_string(), STORE.to_vec()));
+    let out = extract(&id(), &twice);
+    assert!(
+        out.edges
+            .iter()
+            .filter(|edge| edge.label == "CALLS")
+            .all(|edge| !edge.dst.contains("Ledger.Store.Store()")),
+    );
 }
