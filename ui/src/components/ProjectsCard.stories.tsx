@@ -78,6 +78,25 @@ export const SwitchWhileWorkRuns: Story = {
   },
 };
 
+export const NarrowCard: Story = {
+  // #2252: at the Workspace column's 280px minimum the actions wrap inside
+  // the card instead of running past its edge.
+  decorators: [
+    (Story) => (
+      <div style={{ width: '280px' }}>
+        <Story />
+      </div>
+    ),
+  ],
+  play: async ({ canvasElement }) => {
+    const card = canvasElement.querySelector('.projects-card') as HTMLElement;
+    const edge = card.getBoundingClientRect().right;
+    for (const button of within(card).getAllByRole('button')) {
+      await expect(button.getBoundingClientRect().right).toBeLessThanOrEqual(edge);
+    }
+  },
+};
+
 export const LongName: Story = {
   // #2252: a long parked project name wraps beside its actions instead of
   // running under them, and the full name is its tooltip, in a card as

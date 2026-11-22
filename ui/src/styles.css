@@ -595,6 +595,7 @@ button:disabled {
    runs under them; a confirmation takes the row's full width. */
 .project-list {
   list-style: none;
+  padding: 0;
   display: grid;
   gap: 0.5rem;
 }
@@ -614,7 +615,8 @@ button:disabled {
 
 .project-actions {
   display: flex;
-  flex: none;
+  flex-wrap: wrap;
+  flex: 0 1 auto;
   gap: 0.4rem;
   margin-left: auto;
 }
