@@ -51,6 +51,22 @@ export const tauriLocalModelApi: LocalModelApi = {
   reset: () => invoke<LocalModelChoice>('reset_local_model'),
 };
 
+/** The Ollama context windows a desktop investigation may request (#1653); `null` is Ollama's own default. */
+export const CONTEXT_WINDOWS = [8192, 16384, 32768, 65536] as const;
+
+export interface ContextWindowApi {
+  load(): Promise<number | null>;
+  save(tokens: number | null): Promise<number | null>;
+}
+
+export const tauriContextWindowApi: ContextWindowApi = {
+  load: () => invoke<number | null>('get_local_context_window'),
+  save: (tokens) => invoke<number | null>('set_local_context_window', { tokens }),
+};
+
+/** "32K tokens" for 32768. */
+export const formatContextWindow = (tokens: number) => `${tokens / 1024}K tokens`;
+
 /** Whole minutes in the window; seconds/milliseconds on the wire. */
 export const toMinutes = (seconds: number) => seconds / 60;
 

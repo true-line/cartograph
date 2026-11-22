@@ -19,6 +19,9 @@ struct Message<'a> {
 
 #[derive(Serialize)]
 struct Options {
+    // Absent unless chosen, so default request bytes are unchanged (#1653).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
     num_predict: u32,
 }
 
@@ -46,6 +49,7 @@ pub(super) fn ollama<'a>(
     max_tokens: u32,
     schema: Option<&'a serde_json::value::RawValue>,
     think: bool,
+    context_window: Option<u32>,
 ) -> impl Serialize + 'a {
     Ollama {
         format: schema.map_or(Format::Json("json"), Format::Schema),
@@ -61,6 +65,7 @@ pub(super) fn ollama<'a>(
         ],
         model,
         options: Options {
+            num_ctx: context_window,
             num_predict: max_tokens,
         },
         stream: false,

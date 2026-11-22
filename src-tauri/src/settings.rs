@@ -112,6 +112,7 @@ pub enum SettingsError {
     InvalidParallelism(u32),
     InvalidInvestigationChoice,
     InvalidLocalModel,
+    InvalidContextWindow(u32),
     InvalidRunLimit {
         field: &'static str,
         value: u64,
@@ -148,6 +149,11 @@ impl std::fmt::Display for SettingsError {
             Self::InvalidLocalModel => write!(
                 f,
                 "local model must be an Ollama model name (1..=128 of A-Z, a-z, 0-9, : . _ / + -)"
+            ),
+            Self::InvalidContextWindow(tokens) => write!(
+                f,
+                "context window must be one of {:?} tokens, got {tokens}",
+                llm::OllamaProvider::CONTEXT_WINDOWS
             ),
             Self::InvalidRunLimit {
                 field,
@@ -352,6 +358,12 @@ impl SettingsStore {
                  completion_model TEXT CHECK (length(completion_model) BETWEEN 1 AND 128)
              ) STRICT;
              INSERT OR IGNORE INTO settings_local_model (id) VALUES (1);
+             -- NULL leaves the context window to Ollama's own default (#1653).
+             CREATE TABLE IF NOT EXISTS settings_local_context (
+                 id             INTEGER PRIMARY KEY CHECK (id = 1),
+                 context_tokens INTEGER CHECK (context_tokens > 0)
+             ) STRICT;
+             INSERT OR IGNORE INTO settings_local_context (id) VALUES (1);
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -790,6 +802,44 @@ impl SettingsStore {
         self.local_model()
     }
 
+    /// The Ollama context window new desktop investigations request (#1653):
+    /// `None` leaves it to Ollama. A stored value outside the closed set is
+    /// reported as an error.
+    pub fn local_context_window(&self) -> Result<Option<u32>, SettingsError> {
+        let stored: Option<i64> = self.conn.query_row(
+            "SELECT context_tokens FROM settings_local_context WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        match stored {
+            None => Ok(None),
+            Some(tokens) => u32::try_from(tokens)
+                .ok()
+                .filter(|tokens| llm::OllamaProvider::CONTEXT_WINDOWS.contains(tokens))
+                .map(Some)
+                .ok_or(SettingsError::InvalidContextWindow(
+                    u32::try_from(tokens).unwrap_or(u32::MAX),
+                )),
+        }
+    }
+
+    /// Persist one of the closed context windows, or `None` for Ollama's own.
+    pub fn set_local_context_window(
+        &mut self,
+        tokens: Option<u32>,
+    ) -> Result<Option<u32>, SettingsError> {
+        if let Some(tokens) = tokens
+            && !llm::OllamaProvider::CONTEXT_WINDOWS.contains(&tokens)
+        {
+            return Err(SettingsError::InvalidContextWindow(tokens));
+        }
+        self.conn.execute(
+            "UPDATE settings_local_context SET context_tokens = ?1 WHERE id = 1",
+            params![tokens],
+        )?;
+        self.local_context_window()
+    }
+
     /// Derive the egress firewall policy from persisted settings: cloud is
     /// allowed only for enabled LLM tiers whose provider is `cloud` **and**
     /// which hold standing consent. Everything else stays local-only.
@@ -894,6 +944,39 @@ mod tests {
             Err(SettingsError::InvalidLocalModel)
         ));
         assert_eq!(store.reset_local_model().unwrap(), shipped);
+    }
+
+    // #1653: the context window defaults to Ollama's own, persists across
+    // reopen, refuses values outside the closed set without writing, and
+    // reports a tampered stored value.
+    #[test]
+    fn local_context_window_default_persist_validate_and_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.local_context_window().unwrap(), None);
+        assert_eq!(
+            store.set_local_context_window(Some(32768)).unwrap(),
+            Some(32768)
+        );
+        for bad in [0, 4096, 32767, 131072] {
+            assert!(matches!(
+                store.set_local_context_window(Some(bad)),
+                Err(SettingsError::InvalidContextWindow(value)) if value == bad
+            ));
+        }
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.local_context_window().unwrap(), Some(32768));
+        store
+            .conn
+            .execute(
+                "UPDATE settings_local_context SET context_tokens = 5000 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        assert!(store.local_context_window().is_err());
+        assert_eq!(store.set_local_context_window(None).unwrap(), None);
     }
 
     #[test]

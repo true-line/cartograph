@@ -179,6 +179,25 @@ fn assert_no_request(listener: &TcpListener) {
     );
 }
 
+// #1653: a provider with a chosen context window sends it as `num_ctx`.
+#[test]
+fn ollama_sends_the_chosen_context_window() {
+    let limits = CompletionLimits::new(CompletionLimitValues::default()).unwrap();
+    let local_body = ollama_body(r#"{"action":"query_context"}"#);
+    let (endpoint, server) = http(framed(&local_body));
+    let local = OllamaProvider::new(&endpoint, "test-model", Duration::from_secs(10))
+        .unwrap()
+        .with_context_window(16384)
+        .unwrap();
+    local
+        .complete_bounded(&authorize(&local, limits), &control())
+        .unwrap();
+    let request = server.join().unwrap();
+    let wire: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(wire["options"]["num_ctx"], 16384);
+    assert_eq!(wire["options"]["num_predict"], 2048);
+}
+
 // AC-0185: actual provider requests carry finite generation limits; complete
 // response metadata remains distinct from caller reservations and body measures.
 #[test]
@@ -197,6 +216,7 @@ fn bounded_providers_send_exact_generation_limits_and_consented_payload() {
     let request = server.join().unwrap();
     let wire: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(wire["options"]["num_predict"], 37);
+    assert!(wire["options"].get("num_ctx").is_none());
     assert_eq!(wire["format"], "json");
     assert_eq!(wire["think"], false);
     assert_eq!(
@@ -1739,6 +1759,7 @@ fn bounded_response_schema_is_bound_bounded_and_explicit() {
         2048,
         response_schema(authorized.payload()).unwrap(),
         false,
+        None,
     );
     let bytes = encode(
         &wire,

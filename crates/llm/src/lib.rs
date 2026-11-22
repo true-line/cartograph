@@ -489,6 +489,7 @@ impl EgressFirewall {
 /// Local Ollama provider using `/api/embed` and `/api/chat`.
 pub struct OllamaProvider {
     bounded_thinking: bool,
+    bounded_context_window: Option<u32>,
     base_url: Url,
     embedding_model: String,
     completion_model: String,
@@ -570,6 +571,7 @@ impl OllamaProvider {
         };
         Ok(Self {
             bounded_thinking: false,
+            bounded_context_window: None,
             base_url,
             embedding_model,
             completion_model,
@@ -586,6 +588,25 @@ impl OllamaProvider {
             self.bounded_thinking = true;
         }
         self
+    }
+
+    /// Context windows a bounded chat may request from Ollama (#1653). Without
+    /// one, the server's own default applies, which can silently cut a long
+    /// prompt short on a local model.
+    pub const CONTEXT_WINDOWS: [u32; 4] = [8192, 16384, 32768, 65536];
+
+    /// Request `num_ctx` on bounded chats and bind it to the provider profile,
+    /// so the consent fingerprint and provenance record it. Only one of
+    /// [`Self::CONTEXT_WINDOWS`] is accepted.
+    pub fn with_context_window(mut self, tokens: u32) -> Result<Self, ProviderError> {
+        if self.bounded_context_window.is_some() || !Self::CONTEXT_WINDOWS.contains(&tokens) {
+            return Err(ProviderError::Unsupported(
+                "a context window other than one of OllamaProvider::CONTEXT_WINDOWS",
+            ));
+        }
+        self.provider_id.push_str(&format!(":num-ctx-{tokens}"));
+        self.bounded_context_window = Some(tokens);
+        Ok(self)
     }
 
     /// Construct the default local provider.
@@ -794,6 +815,7 @@ impl LlmProvider for OllamaProvider {
             &self.bounded_client,
             &self.bounded_profile()?,
             self.bounded_thinking,
+            self.bounded_context_window,
             request,
             control,
         )
@@ -1152,6 +1174,30 @@ mod tests {
         server.join().unwrap();
     }
 
+    // #1653: a chosen context window is closed, applied once and bound to the
+    // provider id, so consent and provenance name it.
+    #[test]
+    fn ollama_context_window_is_closed_and_named_in_the_provider_id() {
+        let provider =
+            OllamaProvider::new(OllamaProvider::DEFAULT_URL, "m", Duration::from_secs(1)).unwrap();
+        assert_eq!(provider.id(), "ollama:m");
+        let chosen = provider.with_context_window(32768).unwrap();
+        assert_eq!(chosen.id(), "ollama:m:num-ctx-32768");
+        assert_eq!(
+            chosen.bounded_profile().unwrap().provider_id,
+            "ollama:m:num-ctx-32768"
+        );
+        assert!(chosen.with_context_window(8192).is_err());
+        for refused in [0, 2048, 4096, 32767, 131072] {
+            assert!(
+                OllamaProvider::new(OllamaProvider::DEFAULT_URL, "m", Duration::from_secs(1))
+                    .unwrap()
+                    .with_context_window(refused)
+                    .is_err()
+            );
+        }
+    }
+
     #[test]
     fn ollama_client_disables_all_proxies() {
         // AC-0023: a Local provider stays physically local even if a system
@@ -1187,6 +1233,7 @@ mod tests {
             completion_model: "test-model".into(),
             provider_id: "ollama:test-model".into(),
             bounded_thinking: false,
+            bounded_context_window: None,
             client,
             bounded_client: bounded::build_client(Client::builder(), true).unwrap(),
         };

@@ -5,13 +5,17 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A desktop local provider: its completion model and context window (#1643, #1653).
+type LocalProviderKey = (String, Option<u32>);
+
 /// App-lifetime clients and transient worker payloads. Durable task state and
 /// deduplication belong exclusively to JobStore's coordinator tables.
 #[derive(Default)]
 pub(crate) struct InvestigationRuntime {
     providers: Mutex<BTreeMap<InvestigationProviderMode, Arc<dyn LlmProvider>>>,
-    /// Local providers for a configured completion model (#1643), by model.
-    local_models: Mutex<BTreeMap<String, Arc<dyn LlmProvider>>>,
+    /// Local providers for a configured completion model (#1643) and context
+    /// window (#1653), by both.
+    local_models: Mutex<BTreeMap<LocalProviderKey, Arc<dyn LlmProvider>>>,
     live: Mutex<BTreeMap<String, Arc<LiveTask>>>,
 }
 
@@ -58,42 +62,48 @@ impl InvestigationRuntime {
     }
 
     /// The provider a new desktop start uses: the configured local completion
-    /// model (#1643) when it differs from the shipped default, otherwise the
-    /// mode's default provider. Construction makes no network call; a model
-    /// that is not installed fails at its first request and is reported.
+    /// model (#1643) and context window (#1653) when either differs from the
+    /// shipped default, otherwise the mode's default provider. Construction
+    /// makes no network call; a model that is not installed fails at its
+    /// first request and is reported.
     pub(super) fn provider_for_start(
         &self,
         mode: InvestigationProviderMode,
         local_model: Option<&str>,
+        context_window: Option<u32>,
     ) -> Result<Arc<dyn LlmProvider>, HostError> {
-        let model = match (mode, local_model) {
-            (InvestigationProviderMode::Local, Some(model))
-                if model != llm::OllamaProvider::DEFAULT_COMPLETION_MODEL =>
-            {
-                model
-            }
-            _ => return self.provider(mode),
-        };
+        if mode != InvestigationProviderMode::Local {
+            return self.provider(mode);
+        }
+        let model = local_model.unwrap_or(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL);
+        if model == llm::OllamaProvider::DEFAULT_COMPLETION_MODEL && context_window.is_none() {
+            return self.provider(mode);
+        }
         let mut providers = self
             .local_models
             .lock()
             .map_err(|_| HostError::Operational)?;
-        if let Some(provider) = providers.get(model) {
+        let key = (model.to_owned(), context_window);
+        if let Some(provider) = providers.get(&key) {
             return Ok(provider.clone());
         }
-        let provider: Arc<dyn LlmProvider> = Arc::new(
-            llm::OllamaProvider::with_models(
-                llm::OllamaProvider::DEFAULT_URL,
-                llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
-                model,
-                Duration::from_secs(120),
-            )
-            .map_err(|_| HostError::Operational)?,
-        );
+        let mut local = llm::OllamaProvider::with_models(
+            llm::OllamaProvider::DEFAULT_URL,
+            llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+            model,
+            Duration::from_secs(120),
+        )
+        .map_err(|_| HostError::Operational)?;
+        if let Some(tokens) = context_window {
+            local = local
+                .with_context_window(tokens)
+                .map_err(|_| HostError::InvalidInput)?;
+        }
+        let provider: Arc<dyn LlmProvider> = Arc::new(local);
         provider
             .bounded_profile()
             .map_err(|_| HostError::InvalidInput)?;
-        providers.insert(model.to_owned(), provider.clone());
+        providers.insert(key, provider.clone());
         Ok(provider)
     }
 
@@ -103,8 +113,9 @@ impl InvestigationRuntime {
         &self,
         mode: InvestigationProviderMode,
         local_model: Option<&str>,
+        context_window: Option<u32>,
     ) -> InvestigationProvider {
-        self.provider_for_start(mode, local_model)
+        self.provider_for_start(mode, local_model, context_window)
             .and_then(|p| descriptor(p.as_ref(), mode))
             .unwrap_or_else(|_| InvestigationProvider {
                 mode,
@@ -331,18 +342,22 @@ mod run_clock_tests {
         let runtime = InvestigationRuntime::default();
         let local = InvestigationProviderMode::Local;
         let chosen = runtime
-            .provider_for_start(local, Some("qwen3:30b-a3b"))
+            .provider_for_start(local, Some("qwen3:30b-a3b"), None)
             .unwrap();
         assert_eq!(
             descriptor(chosen.as_ref(), local).unwrap().model,
             "qwen3:30b-a3b"
         );
         let again = runtime
-            .provider_for_start(local, Some("qwen3:30b-a3b"))
+            .provider_for_start(local, Some("qwen3:30b-a3b"), None)
             .unwrap();
         assert!(Arc::ptr_eq(&chosen, &again));
         let default = runtime
-            .provider_for_start(local, Some(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL))
+            .provider_for_start(
+                local,
+                Some(llm::OllamaProvider::DEFAULT_COMPLETION_MODEL),
+                None,
+            )
             .unwrap();
         assert!(Arc::ptr_eq(&default, &runtime.provider(local).unwrap()));
         assert_eq!(
@@ -350,20 +365,68 @@ mod run_clock_tests {
             llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
         );
         assert!(Arc::ptr_eq(
-            &runtime.provider_for_start(local, None).unwrap(),
+            &runtime.provider_for_start(local, None, None).unwrap(),
             &default
         ));
         // The catalog shows what a desktop start would use.
         assert_eq!(
             runtime
-                .descriptor_for_start(local, Some("qwen3:30b-a3b"))
+                .descriptor_for_start(local, Some("qwen3:30b-a3b"), None)
                 .model,
             "qwen3:30b-a3b"
         );
         assert_eq!(
-            runtime.descriptor_for_start(local, None).model,
+            runtime.descriptor_for_start(local, None, None).model,
             llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
         );
+    }
+    // #1653: a chosen context window gets its own provider, named by it,
+    // with the default or a chosen model; none keeps the mode provider.
+    #[test]
+    fn configured_context_window_selects_its_own_provider() {
+        let runtime = InvestigationRuntime::default();
+        let local = InvestigationProviderMode::Local;
+        let windowed = runtime
+            .provider_for_start(local, None, Some(32768))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&windowed, &runtime.provider(local).unwrap()));
+        assert_eq!(
+            descriptor(windowed.as_ref(), local).unwrap().provider_id,
+            format!(
+                "ollama:{}+{}:num-ctx-32768",
+                llm::OllamaProvider::DEFAULT_EMBEDDING_MODEL,
+                llm::OllamaProvider::DEFAULT_COMPLETION_MODEL
+            )
+        );
+        assert!(Arc::ptr_eq(
+            &windowed,
+            &runtime
+                .provider_for_start(local, None, Some(32768))
+                .unwrap()
+        ));
+        let both = runtime
+            .provider_for_start(local, Some("qwen3:30b-a3b"), Some(8192))
+            .unwrap();
+        assert!(
+            descriptor(both.as_ref(), local)
+                .unwrap()
+                .provider_id
+                .ends_with("qwen3:30b-a3b:num-ctx-8192")
+        );
+        assert!(runtime.provider_for_start(local, None, Some(5000)).is_err());
+        let cloud = InvestigationProviderMode::Cloud;
+        // The cloud provider ignores the window: same provider, or the same
+        // error when no cloud key is configured.
+        match (
+            runtime.provider_for_start(cloud, None, Some(32768)),
+            runtime.provider(cloud),
+        ) {
+            (Ok(windowed), Ok(plain)) => assert!(Arc::ptr_eq(&windowed, &plain)),
+            (Err(windowed), Err(plain)) => {
+                assert_eq!(format!("{windowed:?}"), format!("{plain:?}"))
+            }
+            _ => panic!("the context window changed the cloud provider"),
+        }
     }
     // AC-0562: a saved active allowance above the default extends the deadline.
     #[test]

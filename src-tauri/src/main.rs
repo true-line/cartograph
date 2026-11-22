@@ -4847,6 +4847,26 @@ fn reset_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelC
     store.reset_local_model().map_err(|e| e.to_string())
 }
 
+/// The Ollama context window for new desktop investigations, or `None` for
+/// Ollama's own default (#1653).
+#[tauri::command]
+fn get_local_context_window(state: State<'_, AppState>) -> Result<Option<u32>, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.local_context_window().map_err(|e| e.to_string())
+}
+
+/// Save one of the closed context windows, or `None` for Ollama's own (#1653).
+#[tauri::command]
+fn set_local_context_window(
+    tokens: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Option<u32>, String> {
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .set_local_context_window(tokens)
+        .map_err(|e| e.to_string())
+}
+
 /// Which provider keys are configured and where each comes from (#1763).
 /// Never returns a key.
 #[tauri::command]
@@ -8532,6 +8552,8 @@ fn main() {
             get_local_model,
             set_local_model,
             reset_local_model,
+            get_local_context_window,
+            set_local_context_window,
             provider_key_status,
             knowledge_phase::knowledge_phase_status,
             set_provider_key,
