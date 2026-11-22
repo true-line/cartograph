@@ -294,6 +294,7 @@ dependencies = [
 name = "app-store"
 version = "0.76.0"
 dependencies = [
+ "adapters-artifact-jvm",
  "adapters-fw",
  "adapters-lang-go",
  "adapters-lang-java",

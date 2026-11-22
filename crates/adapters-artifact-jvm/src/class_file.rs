@@ -162,6 +162,9 @@ pub struct ClassFile {
     pub methods: Vec<Method>,
     /// How the class is nested, from its own `InnerClasses` entry.
     pub nesting: Option<Nesting>,
+    /// The source file name its `SourceFile` attribute records
+    /// (`Ledger.java`, `Models.kt`).
+    pub source_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -460,17 +463,31 @@ fn read_attributes(
         let start = reader.at;
         let body = reader.take(len)?;
         if want_code && pool.utf8(name)? == "Code" {
-            if body.len() < 8 {
-                return Err(Refusal::Truncated);
-            }
-            let code_len = u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
-            if 8 + code_len > body.len() {
-                return Err(Refusal::Truncated);
-            }
-            code = Some((start + 8, code_len));
+            code = Some((start + 8, code_length(body)?));
         }
     }
     Ok(code)
+}
+
+/// The length of a `Code` attribute's bytecode array, once the whole
+/// attribute (JVMS §4.7.3) is walked: the exception table and the nested
+/// attributes must fill its body exactly.
+fn code_length(body: &[u8]) -> Result<usize, Refusal> {
+    let mut reader = Reader { bytes: body, at: 0 };
+    reader.take(4)?;
+    let code_len = reader.u32()? as usize;
+    reader.take(code_len)?;
+    let handlers = usize::from(reader.u16()?);
+    reader.take(handlers * 8)?;
+    for _ in 0..reader.u16()? {
+        reader.u16()?;
+        let len = reader.u32()? as usize;
+        reader.take(len)?;
+    }
+    if reader.at != body.len() {
+        return Err(Refusal::Truncated);
+    }
+    Ok(code_len)
 }
 
 fn read_bootstraps(body: &[u8], pool: &Pool) -> Result<Bootstraps, Refusal> {
@@ -544,6 +561,7 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
     }
     let mut bootstraps = Vec::new();
     let mut nesting = None;
+    let mut source_file = None;
     for _ in 0..reader.u16()? {
         let name = reader.u16()?;
         let len = reader.u32()? as usize;
@@ -551,6 +569,12 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
         match pool.utf8(name)? {
             "BootstrapMethods" => bootstraps = read_bootstraps(body, &pool)?,
             "InnerClasses" => nesting = read_nesting(body, &pool, &this_class)?,
+            "SourceFile" => {
+                let [high, low] = body else {
+                    return Err(Refusal::Truncated);
+                };
+                source_file = Some(pool.utf8(u16::from_be_bytes([*high, *low]))?.to_string());
+            }
             _ => {}
         }
     }
@@ -595,6 +619,7 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
         fields,
         methods,
         nesting,
+        source_file,
     })
 }
 
@@ -699,6 +724,23 @@ mod tests {
         );
         let bootstraps = vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         assert_eq!(read_calls(&code, 0, &pool, &bootstraps).unwrap().len(), 1);
+    }
+
+    /// A `Code` attribute must hold its exception table and nested
+    /// attributes after the bytecode; one that ends early is truncated.
+    #[test]
+    fn a_code_attribute_is_walked_whole() {
+        // max_stack, max_locals, code_length 1, `return`.
+        let head = [0, 1, 0, 1, 0, 0, 0, 1, 0xb1];
+        let whole = [&head[..], &[0, 0, 0, 0]].concat();
+        assert_eq!(code_length(&whole), Ok(1));
+        assert_eq!(code_length(&head), Err(Refusal::Truncated));
+        let no_attributes = [&head[..], &[0, 0]].concat();
+        assert_eq!(code_length(&no_attributes), Err(Refusal::Truncated));
+        let short_handler = [&head[..], &[0, 1, 0, 0]].concat();
+        assert_eq!(code_length(&short_handler), Err(Refusal::Truncated));
+        let trailing = [&whole[..], &[0]].concat();
+        assert_eq!(code_length(&trailing), Err(Refusal::Truncated));
     }
 
     #[test]
