@@ -176,8 +176,21 @@ enum Constant {
     MemberRef(u16, u16),
     FieldRef,
     MethodHandle(u16),
+    /// A `CONSTANT_InvokeDynamic`, naming a bootstrap method by index.
     InvokeDynamic(u16),
+    /// A `CONSTANT_Dynamic`, naming a bootstrap method by index.
+    Dynamic(u16),
     Other,
+}
+
+/// What a constant-pool reference must name.
+#[derive(Debug, Clone, Copy)]
+enum Want {
+    Utf8,
+    Class,
+    NameAndType,
+    /// A field, method or interface method reference.
+    Member,
 }
 
 struct Reader<'a> {
@@ -211,6 +224,25 @@ impl<'a> Reader<'a> {
 struct Pool {
     entries: Vec<Constant>,
     spans: Vec<Span>,
+}
+
+/// Every constant's references to other constants name a constant of the
+/// kind JVMS §4.4 requires, so a class whose pool cites a missing or wrong
+/// constant is refused even where the reader does not need that constant.
+fn check_references(pool: &Pool, refs: &[(u16, Want)]) -> Result<(), Refusal> {
+    for &(index, want) in refs {
+        let ok = matches!(
+            (want, pool.get(index)?),
+            (Want::Utf8, Constant::Utf8(_))
+                | (Want::Class, Constant::Class(_))
+                | (Want::NameAndType, Constant::NameAndType(..))
+                | (Want::Member, Constant::MemberRef(..) | Constant::FieldRef)
+        );
+        if !ok {
+            return Err(Refusal::ConstantIndex);
+        }
+    }
+    Ok(())
 }
 
 impl Pool {
@@ -287,6 +319,7 @@ fn read_pool(reader: &mut Reader<'_>) -> Result<Pool, Refusal> {
     let count = reader.u16()?;
     let mut entries = vec![Constant::Unused];
     let mut spans = vec![(0, 0)];
+    let mut refs = Vec::new();
     let mut index = 1u16;
     while index < count {
         let start = reader.at;
@@ -307,29 +340,48 @@ fn read_pool(reader: &mut Reader<'_>) -> Result<Pool, Refusal> {
                 reader.take(8)?;
                 (Constant::Other, true)
             }
-            7 => (Constant::Class(reader.u16()?), false),
+            7 => {
+                let name = reader.u16()?;
+                refs.push((name, Want::Utf8));
+                (Constant::Class(name), false)
+            }
+            // String, MethodType, Module and Package name a UTF-8 constant.
             8 | 16 | 19 | 20 => {
-                reader.u16()?;
+                refs.push((reader.u16()?, Want::Utf8));
                 (Constant::Other, false)
             }
-            9 => {
-                reader.take(4)?;
-                (Constant::FieldRef, false)
+            9..=11 => {
+                let (class, nat) = (reader.u16()?, reader.u16()?);
+                refs.push((class, Want::Class));
+                refs.push((nat, Want::NameAndType));
+                let entry = if tag == 9 {
+                    Constant::FieldRef
+                } else {
+                    Constant::MemberRef(class, nat)
+                };
+                (entry, false)
             }
-            10 | 11 => (Constant::MemberRef(reader.u16()?, reader.u16()?), false),
-            12 => (Constant::NameAndType(reader.u16()?, reader.u16()?), false),
+            12 => {
+                let (name, descriptor) = (reader.u16()?, reader.u16()?);
+                refs.push((name, Want::Utf8));
+                refs.push((descriptor, Want::Utf8));
+                (Constant::NameAndType(name, descriptor), false)
+            }
             15 => {
                 reader.u8()?;
-                (Constant::MethodHandle(reader.u16()?), false)
+                let reference = reader.u16()?;
+                refs.push((reference, Want::Member));
+                (Constant::MethodHandle(reference), false)
             }
-            17 => {
-                reader.take(4)?;
-                (Constant::Other, false)
-            }
-            18 => {
+            17 | 18 => {
                 let bootstrap = reader.u16()?;
-                reader.u16()?;
-                (Constant::InvokeDynamic(bootstrap), false)
+                refs.push((reader.u16()?, Want::NameAndType));
+                let entry = if tag == 18 {
+                    Constant::InvokeDynamic(bootstrap)
+                } else {
+                    Constant::Dynamic(bootstrap)
+                };
+                (entry, false)
             }
             _ => return Err(Refusal::ConstantTag),
         };
@@ -343,7 +395,9 @@ fn read_pool(reader: &mut Reader<'_>) -> Result<Pool, Refusal> {
             index = index.checked_add(1).ok_or(Refusal::ConstantIndex)?;
         }
     }
-    Ok(Pool { entries, spans })
+    let pool = Pool { entries, spans };
+    check_references(&pool, &refs)?;
+    Ok(pool)
 }
 
 /// The length of the instruction at `pc` in `code`.
@@ -494,7 +548,9 @@ fn read_bootstraps(body: &[u8], pool: &Pool) -> Result<Bootstraps, Refusal> {
     let mut reader = Reader { bytes: body, at: 0 };
     let mut out = Vec::new();
     for _ in 0..reader.u16()? {
-        reader.u16()?;
+        if !matches!(pool.get(reader.u16()?)?, Constant::MethodHandle(_)) {
+            return Err(Refusal::ConstantIndex);
+        }
         let mut handles = Vec::new();
         for _ in 0..reader.u16()? {
             let argument = reader.u16()?;
@@ -506,6 +562,9 @@ fn read_bootstraps(body: &[u8], pool: &Pool) -> Result<Bootstraps, Refusal> {
             }
         }
         out.push(handles);
+    }
+    if reader.at != body.len() {
+        return Err(Refusal::Truncated);
     }
     Ok(out)
 }
@@ -580,6 +639,13 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
     }
     if reader.at != bytes.len() {
         return Err(Refusal::Trailing);
+    }
+    // Every dynamic constant names a bootstrap method the class has.
+    if pool.entries.iter().any(|entry| {
+        matches!(entry, Constant::InvokeDynamic(at) | Constant::Dynamic(at)
+            if usize::from(*at) >= bootstraps.len())
+    }) {
+        return Err(Refusal::ConstantIndex);
     }
     let mut methods = Vec::with_capacity(raw.len());
     for method in raw {
@@ -741,6 +807,50 @@ mod tests {
         assert_eq!(code_length(&short_handler), Err(Refusal::Truncated));
         let trailing = [&whole[..], &[0]].concat();
         assert_eq!(code_length(&trailing), Err(Refusal::Truncated));
+    }
+
+    /// A constant a reader never needs still has to cite constants that
+    /// exist and are of the kind JVMS §4.4 requires.
+    #[test]
+    fn every_constant_reference_is_checked() {
+        let utf8 = |text: &str| {
+            let mut bytes = vec![1, 0, text.len() as u8];
+            bytes.extend_from_slice(text.as_bytes());
+            bytes
+        };
+        let pool = |entries: &[Vec<u8>]| {
+            let mut bytes = vec![0, entries.len() as u8 + 1];
+            entries
+                .iter()
+                .for_each(|entry| bytes.extend_from_slice(entry));
+            read_pool(&mut Reader {
+                bytes: &bytes,
+                at: 0,
+            })
+            .map(|_| ())
+        };
+        // A String naming #1, a UTF-8 constant: well formed.
+        assert_eq!(pool(&[utf8("a"), vec![8, 0, 1]]), Ok(()));
+        // A String naming a constant that does not exist.
+        assert_eq!(
+            pool(&[utf8("a"), vec![8, 0, 9]]),
+            Err(Refusal::ConstantIndex)
+        );
+        // A String naming a String, not a UTF-8 constant.
+        assert_eq!(
+            pool(&[utf8("a"), vec![8, 0, 3], vec![8, 0, 1]]),
+            Err(Refusal::ConstantIndex)
+        );
+        // A field reference whose class is a UTF-8 constant.
+        assert_eq!(
+            pool(&[utf8("a"), vec![12, 0, 1, 0, 1], vec![9, 0, 1, 0, 2]]),
+            Err(Refusal::ConstantIndex)
+        );
+        // A method handle naming a name-and-type, not a member.
+        assert_eq!(
+            pool(&[utf8("a"), vec![12, 0, 1, 0, 1], vec![15, 5, 0, 2]]),
+            Err(Refusal::ConstantIndex)
+        );
     }
 
     #[test]
