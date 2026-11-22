@@ -120,6 +120,31 @@ pub(crate) async fn investigation_specialists(
     .await
 }
 
+/// At most this many pages of in-flight investigations are read for the
+/// roster; the live-task cap keeps the real number far below it.
+const ROSTER_ACTIVE_PAGES: usize = 64;
+
+/// The specialist agent roster with each agent's in-flight work (#256,
+/// AC-1408). Read-only: dispatch stays the existing investigation start.
+#[tauri::command]
+pub(crate) async fn list_agents(
+    app: tauri::AppHandle,
+) -> Result<Vec<agents::roster::RosterAgentStatus>, String> {
+    crate::off_ui_thread(move || {
+        let state = app.state::<AppState>();
+        let roster = agents::roster::roster().map_err(|e| e.to_string())?;
+        let work = state
+            .jobs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .active_investigation_work(ROSTER_ACTIVE_PAGES)
+            .map_err(|e| e.to_string())?
+            .ok_or("Too many active investigations to list the agent roster.")?;
+        Ok(agents::roster::roster_status(roster, &work))
+    })
+    .await
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 pub(crate) enum InvestigationStartError {
