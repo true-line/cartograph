@@ -4629,10 +4629,43 @@ fn set_operator_limit(
     value: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<operator_limits::OperatorLimit, String> {
-    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
-    store
-        .set_operator_limit(&key, value)
-        .map_err(|e| e.to_string())
+    let saved = {
+        let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+        store
+            .set_operator_limit(&key, value)
+            .map_err(|e| e.to_string())?
+    };
+    if [
+        operator_limits::CAPTURE_STORE_MAX_MIB,
+        operator_limits::CAPTURE_STORE_MAX_CAPTURES,
+    ]
+    .contains(&saved.key)
+    {
+        let limits = {
+            let store = state.settings.lock().map_err(|e| e.to_string())?;
+            capture_store_limits(&store)?
+        };
+        state.primary_sources.set_store_limits(limits)?;
+    }
+    Ok(saved)
+}
+
+/// The project's capture store quota (#1653, AC-1801), within the store's
+/// hard maxima. A stored value that no longer validates is an error.
+fn capture_store_limits(
+    settings: &settings::SettingsStore,
+) -> Result<source_capture::StoreLimits, String> {
+    let limit = |key| {
+        settings
+            .operator_limit(key)
+            .map_err(|error| error.to_string())
+    };
+    Ok(source_capture::StoreLimits {
+        max_bytes: limit(operator_limits::CAPTURE_STORE_MAX_MIB)?
+            .checked_mul(1024 * 1024)
+            .ok_or("Capture store MiB overflows.")?,
+        max_captures: limit(operator_limits::CAPTURE_STORE_MAX_CAPTURES)?,
+    })
 }
 
 /// The local completion model for new desktop investigations (#1643).
@@ -8354,6 +8387,11 @@ fn open_app_state(data_dir: &std::path::Path) -> Result<AppState, Box<dyn std::e
     let section_drafts =
         agents::draft_store::DraftStore::open(data_dir.join("section-drafts.sqlite"))
             .map_err(std::io::Error::other)?;
+    let primary_sources =
+        primary_source::PrimarySourceStore::open(&data_dir).map_err(std::io::Error::other)?;
+    primary_sources
+        .set_store_limits(capture_store_limits(&tier_settings).map_err(std::io::Error::other)?)
+        .map_err(std::io::Error::other)?;
     let recovery_metrics = metrics::MetricsStore::open(&state_path)?;
     Ok(AppState {
         graph: Mutex::new(graph),
@@ -8370,8 +8408,7 @@ fn open_app_state(data_dir: &std::path::Path) -> Result<AppState, Box<dyn std::e
         embedding_cache: Some(embedding_cache),
         knowledge_overlay: Some(knowledge_overlay),
         sources: Arc::new(Mutex::new(sources)),
-        primary_sources: primary_source::PrimarySourceStore::open(&data_dir)
-            .map_err(std::io::Error::other)?,
+        primary_sources,
         metrics: Mutex::new(recovery_metrics),
         curated_settled: Arc::default(),
     })

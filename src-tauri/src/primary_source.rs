@@ -1913,6 +1913,16 @@ impl PrimarySourceStore {
         })
     }
 
+    /// Apply the project's capture store quota (#1653, AC-1801) to captures
+    /// retained from now on.
+    pub fn set_store_limits(&self, limits: StoreLimits) -> Result<(), String> {
+        self.captures
+            .lock()
+            .map_err(storage_error)?
+            .set_limits(limits)
+            .map_err(storage_error)
+    }
+
     /// Test observation of retained-source lease attempts, including historical
     /// inspection. It does not count current-checkout reads or successful bytes.
     #[cfg(any(test, feature = "test-support"))]
