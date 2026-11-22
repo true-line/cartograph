@@ -8,7 +8,10 @@
 use super::{
     fixtures::{self, Corpus, LoadedFixtureBundle},
     policy::{self, CalibrationView, EvaluationInputs, FrozenPolicy, PredictionChoice},
-    report::{DecisionReason, EvaluationSummary, FamilyDecision, FamilyStatus, SummaryMode},
+    report::{
+        DecisionReason, EvaluationSummary, FamilyDecision, FamilyStatus, QualityMetrics,
+        SummaryMode,
+    },
     scoring::{self, EvaluationLabels, FamilyScore},
 };
 use crate::{
@@ -344,240 +347,329 @@ impl IndependentReceipt {
         hops: &[UnresolvedHop],
         candidates: &[Candidate],
     ) -> LiveAdmission {
-        // The live inputs are bounded by the same plan bound the embedding
-        // cache admits (AC-1507), so a VSCode-scale graph is ranked, not refused.
-        if hops.len() > LIVE_INPUT_BOUND
-            || candidates.len() > LIVE_INPUT_BOUND
-            || hops
-                .iter()
-                .any(|h| h.subtype.as_ref().is_some_and(|s| s.len() > 128))
-            || candidates
-                .iter()
-                .any(|c| c.subtype.as_ref().is_some_and(|s| s.len() > 128))
-        {
-            // Bound work before constructing groups or cloning live candidates.
-            let families: BTreeSet<_> = hops
-                .iter()
-                .take(LIVE_INPUT_BOUND)
-                .filter(|h| h.subtype.as_ref().is_none_or(|s| s.len() <= 128))
-                .map(UnresolvedHop::family)
-                .take(256)
-                .collect();
-            return LiveAdmission {
-                staged: Vec::new(),
-                admitted: Vec::new(),
-                summary: EvaluationSummary {
-                    schema_version: 1,
-                    mode: SummaryMode::IndependentEvaluation,
-                    families: families
-                        .into_iter()
-                        .map(|family| FamilyDecision {
-                            family,
-                            status: FamilyStatus::Abstained,
-                            reason: DecisionReason::IncompatibleEvidence,
-                            staged: 0,
-                            admitted: 0,
-                            ambiguous: 0,
-                            receipt_digest: Some(self.digest.clone()),
-                            metrics: None,
-                        })
-                        .collect(),
-                },
-            };
-        }
-        // Ranking happens here, not in a caller-supplied proposal list: every family
-        // uses its frozen top-k and both leaders are present for ambiguity admission.
-        let mut groups: BTreeMap<FamilyKey, Vec<&UnresolvedHop>> = BTreeMap::new();
-        // Excluded hops (e.g. interface dispatch, #259) never stage here.
-        for h in hops.iter().filter(|h| h.is_ann_candidate()) {
-            groups.entry(h.family()).or_default().push(h);
-        }
-        // Ranking keeps `neighbors` rows per hop, so bound the staged rows the
-        // families can produce, not only the inputs.
-        let staged_bound = groups.iter().try_fold(0_usize, |sum, (family, group)| {
-            let neighbors = policy.families.get(family).map_or(3, |p| p.neighbors);
-            sum.checked_add(group.len().checked_mul(neighbors)?)
-        });
-        if groups.len() > 256 || staged_bound.is_none_or(|rows| rows > LIVE_STAGED_BOUND) {
-            return LiveAdmission {
-                staged: Vec::new(),
-                admitted: Vec::new(),
-                summary: EvaluationSummary {
-                    schema_version: 1,
-                    mode: SummaryMode::IndependentEvaluation,
-                    families: groups
-                        .into_keys()
-                        .take(256)
-                        .map(|family| FamilyDecision {
-                            family,
-                            status: FamilyStatus::Abstained,
-                            reason: DecisionReason::IncompatibleEvidence,
-                            staged: 0,
-                            admitted: 0,
-                            ambiguous: 0,
-                            receipt_digest: Some(self.digest.clone()),
-                            metrics: None,
-                        })
-                        .collect(),
-                },
-            };
-        }
-        let compatible = ReviewedDataset::load(root, anchor, observed)
+        let verdicts = self
+            .scores
+            .iter()
+            .map(|s| {
+                (
+                    s.family().clone(),
+                    FamilyVerdict {
+                        adequate: s.adequate(),
+                        passed: s.passed(),
+                        metrics: s.metrics(),
+                    },
+                )
+            })
+            .collect();
+        let checks = ReviewedChecks {
+            receipt: self,
+            root,
+            anchor,
+            observed,
+            policy,
+            provider,
+        };
+        rank_live(
+            &checks,
+            &verdicts,
+            &self.digest,
+            policy,
+            provider,
+            hops,
+            candidates,
+        )
+    }
+}
+
+/// One family's independent verdict, from in-process scores or a verified
+/// locked receipt.
+#[derive(Debug, Clone)]
+pub(super) struct FamilyVerdict {
+    pub(super) adequate: bool,
+    pub(super) passed: bool,
+    pub(super) metrics: QualityMetrics,
+}
+
+/// The trust checks live ranking runs: before ranking, after each family's
+/// ranking, and once more before admitting anything.
+pub(super) trait LiveChecks {
+    fn initial(&self) -> bool;
+    fn after_family(&self) -> bool;
+    fn final_trust(&self) -> bool;
+}
+
+struct ReviewedChecks<'a, 'p> {
+    receipt: &'a IndependentReceipt,
+    root: &'a Path,
+    anchor: &'a ReviewAnchor,
+    observed: &'a [ObservedCorpus],
+    policy: &'a FrozenPolicy,
+    provider: &'a CachedProvider<'p>,
+}
+impl LiveChecks for ReviewedChecks<'_, '_> {
+    fn initial(&self) -> bool {
+        let (receipt, root, anchor, observed, policy, provider) = (
+            self.receipt,
+            self.root,
+            self.anchor,
+            self.observed,
+            self.policy,
+            self.provider,
+        );
+        ReviewedDataset::load(root, anchor, observed)
             .and_then(|fresh| {
-                if fresh.envelope_hash != self.dataset.envelope_hash
-                    || fresh.bundle.digests() != self.dataset.bundle.digests()
-                    || self.prediction_started_at < fresh.envelope.calibration_started_at
-                    || policy.digest() != self.policy_digest()
+                if fresh.envelope_hash != receipt.dataset.envelope_hash
+                    || fresh.bundle.digests() != receipt.dataset.bundle.digests()
+                    || receipt.prediction_started_at < fresh.envelope.calibration_started_at
+                    || policy.digest() != receipt.policy_digest()
                 {
                     return Err("independent receipt no longer compatible".into());
                 }
                 fresh.compatible_policy(policy, provider)
             })
-            .is_ok();
-        let mut staged = Vec::new();
-        let mut admitted = Vec::new();
-        let mut families = Vec::new();
-
-        // Even malformed duplicate gap identities cannot win through ordering.
-        let mut gaps = BTreeSet::new();
-        let unique_gaps = hops.iter().all(|h| gaps.insert(&h.gap_id));
-        for (family, group) in groups {
-            let p = policy.families.get(&family);
-            let relevant: Vec<_> = candidates
-                .iter()
-                .filter(|c| c.family() == family)
-                .cloned()
-                .collect();
-            let mut candidate_ids = BTreeSet::new();
-            let unique_candidates = relevant.iter().all(|c| candidate_ids.insert(&c.node_id));
-            let local_hops: Vec<_> = group.into_iter().cloned().collect();
-            let ranked = if !unique_gaps || !unique_candidates {
-                Err("live input bound or identity mismatch".into())
-            } else {
-                crate::propose(
-                    provider,
-                    &local_hops,
-                    &relevant,
-                    p.map(|p| p.neighbors).unwrap_or(3),
-                )
-                .map_err(|e| e.to_string())
-            };
-            let score = self.scores.iter().find(|s| s.family() == &family);
-            let mut reason = if !compatible {
-                DecisionReason::IncompatibleEvidence
-            } else if p.is_none() || score.is_none() {
-                DecisionReason::MissingEvidence
-            } else if !score.is_some_and(FamilyScore::adequate) {
-                DecisionReason::InsufficientEvidence
-            } else if !score.is_some_and(FamilyScore::passed) {
-                DecisionReason::BelowFloor
-            } else {
-                DecisionReason::IndependentlyEvaluated
-            };
-            let mut local_admitted = Vec::new();
-            let mut ambiguous = 0;
-            let local = match ranked {
-                Ok(ranked) => ranked,
-                Err(_) => {
-                    reason = DecisionReason::IncompatibleEvidence;
-                    Vec::new()
-                }
-            };
-            if local.iter().any(|r| {
-                r.family() != &family
-                    || !r.similarity.is_finite()
-                    || !(0.0..=1.0).contains(&r.similarity)
-            }) {
-                reason = DecisionReason::IncompatibleEvidence;
-            }
-            if let Some(p) = p {
-                // One pass groups the ranked rows by Gap, keeping ranking order,
-                // so choosing stays linear in the staged rows at scale.
-                // Choosing reads only a Gap's two leaders, so only those are copied.
-                let mut by_gap: BTreeMap<&str, Vec<&SemanticProposal>> = BTreeMap::new();
-                for r in &local {
-                    by_gap.entry(r.gap_id.as_str()).or_default().push(r);
-                }
-                for h in &local_hops {
-                    let gap_rows = by_gap.remove(h.gap_id.as_str()).unwrap_or_default();
-                    let rows: Vec<SemanticProposal> =
-                        gap_rows.iter().take(2).map(|r| (*r).clone()).collect();
-                    match policy::choose(&rows, p) {
-                        PredictionChoice::Ambiguous => ambiguous += gap_rows.len() as u64,
-                        PredictionChoice::Admitted { .. }
-                            if reason == DecisionReason::IndependentlyEvaluated =>
-                        {
-                            if let Some(best) = rows.first() {
-                                local_admitted.push(best.clone());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Recheck the exact operation after ranking. A lease/model change cannot
-            // retain grants or earlier family admissions.
-            if self.dataset.compatible_policy(policy, provider).is_err() {
-                reason = DecisionReason::IncompatibleEvidence;
-                local_admitted.clear();
-            }
-            let status = if matches!(
-                reason,
-                DecisionReason::IndependentlyEvaluated | DecisionReason::BelowFloor
-            ) {
-                FamilyStatus::IndependentlyEvaluated
-            } else {
-                FamilyStatus::Abstained
-            };
-            families.push(FamilyDecision {
-                family,
-                status,
-                reason,
-                staged: local.len() as u64,
-                admitted: local_admitted.len() as u64,
-                ambiguous,
-                receipt_digest: Some(self.digest.clone()),
-                metrics: score.map(FamilyScore::metrics),
-            });
-            staged.extend(local);
-            admitted.extend(local_admitted);
-        }
-        let final_trust = ReviewedDataset::load(root, anchor, observed)
+            .is_ok()
+    }
+    fn after_family(&self) -> bool {
+        self.receipt
+            .dataset
+            .compatible_policy(self.policy, self.provider)
+            .is_ok()
+    }
+    fn final_trust(&self) -> bool {
+        let (receipt, root, anchor, observed, policy, provider) = (
+            self.receipt,
+            self.root,
+            self.anchor,
+            self.observed,
+            self.policy,
+            self.provider,
+        );
+        ReviewedDataset::load(root, anchor, observed)
             .and_then(|fresh| {
-                if fresh.envelope_hash != self.dataset.envelope_hash
-                    || fresh.bundle.digests() != self.dataset.bundle.digests()
+                if fresh.envelope_hash != receipt.dataset.envelope_hash
+                    || fresh.bundle.digests() != receipt.dataset.bundle.digests()
                 {
                     return Err("review changed during live prediction".into());
                 }
                 fresh.compatible_policy(policy, provider)
             })
-            .is_ok();
-        if !final_trust {
-            admitted.clear();
-            for f in &mut families {
-                f.admitted = 0;
-                f.status = FamilyStatus::Abstained;
-                f.reason = DecisionReason::IncompatibleEvidence;
-            }
-        }
-        let mut summary = EvaluationSummary {
+            .is_ok()
+    }
+}
+
+/// Every listed family abstains on incompatible evidence; nothing is staged.
+pub(super) fn abstained(
+    families: impl IntoIterator<Item = FamilyKey>,
+    receipt_digest: &str,
+) -> LiveAdmission {
+    LiveAdmission {
+        staged: Vec::new(),
+        admitted: Vec::new(),
+        summary: EvaluationSummary {
             schema_version: 1,
             mode: SummaryMode::IndependentEvaluation,
-            families,
+            families: families
+                .into_iter()
+                .map(|family| FamilyDecision {
+                    family,
+                    status: FamilyStatus::Abstained,
+                    reason: DecisionReason::IncompatibleEvidence,
+                    staged: 0,
+                    admitted: 0,
+                    ambiguous: 0,
+                    receipt_digest: Some(receipt_digest.to_owned()),
+                    metrics: None,
+                })
+                .collect(),
+        },
+    }
+}
+
+/// Rank live hops under a frozen policy and admit per family on an
+/// independent verdict. Shared by the in-process reviewed receipt and the
+/// verified locked receipt (ADR-0082), so both bound, rank and choose alike.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rank_live(
+    checks: &dyn LiveChecks,
+    verdicts: &BTreeMap<FamilyKey, FamilyVerdict>,
+    receipt_digest: &str,
+    policy: &FrozenPolicy,
+    provider: &CachedProvider<'_>,
+    hops: &[UnresolvedHop],
+    candidates: &[Candidate],
+) -> LiveAdmission {
+    // The live inputs are bounded by the same plan bound the embedding
+    // cache admits (AC-1507), so a VSCode-scale graph is ranked, not refused.
+    if hops.len() > LIVE_INPUT_BOUND
+        || candidates.len() > LIVE_INPUT_BOUND
+        || hops
+            .iter()
+            .any(|h| h.subtype.as_ref().is_some_and(|s| s.len() > 128))
+        || candidates
+            .iter()
+            .any(|c| c.subtype.as_ref().is_some_and(|s| s.len() > 128))
+    {
+        // Bound work before constructing groups or cloning live candidates.
+        let families: BTreeSet<_> = hops
+            .iter()
+            .take(LIVE_INPUT_BOUND)
+            .filter(|h| h.subtype.as_ref().is_none_or(|s| s.len() <= 128))
+            .map(UnresolvedHop::family)
+            .take(256)
+            .collect();
+        return abstained(families, receipt_digest);
+    }
+    // Ranking happens here, not in a caller-supplied proposal list: every family
+    // uses its frozen top-k and both leaders are present for ambiguity admission.
+    let mut groups: BTreeMap<FamilyKey, Vec<&UnresolvedHop>> = BTreeMap::new();
+    // Excluded hops (e.g. interface dispatch, #259) never stage here.
+    for h in hops.iter().filter(|h| h.is_ann_candidate()) {
+        groups.entry(h.family()).or_default().push(h);
+    }
+    // Ranking keeps `neighbors` rows per hop, so bound the staged rows the
+    // families can produce, not only the inputs.
+    let staged_bound = groups.iter().try_fold(0_usize, |sum, (family, group)| {
+        let neighbors = policy.families.get(family).map_or(3, |p| p.neighbors);
+        sum.checked_add(group.len().checked_mul(neighbors)?)
+    });
+    if groups.len() > 256 || staged_bound.is_none_or(|rows| rows > LIVE_STAGED_BOUND) {
+        return abstained(groups.into_keys().take(256), receipt_digest);
+    }
+    let compatible = checks.initial();
+    let mut staged = Vec::new();
+    let mut admitted = Vec::new();
+    let mut families = Vec::new();
+
+    // Even malformed duplicate gap identities cannot win through ordering.
+    let mut gaps = BTreeSet::new();
+    let unique_gaps = hops.iter().all(|h| gaps.insert(&h.gap_id));
+    for (family, group) in groups {
+        let p = policy.families.get(&family);
+        let relevant: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.family() == family)
+            .cloned()
+            .collect();
+        let mut candidate_ids = BTreeSet::new();
+        let unique_candidates = relevant.iter().all(|c| candidate_ids.insert(&c.node_id));
+        let local_hops: Vec<_> = group.into_iter().cloned().collect();
+        let ranked = if !unique_gaps || !unique_candidates {
+            Err("live input bound or identity mismatch".into())
+        } else {
+            crate::propose(
+                provider,
+                &local_hops,
+                &relevant,
+                p.map(|p| p.neighbors).unwrap_or(3),
+            )
+            .map_err(|e| e.to_string())
         };
-        if summary.validate().is_err() {
-            admitted.clear();
-            for f in &mut summary.families {
-                f.status = FamilyStatus::Abstained;
-                f.reason = DecisionReason::IncompatibleEvidence;
-                f.admitted = 0;
+        let score = verdicts.get(&family);
+        let mut reason = if !compatible {
+            DecisionReason::IncompatibleEvidence
+        } else if p.is_none() || score.is_none() {
+            DecisionReason::MissingEvidence
+        } else if !score.is_some_and(|s| s.adequate) {
+            DecisionReason::InsufficientEvidence
+        } else if !score.is_some_and(|s| s.passed) {
+            DecisionReason::BelowFloor
+        } else {
+            DecisionReason::IndependentlyEvaluated
+        };
+        let mut local_admitted = Vec::new();
+        let mut ambiguous = 0;
+        let local = match ranked {
+            Ok(ranked) => ranked,
+            Err(_) => {
+                reason = DecisionReason::IncompatibleEvidence;
+                Vec::new()
+            }
+        };
+        if local.iter().any(|r| {
+            r.family() != &family
+                || !r.similarity.is_finite()
+                || !(0.0..=1.0).contains(&r.similarity)
+        }) {
+            reason = DecisionReason::IncompatibleEvidence;
+        }
+        if let Some(p) = p {
+            // One pass groups the ranked rows by Gap, keeping ranking order,
+            // so choosing stays linear in the staged rows at scale.
+            // Choosing reads only a Gap's two leaders, so only those are copied.
+            let mut by_gap: BTreeMap<&str, Vec<&SemanticProposal>> = BTreeMap::new();
+            for r in &local {
+                by_gap.entry(r.gap_id.as_str()).or_default().push(r);
+            }
+            for h in &local_hops {
+                let gap_rows = by_gap.remove(h.gap_id.as_str()).unwrap_or_default();
+                let rows: Vec<SemanticProposal> =
+                    gap_rows.iter().take(2).map(|r| (*r).clone()).collect();
+                match policy::choose(&rows, p) {
+                    PredictionChoice::Ambiguous => ambiguous += gap_rows.len() as u64,
+                    PredictionChoice::Admitted { .. }
+                        if reason == DecisionReason::IndependentlyEvaluated =>
+                    {
+                        if let Some(best) = rows.first() {
+                            local_admitted.push(best.clone());
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        LiveAdmission {
-            staged,
-            admitted,
-            summary,
+        // Recheck the exact operation after ranking. A lease/model change cannot
+        // retain grants or earlier family admissions.
+        if !checks.after_family() {
+            reason = DecisionReason::IncompatibleEvidence;
+            local_admitted.clear();
         }
+        let status = if matches!(
+            reason,
+            DecisionReason::IndependentlyEvaluated | DecisionReason::BelowFloor
+        ) {
+            FamilyStatus::IndependentlyEvaluated
+        } else {
+            FamilyStatus::Abstained
+        };
+        families.push(FamilyDecision {
+            family,
+            status,
+            reason,
+            staged: local.len() as u64,
+            admitted: local_admitted.len() as u64,
+            ambiguous,
+            receipt_digest: Some(receipt_digest.to_owned()),
+            metrics: score.map(|s| s.metrics.clone()),
+        });
+        staged.extend(local);
+        admitted.extend(local_admitted);
+    }
+    let final_trust = checks.final_trust();
+    if !final_trust {
+        admitted.clear();
+        for f in &mut families {
+            f.admitted = 0;
+            f.status = FamilyStatus::Abstained;
+            f.reason = DecisionReason::IncompatibleEvidence;
+        }
+    }
+    let mut summary = EvaluationSummary {
+        schema_version: 1,
+        mode: SummaryMode::IndependentEvaluation,
+        families,
+    };
+    if summary.validate().is_err() {
+        admitted.clear();
+        for f in &mut summary.families {
+            f.status = FamilyStatus::Abstained;
+            f.reason = DecisionReason::IncompatibleEvidence;
+            f.admitted = 0;
+        }
+    }
+    LiveAdmission {
+        staged,
+        admitted,
+        summary,
     }
 }
 
@@ -728,7 +820,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("review-envelope.json"), &bytes).unwrap();
         ReviewAnchor::new(fixtures::sha256(&bytes), "policy-implementer".into()).unwrap()
     }
-    fn live(b: &LoadedFixtureBundle, id: &str) -> (Vec<UnresolvedHop>, Vec<Candidate>) {
+    pub(crate) fn live(b: &LoadedFixtureBundle, id: &str) -> (Vec<UnresolvedHop>, Vec<Candidate>) {
         let c = b.inputs().cases.iter().find(|c| c.case_id == id).unwrap();
         let ev = |es: &[fixtures::EvidenceRef]| {
             es.iter()

@@ -12,7 +12,7 @@ use super::{
     },
 };
 use crate::FamilyKey;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Evaluation labels enter only after prediction has returned an owned seal.
@@ -36,7 +36,8 @@ impl EvaluationLabels {
         }
     }
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScoringCounts {
     pub cases: u64,
     pub answerable: u64,
