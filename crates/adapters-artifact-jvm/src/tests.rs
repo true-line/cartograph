@@ -292,3 +292,61 @@ fn descriptors_read_as_source_spellings() {
     );
     assert!(class_file::parameter_types("(Lunterminated").is_none());
 }
+
+fn write(root: &std::path::Path, rel: &str, bytes: &[u8]) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn class_files(out: &Extraction) -> Vec<&str> {
+    out.nodes
+        .iter()
+        .filter(|node| node.label == "File")
+        .map(|node| node.props["path"].as_str().unwrap())
+        .collect()
+}
+
+/// AC-1215: a checkout's shipped classes are read; classes in build output
+/// directories or with their own Java or Kotlin source are not.
+#[test]
+fn a_checkout_reads_the_classes_it_ships_without_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "lib/com/acme/pay/Ledger.class", LEDGER);
+    write(root, "lib/com/acme/pay/Ledger$Store.class", STORE);
+    write(root, "build/classes/com/acme/pay/Ledger$Audit.class", AUDIT);
+    write(root, "lib/Broken.class", b"not a class");
+    let id = id();
+    let mut seen = Vec::new();
+    let out = extract_dir(root, &id, &mut |path| seen.push(path.to_string())).unwrap();
+    assert_eq!(
+        class_files(&out),
+        vec![
+            "lib/com/acme/pay/Ledger$Store.class",
+            "lib/com/acme/pay/Ledger.class"
+        ]
+    );
+    assert!(
+        out.nodes
+            .iter()
+            .any(|node| node.label == "Gap" && node.props["path"] == "lib/Broken.class")
+    );
+    assert_eq!(seen.len(), 3, "{seen:?}");
+
+    // With Ledger's Java source in the checkout, Ledger and its nested
+    // classes are left to the Java adapter.
+    write(
+        root,
+        "src/main/java/com/acme/pay/Ledger.java",
+        b"package com.acme.pay;",
+    );
+    let out = extract_dir(root, &id, &mut |_| {}).unwrap();
+    assert!(class_files(&out).is_empty(), "{:?}", class_files(&out));
+
+    // A Kotlin file facade (`LedgerKt`) is left to the Kotlin adapter too.
+    let stems = source_stems(&["app/src/com/acme/Ledger.kt".to_string()]);
+    assert!(has_source(&stems, "com/acme/LedgerKt"));
+    assert!(has_source(&stems, "com/acme/Ledger$Inner"));
+    assert!(!has_source(&stems, "com/other/Ledger"));
+}

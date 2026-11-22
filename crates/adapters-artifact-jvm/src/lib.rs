@@ -500,5 +500,77 @@ fn collect_calls(
     }
 }
 
+/// A directory the walk does not enter: hidden, dependency or build output
+/// (a build's classes come from sources the source adapters read).
+fn skipped_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "target" | "build" | "out" | "node_modules" | "dist" | "generated"
+        )
+}
+
+/// Every path suffix, at `/` boundaries, of each Java or Kotlin source path
+/// without its extension: `src/com/acme/Pay.java` gives `com/acme/Pay`,
+/// `acme/Pay` and `Pay` among others.
+fn source_stems(paths: &[String]) -> BTreeSet<String> {
+    let mut stems = BTreeSet::new();
+    for path in paths {
+        let Some(stem) = path
+            .strip_suffix(".java")
+            .or_else(|| path.strip_suffix(".kt"))
+        else {
+            continue;
+        };
+        stems.insert(stem.to_string());
+        for (at, _) in stem.match_indices('/') {
+            stems.insert(stem[at + 1..].to_string());
+        }
+    }
+    stems
+}
+
+/// Whether the repository holds the source of `internal` (a class's
+/// internal name): a `.java` file at its outer class's package path, or a
+/// `.kt` file for it or for its `…Kt` file facade.
+fn has_source(stems: &BTreeSet<String>, internal: &str) -> bool {
+    let outer = internal.split('$').next().unwrap_or(internal);
+    stems.contains(outer)
+        || outer
+            .strip_suffix("Kt")
+            .is_some_and(|facade| stems.contains(facade))
+}
+
+/// Read the compiled classes of the checkout at `root`: every `.class` file
+/// the ordinary walk selects (`.gitignore` honored; hidden, dependency and
+/// build-output directories not entered) whose class has no Java or Kotlin
+/// source in the same walk. A repository built from its sources is read by
+/// the source adapters; this reads the classes it ships without them. A file
+/// that is not a readable class file is still read, so it becomes a Gap.
+pub fn extract_dir(
+    root: &std::path::Path,
+    id: &SourceId<'_>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<Extraction> {
+    let walked = source_walk::files(root, &skipped_dir, source_walk::Gitignores::Honor)?;
+    let (classes, sources): (Vec<_>, Vec<_>) = walked
+        .into_iter()
+        .map(|file| file.rel)
+        .filter(|rel| rel.ends_with(".class") || rel.ends_with(".java") || rel.ends_with(".kt"))
+        .partition(|rel| rel.ends_with(".class"));
+    let stems = source_stems(&sources);
+    let mut files = Vec::new();
+    for rel in classes {
+        on_file(&rel);
+        let bytes = std::fs::read(root.join(&rel))?;
+        let covered = bytes.len() <= MAX_CLASS_BYTES
+            && class_file::parse(&bytes).is_ok_and(|class| has_source(&stems, &class.this_class));
+        if !covered {
+            files.push((rel, bytes));
+        }
+    }
+    Ok(extract(id, &files))
+}
+
 #[cfg(test)]
 mod tests;
