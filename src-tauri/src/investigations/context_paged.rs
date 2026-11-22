@@ -171,6 +171,16 @@ impl FrozenContext {
 }
 
 impl FrozenContext {
+    /// The complete-graph identity at `revision`, streamed under the
+    /// identity-pass caps for `graph_limits` without holding a fact.
+    pub(in crate::investigations) fn complete_identity_at(
+        state: &AppState,
+        revision: &StoreRevision,
+        graph_limits: SnapshotReadLimits,
+    ) -> Result<String, HostError> {
+        complete_id_at(state, revision, graph_limits)
+    }
+
     /// The revision a paged read runs at: the pinned one, or, after a store
     /// write that left the complete graph identical (a replaced coverage
     /// inventory, say), the current one, found by streaming the identity

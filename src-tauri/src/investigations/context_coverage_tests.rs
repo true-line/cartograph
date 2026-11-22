@@ -1586,14 +1586,37 @@ fn scoped_completion_choices_match_the_whole_graph_read() {
         hops: 1,
     };
     assert!(choices_at(&fixture.state, &neighborhood, retained, read_scope).is_ok());
-    assert!(
-        choices_at(
-            &fixture.state,
-            &InvestigationScope::All,
-            retained,
-            read_scope
+    // A whole-system scope streams only the identity, so it lists too, with
+    // exactly the choices a held whole graph gives.
+    let paged = choices_at(
+        &fixture.state,
+        &InvestigationScope::All,
+        retained,
+        read_scope,
+    )
+    .unwrap();
+    let (base, recorded) = fixture
+        .state
+        .graph
+        .lock()
+        .unwrap()
+        .read_snapshot_with_coverage_and_revision_bounded(
+            SnapshotReadLimits::investigation(),
+            core_graph::coverage::CoverageReadLimits::default(),
         )
-        .is_err()
+        .unwrap();
+    let coverage =
+        context_hub::coverage::CoverageQualification::new(&fixture.scope, &recorded).unwrap();
+    let whole = choices(base.graph, coverage, &InvestigationScope::All, None).unwrap();
+    assert_eq!(
+        serde_json::to_value(&paged).unwrap(),
+        serde_json::to_value(&whole).unwrap()
+    );
+    assert!(paged.scoped_facts().is_none());
+    assert!(
+        serde_json::to_value(&paged).unwrap()["inventories"]
+            .as_array()
+            .is_some_and(|inventories| !inventories.is_empty())
     );
 }
 
