@@ -425,7 +425,47 @@ pub(super) fn seal_admission_inner(
             });
         }
     }
+    let mut artifact_pages = Vec::new();
+    if !ledger.artifact_reads.is_empty() {
+        let originals = array(&before, "artifact_pages")?;
+        let actuals = array(&after, "artifact_pages")?;
+        if originals.len() != ledger.artifact_reads.len() || actuals.len() != originals.len() {
+            return Err(InvestigationError::InvalidInput);
+        }
+        for (index, ((original, actual), read)) in originals
+            .iter()
+            .zip(actuals)
+            .zip(&ledger.artifact_reads)
+            .enumerate()
+        {
+            let original: InvestigationArtifactPage = serde_json::from_value(original.clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            let actual_page: InvestigationArtifactPage = serde_json::from_value(actual.clone())
+                .map_err(|_| InvestigationError::InvalidInput)?;
+            // Only the content may be redacted; every identity field is kept.
+            if content_hash(&bounded_bytes(&original, MAX_INPUT_BYTES)?) != read.response_hash
+                || actual_page.schema_version != original.schema_version
+                || actual_page.context_id != original.context_id
+                || actual_page.artifact_id != original.artifact_id
+                || actual_page.schema != original.schema
+                || actual_page.content_id != original.content_id
+                || actual_page.offset != original.offset
+                || actual_page.next_offset != original.next_offset
+                || actual_page.total_content_bytes != original.total_content_bytes
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+            let disclosed_body_hash = content_hash(&bounded_bytes(&actual_page, MAX_INPUT_BYTES)?);
+            artifact_pages.push(DisclosedInvestigationArtifactPage {
+                read_index: index,
+                representation_hash: content_hash(&bounded_bytes(actual, MAX_INPUT_BYTES)?),
+                redacted: disclosed_body_hash != read.response_hash,
+                disclosed_body_hash,
+            });
+        }
+    }
     let disclosure = InvestigationDisclosure {
+        artifact_pages,
         admission,
         query_history,
         completion_contract_hash,

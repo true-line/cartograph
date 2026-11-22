@@ -42,6 +42,7 @@ fn fixture(
             DisclosedInvestigationCoverage::from_proof(ledger.coverage.as_ref().unwrap()).unwrap(),
         ),
         coverage_details: vec![],
+        artifact_pages: vec![],
         completion_contract_hash: Some("b".repeat(64)),
         completion_metadata_hash: Some("c".repeat(64)),
         policy: if progressive {

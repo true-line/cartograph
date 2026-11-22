@@ -158,6 +158,7 @@ fn disclosure_construction(policy: &InvestigationPolicy) -> Option<usize> {
         slots::<DisclosedInvestigationQuery>(queries)?,
         slots::<DisclosedInvestigationSource>(sources)?,
         slots::<DisclosedInvestigationCoverageDetail>(queries)?,
+        slots::<DisclosedInvestigationArtifactPage>(queries)?,
         slots::<String>(queries)?,          // query-history IDs
         MAX_MANIFEST_BYTES.checked_mul(2)?, // citation/key and basis/coverage IDs
         json_bytes(MAX_INPUT_BYTES)?,       // decoded admission state
