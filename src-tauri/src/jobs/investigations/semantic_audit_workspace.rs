@@ -1,8 +1,13 @@
 //! Audit receipt replay ownership. This does not cover provider dispatch or
 //! compact-prompt construction, and is not an allocator/native/RSS estimate.
+// Every workspace bound here is Unix-only (#227).
+#[cfg(unix)]
 use super::*;
+#[cfg(unix)]
 use agents::investigation::semantic_audit::{AuditSubject, SemanticAuditAccount, SubjectReview};
+#[cfg(unix)]
 use context_hub::logical::{json_bytes, set, slots, sum};
+#[cfg(unix)]
 use std::mem::size_of;
 
 #[cfg(unix)]

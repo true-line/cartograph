@@ -607,6 +607,7 @@ fn same_entry(a: &cap_std::fs::Metadata, b: &cap_std::fs::Metadata) -> bool {
 }
 
 fn private_dir(parent: &Dir, name: &str) -> Result<Dir, String> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     {
@@ -810,9 +811,10 @@ impl PrivateStorage {
             .zip(&self.databases)
         {
             let current = private_file(&self.root, name.as_ref(), false)?;
-            let a = current.metadata().map_err(storage_error)?;
-            let b = expected.metadata().map_err(storage_error)?;
-            if a.dev() != b.dev() || a.ino() != b.ino() {
+            // cap-std's metadata carries the Windows file index too (#227).
+            let a = cap_std::fs::Metadata::from_file(&current).map_err(storage_error)?;
+            let b = cap_std::fs::Metadata::from_file(expected).map_err(storage_error)?;
+            if !same_entry(&a, &b) {
                 return Err(storage_error("private database substituted"));
             }
             sqlite_sidecars(&self.root, name)?;
@@ -1306,9 +1308,9 @@ impl ReceiptStore {
         receipt_storage(&tx)?;
         tx.commit().map_err(storage_error)?;
         let current = private_file(&parent, name.as_ref(), false)?;
-        let a = checked.metadata().map_err(storage_error)?;
-        let b = current.metadata().map_err(storage_error)?;
-        if a.dev() != b.dev() || a.ino() != b.ino() {
+        let a = cap_std::fs::Metadata::from_file(&checked).map_err(storage_error)?;
+        let b = cap_std::fs::Metadata::from_file(&current).map_err(storage_error)?;
+        if !same_entry(&a, &b) {
             return Err(storage_error("receipt database changed"));
         }
         sqlite_sidecars(&parent, name)?;

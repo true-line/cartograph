@@ -595,6 +595,7 @@ fn validate_regular_file(path: &Path) -> Result<(), IngestError> {
 }
 
 fn create_private_directory(path: &Path) -> Result<(), IngestError> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
