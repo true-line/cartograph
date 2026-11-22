@@ -844,6 +844,10 @@ fn the_phase_base_leaves_out_only_props_no_producer_reads() {
     assert_eq!(base.revision, full.revision);
     let held =
         |props: &serde_json::Value| core_graph::stored::compact_text(&props["prov"]).is_some();
+    // A `prov` is held as text exactly when its text needs no escape.
+    let borrowable = |props: &serde_json::Value| {
+        props["prov"].is_object() && !props["prov"].to_string().contains('\\')
+    };
     let restored = |props: &serde_json::Value| {
         let mut props = props.clone();
         core_graph::stored::restore_prov(&mut props);
@@ -855,7 +859,7 @@ fn the_phase_base_leaves_out_only_props_no_producer_reads() {
             (&read.src, &read.label, &read.dst),
             (&stored.src, &stored.label, &stored.dst)
         );
-        assert_eq!(held(&read.props), stored.props["prov"].is_object());
+        assert_eq!(held(&read.props), borrowable(&stored.props));
         assert_eq!(restored(&read.props), stored.props);
     }
     assert_eq!(base.graph.0.len(), full.graph.0.len());
@@ -864,7 +868,7 @@ fn the_phase_base_leaves_out_only_props_no_producer_reads() {
         if stored.label == "BusinessRule" {
             assert_eq!(read.props, serde_json::json!({}));
         } else {
-            assert_eq!(held(&read.props), stored.props["prov"].is_object());
+            assert_eq!(held(&read.props), borrowable(&stored.props));
             assert_eq!(restored(&read.props), stored.props);
         }
     }
