@@ -152,10 +152,42 @@ pub(super) fn validate_continuation(
         Some(ledger),
         metadata.completed_attempt_ids.len(),
     )?;
+    let refused = match (c.refusal, kind) {
+        (Some(decide), DispositionKind::Acquired) => {
+            completion::read_refusals::plan_settlement_refusals(before, &records, ledger, decide)?
+        }
+        _ => None,
+    };
     let disclosure = c
         .candidate
         .seal_disclosure_with_policy(c.candidate_prepared, policy)?
         .ok_or(InvestigationStoreError::Invalid)?;
+    // The candidate withholds the new read exactly when the firewall refused
+    // it and that refusal is recorded here; nothing else may be withheld anew.
+    if kind == DispositionKind::Acquired {
+        let citation_id = &ledger
+            .citations
+            .last()
+            .ok_or(InvestigationStoreError::Invalid)?
+            .citation_id;
+        let withheld = disclosure
+            .sources
+            .iter()
+            .find(|source| &source.citation_id == citation_id)
+            .ok_or(InvestigationStoreError::Invalid)?
+            .representation
+            == agents::investigation::DisclosureRepresentation::FirewallRefused;
+        if withheld != refused.is_some() {
+            return Err(InvestigationStoreError::Invalid);
+        }
+    }
+    let records = match refused {
+        Some(refused) => records
+            .into_iter()
+            .chain(refused.into_iter().map(|planned| planned.record))
+            .collect(),
+        None => records,
+    };
     if encode(&disclosure, MAX_DISCLOSURE_BYTES)?.len() > c.proof.disclosure_upper_bytes() {
         return Err(InvestigationStoreError::Invalid);
     }
