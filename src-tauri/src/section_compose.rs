@@ -521,7 +521,7 @@ fn stage_as(
     // or version, and a claim about endpoints cites one (#2349).
     let shown = spec::CitedText::of(nodes, edges, &prepared.overlay, &cited);
     type Check<'a> = (&'static str, &'a dyn Fn(&Claim) -> bool);
-    let checks: [Check<'_>; 4] = [
+    let checks: [Check<'_>; 5] = [
         ("statement_names_source", &|claim| {
             !source.named_in(&claim.statement, &claim.citations)
         }),
@@ -537,6 +537,12 @@ fn stage_as(
         }),
         ("endpoint_not_cited", &|claim| {
             !shown.endpoint_claim_uncited(&claim.statement, &claim.citations)
+        }),
+        // A claim asserts no more than its cited facts show (#2371).
+        ("claim_not_supported", &|claim| {
+            !shown
+                .support(&claim.statement, &claim.citations)
+                .overreaches()
         }),
     ];
     for (reason, keep) in checks {

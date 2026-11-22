@@ -441,3 +441,52 @@ fn an_uncited_figure_or_endpoint_claim_is_left_out_with_its_reason() {
     let returned = serde_json::to_value(&outcome).unwrap();
     assert_eq!(returned["left_out_reasons"]["number_not_cited"], 1);
 }
+
+/// AC-1319 (T-1319): a claim asserting more than its cited facts show is
+/// left out as `claim_not_supported`, and a paraphrase of them is staged
+/// (#2371).
+#[test]
+fn a_claim_asserting_more_than_its_facts_show_is_left_out() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let cites = [id("cap:orders")];
+    let provider = Scripted {
+        reply: json!({"claims": [
+            {"statement": "The mobile checkout screen syncs carts with the warehouse ledger.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place orders for themselves.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
+    let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
+    assert_eq!((outcome.claims, outcome.left_out), (1, 1), "{outcome:?}");
+    assert_eq!(
+        outcome.left_out_reasons,
+        BTreeMap::from([("claim_not_supported", 1)])
+    );
+    let store = state.drafts.lock().unwrap();
+    let stored = store.for_job(job.id()).unwrap().unwrap();
+    assert_eq!(
+        stored.draft.claims[0].statement,
+        "Shoppers place orders for themselves."
+    );
+}

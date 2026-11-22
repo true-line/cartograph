@@ -326,8 +326,9 @@ impl CitedText {
         })
     }
 
-    /// Whether `statement` asserts endpoints or routes, by naming them or
-    /// spelling a route, without citing an Endpoint fact (#2349).
+    /// Whether `statement` asserts endpoints or routes, by naming them,
+    /// spelling a route or an HTTP method, without citing an Endpoint fact
+    /// (#2349, #2371).
     pub fn endpoint_claim_uncited(&self, statement: &str, citations: &[String]) -> bool {
         let asserts = !route_literals(statement).is_empty()
             || statement.split_whitespace().any(|word| {
@@ -335,6 +336,10 @@ impl CitedText {
                     .trim_matches(|c: char| !c.is_alphanumeric())
                     .to_lowercase();
                 matches!(word.as_str(), "endpoint" | "endpoints" | "route" | "routes")
+            })
+            // An HTTP method states an endpoint too (`GET and POST`).
+            || statement.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                matches!(word, "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
             });
         asserts && !citations.iter().any(|id| self.endpoints.contains(id))
     }
@@ -359,6 +364,179 @@ impl CitedText {
                     .find(|fragment| !cited().any(|text| contains_segments(text, fragment)))
             })
     }
+
+    /// How much of what `statement` says its cited facts show (#2371): the
+    /// claim's content terms, and those no fact of `citations` shows. A
+    /// claim that asserts a screen, a channel or a behaviour none of its
+    /// facts names scores low however well it reads.
+    pub fn support(&self, statement: &str, citations: &[String]) -> Support {
+        let shown: BTreeSet<String> = citations
+            .iter()
+            .filter_map(|id| self.by_citation.get(id))
+            .flat_map(|text| words(text))
+            .collect();
+        let terms = claim_terms(statement);
+        let unsupported: Vec<String> = terms
+            .iter()
+            .filter(|term| !shown.iter().any(|word| same_term(term, word)))
+            .cloned()
+            .collect();
+        Support {
+            terms: terms.len(),
+            unsupported,
+        }
+    }
+}
+
+/// The content terms of a claim, and those its cited facts do not show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Support {
+    /// Distinct content terms the claim states.
+    pub terms: usize,
+    /// The terms no cited fact shows, in order.
+    pub unsupported: Vec<String>,
+}
+
+impl Support {
+    /// Whether the claim asserts more than its cited facts show: fewer than
+    /// [`MIN_SUPPORT`] of its terms are shown, once it states at least
+    /// [`MIN_UNSUPPORTED`] terms they do not.
+    pub fn overreaches(&self) -> bool {
+        let shown = self.terms - self.unsupported.len();
+        self.unsupported.len() >= MIN_UNSUPPORTED
+            && (shown as f64) < MIN_SUPPORT * self.terms as f64
+    }
+}
+
+/// The share of a claim's terms its cited facts must show (#2371). Set from
+/// the W13 calibration on 35 staged claims: every claim at or below 0.10 was
+/// judged an overreach, and fair paraphrases of Capability titles score as
+/// low as 0.27, so a lexical score catches only the gross case; subtler
+/// overreach is left to review.
+pub const MIN_SUPPORT: f64 = 0.15;
+
+/// Fewest unshown terms that make a claim overreach: one or two are
+/// paraphrase, not a new assertion.
+pub const MIN_UNSUPPORTED: usize = 3;
+
+/// Words a claim uses for the frame of the specification rather than for
+/// what the system does; they need no fact.
+const FRAME_WORDS: &str = "\
+    capability capabilities area areas section system fact facts feature features user users \
+    handle handles provide provides support supports include includes application app service \
+    services";
+
+/// English function words, which carry no assertion.
+const STOPWORDS: &str = "\
+    a about above after again against all am an and any are as at be because been before \
+    being below between both but by can could did do does doing down during each either every \
+    few for from further had has have having he her here hers him his how i if in into is it \
+    its itself just may me more most must my no nor not now of off on once one only or other \
+    our out over own same she should so some such than that the their them then there these \
+    they this those through to too under until up upon us very via was we were what when \
+    where which while who whom why will with within without would you your";
+
+/// The stemmed, lower-case words of `text` ([`pieces`]).
+fn words(text: &str) -> Vec<String> {
+    pieces(text).iter().map(|piece| stem(piece)).collect()
+}
+
+/// The lower-case words of `text`: split on every character that is not a
+/// letter or digit, and where camelCase or digits begin.
+fn pieces(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for piece in text.split(|c: char| !c.is_alphanumeric()) {
+        let mut word = String::new();
+        let mut previous: Option<char> = None;
+        for c in piece.chars() {
+            let boundary = previous.is_some_and(|p| {
+                (p.is_lowercase() && c.is_uppercase()) || (p.is_ascii_digit() != c.is_ascii_digit())
+            });
+            if boundary && !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+            word.extend(c.to_lowercase());
+            previous = Some(c);
+        }
+        if !word.is_empty() {
+            out.push(word);
+        }
+    }
+    out
+}
+
+/// A crude English stem: `entries` and `entry`, `aliases` and `alias`,
+/// `blocked` and `block` compare equal. A word ending in `ss`, `us`, `is`
+/// or `as` (`status`, `alias`) keeps its `s`; `es` is a suffix only after
+/// a sibilant (`boxes`, `aliases`), so `types` stems to `type`.
+fn stem(word: &str) -> String {
+    let long = |root: &str| root.chars().count() >= 3;
+    if let Some(root) = word
+        .strip_suffix("ies")
+        .filter(|root| root.chars().count() >= 2)
+    {
+        return format!("{root}y");
+    }
+    for suffix in ["ing", "ed"] {
+        if let Some(root) = word.strip_suffix(suffix).filter(|root| long(root)) {
+            return root.to_owned();
+        }
+    }
+    if let Some(root) = word.strip_suffix("es").filter(|root| long(root))
+        && ["s", "x", "z", "ch", "sh"]
+            .iter()
+            .any(|end| root.ends_with(end))
+    {
+        return root.to_owned();
+    }
+    match word.strip_suffix('s') {
+        Some(root) if long(root) && !["s", "u", "i", "a"].iter().any(|end| root.ends_with(end)) => {
+            root.to_owned()
+        }
+        _ => word.to_owned(),
+    }
+}
+
+/// The distinct content terms of a claim, stemmed: its words ([`pieces`],
+/// so `idToken` is `id` and `token`) of at least three letters, without
+/// citation ids, section references, function words or frame words. The
+/// filters apply to each word and to its stem, so `systems` is a frame word
+/// too.
+fn claim_terms(statement: &str) -> Vec<String> {
+    let listed = |list: &str, word: &str| list.split_whitespace().any(|entry| entry == word);
+    let frame = |word: &str| {
+        listed(FRAME_WORDS, word)
+            || FRAME_WORDS
+                .split_whitespace()
+                .any(|entry| stem(entry) == word)
+    };
+    let mut seen = BTreeSet::new();
+    statement
+        .split_whitespace()
+        .filter(|token| {
+            let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '§');
+            !(token.starts_with("F-") || token.starts_with('§'))
+        })
+        .flat_map(pieces)
+        .filter(|word| {
+            word.chars().filter(|c| c.is_alphabetic()).count() >= 3
+                && !listed(STOPWORDS, word)
+                && !frame(word)
+        })
+        .map(|word| stem(&word))
+        .filter(|term| !frame(term) && seen.insert(term.clone()))
+        .collect()
+}
+
+/// Whether two stemmed words are the same term: equal, or one starts the
+/// other with at least five letters in common (`config`, `configuration`).
+fn same_term(term: &str, word: &str) -> bool {
+    let (short, long) = if term.len() <= word.len() {
+        (term, word)
+    } else {
+        (word, term)
+    };
+    term == word || (short.chars().count() >= 5 && long.starts_with(short))
 }
 
 /// The words of `statement` that state a figure: each piece, split on `/`
@@ -880,6 +1058,77 @@ mod tests {
         assert_eq!(
             text.uncited_route("It reads and/or writes input/output.", &[c]),
             None
+        );
+    }
+
+    /// AC-1319 (T-1319): a claim that asserts much more than its cited facts
+    /// show overreaches, and an HTTP method asserts an endpoint (#2371).
+    #[test]
+    fn a_claim_that_asserts_more_than_its_facts_show_overreaches() {
+        let view = Node {
+            id: "view:admin".into(),
+            label: "View".into(),
+            props: json!({"name": "admin", "title": "View admin"}),
+        };
+        let blocking = Node {
+            id: "cap:block".into(),
+            label: "Capability".into(),
+            props: json!({"title": "Block senders of an alias", "entries": "blockedContacts"}),
+        };
+        let ids = |node: &Node| {
+            citation_id(&FactKey::Node {
+                id: node.id.clone(),
+            })
+        };
+        let (v, b) = (ids(&view), ids(&blocking));
+        let cited: BTreeSet<String> = [v.clone(), b.clone()].into();
+        let text = CitedText::of(&[view], &[], &[blocking], &cited);
+        let (v, b) = (std::slice::from_ref(&v), std::slice::from_ref(&b));
+        // Paraphrase of what the cited fact shows, with frame words, passes.
+        let held = text.support("Users can block the senders of an alias (F-1).", b);
+        assert!(
+            held.unsupported.is_empty() && !held.overreaches(),
+            "{held:?}"
+        );
+        assert!(
+            !text
+                .support("Blocked contacts are kept per alias.", b)
+                .overreaches()
+        );
+        // Asserting a screen and a behaviour the one cited view never shows.
+        let claim = "The mobile main activity screen lists every capability area, \
+                     which groups server-side behaviour.";
+        let over = text.support(claim, v);
+        assert!(over.overreaches(), "{over:?}");
+        assert_eq!(over.unsupported[..3], ["mobile", "main", "activity"]);
+        // One or two unshown words are paraphrase, not a new assertion.
+        assert!(
+            !text
+                .support("An admin view exists for operators.", v)
+                .overreaches()
+        );
+        // Stems and long prefixes compare equal; short ones do not.
+        assert!(
+            same_term(&stem("entries"), &stem("entry")) && same_term("config", "configuration")
+        );
+        assert_eq!(
+            [stem("aliases"), stem("alias"), stem("status")],
+            ["alias", "alias", "status"]
+        );
+        assert_eq!(
+            [stem("types"), stem("boxes"), stem("blocked")],
+            ["type", "box", "block"]
+        );
+        // HTTP methods assert an endpoint without spelling a route.
+        assert!(text.endpoint_claim_uncited("Users GET and POST their settings.", v));
+        assert!(!text.endpoint_claim_uncited("Users post their settings.", v));
+        assert!(!same_term("sen", "sender"));
+        assert_eq!(words("blockedContacts v2"), ["block", "contact", "v", "2"]);
+        // Filters apply after splitting and stemming: `systems` is a frame
+        // word and `idToken` gives no two-letter term.
+        assert_eq!(
+            claim_terms("Systems refresh an idToken (F-1)."),
+            ["refresh", "token"]
         );
     }
 
