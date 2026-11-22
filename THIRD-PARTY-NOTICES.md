@@ -4555,7 +4555,7 @@ Used by:
 - fixedbitset 0.4.2 — https://github.com/petgraph/fixedbitset
 - flate2 1.1.9 — https://github.com/rust-lang/flate2-rs
 - fnv 1.0.7 — https://github.com/servo/rust-fnv
-- form_urlencoded 1.2.2 — https://github.com/servo/rust-url
+- form_urlencoded 1.2.3 — https://github.com/servo/rust-url
 - fs-set-times 0.20.3 — https://github.com/bytecodealliance/fs-set-times
 - gimli 0.33.0 — https://github.com/gimli-rs/gimli
 - git2 0.21.0 — https://github.com/rust-lang/git2-rs
@@ -4614,7 +4614,7 @@ Used by:
 - tempfile 3.27.0 — https://github.com/Stebalien/tempfile
 - tendril 0.5.0 — https://github.com/servo/html5ever
 - unicode-width 0.2.2 — https://github.com/unicode-rs/unicode-width
-- url 2.5.8 — https://github.com/servo/rust-url
+- url 2.5.9 — https://github.com/servo/rust-url
 - uuid 1.23.4 — https://github.com/uuid-rs/uuid
 - wasm-compose 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-compose
 - wasm-encoder 0.261.0 — https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder
