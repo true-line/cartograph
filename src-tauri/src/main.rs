@@ -8501,6 +8501,7 @@ fn open_app_state(data_dir: &std::path::Path) -> Result<AppState, Box<dyn std::e
     // Only unchanged recorded attempts whose OS ownership is available
     // are interrupted. Live and legacy-unknown jobs remain untouched.
     recover_jobs(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
+    agent_pool::recover_held_jobs(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
     investigations::recover(&jobs, &job_execution_locks).map_err(std::io::Error::other)?;
     let findings = FindingStore::open(&state_path)?;
     let sources = SourceRegistry::open(&state_path, &data_dir).map_err(std::io::Error::other)?;
