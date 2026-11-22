@@ -440,6 +440,20 @@ impl Parser {
             } else if self.op("(") {
                 self.bump();
                 let args = self.arguments()?;
+                // A text conversion of the result (`.decode()`) does not
+                // change what is read (AC-1036).
+                if self.op(".")
+                    && matches!(
+                        self.toks.get(self.pos + 1),
+                        Some(Tok::Ident(m)) if matches!(m.as_str(), "decode" | "encode")
+                    )
+                    && matches!(self.toks.get(self.pos + 2), Some(Tok::Op(o)) if o == "(")
+                    && matches!(self.toks.get(self.pos + 3), Some(Tok::Op(o)) if o == ")")
+                    && !args.is_empty()
+                {
+                    self.pos += 4;
+                    return Some(Expr::Apply(path, args));
+                }
                 if self.op(".") {
                     // `arrow.now().shift(days=-N)`, the one member of a
                     // call's result that is rendered.
@@ -655,9 +669,14 @@ fn noun(expr: &Expr, cx: &Context<'_>) -> Option<String> {
                     if !is_class(receiver) && predicate_verb(method).is_none() =>
                 {
                     let what = subject(&accessor(path), cx)?;
+                    // A literal keyword input keeps its name (AC-1036):
+                    // `max_age=600` is "max age 600".
                     let inputs: Option<Vec<String>> = args
                         .iter()
                         .map(|a| match a {
+                            Arg::Kw(k, Expr::Lit(lit @ (Lit::Num(_) | Lit::Bool(_)))) => {
+                                Some(format!("{} {}", words(k), literal(lit)))
+                            }
                             Arg::Pos(v) | Arg::Kw(_, v) => noun(v, cx),
                         })
                         .collect();
@@ -1259,7 +1278,16 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
         }
         Some(toks)
     };
+    let raised = |polarity: BranchPolarity| {
+        matches!(
+            polarity,
+            BranchPolarity::RaisedBranch | BranchPolarity::UnraisedBranch
+        )
+    };
     let equality = |display: &str, polarity: BranchPolarity| -> Option<(Vec<Tok>, bool, Lit)> {
+        if raised(polarity) {
+            return None;
+        }
         let source = operand(display)?;
         let mut expr = parse(display)?;
         let mut negated = polarity == BranchPolarity::FalsyBranch;
@@ -1305,6 +1333,9 @@ fn implied_by_pin(conditions: &[(&str, BranchPolarity)]) -> Vec<bool> {
     // An elif chain's earlier tests (#1998): `not (alias and …)` says nothing
     // once another condition says `not alias`, for a plain local name.
     let tested = |display: &str, polarity: BranchPolarity| -> Option<(Expr, bool)> {
+        if raised(polarity) {
+            return None;
+        }
         let mut expr = parse(display)?;
         let mut negated = polarity == BranchPolarity::FalsyBranch;
         while let Expr::Not(inner) = expr {
@@ -1359,7 +1390,46 @@ pub(super) fn condition(
     cx: &Context<'_>,
 ) -> Option<String> {
     let expr = parse(display)?;
-    render(&expr, polarity == BranchPolarity::FalsyBranch, cx)
+    match polarity {
+        BranchPolarity::RaisedBranch => Some(format!("{} is raised", raised_error(&expr)?)),
+        BranchPolarity::UnraisedBranch => {
+            let error = raised_error(&expr)?;
+            let error = error
+                .strip_prefix("an ")
+                .or(error.strip_prefix("a "))
+                .unwrap_or(&error);
+            Some(format!("no {error} is raised"))
+        }
+        _ => render(&expr, polarity == BranchPolarity::FalsyBranch, cx),
+    }
+}
+
+/// The error type an `except` names, as a phrase (AC-1036):
+/// `itsdangerous.BadSignature` is "a bad signature error", `ValueError` "a
+/// value error", and `Exception` "an error".
+fn raised_error(expr: &Expr) -> Option<String> {
+    let Expr::Ref(path) = expr else {
+        return None;
+    };
+    let last = path.last()?;
+    if !is_class(last) {
+        return None;
+    }
+    let mut what = words(last);
+    for suffix in [" error", " exception"] {
+        if let Some(rest) = what.strip_suffix(suffix) {
+            what = rest.to_owned();
+        }
+    }
+    if matches!(what.as_str(), "error" | "exception" | "base exception" | "") {
+        return Some("an error".to_owned());
+    }
+    let article = if what.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    Some(format!("{article} {what} error"))
 }
 
 /// An HTTP status and a literal message from a response display:
@@ -2067,7 +2137,9 @@ pub(super) fn with_outcome(
     } else {
         format!("When {}, {outcome}.", conditions.join(", and "))
     };
-    Some(sentence).filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
+    Some(sentence)
+        .filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
+        .map(|said| with_definitions(said, evidence, constant))
 }
 
 /// Conditions with repeats dropped: nested guards may test the same thing
@@ -2102,6 +2174,187 @@ pub(super) fn statement(
     // a statement in domain terms: the row states a Gap instead (#1999).
     rendered(evidence, owner, constant, failed)
         .filter(|s| crate::workbench::neutrality::projected_code_token(s).is_none())
+        .map(|said| with_definitions(said, evidence, constant))
+}
+
+/// A statement followed by what each local name its conditions test was
+/// assigned, when the adapter recorded it (AC-1034): "Here the API key is
+/// the API key whose code is the “Authentication” header." A definition
+/// outside the rendering rules adds nothing.
+fn with_definitions(
+    said: String,
+    evidence: &GuardedExitEvidence,
+    constant: Constants<'_>,
+) -> String {
+    let Some(definitions) = evidence.local_definitions.as_deref() else {
+        return said;
+    };
+    // Each definition's name, read off a use inside a stored expression.
+    let spelled = |at: &core_prov::EvidenceRef| -> Option<String> {
+        let within = evidence
+            .conditions
+            .iter()
+            .map(|c| &c.expression)
+            .chain(definitions.iter().map(|d| &d.initializer))
+            .find(|e| {
+                e.capture == core_graph::rules::ExpressionCapture::CompleteSyntax
+                    && e.source.byte_start <= at.byte_start
+                    && at.byte_end <= e.source.byte_end
+            })?;
+        let start = usize::try_from(at.byte_start - within.source.byte_start).ok()?;
+        let end = usize::try_from(at.byte_end - within.source.byte_start).ok()?;
+        let name = within.display.as_str().get(start..end)?;
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            .then(|| name.to_owned())
+    };
+    let named: Vec<(String, &str, bool)> = definitions
+        .iter()
+        .filter_map(|d| {
+            let name = d.uses.iter().find_map(&spelled)?;
+            let tested = d.uses.iter().any(|u| {
+                evidence.conditions.iter().any(|c| {
+                    c.expression.source.byte_start <= u.byte_start
+                        && u.byte_end <= c.expression.source.byte_end
+                })
+            });
+            Some((name, d.initializer.display.as_str(), tested))
+        })
+        .collect();
+    let cx = Context {
+        class: None,
+        constant,
+        failed: None,
+    };
+    let mut out = said;
+    let mut said_names = std::collections::BTreeSet::new();
+    for (name, _, tested) in &named {
+        if !tested || !said_names.insert(name.as_str()) {
+            continue;
+        }
+        let Some(what) = noun(&Expr::Ref(vec![name.clone()]), &cx) else {
+            continue;
+        };
+        let Some(is) = defined_noun(&Expr::Ref(vec![name.clone()]), &named, &cx, 0) else {
+            continue;
+        };
+        let sentence = format!(" Here {what} is {is}.");
+        if is != what && crate::workbench::neutrality::projected_code_token(&sentence).is_none() {
+            out.push_str(&sentence);
+        }
+    }
+    out
+}
+
+/// A request input read by its literal name: `request.headers.get("X")` is
+/// the “X” header, `request.args.get("x")` the “x” query parameter and
+/// `request.form.get("x")` the “x” form field (AC-1034).
+fn request_read(initializer: &str) -> Option<String> {
+    for (prefix, what) in [
+        ("request.headers.get(", "header"),
+        ("request.args.get(", "query parameter"),
+        ("request.form.get(", "form field"),
+    ] {
+        let Some(rest) = initializer.trim().strip_prefix(prefix) else {
+            continue;
+        };
+        let rest = rest.strip_suffix(')')?.trim();
+        let key = rest.split(',').next()?.trim();
+        let key = key
+            .strip_prefix('"')
+            .and_then(|k| k.strip_suffix('"'))
+            .or_else(|| key.strip_prefix('\'').and_then(|k| k.strip_suffix('\'')))?;
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return None;
+        }
+        return Some(format!("the “{key}” {what}"));
+    }
+    None
+}
+
+/// A value as a noun phrase, with each defined local name read as what it
+/// was assigned (AC-1034).
+fn defined_noun(
+    expr: &Expr,
+    named: &[(String, &str, bool)],
+    cx: &Context<'_>,
+    depth: usize,
+) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    match expr {
+        Expr::Ref(path) if path.len() == 1 => {
+            match named.iter().find(|(name, ..)| *name == path[0]) {
+                Some((_, initializer, _)) => {
+                    if let Some(read) = request_read(initializer) {
+                        return Some(read);
+                    }
+                    // `Alias.get(alias_id)` looks a record up by its key; a
+                    // `.get(name)` of any other receiver reads an entry the
+                    // parser would take for a member, so it is not said.
+                    if let Some((receiver, rest)) = initializer.trim().split_once(".get(") {
+                        let key = rest.strip_suffix(')')?.trim();
+                        if is_class(receiver) && receiver.chars().all(|c| c.is_ascii_alphanumeric())
+                        {
+                            let key = defined_noun(&parse(key)?, named, cx, depth + 1)?;
+                            return Some(format!("the {} found by {key}", words(receiver)));
+                        }
+                        if !key.starts_with(['"', '\'']) {
+                            return None;
+                        }
+                    }
+                    defined_noun(&parse(initializer)?, named, cx, depth + 1)
+                }
+                None => noun(expr, cx),
+            }
+        }
+        // A plain function's result: `authorize_request()`.
+        Expr::Call(path) if path.len() == 1 && predicate_verb(&path[0]).is_none() => Some(format!(
+            "the “{}” result",
+            words(path[0].trim_start_matches('_'))
+        )),
+        Expr::Apply(path, args) => {
+            let names: Vec<&str> = path.iter().map(String::as_str).collect();
+            match (&names[..], &args[..]) {
+                // `request.headers.get("Authentication")`.
+                (["request", "headers", "get"], [Arg::Pos(Expr::Lit(Lit::Str(key))), ..]) => {
+                    Some(format!("the “{key}” header"))
+                }
+                (["request", "args", "get"], [Arg::Pos(Expr::Lit(Lit::Str(key))), ..]) => {
+                    Some(format!("the “{key}” query parameter"))
+                }
+                (["request", "form", "get"], [Arg::Pos(Expr::Lit(Lit::Str(key))), ..]) => {
+                    Some(format!("the “{key}” form field"))
+                }
+                // `ApiKey.get_by(code=api_code)`: the API key whose code is …
+                ([model, "get_by" | "first_by"], _) if is_class(model) && !args.is_empty() => {
+                    let parts: Option<Vec<String>> = args
+                        .iter()
+                        .map(|a| match a {
+                            Arg::Kw(key, value) => Some(format!(
+                                "{} is {}",
+                                words(key),
+                                defined_noun(value, named, cx, depth + 1)?
+                            )),
+                            Arg::Pos(_) => None,
+                        })
+                        .collect();
+                    Some(format!(
+                        "the {} whose {}",
+                        words(model),
+                        parts?.join(" and ")
+                    ))
+                }
+                _ => noun(expr, cx),
+            }
+        }
+        _ => noun(expr, cx),
+    }
 }
 
 fn rendered(
