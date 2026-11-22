@@ -42,7 +42,7 @@ On an M4 laptop, ingesting and exporting all three repos through the system mani
 
 The **Scheduled checks** workflow runs this showcase every Sunday on the self-hosted Mac, with a release build and the system manifest above (`node scripts/showcase-watch.mjs simplelogin`). It compares the run with the thresholds in [`bench/thresholds/simplelogin.json`](../../bench/thresholds/simplelogin.json): endpoints recovered, the `/api` contract scores below, client calls linked, traced flows, business rules, data entities, tests, gap nodes and gap findings by extractor, wall time and peak memory. A missed threshold fails the lane and opens or updates the issue "Scheduled: SimpleLogin showcase below its thresholds" (AC-1700). Each run's report states the Cartograph commit and version it measured, and its `metrics.json` artifact is the source for updating the numbers on this page.
 
-The thresholds were recorded at Cartograph `ee9df763` (v0.72.0), release build, linux-x64:
+The thresholds were recorded at Cartograph `30f76fb5` (v0.75.0) with the #1774 gap-cause fix, release build, linux-x64:
 
 | Metric | Value |
 |---|---:|
@@ -52,14 +52,16 @@ The thresholds were recorded at Cartograph `ee9df763` (v0.72.0), release build, 
 | Documented statuses matched | 30 |
 | Documented top-level keys matched | 14 |
 | Client calls linked to an endpoint | 59 (24 Gaps) |
-| Traced flows | 483 (38 Verified, 23 Partial) |
-| Business rules | 5,935 |
+| Traced flows | 484 (38 Verified, 23 Partial) |
+| Business rules | 6,071 |
 | Data entities | 80 |
-| Tests | 1,047 |
-| Gap nodes | 20,138 |
-| Gap findings | 20,181 in 51 classes (Python 12,256, TypeScript/JS 7,861) |
-| Whole harness wall time (ingest, knowledge phase, both exports, briefings) | 119.6 s on 4 vCPU |
-| Peak resident memory | 2.47 GiB |
+| Tests | 1,049 |
+| Gap nodes | 22,435 |
+| Gap findings | 22,478 in 61 classes (Python 14,404, TypeScript/JS 7,964, Kotlin 52) |
+| Whole harness wall time (ingest, knowledge phase, both exports, briefings) | 142.3 s on 4 vCPU |
+| Peak resident memory | 1.67 GiB |
+
+Against v0.72.0 (`ee9df763`), endpoints, the `/api` contract scores, client links, Verified flows and data entities hold exactly; 136 more business rules, one more traced flow and two more tests were recovered. The 2,297 more gap findings are mostly deliberate: rules that are now recovered but not yet fully interpreted. They come from Python condition locals, bindings and `except` handling (AC-1034, AC-1036, AC-1040), from Kotlin guarded exits (AC-1106, AC-1108) and from TypeScript bindings. Their classes now name each reason (AC-1064). Before the fix, 1,092 Python gaps shared one generic "Source-rule interpretation remains incomplete." class.
 
 The sections below were measured earlier and say at which commit.
 

@@ -1,8 +1,8 @@
 {
   "_comment": "Thresholds for the weekly SimpleLogin showcase lane (AC-1700, #1768). min: the value may not fall below baseline x (1 - tolerance); max: it may not rise above baseline x (1 + tolerance). Counts were measured with a release build on linux-x64 (4 vCPU); recovery is deterministic, so the Mac lane must reproduce them. Wall time and memory are this harness's whole run (ingest, knowledge phase, both exports and briefings) and get wide tolerances because the Mac is shared with release packaging. Raise a baseline only in a reviewed PR, from a scheduled run's metrics.json.",
   "measured_at": {
-    "commit": "ee9df763b6266793556e6854995aaa8e8ad0b627",
-    "version": "v0.72.0",
+    "commit": "30f76fb5eb9ce2e9427c48df232cdd59687d392c",
+    "version": "v0.75.0 with the #1774 gap-cause fix",
     "platform": "linux-x64"
   },
   "lane": {
@@ -61,7 +61,7 @@
       "tolerance": 0
     },
     "flows_traced": {
-      "baseline": 483,
+      "baseline": 484,
       "direction": "min",
       "tolerance": 0.02
     },
@@ -71,7 +71,7 @@
       "tolerance": 0
     },
     "business_rules": {
-      "baseline": 5935,
+      "baseline": 6071,
       "direction": "min",
       "tolerance": 0.05
     },
@@ -81,37 +81,37 @@
       "tolerance": 0
     },
     "test_cases": {
-      "baseline": 1047,
+      "baseline": 1049,
       "direction": "min",
       "tolerance": 0
     },
     "gap_nodes": {
-      "baseline": 20138,
+      "baseline": 22435,
       "direction": "max",
       "tolerance": 0.05
     },
     "gap_findings": {
-      "baseline": 20181,
+      "baseline": 22478,
       "direction": "max",
       "tolerance": 0.05
     },
     "gap_classes": {
-      "baseline": 51,
+      "baseline": 61,
       "direction": "max",
       "tolerance": 0.1
     },
     "gap_findings.t0.adapter-python": {
-      "baseline": 12256,
+      "baseline": 14404,
       "direction": "max",
       "tolerance": 0.05
     },
     "gap_findings.t0.adapter-ts": {
-      "baseline": 7861,
+      "baseline": 7964,
       "direction": "max",
       "tolerance": 0.05
     },
     "gap_findings.t0.adapter-kotlin": {
-      "baseline": 6,
+      "baseline": 52,
       "direction": "max",
       "tolerance": 0.5
     },
