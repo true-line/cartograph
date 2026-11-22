@@ -729,7 +729,6 @@ impl ReconciliationResultV1 {
             || !crate::source_basis::text(&self.proposal_id, 256)
             || r.job_id <= 0
             || !prefixed(&r.graph_snapshot_id, "context-v1:")
-            || r.captures.is_empty()
             || r.captures.len() > MAX_RECOVERY_CAPTURES
             || r.captures.windows(2).any(|pair| pair[0] >= pair[1])
             || r.captures.iter().any(|capture| {
@@ -819,4 +818,4 @@ fn canonical(value: serde_json::Value) -> serde_json::Value {
 
 #[cfg(test)]
 #[path = "reconciliation_tests.rs"]
-mod tests;
+pub(crate) mod tests;

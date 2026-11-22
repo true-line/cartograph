@@ -8747,6 +8747,8 @@ pub fn run() {
             proposals::record_agent_decision,
             proposals::list_staged_proposals,
             task_evidence::assessment::assess_staged_basis,
+            task_evidence::reconcile::reconcile_staged,
+            task_evidence::reconcile::staged_reconciliation_history,
             list_agent_decisions,
             reapply_agent_decisions,
             record_assertion_decision,

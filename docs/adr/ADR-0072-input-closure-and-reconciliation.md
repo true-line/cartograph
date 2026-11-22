@@ -386,6 +386,25 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    change gives `reconciliation_stale`; restart keeps results; acceptance
    changes nothing; staged rows are byte-identical before and after; no
    source text is stored.
+   *As built so far (AC-1070):* the store half. `ProposalStore` opens a
+   `staged_reconciliation_results` table (`result_id` unique, `proposal_id`,
+   canonical `result_json` up to 64 KiB, `recorded_at`) with triggers that
+   refuse every update and delete. `record_reconciliation` validates the
+   result against the staged record in the same transaction and is
+   idempotent; `reconciliations` reads up to 64 newest first, each strictly
+   decoded and bound to its record.
+   *Host (AC-1072):* `task_evidence::reconcile`. `reconcile_staged` runs as
+   its own durable job (`reconcile-staged:<proposal id>`), whose id is the
+   result's `RecoveryBasis.job_id`; the recovery names every capture whose
+   receipt was read (none when every cited fact is gone). A v1 item names no
+   fact, so it is looked up under the slot's source and Gap facts (source
+   items) and the candidates that list it; the most specific outcome wins.
+   The Gap reads `gap_resolved` when its node is no longer a Gap, or is gone
+   and the source now has the relation to a real node. The derived state is
+   `reconciliation_stale` once the graph snapshot moved, a reconciled span's
+   capture is no longer retained, or its fact's current association names
+   another receipt. `staged_reconciliation_history` returns the state and up
+   to 64 results. The `StagedProposal` DTO field and the history UI follow.
 4. **SPEC-12 consumption** (`context-hub`). `curated-policy-v3`,
    reconciled evidence, separate DR-4 counts. *Tests:* each reconciliation
    state maps to its listed reason; a reconciled v1 record leaves
