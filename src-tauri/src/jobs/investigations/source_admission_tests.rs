@@ -358,6 +358,49 @@ fn source_admission_count_headroom_keeps_exact_terminal_and_attempt_slots() {
     );
 }
 
+// AC-1414 / #679: on a cloud task the envelope reserves one refusal attempt
+// per acquisition and one refusal event, so a read admitted at the last
+// slots can still settle with its refusal.
+#[test]
+fn cloud_source_admission_reserves_refusal_attempts_and_event() {
+    let mut f = Fixture::new();
+    f.publish().unwrap();
+    let tx = f.f.store.conn.unchecked_transaction().unwrap();
+    let mut task = load_next_prompt_task_base(&tx, &f.f.basis.task_id).unwrap();
+    let saved = source_validation::validate_saved_pending(&tx, &task).unwrap();
+    let local = source_settlement::envelope(&tx, &task, &saved.reservation, &f.response).unwrap();
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(true));
+    let cloud = source_settlement::envelope(&tx, &task, &saved.reservation, &f.response);
+    completion::read_refusals::FIXTURE_EGRESSES_TO_CLOUD.with(|cloud| cloud.set(false));
+    let cloud = cloud.unwrap();
+    assert_eq!(local.refusal_events, 0);
+    assert_eq!(cloud.refusal_events, 1);
+    assert!(cloud.attempts >= local.attempts * 2 && local.attempts > 0);
+    assert_eq!(cloud.events, local.events);
+    let policy = &INVESTIGATION_V2_POLICY;
+    // The last local journal slot leaves no room for the refusal event.
+    task.detail.summary.last_event_sequence =
+        policy.journal_events() - saved.reservation.storage_claim.events(false) as u64 - 3;
+    count_headroom(&tx, &task, &saved.reservation, &local, 0).unwrap();
+    assert_eq!(
+        count_headroom(&tx, &task, &saved.reservation, &cloud, 0),
+        Err(InvestigationStoreError::Capacity)
+    );
+    task.detail.summary.last_event_sequence -= 1;
+    count_headroom(&tx, &task, &saved.reservation, &cloud, 0).unwrap();
+    // The last local attempt slots leave no room for the refusal attempts.
+    assert_eq!(
+        count_headroom(
+            &tx,
+            &task,
+            &saved.reservation,
+            &cloud,
+            policy.max_completed_attempts() - local.attempts
+        ),
+        Err(InvestigationStoreError::Capacity)
+    );
+}
+
 #[test]
 fn source_admission_real_cancellation_and_foreign_execution_cannot_create_reservation() {
     let mut f = Fixture::new();

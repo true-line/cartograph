@@ -10,6 +10,9 @@ pub(in crate::jobs::investigations) struct SettlementEnvelope {
     pub attempts: usize,
     pub input_rows: usize,
     pub reference_rows: usize,
+    /// Journal events a cloud refusal may add beyond the settlement claim's
+    /// events (#679): one when the task egresses to a cloud provider.
+    pub refusal_events: usize,
 }
 
 /// Size every possible settlement before admitting the source reservation.
@@ -90,7 +93,12 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
         attempts: 0,
         input_rows: 0,
         reference_rows: 0,
+        refusal_events: 0,
     };
+    // A cloud task's acquired read may settle with one refusal attempt per
+    // acquisition and one refusal event (#679). Their bytes are outside the
+    // claim; the attempt count and the journal headroom leave room for them.
+    let cloud = completion::read_refusals::egresses_to_cloud(reservation_task);
     for (before, charge) in [
         (reservation_task, None),
         (&charged.task, Some(&charged.charge)),
@@ -186,6 +194,13 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
                 envelope.bytes = envelope.bytes.max(sizing.additional_bytes);
                 envelope.events = envelope.events.max(sizing.counts.events as usize);
                 envelope.attempts = envelope.attempts.max(sizing.counts.attempts);
+                if cloud && kind == DispositionKind::Acquired {
+                    // One refusal attempt per acquisition and one refusal event.
+                    envelope.attempts = envelope
+                        .attempts
+                        .max(sizing.counts.attempts.saturating_mul(2));
+                    envelope.refusal_events = 1;
+                }
                 envelope.input_rows = envelope.input_rows.max(sizing.counts.input_rows);
                 envelope.reference_rows = envelope.reference_rows.max(sizing.counts.reference_rows);
             }
@@ -199,7 +214,7 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
             .detail
             .summary
             .last_event_sequence
-            .checked_add(1 + envelope.events as u64)
+            .checked_add(1 + (envelope.events + envelope.refusal_events) as u64)
             .is_none_or(|n| n > INVESTIGATION_V2_POLICY.journal_events() - 3)
     {
         return Err(InvestigationStoreError::Capacity);

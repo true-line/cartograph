@@ -398,7 +398,7 @@ fn count_headroom(
             .detail
             .summary
             .last_event_sequence
-            .checked_add(reservation.storage_claim.events(false) as u64)
+            .checked_add((reservation.storage_claim.events(false) + envelope.refusal_events) as u64)
             .and_then(|count| count.checked_add(3))
             .is_none_or(|count| count > policy.journal_events())
     {

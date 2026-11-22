@@ -115,7 +115,7 @@ thread_local! {
 
 /// The firewall refuses only toward a cloud provider, so a refusal on a task
 /// that never egresses to one is not authentic.
-fn egresses_to_cloud(task: &StoredTask) -> bool {
+pub(in crate::jobs::investigations) fn egresses_to_cloud(task: &StoredTask) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if FIXTURE_EGRESSES_TO_CLOUD.with(std::cell::Cell::get) {
         return true;
