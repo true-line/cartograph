@@ -312,9 +312,12 @@ cache between runs.
 
 ## Captured pipeline reads (AC-1057, #385)
 
-The pipeline reader's workflows and Dockerfiles join the same capture as the
-lanes' for every layer selection, under the same fallback. With a capture,
-the reader parses their retained bytes. Preflight's unreadable-pipeline
+The pipeline reader's workflows and Dockerfiles are retained with the TS/JS
+selection itself for every layer selection, even when the lanes' files fall
+back; if they cannot be listed or retained, recovery is not published, as for
+TS/JS. A capture therefore always holds the reader's whole selection, possibly
+none, and with a capture the reader parses only those retained bytes: a
+pipeline file created after capture is not read. Preflight's unreadable-pipeline
 finding still reads the checkout, and pipeline facts carry no receipt.
 
 ## Directory-built lane facts (AC-1037, #385)
