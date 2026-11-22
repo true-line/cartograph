@@ -44,6 +44,19 @@ pub(crate) struct Imports<'a> {
     pub(crate) modules: &'a HashMap<String, String>,
 }
 
+impl Imports<'_> {
+    /// The Symbol id a type or value name in this file binds: an imported
+    /// relative export, else a same-file declaration. A name imported from
+    /// a package binds nothing.
+    pub(crate) fn bind(&self, cx: &FileCx<'_>, local: &str) -> Option<String> {
+        match self.files.get(local) {
+            Some((file, exported)) => Some(sym_id(cx.id.repo, file, exported)),
+            None if self.modules.contains_key(local) => None,
+            None => Some(sym_id(cx.id.repo, cx.path, local)),
+        }
+    }
+}
+
 /// The `extends` clause of every named class in one file.
 pub(crate) fn bases(
     cx: &FileCx<'_>,
@@ -83,11 +96,8 @@ pub(crate) fn bases(
         else {
             continue;
         };
-        let local = cx.text(&value);
-        let base = match imports.files.get(local) {
-            Some((file, exported)) => sym_id(cx.id.repo, file, exported),
-            None if imports.modules.contains_key(local) => continue,
-            None => sym_id(cx.id.repo, cx.path, local),
+        let Some(base) = imports.bind(cx, cx.text(&value)) else {
+            continue;
         };
         out.push(Base {
             class: sym_id(cx.id.repo, cx.path, cx.text(&name)),
@@ -114,6 +124,8 @@ pub(crate) fn retarget(bases: &mut [Base], commit: &str) {
 #[derive(Debug, Default)]
 pub(crate) struct Index {
     bases: HashMap<String, (String, EvidenceRef)>,
+    /// base -> its proven subclasses, sorted.
+    children: HashMap<String, Vec<String>>,
 }
 
 impl Index {
@@ -140,12 +152,42 @@ impl Index {
                 }
             }
         }
-        Self {
-            bases: index
-                .into_iter()
-                .filter_map(|(class, base)| Some((class, base?)))
-                .collect(),
+        let bases: HashMap<String, (String, EvidenceRef)> = index
+            .into_iter()
+            .filter_map(|(class, base)| Some((class, base?)))
+            .collect();
+        let mut children: HashMap<String, Vec<String>> = HashMap::new();
+        for (class, (base, _)) in &bases {
+            children
+                .entry(base.clone())
+                .or_default()
+                .push(class.clone());
         }
+        for list in children.values_mut() {
+            list.sort();
+        }
+        Self { bases, children }
+    }
+
+    /// `class` and its subclasses, breadth first, at most `cap`: each with
+    /// the `extends` clauses from it up to `class`.
+    pub(crate) fn descendants(&self, class: &str, cap: usize) -> Vec<(String, Vec<EvidenceRef>)> {
+        let mut out = vec![(class.to_string(), Vec::new())];
+        let mut seen = HashSet::from([class.to_string()]);
+        let mut next = 0;
+        while next < out.len() && out.len() < cap {
+            let (parent, cited) = out[next].clone();
+            next += 1;
+            for child in self.children.get(&parent).into_iter().flatten() {
+                if out.len() >= cap || !seen.insert(child.clone()) {
+                    continue;
+                }
+                let mut evidence = vec![self.bases[child].1.clone()];
+                evidence.extend(cited.iter().cloned());
+                out.push((child.clone(), evidence));
+            }
+        }
+        out
     }
 
     pub(crate) fn is_empty(&self) -> bool {

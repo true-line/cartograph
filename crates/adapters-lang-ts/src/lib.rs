@@ -117,6 +117,10 @@ pub struct Extraction {
     /// Each class's `extends` clause (AC-1514), so a typed call on a class
     /// that only inherits the method reaches the base that declares it.
     heritage: Vec<heritage::Base>,
+    /// Each class's `implements` and each interface's `extends` clause
+    /// (AC-1515), so a typed call on an interface reaches its
+    /// implementations.
+    implements: implementers::Pending,
     /// What the opt-in dependency type reader did on this walk (AC-1506).
     pub dependency_types: DependencyTypesReport,
 }
@@ -339,6 +343,7 @@ fn retarget_commit(
         call.retarget(commit);
     }
     heritage::retarget(&mut extraction.heritage, commit);
+    extraction.implements.retarget(commit);
     Ok(())
 }
 
@@ -378,6 +383,7 @@ impl Extraction {
         self.exported.clear();
         self.dependency_calls.clear();
         self.heritage.clear();
+        self.implements = implementers::Pending::default();
     }
 
     /// Ensure every edge endpoint exists as a node; unresolved targets become
@@ -3404,15 +3410,12 @@ fn extract_source_recording(
     client_navigation::extract(&cx, root, &route_proofs, &mut out.client_navigation);
     // Inherited members resolve in test code too: a test calls the same
     // classes the product does (AC-1514).
-    heritage::bases(
-        &cx,
-        &syntax_nodes,
-        &heritage::Imports {
-            files: &imported_types,
-            modules: &import_modules,
-        },
-        &mut out.heritage,
-    );
+    let heritage_imports = heritage::Imports {
+        files: &imported_types,
+        modules: &import_modules,
+    };
+    heritage::bases(&cx, &syntax_nodes, &heritage_imports, &mut out.heritage);
+    implementers::clauses(&cx, &syntax_nodes, &heritage_imports, &mut out.implements);
     // Guards in test code are not business rules (#2009).
     if !target_tests::in_test_tree(cx.path) {
         rule_evidence::extract(&cx, &syntax_nodes, &bindings, &mut out, direct);
@@ -3602,6 +3605,7 @@ fn append_extraction(out: &mut Extraction, ex: Extraction) {
     out.exported.extend(ex.exported);
     out.dependency_calls.extend(ex.dependency_calls);
     out.heritage.extend(ex.heritage);
+    out.implements.extend(ex.implements);
 }
 
 /// Link each pending call to its recovered target, or record its Gap. Only
@@ -3611,6 +3615,7 @@ fn complete_pending_calls(
     known_symbols: &std::collections::HashSet<String>,
     barrels: &reexports::Index<'_>,
     bases: Vec<heritage::Base>,
+    implements: implementers::Pending,
     id: &SourceId,
     facts: &mut impl FactAccess,
 ) -> Result<(), core_graph::GraphError> {
@@ -3642,12 +3647,13 @@ fn complete_pending_calls(
     // to the nearest declaration (AC-1514).
     // Classes are not Symbols themselves: a class is known by its
     // `extends` clause or by a member Symbol (`…#T.m`).
-    let classes: std::collections::HashSet<String> = if bases.is_empty() {
+    let classes: std::collections::HashSet<String> = if bases.is_empty() && implements.is_empty() {
         Default::default()
     } else {
         bases
             .iter()
             .map(|base| base.class.clone())
+            .chain(implements.interfaces().map(str::to_string))
             .chain(known_symbols.iter().filter_map(|symbol| {
                 let (prefix, qualified) = symbol.rsplit_once('#')?;
                 let (class, _) = qualified.split_once('.')?;
@@ -3671,6 +3677,9 @@ fn complete_pending_calls(
         })
     };
     let bases = heritage::Index::new(bases, place);
+    // A typed call on an interface reaches each class implementing it
+    // (AC-1515).
+    let implementers = implementers::Index::new(implements, place);
     let direct: BTreeSet<&str> = pending
         .iter()
         .filter(|call| call.requires_instance_method)
@@ -3700,10 +3709,26 @@ fn complete_pending_calls(
             .flatten()
         })
         .collect();
+    let implemented: Vec<Vec<implementers::Implementation>> = pending
+        .iter()
+        .zip(&inherited)
+        .map(|(call, inherited)| {
+            let dst = call.resolved_edge.dst.as_str();
+            if !call.requires_instance_method
+                || implementers.is_empty()
+                || known_symbols.contains(dst)
+                || inherited.is_some()
+            {
+                return Vec::new();
+            }
+            implementers.implementations(dst, &bases, place, known_symbols)
+        })
+        .collect();
     let targets: BTreeSet<&str> = inherited
         .iter()
         .flatten()
         .map(|found| found.dst.as_str())
+        .chain(implemented.iter().flatten().map(|found| found.dst.as_str()))
         .filter(|dst| !direct.contains(dst))
         .collect();
     let inherited_nodes = if targets.is_empty() {
@@ -3718,7 +3743,15 @@ fn complete_pending_calls(
         .map(|node| node.id.clone())
         .collect();
     let (mut nodes, mut edges) = (Vec::new(), Vec::new());
-    for (call, inherited) in pending.into_iter().zip(inherited) {
+    for ((call, inherited), implemented) in pending.into_iter().zip(inherited).zip(implemented) {
+        let implemented = implementers::choose(
+            implemented
+                .into_iter()
+                .filter(|found| instance_methods.contains(&found.dst))
+                .collect(),
+            &call.resolved_edge.src,
+            target_tests::in_test_tree,
+        );
         if known_symbols.contains(&call.resolved_edge.dst)
             && (!call.requires_instance_method
                 || instance_methods.contains(&call.resolved_edge.dst))
@@ -3727,6 +3760,12 @@ fn complete_pending_calls(
         } else if let Some(found) = inherited.filter(|found| instance_methods.contains(&found.dst))
         {
             edges.push(inherited_edge(call.resolved_edge.unpack()?, found));
+        } else if !implemented.is_empty() {
+            let alternatives = implemented.len();
+            let edge = call.resolved_edge.unpack()?;
+            for found in implemented {
+                edges.push(implementation_edge(edge.clone(), found, alternatives));
+            }
         } else {
             nodes.push(call.gap_node.unpack()?);
             edges.push(call.gap_edge.unpack()?);
@@ -3745,6 +3784,32 @@ fn inherited_edge(mut edge: Edge, found: heritage::Inherited) -> Edge {
         prov.evidence.extend(found.evidence);
         edge.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
     }
+    edge
+}
+
+/// A typed interface call's edge retargeted to one implementation, citing
+/// the `implements` and `extends` clauses relied on (AC-1515). Which class
+/// answers is decided at run time, so the edge is InferredStrong.
+fn implementation_edge(
+    mut edge: Edge,
+    found: implementers::Implementation,
+    alternatives: usize,
+) -> Edge {
+    if let Ok(mut prov) = serde_json::from_value::<Provenance>(edge.props["prov"].clone()) {
+        let fact = format!(
+            "CALLS {} -> {} via {}",
+            edge.dst, found.dst, prov.content_hash
+        );
+        prov.content_hash = core_prov::content_hash(fact.as_bytes());
+        prov.evidence.extend(found.evidence);
+        prov.confidence_tier = ConfidenceTier::InferredStrong;
+        edge.props["prov"] = serde_json::to_value(prov).expect("provenance serializes");
+    }
+    edge.dst = found.dst;
+    edge.props["resolution"] = "interface-implementation".into();
+    edge.props["interface"] = found.interface.into();
+    edge.props["implementation"] = found.class.into();
+    edge.props["alternatives"] = alternatives.into();
     edge
 }
 
@@ -3814,6 +3879,7 @@ fn complete_directory(
         &known_symbols,
         &reexports::Index::new(&reexports, &exported),
         std::mem::take(&mut out.heritage),
+        std::mem::take(&mut out.implements),
         id,
         &mut *facts,
     )?;
@@ -4096,6 +4162,7 @@ mod dependency_types;
 mod grammar;
 pub mod graphql_resolvers;
 mod heritage;
+mod implementers;
 pub mod indexeddb;
 mod instances;
 mod local_definitions;
