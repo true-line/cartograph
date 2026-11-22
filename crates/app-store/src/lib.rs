@@ -15,12 +15,16 @@
     allow(dead_code, unused_imports)
 )]
 
+#[path = "../../../src-tauri/src/edge_merge.rs"]
+pub mod edge_merge;
 #[path = "../../../src-tauri/src/findings.rs"]
 pub mod findings;
 #[path = "../../../src-tauri/src/job_execution.rs"]
 pub mod job_execution;
 #[path = "../../../src-tauri/src/jobs.rs"]
 pub mod jobs;
+#[path = "../../../src-tauri/src/observation_inputs.rs"]
+pub mod observation_inputs;
 #[path = "../../../src-tauri/src/paths.rs"]
 pub mod paths;
 #[path = "../../../src-tauri/src/sources.rs"]
