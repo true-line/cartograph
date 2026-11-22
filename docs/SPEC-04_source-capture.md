@@ -67,8 +67,8 @@ logical manifest keys; the core does not materialize them into a new filesystem
 tree or silently collapse case/Unicode-distinct names. Duplicate selected paths
 fail. Absolute paths are rejected even if they happen to point under the root.
 
-Hard maxima are 8,192 selected files, 1,024 bytes per path, 256 bytes per source
-identity, 16 MiB per file, 128 MiB raw bytes per capture, 8 MiB serialized manifest,
+Hard maxima are 20,480 selected files, 1,024 bytes per path, 256 bytes per source
+identity, 16 MiB per file, 320 MiB raw bytes per capture, 8 MiB serialized manifest,
 and 256 KiB per evidence span. Callers may request smaller limits for tests or
 bounded tasks, never exceed the hard maxima. Empty files may be captured but have
 no valid nonempty span; an empty selection remains an explicit empty capture.
@@ -103,10 +103,15 @@ loading source payloads. Existing conflicting or corrupt rows fail rather than b
 repaired from new caller content. Stored schema versions, manifest identity,
 membership, object digests and actual lengths are revalidated on load, with limits
 checked before loading large payloads. Evidence comes from the validated buffer;
-there is no fallback to a checkout, Git repository or network. The initial store
-span reader validates and loads the complete bounded capture (up to 128 MiB)
-before slicing; its 256 KiB output limit does not bound that input cost. A validated
-single-object read optimization precedes broad agent exposure.
+there is no fallback to a checkout, Git repository or network. `load` validates
+and loads the complete bounded capture (up to 320 MiB); span reads load and hash
+only the requested object.
+
+The file and byte maxima are sized from measurement (AC-1510): a full VSCode
+checkout at `733a998` selects 16,180 TS/JS files and about 234 MiB, and its
+whole ingest peaked at 12.3 GB RSS (1.28M nodes, 2.03M edges; optimized test
+build, Linux). The maxima leave about 27% file and 37% byte headroom while
+keeping the projected peak within a 24 GB host.
 
 The store retains captures independently of jobs, disposable graph state and
 proposal review. There is no automatic eviction or deletion API in this first

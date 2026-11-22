@@ -20,7 +20,7 @@ pub use store::{
 /// Canonical manifest interpretation version.
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 /// Maximum files explicitly selected for one capture.
-pub const MAX_FILES: usize = 8_192;
+pub const MAX_FILES: usize = 20_480;
 /// Maximum UTF-8 bytes in a logical relative path.
 pub const MAX_PATH_BYTES: usize = 1_024;
 /// Maximum UTF-8 bytes in a host-assigned source identity.
@@ -28,7 +28,7 @@ pub const MAX_SOURCE_ID_BYTES: usize = 256;
 /// Maximum raw bytes per captured file.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum raw bytes per capture, counting every selected file.
-pub const MAX_CAPTURE_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: u64 = 320 * 1024 * 1024;
 /// Maximum serialized canonical manifest bytes.
 pub const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum nonempty evidence span bytes.
