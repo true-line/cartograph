@@ -1,11 +1,15 @@
 //! Agent pool controls (#252, AC-1704): pause new agent work, and cap how
 //! many agent jobs run at once per provider mode. The controls gate only
 //! where agent work starts as a job (topic expert questions, section drafts
-//! and gap escalations); they never stop work already running, and they do
-//! not apply to specialist investigations, which keep their own runner.
+//! and gap escalations): work they do not admit yet is held as queued and
+//! starts when they do (AC-1705). They never stop work already running.
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+use std::time::Duration;
+
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::AppState;
 use crate::job_execution::JobExecution;
@@ -51,15 +55,63 @@ pub(crate) fn agent_mode(kind: &str) -> Option<&str> {
     Some(rest.rsplit(':').next().unwrap_or(rest))
 }
 
-/// Whether agent work of `kind` may start next to `jobs`. Other work is
+/// Agent jobs held in this process, waiting for the controls to admit them,
+/// keyed by the app state they belong to. A queued row left by an earlier
+/// process has no waiter and never counts against a limit.
+static HELD: Mutex<BTreeSet<(usize, i64)>> = Mutex::new(BTreeSet::new());
+
+/// How often a held job checks again whether it may start.
+const HOLD_POLL: Duration = Duration::from_millis(250);
+
+fn state_key(state: &AppState) -> usize {
+    std::ptr::from_ref(state) as usize
+}
+
+fn is_held(state: usize, id: i64) -> bool {
+    HELD.lock()
+        .map(|held| held.contains(&(state, id)))
+        .unwrap_or(false)
+}
+
+/// Registers a held job and removes it however the wait ends.
+struct Hold {
+    state: usize,
+    id: i64,
+}
+
+impl Hold {
+    fn new(state: usize, id: i64) -> Self {
+        if let Ok(mut held) = HELD.lock() {
+            held.insert((state, id));
+        }
+        Self { state, id }
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        if let Ok(mut held) = HELD.lock() {
+            held.remove(&(self.state, self.id));
+        }
+    }
+}
+
+/// Whether agent work of `kind` may start now next to `jobs`, or why it is
+/// held. Running agent jobs of the same mode count against its limit, and
+/// so do queued ones that `ahead` says are waiting before it. Other work is
 /// always admitted.
-pub(crate) fn admit(controls: &AgentPoolControls, jobs: &[Job], kind: &str) -> Result<(), String> {
+pub(crate) fn admit(
+    controls: &AgentPoolControls,
+    jobs: &[Job],
+    kind: &str,
+    ahead: impl Fn(&Job) -> bool,
+) -> Result<(), String> {
     let Some(mode) = agent_mode(kind) else {
         return Ok(());
     };
     if controls.paused {
         return Err(
-            "Agent work is paused in the agent pool. Resume it there to start this.".into(),
+            "Agent work is paused in the agent pool; this starts when it is resumed.".into(),
         );
     }
     let limit = match mode {
@@ -72,37 +124,86 @@ pub(crate) fn admit(controls: &AgentPoolControls, jobs: &[Job], kind: &str) -> R
     }
     let active = jobs
         .iter()
-        .filter(|job| matches!(job.status.as_str(), "queued" | "running"))
         .filter(|job| agent_mode(&job.kind) == Some(mode))
+        .filter(|job| job.status == "running" || (job.status == "queued" && ahead(job)))
         .count();
     if active >= limit as usize {
         return Err(format!(
-            "The agent pool already runs {active} {mode} agent {}, its limit. Wait for one to finish or raise the limit.",
-            if active == 1 { "job" } else { "jobs" }
+            "The agent pool is at its limit of {limit} {mode} agent {}; this starts when one finishes.",
+            if limit == 1 { "job" } else { "jobs" }
         ));
     }
     Ok(())
 }
 
-/// Start agent work of `kind` as a job when the controls admit it. The
-/// check and the enqueue happen under one jobs lock, so two starts cannot
-/// both take the last free place.
-pub(crate) fn start_job(state: &AppState, kind: &str) -> Result<(Job, JobExecution), String> {
-    let controls = state
-        .settings
+/// Start agent work of `kind` as a job. When the controls do not admit it
+/// yet, the job is held as queued (and reported through `emit`) until they
+/// do: held jobs start in the order they were queued. The check and the
+/// claim's plan are made under one jobs lock. Cancelling a held job ends
+/// the wait without starting it.
+pub(crate) fn start_job_blocking(
+    state: &AppState,
+    kind: &str,
+    emit: &dyn Fn(&Job),
+) -> Result<(Job, JobExecution), String> {
+    let key = state_key(state);
+    let job = state
+        .jobs
         .lock()
         .map_err(|error| error.to_string())?
-        .agent_pool_controls()
+        .enqueue(kind)
         .map_err(|error| error.to_string())?;
-    let plan = {
-        let mut jobs = state.jobs.lock().map_err(|error| error.to_string())?;
-        let listed = jobs.list().map_err(|error| error.to_string())?;
-        admit(&controls, &listed, kind)?;
-        let job = jobs.enqueue(kind).map_err(|error| error.to_string())?;
-        jobs.claim_plan(job.id, ClaimMode::StartQueued)
+    let _hold = Hold::new(key, job.id);
+    let mut reported = false;
+    loop {
+        let controls = state
+            .settings
+            .lock()
             .map_err(|error| error.to_string())?
-    };
-    crate::claim_job(state, &plan)
+            .agent_pool_controls()
+            .map_err(|error| error.to_string())?;
+        let plan = {
+            let jobs = state.jobs.lock().map_err(|error| error.to_string())?;
+            let listed = jobs.list().map_err(|error| error.to_string())?;
+            match listed.iter().find(|row| row.id == job.id) {
+                Some(row) if row.status == "queued" => {}
+                Some(row) if row.status == "cancelled" => return Err("cancelled".into()),
+                _ => return Err("The held agent job is no longer queued.".into()),
+            }
+            match admit(&controls, &listed, kind, |other| {
+                other.id < job.id && is_held(key, other.id)
+            }) {
+                Ok(()) => Some(
+                    jobs.claim_plan(job.id, ClaimMode::StartQueued)
+                        .map_err(|error| error.to_string())?,
+                ),
+                Err(_) => None,
+            }
+        };
+        match plan {
+            Some(plan) => return crate::claim_job(state, &plan),
+            None => {
+                if !reported {
+                    emit(&job);
+                    reported = true;
+                }
+                std::thread::sleep(HOLD_POLL);
+            }
+        }
+    }
+}
+
+/// [`start_job_blocking`] off the async runtime, reporting a held job.
+pub(crate) async fn start_job(
+    app: &tauri::AppHandle,
+    kind: &str,
+) -> Result<(Job, JobExecution), String> {
+    let (app, kind) = (app.clone(), kind.to_owned());
+    crate::off_ui_thread(move || {
+        let state = app.state::<AppState>();
+        start_job_blocking(&state, &kind, &|job| crate::emit_job(&app, job))
+    })
+    .await
 }
 
 pub(crate) fn initialize(conn: &Connection) -> rusqlite::Result<()> {
@@ -212,47 +313,51 @@ mod tests {
         assert_eq!(agent_mode("plugin-gate:p"), None);
     }
 
-    // AC-1704 (T-1704): pause refuses agent work only; a limit counts that
-    // mode's queued and running agent jobs.
+    // AC-1704 (T-1704): pause holds agent work only; a limit counts that
+    // mode's running agent jobs and the queued ones waiting ahead.
     #[test]
-    fn pause_and_limits_admit_or_refuse_new_agent_work() {
+    fn pause_and_limits_admit_or_hold_new_agent_work() {
         let jobs = [
             job(1, "area-ask:local", "running"),
             job(2, "escalate:g:local", "queued"),
             job(3, "area-ask:cloud", "done"),
             job(4, "ingest-source-v1:src_1", "running"),
         ];
+        let none_ahead = |_: &Job| false;
+        let all_ahead = |_: &Job| true;
         let open = AgentPoolControls::default();
-        assert!(admit(&open, &jobs, "area-ask:local").is_ok());
+        assert!(admit(&open, &jobs, "area-ask:local", all_ahead).is_ok());
 
         let paused = AgentPoolControls {
             paused: true,
             ..open
         };
         assert!(
-            admit(&paused, &jobs, "area-ask:cloud")
+            admit(&paused, &jobs, "area-ask:cloud", none_ahead)
                 .unwrap_err()
                 .contains("paused")
         );
-        assert!(admit(&paused, &jobs, "ingest-source-v1:src_2").is_ok());
+        assert!(admit(&paused, &jobs, "ingest-source-v1:src_2", none_ahead).is_ok());
 
         let limited = AgentPoolControls {
             local_limit: 2,
             cloud_limit: 1,
             ..open
         };
-        let refused = admit(&limited, &jobs, "section-compose:D1:1:all:local").unwrap_err();
+        let held = admit(&limited, &jobs, "section-compose:D1:1:all:local", all_ahead).unwrap_err();
+        assert!(held.contains("limit of 2 local agent jobs"), "{held}");
+        // A queued row with no live waiter ahead (left by an earlier run)
+        // does not count, and the finished cloud job does not count either.
         assert!(
-            refused.contains("2 local agent jobs, its limit"),
-            "{refused}"
+            admit(
+                &limited,
+                &jobs,
+                "section-compose:D1:1:all:local",
+                none_ahead
+            )
+            .is_ok()
         );
-        // The finished cloud job does not count.
-        assert!(admit(&limited, &jobs, "area-ask:cloud").is_ok());
-        let raised = AgentPoolControls {
-            local_limit: 3,
-            ..limited
-        };
-        assert!(admit(&raised, &jobs, "area-ask:local").is_ok());
+        assert!(admit(&limited, &jobs, "area-ask:cloud", all_ahead).is_ok());
     }
 
     // AC-1704 (T-1704): controls persist, default to no gate and reject an
@@ -287,43 +392,107 @@ mod tests {
         );
     }
 
-    // AC-1704 (T-1704): the host's agent start path applies the stored
-    // controls; work that is not agent work still starts while paused.
-    #[test]
-    fn agent_jobs_start_through_the_stored_controls() {
-        let refused = |state: &AppState, kind: &str| match start_job(state, kind) {
-            Ok(_) => panic!("{kind} started"),
-            Err(error) => error,
-        };
-        let (_dir, state) = crate::area_briefing::tests::state();
-        let limited = AgentPoolControls {
-            paused: false,
-            local_limit: 1,
-            cloud_limit: 0,
-        };
+    fn set(state: &AppState, controls: AgentPoolControls) {
         state
             .settings
             .lock()
             .unwrap()
-            .set_agent_pool_controls(&limited)
+            .set_agent_pool_controls(&controls)
             .unwrap();
-        let (first, _execution) = start_job(&state, "area-ask:local").unwrap();
-        assert!(refused(&state, "escalate:g:local").contains("its limit"));
-        assert!(start_job(&state, "area-ask:cloud").is_ok());
-        state.jobs.lock().unwrap().finish(first.id, &[]).unwrap();
-        assert!(start_job(&state, "escalate:g:local").is_ok());
+    }
 
+    fn status(state: &AppState, id: i64) -> String {
+        state.jobs.lock().unwrap().get(id).unwrap().status
+    }
+
+    // AC-1705 (T-1705): work over the limit is held as queued and starts,
+    // in order, when a running job finishes; other modes are not held.
+    #[test]
+    fn held_agent_work_starts_in_order_when_a_slot_frees() {
+        let (_dir, state) = crate::area_briefing::tests::state();
+        set(
+            &state,
+            AgentPoolControls {
+                paused: false,
+                local_limit: 1,
+                cloud_limit: 0,
+            },
+        );
+        let (first, _first) = start_job_blocking(&state, "area-ask:local", &|_| {}).unwrap();
+        assert!(start_job_blocking(&state, "area-ask:cloud", &|_| {}).is_ok());
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                let tx = held_tx.clone();
+                start_job_blocking(&state, "escalate:g:local", &move |job| {
+                    tx.send(job.id).unwrap();
+                })
+                .map(|(job, _)| job.id)
+            });
+            let second_id = held_rx.recv().unwrap();
+            let third = scope.spawn(|| {
+                let tx = held_tx.clone();
+                start_job_blocking(&state, "area-ask:local", &move |job| {
+                    tx.send(job.id).unwrap();
+                })
+                .map(|(job, _)| job.id)
+            });
+            let third_id = held_rx.recv().unwrap();
+            assert_eq!(status(&state, second_id), "queued");
+            assert_eq!(status(&state, third_id), "queued");
+
+            state.jobs.lock().unwrap().finish(first.id, &[]).unwrap();
+            assert_eq!(second.join().unwrap().unwrap(), second_id);
+            assert_eq!(status(&state, second_id), "running");
+            // The later job is still held behind the one that just started.
+            std::thread::sleep(HOLD_POLL * 3);
+            assert_eq!(status(&state, third_id), "queued");
+            state.jobs.lock().unwrap().finish(second_id, &[]).unwrap();
+            assert_eq!(third.join().unwrap().unwrap(), third_id);
+        });
+    }
+
+    // AC-1705 (T-1705): a paused pool holds agent work until it is resumed,
+    // a cancelled held job never starts, and other work is not held.
+    #[test]
+    fn paused_work_waits_for_resume_and_cancelling_ends_the_wait() {
+        let (_dir, state) = crate::area_briefing::tests::state();
         let paused = AgentPoolControls {
             paused: true,
-            ..limited
+            local_limit: 0,
+            cloud_limit: 0,
         };
-        state
-            .settings
-            .lock()
-            .unwrap()
-            .set_agent_pool_controls(&paused)
-            .unwrap();
-        assert!(refused(&state, "area-ask:cloud").contains("paused"));
-        assert!(start_job(&state, "plugin-gate:p").is_ok());
+        set(&state, paused);
+        assert!(start_job_blocking(&state, "plugin-gate:p", &|_| {}).is_ok());
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let resumed = scope.spawn(|| {
+                let tx = held_tx.clone();
+                start_job_blocking(&state, "area-ask:cloud", &move |job| {
+                    tx.send(job.id).unwrap();
+                })
+                .map(|(job, _)| job.id)
+            });
+            let resumed_id = held_rx.recv().unwrap();
+            let cancelled = scope.spawn(|| {
+                let tx = held_tx.clone();
+                start_job_blocking(&state, "area-ask:local", &move |job| {
+                    tx.send(job.id).unwrap();
+                })
+                .map(|(job, _)| job.id)
+            });
+            let cancelled_id = held_rx.recv().unwrap();
+            state.jobs.lock().unwrap().cancel(cancelled_id).unwrap();
+            assert_eq!(cancelled.join().unwrap().unwrap_err(), "cancelled");
+            assert_eq!(status(&state, resumed_id), "queued");
+            set(
+                &state,
+                AgentPoolControls {
+                    paused: false,
+                    ..paused
+                },
+            );
+            assert_eq!(resumed.join().unwrap().unwrap(), resumed_id);
+        });
     }
 }
