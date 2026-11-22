@@ -591,6 +591,39 @@ button:disabled {
   margin-top: 0.8rem;
 }
 
+/* A project row (#2252): a long name wraps beside its actions and never
+   runs under them; a confirmation takes the row's full width. */
+.project-list {
+  list-style: none;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.project-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+}
+
+.project-name {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-actions {
+  display: flex;
+  flex: none;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.project-row > form,
+.project-row > .clear-confirmation {
+  flex-basis: 100%;
+}
+
 .clear-confirmation {
   margin-top: 0.8rem;
   padding: 0.65rem;

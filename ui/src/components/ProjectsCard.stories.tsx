@@ -77,3 +77,48 @@ export const SwitchWhileWorkRuns: Story = {
     }
   },
 };
+
+export const LongName: Story = {
+  // #2252: a long parked project name wraps beside its actions instead of
+  // running under them, and the full name is its tooltip, in a card as
+  // narrow as the Workspace column.
+  decorators: [
+    (Story) => (
+      <div style={{ width: '22rem' }}>
+        <Story />
+      </div>
+    ),
+  ],
+  args: {
+    projects: [
+      { id: '0123456789abcdef', name: null, repos: [], active: true },
+      {
+        id: 'fedcba9876543210',
+        name: 'Customer onboarding and identity verification platform, legacy billing integration and reporting',
+        repos: ['acme/onboarding'],
+        active: false,
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const row = canvas.getAllByRole('listitem')[1];
+    const name = row.querySelector('.project-name') as HTMLElement;
+    await expect(name).toHaveAttribute(
+      'title',
+      'Customer onboarding and identity verification platform, legacy billing integration and reporting',
+    );
+    const text = name.getBoundingClientRect();
+    for (const button of within(row).getAllByRole('button')) {
+      const box = button.getBoundingClientRect();
+      // Touching counts: an inline button's padding reaches into the line
+      // above it, which is how the name got covered.
+      const overlaps =
+        box.left <= text.right &&
+        text.left <= box.right &&
+        box.top <= text.bottom &&
+        text.top <= box.bottom;
+      await expect(overlaps).toBe(false);
+    }
+  },
+};
