@@ -2,14 +2,14 @@
 use super::*;
 
 impl JobStore {
-    pub(crate) fn existing_investigation(
+    pub fn existing_investigation(
         &self,
         request: &StartInvestigationRequest,
     ) -> Result<Option<InvestigationDetail>, InvestigationStoreError> {
         self.existing_investigation_access(request, None)
     }
 
-    pub(crate) fn existing_investigation_access(
+    pub fn existing_investigation_access(
         &self,
         request: &StartInvestigationRequest,
         session: Option<&McpTaskSession>,
@@ -45,7 +45,7 @@ impl JobStore {
         Ok(detail)
     }
 
-    pub(crate) fn investigation_turn_basis(
+    pub fn investigation_turn_basis(
         &self,
         id: &str,
     ) -> Result<InvestigationTurnBasis, InvestigationStoreError> {

@@ -158,7 +158,7 @@ fn validate_source_replay_begin(
 }
 
 impl JobStore {
-    pub(crate) fn advance_investigation(
+    pub fn advance_investigation(
         &mut self,
         execution: &JobExecution,
         expected_revision: u64,
@@ -646,7 +646,7 @@ impl JobStore {
         Ok(task.detail)
     }
 
-    pub(crate) fn approve_investigation(
+    pub fn approve_investigation(
         &mut self,
         id: &str,
         revision: u64,
@@ -656,7 +656,7 @@ impl JobStore {
         self.consent_decision(id, revision, step_id, payload_hash, true)
     }
 
-    pub(crate) fn decline_investigation(
+    pub fn decline_investigation(
         &mut self,
         id: &str,
         revision: u64,
@@ -712,7 +712,7 @@ impl JobStore {
         Ok(task.detail)
     }
 
-    pub(crate) fn cancel_investigation(
+    pub fn cancel_investigation(
         &mut self,
         id: &str,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
@@ -721,14 +721,14 @@ impl JobStore {
 
     /// Next-family cancellation retains its existing terminal reserve and
     /// generation fencing; owner app and MCP use the same transition.
-    pub(crate) fn cancel_next_prompt_investigation(
+    pub fn cancel_next_prompt_investigation(
         &mut self,
         id: &str,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         self.cancel_investigation_access(id, true, None)
     }
 
-    pub(crate) fn cancel_investigation_access(
+    pub fn cancel_investigation_access(
         &mut self,
         id: &str,
         next_prompt: bool,
@@ -768,8 +768,8 @@ impl JobStore {
 
     /// Internal terminal path for failures outside a pending source read.
     /// Reservations must settle their durable charge and disposition instead.
-    #[cfg(test)]
-    pub(crate) fn stop_next_prompt_investigation(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stop_next_prompt_investigation(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -786,7 +786,7 @@ impl JobStore {
     }
 
     /// The same stop, also keeping the rejected response that caused it (AC-1403).
-    pub(crate) fn stop_next_prompt_investigation_keeping(
+    pub fn stop_next_prompt_investigation_keeping(
         &mut self,
         execution: &JobExecution,
         revision: u64,
@@ -836,7 +836,7 @@ impl JobStore {
         Ok(task.detail)
     }
 
-    pub(crate) fn investigation_recovery_candidates(
+    pub fn investigation_recovery_candidates(
         &self,
     ) -> Result<Vec<InvestigationRecoveryCandidate>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
@@ -875,7 +875,7 @@ impl JobStore {
     /// waiter keeps its job's lock file reserved while it waits, so only an
     /// existing, free lock proves the waiting process stopped; a task whose
     /// lock file does not exist yet stays queued and cancellable.
-    pub(crate) fn held_investigation_candidates(
+    pub fn held_investigation_candidates(
         &self,
     ) -> Result<Vec<InvestigationRecoveryCandidate>, InvestigationStoreError> {
         let tx = self.conn.unchecked_transaction()?;
@@ -907,7 +907,7 @@ impl JobStore {
         Ok(candidates)
     }
 
-    pub(crate) fn recover_investigation(
+    pub fn recover_investigation(
         &mut self,
         candidate: &InvestigationRecoveryCandidate,
         reservation: ExecutionReservation,
