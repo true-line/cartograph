@@ -215,13 +215,19 @@ Which gates run where:
 
 | Gate | Linux (`ubuntu-latest`) | Windows (`windows-latest`) | macOS (self-hosted, `scheduled.yml`) |
 |---|---|---|---|
-| Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | — | — |
-| `cargo test` (every package; `app` in two test groups of six shards on Linux, and `job-execution-tests` covered there by `app-store`; four processes on macOS) | every PR and merge | — | daily; not a PR gate |
+| Format, clippy, docs and traceability, notices, zizmor, CodeQL, frontend | every PR and merge | format and clippy: advisory, every push to main (`windows.yml`) | — |
+| `cargo test` (every package; `app` in two test groups of six shards on Linux, and `job-execution-tests` covered there by `app-store`; four processes on macOS) | every PR and merge | advisory, every push to main, all but `app` (`windows.yml`) | daily; not a PR gate |
+| Unsigned installer with both sidecars (#227) | — | advisory, every push to main (`windows.yml`) | — |
 | Job ownership tests (`job-execution-tests --test ownership`) | every PR and merge (as `app-store`'s unit tests) | every PR and merge | daily (in the workspace run) |
 | Real-repository determinism (AC-0593, MT-1812-01) | — | — | daily, Cartograph at its pinned commit |
 | SimpleLogin showcase thresholds (AC-1700) | — | — | weekly, release build |
 | Scale showcase thresholds (AC-1700) | — | — | monthly or on demand |
 | Changelog versions are tagged (#1762) | daily (`scheduled.yml`) | — | — |
+
+The `windows.yml` lanes (#227) are advisory: the complete suite does not need
+them, so they never block a PR or a merge. They also run on a PR that changes
+that workflow or the Windows packaging inputs. Make them required once they
+have stayed green on main for a week.
 
 A scheduled lane does not block a PR. It opens or updates one tracking issue
 named `Scheduled: …` when it fails and closes it when it passes again; its
