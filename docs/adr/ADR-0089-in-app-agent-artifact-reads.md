@@ -60,11 +60,18 @@ product has already compiled.
    coverage reads. A repeat of an identical read is skipped and charged, not
    re-run.
 3. **The host compiles from the frozen basis only.**
-   - The host builds the artifact from the investigation's visible projection
-     at its pinned revision, using the same artifact compiler and
-     byte-bounded `CompiledArtifact::page` as the MCP read session.
-   - The compilation must reproduce the ledger's `graph_snapshot_id`. A
-     different basis is a stale refusal, never a page from another revision.
+   - The host builds the artifact from the investigation's retained visible
+     projection, using the same artifact compiler and byte-bounded
+     `CompiledArtifact::page` as the MCP read session.
+   - The basis is the projection the ledger's `scope_snapshot_id` names. For a
+     whole-system investigation that is the complete visible graph. For an
+     Area or Neighborhood investigation it is only the scoped projection, so
+     the artifact describes the scope, and the page says so
+     (`complete_system: false`); it is never labeled with the complete
+     graph's `graph_snapshot_id`.
+   - The host must reproduce `scope_snapshot_id` from the retained facts
+     before compiling. A different basis is a stale refusal, never a page from
+     another revision or a wider graph.
    - A continuation whose `expected_content_id` differs from the compiled
      content is stale.
    - Trace and compile limits are the MCP read limits. A limited compilation
@@ -102,11 +109,26 @@ product has already compiled.
 - The change is additive in every persisted form. Older tasks, ledgers,
   fingerprints and specialist goldens keep their bytes.
 - Compiling an artifact from a frozen basis costs a full projection compile
-  per read. Hosts may cache one compilation per `(graph_snapshot_id,
+  per read. Hosts may cache one compilation per `(scope_snapshot_id,
   artifact_id)` for the life of an investigation, but the cache never crosses
   a basis.
 - Artifact pages are summaries. An agent that answers from them alone, with
   no fact citations, still fails the existing citation obligations.
+
+## Alternatives
+
+1. **Let in-app agents call the local MCP server.** Rejected: MCP sessions
+   are an external trust boundary with their own grants and limits. Their
+   pages would sit outside the frozen input ledger, the acquisition budget
+   and the sealed disclosure, so a run could not be replayed or audited.
+2. **Supply selected artifacts in the first prompt.** Rejected: the host
+   would have to guess which artifacts a task needs, every page would spend
+   prompt capacity whether used or not, and every specialist's golden would
+   change.
+3. **Add an artifact scope to `query_context`.** Rejected: query pages are
+   fact pages whose facts become citations. Artifact text is a summary, not
+   evidence, and mixing the two would weaken the query manifest and citation
+   contracts.
 
 ## Implementation order
 
