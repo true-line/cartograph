@@ -13,7 +13,8 @@ use tauri::{Manager, State};
 
 use crate::AppState;
 use crate::job_execution::JobExecution;
-use crate::jobs::{ClaimMode, Job};
+use crate::jobs::{ClaimMode, ClaimPlan, Job, JobStore};
+use agents::investigation::InvestigationProviderMode;
 
 /// Largest per-mode limit offered.
 pub const MAX_LIMIT: u32 = 16;
@@ -73,10 +74,17 @@ fn is_held(state: usize, id: i64) -> bool {
         .unwrap_or(false)
 }
 
-/// Registers a held job and removes it however the wait ends.
-struct Hold {
+/// Registers a held job and removes it however the wait ends. Keep it
+/// until the job is claimed, so later jobs still count it as ahead.
+pub(crate) struct Hold {
     state: usize,
     id: i64,
+}
+
+/// Register queued job `id` as held. Call it under the same jobs lock that
+/// queued the job, so no later start can be admitted ahead of it.
+pub(crate) fn hold(state: &AppState, id: i64) -> Hold {
+    Hold::new(state_key(state), id)
 }
 
 impl Hold {
@@ -100,13 +108,32 @@ impl Drop for Hold {
 /// held. Running agent jobs of the same mode count against its limit, and
 /// so do queued ones that `ahead` says are waiting before it. Other work is
 /// always admitted.
-pub(crate) fn admit(
+#[cfg(test)]
+fn admit(
     controls: &AgentPoolControls,
     jobs: &[Job],
     kind: &str,
     ahead: impl Fn(&Job) -> bool,
 ) -> Result<(), String> {
-    let Some(mode) = agent_mode(kind) else {
+    admit_mode(
+        controls,
+        jobs,
+        agent_mode(kind),
+        |job| agent_mode(&job.kind).map(str::to_owned),
+        ahead,
+    )
+}
+
+/// [`admit`] for work of provider `mode` (`None`: not agent work), with
+/// `mode_of` naming each listed job's mode.
+fn admit_mode(
+    controls: &AgentPoolControls,
+    jobs: &[Job],
+    mode: Option<&str>,
+    mode_of: impl Fn(&Job) -> Option<String>,
+    ahead: impl Fn(&Job) -> bool,
+) -> Result<(), String> {
+    let Some(mode) = mode else {
         return Ok(());
     };
     if controls.paused {
@@ -124,8 +151,8 @@ pub(crate) fn admit(
     }
     let active = jobs
         .iter()
-        .filter(|job| agent_mode(&job.kind) == Some(mode))
         .filter(|job| job.status == "running" || (job.status == "queued" && ahead(job)))
+        .filter(|job| mode_of(job).as_deref() == Some(mode))
         .count();
     if active >= limit as usize {
         return Err(format!(
@@ -136,62 +163,105 @@ pub(crate) fn admit(
     Ok(())
 }
 
+/// The provider mode of a listed job: from its kind for host-run agent
+/// work, from its saved task for a specialist investigation (AC-1706).
+fn job_mode(store: &JobStore, job: &Job) -> Option<String> {
+    match &job.investigation_id {
+        Some(id) => store
+            .investigation(id)
+            .ok()
+            .map(|detail| investigation_mode(detail.summary.provider_mode).to_owned()),
+        None => agent_mode(&job.kind).map(str::to_owned),
+    }
+}
+
+/// The pool's name for an investigation's provider mode.
+pub(crate) fn investigation_mode(mode: InvestigationProviderMode) -> &'static str {
+    match mode {
+        InvestigationProviderMode::Local => "local",
+        InvestigationProviderMode::Cloud => "cloud",
+    }
+}
+
+/// The claim plan for held job `id` of provider `mode` if the controls
+/// admit it now, or `None` while it has to wait. Held jobs start in the
+/// order they were queued. The check and the plan are made under one jobs
+/// lock. A job that stops being queued (cancelled from Jobs or its task)
+/// is an error.
+pub(crate) fn try_place(
+    state: &AppState,
+    id: i64,
+    mode: Option<&str>,
+) -> Result<Option<ClaimPlan>, String> {
+    let key = state_key(state);
+    let controls = state
+        .settings
+        .lock()
+        .map_err(|error| error.to_string())?
+        .agent_pool_controls()
+        .map_err(|error| error.to_string())?;
+    let jobs = state.jobs.lock().map_err(|error| error.to_string())?;
+    let listed = jobs.list().map_err(|error| error.to_string())?;
+    match listed.iter().find(|row| row.id == id) {
+        Some(row) if row.status == "queued" => {}
+        Some(row) if row.status == "cancelled" => return Err("cancelled".into()),
+        _ => return Err("The held agent job is no longer queued.".into()),
+    }
+    let admitted = admit_mode(
+        &controls,
+        &listed,
+        mode,
+        |job| job_mode(&jobs, job),
+        |other| other.id < id && is_held(key, other.id),
+    );
+    match admitted {
+        Ok(()) => jobs
+            .claim_plan(id, ClaimMode::StartQueued)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Wait, blocking, until the job `hold` registers may start, and return its
+/// claim plan with the hold, which must be kept until the plan is claimed.
+/// `on_hold` runs once if the job has to wait. A job that stops being
+/// queued ends the wait.
+pub(crate) fn wait_for_place(
+    state: &AppState,
+    hold: Hold,
+    mode: Option<&str>,
+    on_hold: &dyn Fn(),
+) -> Result<(ClaimPlan, Hold), String> {
+    let mut reported = false;
+    loop {
+        if let Some(plan) = try_place(state, hold.id, mode)? {
+            return Ok((plan, hold));
+        }
+        if !reported {
+            on_hold();
+            reported = true;
+        }
+        std::thread::sleep(HOLD_POLL);
+    }
+}
+
 /// Start agent work of `kind` as a job. When the controls do not admit it
 /// yet, the job is held as queued (and reported through `emit`) until they
-/// do: held jobs start in the order they were queued. The check and the
-/// claim's plan are made under one jobs lock. Cancelling a held job ends
-/// the wait without starting it.
+/// do (AC-1705). Cancelling a held job ends the wait without starting it.
 pub(crate) fn start_job_blocking(
     state: &AppState,
     kind: &str,
     emit: &dyn Fn(&Job),
 ) -> Result<(Job, JobExecution), String> {
-    let key = state_key(state);
-    // Registered under the lock that queues the job, so no later start can
-    // be admitted ahead of it.
-    let (job, _hold) = {
+    let (job, hold) = {
         let mut jobs = state.jobs.lock().map_err(|error| error.to_string())?;
         let job = jobs.enqueue(kind).map_err(|error| error.to_string())?;
-        let held = Hold::new(key, job.id);
+        let held = hold(state, job.id);
         (job, held)
     };
-    let mut reported = false;
-    loop {
-        let controls = state
-            .settings
-            .lock()
-            .map_err(|error| error.to_string())?
-            .agent_pool_controls()
-            .map_err(|error| error.to_string())?;
-        let plan = {
-            let jobs = state.jobs.lock().map_err(|error| error.to_string())?;
-            let listed = jobs.list().map_err(|error| error.to_string())?;
-            match listed.iter().find(|row| row.id == job.id) {
-                Some(row) if row.status == "queued" => {}
-                Some(row) if row.status == "cancelled" => return Err("cancelled".into()),
-                _ => return Err("The held agent job is no longer queued.".into()),
-            }
-            match admit(&controls, &listed, kind, |other| {
-                other.id < job.id && is_held(key, other.id)
-            }) {
-                Ok(()) => Some(
-                    jobs.claim_plan(job.id, ClaimMode::StartQueued)
-                        .map_err(|error| error.to_string())?,
-                ),
-                Err(_) => None,
-            }
-        };
-        match plan {
-            Some(plan) => return crate::claim_job(state, &plan),
-            None => {
-                if !reported {
-                    emit(&job);
-                    reported = true;
-                }
-                std::thread::sleep(HOLD_POLL);
-            }
-        }
-    }
+    let (plan, _hold) = wait_for_place(state, hold, agent_mode(kind), &|| emit(&job))?;
+    crate::claim_job(state, &plan)
 }
 
 /// [`start_job_blocking`] off the async runtime, reporting a held job.

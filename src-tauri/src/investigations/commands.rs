@@ -4,7 +4,7 @@
 mod completion_start;
 
 use super::{HostError, emit_changed, history, runtime, worker};
-use crate::{AppState, jobs::ClaimMode};
+use crate::AppState;
 use agents::investigation::*;
 use std::time::Instant;
 use tauri::Manager;
@@ -292,19 +292,25 @@ pub(super) fn start_access<R: tauri::Runtime>(
     let descriptor = provider
         .as_ref()
         .and_then(|provider| runtime::descriptor(provider.as_ref(), request.provider_mode).ok());
-    let committed = {
+    let (committed, hold) = {
         let mut jobs = state.jobs.lock().map_err(|error| error.to_string())?;
-        match session {
+        let committed = match session {
             Some(session) => {
                 jobs.start_investigation_access(&request, descriptor.as_ref(), Some(session))
             }
             None => jobs.start_investigation(&request, descriptor.as_ref()),
         }
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        // AC-1706: registered under the lock that queued the job, so no later
+        // start is admitted ahead of it.
+        let hold = committed
+            .created
+            .then(|| crate::agent_pool::hold(&state, committed.detail.summary.job_id));
+        (committed, hold)
     };
-    if !committed.created {
+    let Some(hold) = hold else {
         return Ok(committed.detail.summary);
-    }
+    };
     emit_changed(&app, &committed.detail);
     let id = committed.detail.summary.investigation_id.clone();
     let provider = provider.ok_or_else(|| HostError::Operational.to_string())?;
@@ -312,15 +318,39 @@ pub(super) fn start_access<R: tauri::Runtime>(
         .investigations
         .insert(&id)
         .map_err(|e| e.to_string())?;
-    let claim = (|| {
-        let plan = state
-            .jobs
-            .lock()
-            .map_err(|e| e.to_string())?
-            .claim_plan(committed.detail.summary.job_id, ClaimMode::StartQueued)
-            .map_err(|e| e.to_string())?;
+    let job_id = committed.detail.summary.job_id;
+    let mode = crate::agent_pool::investigation_mode(request.provider_mode);
+    // AC-1706: a start the agent pool does not admit yet stays queued and
+    // cancellable; a detached waiter claims it when a place frees and the
+    // run's clocks start then, not while it waited.
+    let placed = crate::agent_pool::try_place(&state, job_id, Some(mode));
+    if matches!(placed, Ok(None)) {
+        let worker_app = app.clone();
+        let worker_id = id.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = worker_app.state::<AppState>();
+            let claimed = crate::agent_pool::wait_for_place(&state, hold, Some(mode), &|| {})
+                .and_then(|(plan, _hold)| crate::claim_job(&state, &plan));
+            match claimed {
+                Ok((_, execution)) => worker::run(
+                    worker_app.clone(),
+                    worker_id,
+                    request,
+                    execution,
+                    provider,
+                    live,
+                    Instant::now(),
+                ),
+                Err(_) => state.investigations.remove(&worker_id),
+            }
+        });
+        return Ok(committed.detail.summary);
+    }
+    let claim = placed.and_then(|plan| {
+        let plan = plan.ok_or_else(|| "The investigation was not admitted.".to_owned())?;
         crate::claim_job(&state, &plan)
-    })();
+    });
+    drop(hold);
     let (_, execution) = match claim {
         Ok(claim) => claim,
         Err(error) => {
