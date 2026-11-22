@@ -23,6 +23,44 @@ use std::sync::Arc;
 #[path = "context_metadata_admission.rs"]
 pub(super) mod metadata_admission;
 
+#[path = "context_paged.rs"]
+mod paged;
+
+/// The facts a task's scope reads from (#1602).
+pub(super) enum ScopeFacts {
+    /// The scope's projection, held in memory.
+    Held(Arc<ContextSnapshot>),
+    /// The whole system, read a page at a time from the store at the pinned
+    /// revision; `id` is its complete-graph identity (AC-1058).
+    Paged { id: String },
+}
+
+impl ScopeFacts {
+    pub(super) fn id(&self) -> &str {
+        match self {
+            Self::Held(snapshot) => snapshot.id(),
+            Self::Paged { id } => id,
+        }
+    }
+
+    /// The held projection; a paged scope holds none.
+    pub(super) fn held(&self) -> Option<&Arc<ContextSnapshot>> {
+        match self {
+            Self::Held(snapshot) => Some(snapshot),
+            Self::Paged { .. } => None,
+        }
+    }
+}
+
+/// One frozen fact's stored copy.
+pub(super) enum FrozenFact<'a> {
+    Node(&'a Node),
+    Edge(&'a Edge),
+}
+
+/// No fresh rows: every fact is already in the context's graph.
+pub(super) const NO_ROWS: &ScopedGraph = &(Vec::new(), Vec::new());
+
 #[cfg(test)]
 #[path = "context_metadata_admission_tests.rs"]
 mod metadata_admission_tests;
@@ -92,7 +130,7 @@ pub(super) fn supplied<'a>(
 /// authorized query projection. Nothing is rebuilt from live context mid-task.
 pub(super) struct FrozenContext {
     pub(super) graph: (Vec<Node>, Vec<Edge>),
-    pub(super) snapshot: Arc<ContextSnapshot>,
+    pub(super) snapshot: ScopeFacts,
     pub(super) ledger: InvestigationInputLedger,
     pub(super) query_pages: Vec<String>,
     pub(super) evidence: Vec<AgentEvidence>,
@@ -107,8 +145,9 @@ pub(super) struct FrozenContext {
     /// The complete-graph ceiling this context was prepared under; later
     /// evidence selection rereads under the same bound (#1602).
     graph_limits: SnapshotReadLimits,
-    /// The store revision a scope-aware preparation pinned (#1602,
-    /// AC-1302). `graph` then holds only the task's scope, and later
+    /// The store revision a scope-aware or paged preparation pinned (#1602,
+    /// AC-1302, AC-1058). `graph` then holds only the task's scope (for a
+    /// paged scope, the facts its pages returned), and later
     /// selection rereads exactly the selected facts at this revision instead
     /// of the whole graph. `None` for a complete-graph preparation.
     scoped_revision: Option<StoreRevision>,
@@ -124,6 +163,8 @@ pub(super) struct PreparedContextRead {
     raw: String,
     kind: PreparedContextReadKind,
     guards: Option<EvidenceGuards>,
+    /// Stored copies of a paged page's facts, retained on publication.
+    rows: ScopedGraph,
 }
 
 /// Inventory preparation plus the actual host publication wrapper. The frozen
@@ -332,7 +373,7 @@ fn take_projection_work() -> ProjectionWork {
     PROJECTION_WORK.with(std::cell::Cell::take)
 }
 /// The nodes and edges of one investigation scope.
-type ScopedGraph = (Vec<Node>, Vec<Edge>);
+pub(super) type ScopedGraph = (Vec<Node>, Vec<Edge>);
 
 fn projection(nodes: Vec<Node>, edges: Vec<Edge>) -> Result<ContextSnapshot, HostError> {
     #[cfg(test)]
@@ -455,7 +496,7 @@ impl FrozenContext {
         // Union retention failures may concern unrelated facts; never attribute
         // them to the requested obligation.
         let guards = EvidenceGuards::acquire(state, &preliminary)?;
-        let options = match guards.options(state, self, &selected) {
+        let options = match guards.options(state, self, NO_ROWS, &selected) {
             Ok(options) => options,
             Err(HostError::SourceUnavailable) => {
                 return Ok(Some(staged_attempt::UnavailableReason::PinnedTargetAbsent));
@@ -535,6 +576,9 @@ impl FrozenContext {
         }
         if let Some(prepared) = Self::prepare_scoped(state, &request, history, graph_limits)? {
             return Ok(prepared);
+        }
+        if request.scope == InvestigationScope::All {
+            return Self::prepare_paged(state, &request, history, graph_limits);
         }
         let base = state
             .graph
@@ -674,7 +718,7 @@ impl FrozenContext {
         Self::assemble(
             graph,
             graph_id,
-            Arc::new(snapshot),
+            ScopeFacts::Held(Arc::new(snapshot)),
             request.clone(),
             history,
         )
@@ -786,9 +830,11 @@ impl FrozenContext {
         prepared.graph_limits = graph_limits;
         // Both paths retain the one already-authorized immutable scoped
         // projection from this same bounded graph read.
-        let qualified =
-            CoverageContext::from_shared_snapshot(Arc::clone(&prepared.snapshot), qualification)
-                .map_err(context_error)?;
+        let qualified = CoverageContext::from_shared_snapshot(
+            Arc::clone(prepared.snapshot.held().ok_or(HostError::Operational)?),
+            qualification,
+        )
+        .map_err(context_error)?;
         let proof = qualified.durable_proof().map_err(context_error)?;
         bounded_json(&proof, MAX_MANIFEST_BYTES)?;
         if request
@@ -847,19 +893,19 @@ impl FrozenContext {
         {
             return Err(HostError::InputChanged);
         }
-        let snapshot = Arc::new(Self::scoped_snapshot(
+        let snapshot = ScopeFacts::Held(Arc::new(Self::scoped_snapshot(
             &graph,
             &request.scope,
             area,
             complete,
-        )?);
+        )?));
         Self::assemble(graph, graph_id, snapshot, request, history)
     }
 
     fn assemble(
         graph: (Vec<Node>, Vec<Edge>),
         graph_id: String,
-        snapshot: Arc<ContextSnapshot>,
+        snapshot: ScopeFacts,
         request: AcquisitionRequest,
         history: &[String],
     ) -> Result<Self, HostError> {
@@ -1006,19 +1052,36 @@ impl FrozenContext {
                     offset: c.offset,
                 }),
             };
-            match &self.qualified {
-                Some(qualified) => qualified
+            let read = match (&self.qualified, &self.snapshot, &self.scoped_revision) {
+                (Some(qualified), _, _) => qualified
                     .query(QualifiedRequest {
                         request,
                         context_id: Some(qualified.context_id().to_owned()),
                     })
-                    .map(InvestigationPageContext::Qualified),
-                None => self
-                    .snapshot
+                    .map(|page| {
+                        (
+                            InvestigationPageContext::Qualified(page),
+                            Default::default(),
+                        )
+                    })
+                    .map_err(paged::PagedError::Context),
+                (None, ScopeFacts::Held(snapshot), _) => snapshot
                     .query(request)
-                    .map(InvestigationPageContext::Legacy),
-            }
-            .map_err(|error| {
+                    .map(|page| (InvestigationPageContext::Legacy(page), Default::default()))
+                    .map_err(paged::PagedError::Context),
+                (None, ScopeFacts::Paged { id }, Some(revision)) => {
+                    paged::query_at(state, revision, self.graph_limits, id, request)
+                        .map(|(page, rows)| (InvestigationPageContext::Legacy(page), rows))
+                }
+                (None, ScopeFacts::Paged { .. }, None) => {
+                    Err(paged::PagedError::Host(HostError::Operational))
+                }
+            };
+            read.map_err(|error| {
+                let error = match error {
+                    paged::PagedError::Context(error) => error,
+                    paged::PagedError::Host(error) => return error.into(),
+                };
                 if self.specialist.uses_query_budget_refusals()
                     && let context_hub::ContextError::ResponseBudgetExceeded {
                         max_bytes,
@@ -1051,7 +1114,7 @@ impl FrozenContext {
             .iter()
             .map(|s| crate::task_evidence::graph_fact(&s.fact))
             .collect::<BTreeSet<_>>();
-        let page = query_page(query.max_facts)?;
+        let (page, mut rows) = query_page(query.max_facts)?;
         let mut keys = prior_keys.clone();
         keys.extend(
             page.page()
@@ -1063,9 +1126,9 @@ impl FrozenContext {
             return Err(HostError::LimitExceeded.into());
         }
         let keys = keys.into_iter().collect::<Vec<_>>();
-        let preliminary = self.select(state, &keys)?;
+        let preliminary = self.select_with(state, &keys, &rows)?;
         let guards = EvidenceGuards::acquire(state, &preliminary)?;
-        let authoritative = self.select(state, &keys)?;
+        let authoritative = self.select_with(state, &keys, &rows)?;
         if authoritative != preliminary {
             return Err(HostError::InputChanged.into());
         }
@@ -1076,7 +1139,7 @@ impl FrozenContext {
             let selected = authoritative
                 .get(&graph_reference(&fact.reference))
                 .ok_or(HostError::InvalidInput)?;
-            options.push(guards.options(state, self, selected)?);
+            options.push(guards.options(state, self, &rows, selected)?);
         }
         let mut response = InvestigationQueryPage {
             context: page,
@@ -1096,7 +1159,8 @@ impl FrozenContext {
                     let max_facts = context.page().facts.len() - 1;
                     // Release the old page before constructing its replacement.
                     drop(context);
-                    let context = query_page(max_facts)?;
+                    let (context, fresh) = query_page(max_facts)?;
+                    rows = fresh;
                     evidence_options.truncate(context.page().facts.len());
                     response = InvestigationQueryPage {
                         context,
@@ -1204,6 +1268,7 @@ impl FrozenContext {
             raw,
             kind: PreparedContextReadKind::Query,
             guards: Some(guards),
+            rows,
         })
     }
 
@@ -1277,6 +1342,7 @@ impl FrozenContext {
             raw,
             kind: PreparedContextReadKind::Inventory,
             guards: None,
+            rows: Default::default(),
         })
     }
 
@@ -1381,9 +1447,11 @@ impl FrozenContext {
             raw,
             kind,
             guards,
+            rows,
             ..
         } = prepared;
         self.ledger = ledger;
+        self.retain_rows(rows);
         match kind {
             PreparedContextReadKind::Query => self.query_pages.push(raw),
             PreparedContextReadKind::Inventory => self.inventory_details.push(raw),
@@ -1397,6 +1465,17 @@ impl FrozenContext {
         state: &AppState,
         keys: &[FactKey],
     ) -> Result<BTreeMap<FactKey, TaskFactSelection>, HostError> {
+        self.select_with(state, keys, NO_ROWS)
+    }
+
+    /// [`Self::select`], where a fact may also be one of `fresh`, the stored
+    /// copies of a page being prepared at the pinned revision.
+    pub(super) fn select_with(
+        &self,
+        state: &AppState,
+        keys: &[FactKey],
+        fresh: &ScopedGraph,
+    ) -> Result<BTreeMap<FactKey, TaskFactSelection>, HostError> {
         let selections = match &self.scoped_revision {
             // A scope-aware context rereads only the selected facts, at the
             // revision it pinned: a store that moved on is a changed input,
@@ -1408,8 +1487,14 @@ impl FrozenContext {
                     .map_err(|_| HostError::Operational)?
                     .read_selected_facts_at_revision(keys, revision, self.graph_limits)
                     .map_err(scoped_graph_error)?;
-                if read.nodes.iter().any(|node| !self.graph.0.contains(node))
-                    || read.edges.iter().any(|edge| !self.graph.1.contains(edge))
+                if read
+                    .nodes
+                    .iter()
+                    .any(|node| !self.graph.0.contains(node) && !fresh.0.contains(node))
+                    || read
+                        .edges
+                        .iter()
+                        .any(|edge| !self.graph.1.contains(edge) && !fresh.1.contains(edge))
                 {
                     return Err(HostError::InputChanged);
                 }
@@ -1441,8 +1526,37 @@ impl FrozenContext {
     }
 
     pub(super) fn props(&self, fact: &TaskFactKey) -> Result<&serde_json::Value, HostError> {
+        self.props_in(fact, NO_ROWS)
+    }
+
+    /// [`Self::props`], looking also in `fresh`.
+    pub(super) fn props_in<'a>(
+        &'a self,
+        fact: &TaskFactKey,
+        fresh: &'a ScopedGraph,
+    ) -> Result<&'a serde_json::Value, HostError> {
+        match self.fact_in(fact, fresh) {
+            Some(FrozenFact::Node(node)) => Ok(&node.props),
+            Some(FrozenFact::Edge(edge)) => Ok(&edge.props),
+            None => Err(HostError::InvalidInput),
+        }
+    }
+
+    /// The frozen copy of `fact`: in this context's graph, or else in
+    /// `fresh`, a page being prepared at the pinned revision.
+    pub(super) fn fact_in<'a>(
+        &'a self,
+        fact: &TaskFactKey,
+        fresh: &'a ScopedGraph,
+    ) -> Option<FrozenFact<'a>> {
         match fact {
-            TaskFactKey::Node { id } => self.graph.0.iter().find(|n| &n.id == id).map(|n| &n.props),
+            TaskFactKey::Node { id } => self
+                .graph
+                .0
+                .iter()
+                .chain(&fresh.0)
+                .find(|n| &n.id == id)
+                .map(FrozenFact::Node),
             TaskFactKey::Edge {
                 source,
                 label,
@@ -1451,10 +1565,30 @@ impl FrozenContext {
                 .graph
                 .1
                 .iter()
+                .chain(&fresh.1)
                 .find(|e| &e.src == source && &e.label == label && &e.dst == destination)
-                .map(|e| &e.props),
+                .map(FrozenFact::Edge),
         }
-        .ok_or(HostError::InvalidInput)
+    }
+
+    /// Keep the stored copies of a published paged page's facts, so later
+    /// steps find them without reading the whole graph.
+    fn retain_rows(&mut self, rows: ScopedGraph) {
+        for node in rows.0 {
+            if !self.graph.0.iter().any(|n| n.id == node.id) {
+                self.graph.0.push(node);
+            }
+        }
+        for edge in rows.1 {
+            if !self
+                .graph
+                .1
+                .iter()
+                .any(|e| (&e.src, &e.label, &e.dst) == (&edge.src, &edge.label, &edge.dst))
+            {
+                self.graph.1.push(edge);
+            }
+        }
     }
 }
 
