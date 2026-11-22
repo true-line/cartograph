@@ -25,8 +25,12 @@ pub mod ingest_basis;
 pub mod job_execution;
 #[path = "../../../src-tauri/src/jobs.rs"]
 pub mod jobs;
+#[path = "../../../src-tauri/src/metrics.rs"]
+pub mod metrics;
 #[path = "../../../src-tauri/src/observation_inputs.rs"]
 pub mod observation_inputs;
+#[path = "../../../src-tauri/src/operator_limits.rs"]
+pub mod operator_limits;
 #[path = "../../../src-tauri/src/paths.rs"]
 pub mod paths;
 #[path = "../../../src-tauri/src/primary_source.rs"]

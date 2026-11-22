@@ -116,7 +116,7 @@ fn spec(key: &str) -> Option<&'static LimitSpec> {
 }
 
 /// Create the project table. Called with the other settings tables.
-pub(crate) fn initialize(conn: &Connection) -> rusqlite::Result<()> {
+pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings_operator_limits (
              key   TEXT PRIMARY KEY NOT NULL,
@@ -207,7 +207,7 @@ pub fn list(conn: &Connection) -> Result<Vec<OperatorLimit>, OperatorLimitError>
     REGISTRY.iter().map(|spec| describe(conn, spec)).collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod tests {
     use super::*;
 

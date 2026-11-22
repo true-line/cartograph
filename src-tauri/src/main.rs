@@ -29,16 +29,16 @@ mod knowledge_phase;
 mod local_commit;
 mod manifest_draft;
 mod mcp_reads;
-mod metrics;
+use app_store::metrics;
 mod model_debug;
 #[cfg(test)]
 mod name_unique_tests;
-use app_store::observation_inputs;
-mod operator_limits;
 use app_store::ingest_basis::{
     ActivePlugin, SystemRepo, coverage_config_hash, plugin_settings_root, source_revisions_of,
     system_contents_of,
 };
+use app_store::observation_inputs;
+use app_store::operator_limits;
 use app_store::paths;
 #[path = "primary_source_commands.rs"]
 mod primary_source;
