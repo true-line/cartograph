@@ -4867,6 +4867,14 @@ fn vue_navigations_record_a_branch_on_a_bound_call_result() {
          if (flag) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n    },\n\
          \x20   async later() {\n      const res = await callAPI(4);\n      \
          setTimeout(() => { if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); } }, 1);\n    },\n\
+         \x20   async both() {\n      const first = await callAPI(5);\n      const second = await callAPI(6);\n      \
+         if (first.ok && second.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); }\n    },\n\
+         \x20   async caught() {\n      const res = await callAPI(7);\n      \
+         try { run(); } catch (res) { if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); } }\n    },\n\
+         \x20   async looped(values) {\n      const res = await callAPI(8);\n      \
+         for (const res of values) { if (res.ok) { Navigation.navigateTo(Navigation.PATH.RESULT); } }\n    },\n\
+         \x20   async destructured(values) {\n      const res = await callAPI(9);\n      \
+         for (const { res } of values) { if (res) { Navigation.navigateTo(Navigation.PATH.RESULT); } }\n    },\n\
          \x20 },\n};\n</script>\n";
     write("popup/Flow.vue", flow);
 
@@ -4891,13 +4899,29 @@ fn vue_navigations_record_a_branch_on_a_bound_call_result() {
     let start = flow.find("callAPI(1)").unwrap() as u64;
     assert_eq!(
         result_of(".proven@"),
-        Some(
-            serde_json::json!({"byte_start": start, "byte_end": start + "callAPI(1)".len() as u64})
-        )
+        Some(serde_json::json!([
+            {"byte_start": start, "byte_end": start + "callAPI(1)".len() as u64}
+        ]))
     );
     assert_eq!(result_of(".reassigned@"), None);
     assert_eq!(result_of(".other@"), None);
     assert_eq!(result_of("#anon@"), None);
+    // Every bound call the condition reads is listed, in source order.
+    let range = |call: &str| {
+        let start = flow.find(call).unwrap() as u64;
+        serde_json::json!({"byte_start": start, "byte_end": start + call.len() as u64})
+    };
+    assert_eq!(
+        result_of(".both@"),
+        Some(serde_json::json!([
+            range("callAPI(5)"),
+            range("callAPI(6)")
+        ]))
+    );
+    // A `catch` parameter or loop binding shadows the outer `const`.
+    assert_eq!(result_of(".caught@"), None);
+    assert_eq!(result_of(".looped@"), None);
+    assert_eq!(result_of(".destructured@"), None);
 }
 
 #[test]
