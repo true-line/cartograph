@@ -77,6 +77,19 @@ impl LlmProvider for HostedSource {
     }
 }
 
+/// Save the project read-deny rule `*`, so the production firewall refuses
+/// every source read toward a cloud provider (AC-1414, #679).
+fn deny_every_read(f: &NextFixture) {
+    let state = f.base.base.app.state::<AppState>();
+    let rules = state
+        .settings
+        .lock()
+        .unwrap()
+        .set_read_deny_rules(vec!["*".into()])
+        .unwrap();
+    assert_eq!(rules.project_rules(), ["*"]);
+}
+
 /// Run `f` on a scripted Cloud provider, approving every step it asks for.
 fn run_with_approvals(f: &NextFixture, provider: Arc<dyn LlmProvider>) {
     // Standing consent is confined to this temporary scripted fixture.
@@ -405,7 +418,6 @@ impl LlmProvider for RefusedSource {
 // and the store keeps the acquisition, the refusal and its event.
 #[test]
 fn hosted_refused_read_is_withheld_and_recorded() {
-    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = Some(vec!["*".into()]));
     let local = NextProvider::new(false);
     let base = CompletionFixture::new(&local, SpecialistId::DomainAnalystV9, true, false, false);
     let request = base.request.clone();
@@ -416,8 +428,8 @@ fn hosted_refused_read_is_withheld_and_recorded() {
         base,
         request,
     );
+    deny_every_read(&f);
     run_with_approvals(&f, provider.clone());
-    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = None);
     let state = f.base.base.app.state::<AppState>();
     let detail = state
         .jobs
@@ -461,7 +473,6 @@ fn hosted_refused_read_is_withheld_and_recorded() {
 /// Run `provider` on a cloud task whose every source read the firewall
 /// refuses, with the source (and optionally the inventory) obligation.
 fn run_refusing(provider: &Arc<RefusedSource>, inventory: bool) -> NextFixture {
-    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = Some(vec!["*".into()]));
     let local = NextProvider::new(false);
     let base = CompletionFixture::new(
         &local,
@@ -477,8 +488,8 @@ fn run_refusing(provider: &Arc<RefusedSource>, inventory: bool) -> NextFixture {
         base,
         request,
     );
+    deny_every_read(&f);
     run_with_approvals(&f, provider.clone());
-    super::super::TEST_READ_DENY_RULES.with(|rules| *rules.borrow_mut() = None);
     f
 }
 
