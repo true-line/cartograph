@@ -491,7 +491,12 @@ pub(super) fn write_new_receipt(
     let mut file = options.open(path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
-    File::open(path.parent().ok_or(RecordError::Invalid)?)?.sync_all()?;
+    // Portable directory sync: a plain `File::open` of a directory is
+    // refused on Windows.
+    super::super::expanded::vendure_prepare::sync_directory(
+        path.parent().ok_or(RecordError::Invalid)?,
+    )
+    .map_err(|error| RecordError::Io(std::io::Error::other(error)))?;
     Ok(ReceiptRef {
         body_hash: core_prov::content_hash(&bytes),
         byte_len: bytes.len() as u64,

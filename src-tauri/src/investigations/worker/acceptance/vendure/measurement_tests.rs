@@ -297,19 +297,10 @@ fn vendure_measurement_rejects_scope_and_missing_store_without_recreation() {
             }
         })
         .unwrap();
-    roles[0].scope = InvestigationScope::Neighborhood { anchor, hops: 1 };
-    let (preparation, proposal) = files(&case, &prepared, &roles);
-    let error = measure(
-        &case.config,
-        &preparation,
-        &proposal,
-        &case.root.parent().unwrap().join("measurement-output"),
-    )
-    .err()
-    .unwrap();
-    assert!(error.contains("outside the requested scope"), "{error}");
-    let roles = selections(&prepared, 1);
-    std::fs::write(&proposal, bytes(&roles).unwrap()).unwrap();
+    // The missing store is checked first: a measurement retains its app (and
+    // so its open store) for the rest of the process, and Windows cannot
+    // rename a file another handle holds open.
+    let (preparation, proposal) = files(&case, &prepared, &selections(&prepared, 1));
     let graph = prepared.profile.data().join("graph.db");
     let retained = graph.with_extension("retained");
     std::fs::rename(&graph, &retained).unwrap();
@@ -326,6 +317,18 @@ fn vendure_measurement_rejects_scope_and_missing_store_without_recreation() {
     );
     assert!(!graph.exists());
     std::fs::rename(&retained, &graph).unwrap();
+    roles[0].scope = InvestigationScope::Neighborhood { anchor, hops: 1 };
+    std::fs::write(&proposal, bytes(&roles).unwrap()).unwrap();
+    let error = measure(
+        &case.config,
+        &preparation,
+        &proposal,
+        &case.root.parent().unwrap().join("measurement-output"),
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("outside the requested scope"), "{error}");
+    std::fs::write(&proposal, bytes(&selections(&prepared, 1)).unwrap()).unwrap();
     let mut saved: Value = serde_json::from_slice(&std::fs::read(&preparation).unwrap()).unwrap();
     saved["graph"]["coverage"]["inventory_hash"] = Value::String("0".repeat(64));
     std::fs::write(&preparation, bytes(&saved).unwrap()).unwrap();
