@@ -487,3 +487,76 @@ fn a_result_binds_only_its_own_record() {
     )
     .unwrap_err();
 }
+
+fn result_v1() -> ReconciliationResultV1 {
+    derive_v1(
+        vec![
+            range("cart.ts", "", b"cart source text"),
+            range("validate.ts", "", b"validate target text"),
+        ],
+        vec![candidate("Symbol", "Symbol: validate")],
+    )
+}
+
+#[test]
+fn a_matched_origin_must_be_a_span_of_a_named_recapture() {
+    // Codex P1 on #2425: a matched item cannot cite bytes of a capture the
+    // recovery does not name, or a span outside its file.
+    let result = result_v1();
+    let foreign = |edit: &dyn Fn(&mut ReconciledOrigin)| {
+        let mut tampered = result.clone();
+        edit(tampered.evidence[0].reconciled.as_mut().unwrap());
+        tampered.result_id = tampered.compute_id().unwrap();
+        ReconciliationResultV1::decode(&tampered.canonical_bytes().unwrap()).unwrap_err();
+    };
+    foreign(&|origin| origin.captured.file.capture_id = format!("capture-v1:{}", "9".repeat(64)));
+    foreign(&|origin| origin.captured.file.source_id = "src_other".into());
+    foreign(&|origin| origin.captured.file.capture_id = "not-a-capture".into());
+    foreign(&|origin| origin.captured.file.digest = "short".into());
+    foreign(&|origin| origin.captured.byte_end = origin.captured.file.byte_len + 1);
+    // Deriving from such a comparison is refused the same way.
+    let mut stray = origin("cart.ts", b"cart source text".len());
+    stray.captured.file.source_id = "src_other".into();
+    ReconciliationResultV1::derive(
+        &v1_record(),
+        ReconciliationInput {
+            recovery: recovery(),
+            slot: present_slot(),
+            evidence: vec![
+                RecapturedItem::Range {
+                    origin: stray,
+                    fact_digest: "",
+                    bytes: b"cart source text",
+                },
+                RecapturedItem::FactAbsent,
+            ],
+            candidates: vec![RecapturedCandidate::Absent],
+        },
+    )
+    .unwrap_err();
+}
+
+#[test]
+fn every_accepted_result_still_decodes_with_its_id() {
+    // Codex P2 on #2425: the size bound counts the stored id field, so a
+    // result `compute_id` accepts is never one `decode` rejects for size.
+    let base = result_v1();
+    let grown = |bytes: usize| {
+        let mut result = base.clone();
+        result.recovery.captures[0].capture_id = "c".repeat(bytes);
+        result
+    };
+    let mut largest = None;
+    for bytes in (0..MAX_RESULT_BYTES).step_by(61) {
+        let result = grown(bytes);
+        match result.compute_id() {
+            Ok(id) => largest = Some((result, id)),
+            Err(_) => break,
+        }
+    }
+    let (mut result, id) = largest.unwrap();
+    result.result_id = id;
+    let stored = result.canonical_bytes().unwrap();
+    assert!(stored.len() <= MAX_RESULT_BYTES);
+    assert!(stored.len() > MAX_RESULT_BYTES - 61);
+}

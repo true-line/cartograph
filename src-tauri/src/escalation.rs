@@ -210,7 +210,11 @@ pub fn assemble_task(
         candidates.push(AgentCandidate {
             node_id: node.id.clone(),
             label: node.label.clone(),
-            summary: agents::reconciliation::candidate_summary_v1(&node.label, &node.props, &node.id),
+            summary: agents::reconciliation::candidate_summary_v1(
+                &node.label,
+                &node.props,
+                &node.id,
+            ),
             evidence_ids: vec![evidence_id],
         });
     }

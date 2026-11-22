@@ -25,6 +25,8 @@ pub const RESULT_ID_PREFIX: &str = "reconcile-v1:";
 const RESULT_DOMAIN: &[u8] = b"cartograph:reconciliation-result:v1\0";
 /// Largest canonical result accepted by the decoder.
 pub const MAX_RESULT_BYTES: usize = 64 * 1024;
+/// Encoded size of `,"result_id":"reconcile-v1:<64 hex>"` in a stored result.
+const RESULT_ID_FIELD_BYTES: usize = ",\"result_id\":\"\"".len() + RESULT_ID_PREFIX.len() + 64;
 /// Most recaptured sources one result may name.
 pub const MAX_RECOVERY_CAPTURES: usize = 64;
 /// Most evidence or candidate items one result may report; a staged task
@@ -655,7 +657,9 @@ impl ReconciliationResultV1 {
             .ok_or_else(|| invalid("shape"))?
             .remove("result_id");
         let bytes = serde_json::to_vec(&canonical(value))?;
-        if bytes.len() > MAX_RESULT_BYTES {
+        // Leave room for the id field, so every result this module accepts
+        // still decodes once its id is stored with it.
+        if bytes.len() + RESULT_ID_FIELD_BYTES > MAX_RESULT_BYTES {
             return Err(invalid("size"));
         }
         let mut input = RESULT_DOMAIN.to_vec();
@@ -754,10 +758,10 @@ impl ReconciliationResultV1 {
                 || legacy_captured
                 || wrong_match
                 || item.outcome.reconciles() != item.reconciled.is_some()
-                || item.reconciled.as_ref().is_some_and(|origin| {
-                    origin.captured.byte_end <= origin.captured.byte_start
-                        || !crate::source_basis::text(&origin.receipt_id, 256)
-                })
+                || item
+                    .reconciled
+                    .as_ref()
+                    .is_some_and(|origin| !self.origin_in_recovery(origin))
             {
                 return Err(invalid("evidence item"));
             }
@@ -772,6 +776,27 @@ impl ReconciliationResultV1 {
             return Err(invalid("derived fields"));
         }
         Ok(())
+    }
+}
+
+impl ReconciliationResultV1 {
+    /// A matched item's origin must be a well-formed captured span of one of
+    /// the captures the recovery names.
+    fn origin_in_recovery(&self, origin: &ReconciledOrigin) -> bool {
+        let span = &origin.captured;
+        let file = &span.file;
+        crate::source_basis::text(&origin.receipt_id, 256)
+            && crate::source_basis::text(&file.path, 4096)
+            && file
+                .capture_id
+                .strip_prefix("capture-v1:")
+                .is_some_and(crate::source_basis::hash)
+            && crate::source_basis::hash(&file.digest)
+            && span.byte_start < span.byte_end
+            && span.byte_end <= file.byte_len
+            && self.recovery.captures.iter().any(|capture| {
+                capture.source_id == file.source_id && capture.capture_id == file.capture_id
+            })
     }
 }
 
