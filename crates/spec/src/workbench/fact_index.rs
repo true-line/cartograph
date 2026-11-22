@@ -458,7 +458,8 @@ impl Collector {
                     record.gap = gap_node || record.confidence == ConfidenceTier::Gap;
                     record.inferred_weak = record.confidence == ConfidenceTier::InferredWeak;
                     if !row.provenance_differs {
-                        record.cited_by.clear();
+                        // Not printed: release it rather than keep its slot.
+                        record.cited_by = Vec::new();
                     }
                 }
                 if row.provenance_differs {
@@ -1285,6 +1286,7 @@ mod tests {
         let index = collector.finish().unwrap();
         assert_eq!(index.rows.len(), 1);
         assert_eq!(index.rows[0].cited_by, ["adrs", "topology"]);
+        assert_eq!(index.rows[0].records[0].cited_by.capacity(), 0);
     }
 
     // AC-0595: one subject cited with differing provenance keeps every
