@@ -49,6 +49,25 @@ fn a_section_runs_from_its_heading_to_the_next() {
     assert_eq!(section_text(document, "1.1"), None);
 }
 
+/// AC-1313 (T-1313): §1.1 prints no fact of its own, so it is composed
+/// from its heading, §1.2 and the §1.3 overview (#2319).
+#[test]
+fn purpose_and_scope_is_composed_from_the_sections_it_summarises() {
+    let document = "# D1\n\n## 1.1 Purpose (A)\n\n_Not drafted._\n\n## 1.2 Actors (P)\n\nA\n\n## 1.3 Capabilities (P)\n\nrow\n### sub\n\n## 1.4 Next (P)\n\nB\n";
+    let text = composition_source(document, "1.1").unwrap();
+    assert!(text.starts_with("## 1.1 Purpose (A)\n\n"));
+    assert!(text.contains("## 1.2 Actors (P)\n\nA\n"));
+    assert!(text.contains("## 1.3 Capabilities (P)\n\nrow\n"));
+    assert!(!text.contains("### sub") && !text.contains("_Not drafted._"));
+    assert!(!text.contains("## 1.4"));
+    // Any other section reads as its composition text.
+    assert_eq!(
+        composition_source(document, "1.4").as_deref(),
+        Some("## 1.4 Next (P)\n\nB\n")
+    );
+    assert_eq!(composition_source("# D1\n", "1.1"), None);
+}
+
 #[test]
 fn an_overview_section_is_read_up_to_its_per_capability_detail() {
     let text = "## 1.3 Capabilities (P)\n\n| Area | Capability |\n\n### Orders\n\n#### Place order\n\nrow\n\n### Billing\n\nrow\n";

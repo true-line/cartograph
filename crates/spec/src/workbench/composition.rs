@@ -119,6 +119,33 @@ pub fn composition_text(text: &str, number: &str) -> (String, usize) {
     (kept, left_out)
 }
 
+/// Sections that print no fact of their own and are composed from the
+/// sections they summarise (#2319). D1 1.1 Purpose and scope is
+/// agent-authored only, so it reads the actors of 1.2 and the 1.3 overview.
+const SUMMARY_SECTIONS: &[(&str, &[&str])] = &[("1.1", &["1.2", "1.3"])];
+
+/// What a composer reads for section `number` of the compiled `document`:
+/// the section's [`composition_text`], or, for a section that summarises
+/// others, its heading line followed by each summarised section's
+/// composition text. `None` when the section is not compiled.
+pub fn composition_source(document: &str, number: &str) -> Option<String> {
+    let own = section_text(document, number)?;
+    let Some((_, summarised)) = SUMMARY_SECTIONS.iter().find(|(n, _)| *n == number) else {
+        return Some(composition_text(own, number).0);
+    };
+    let heading = own.lines().next().unwrap_or_default();
+    let mut text = format!("{heading}\n\nThis section summarises the sections below.\n\n");
+    for source in *summarised {
+        if let Some(found) = section_text(document, source) {
+            text.push_str(&composition_text(found, source).0);
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+    }
+    Some(text)
+}
+
 /// Every `F-` citation id `text` prints.
 pub(super) fn printed_ids(text: &str) -> BTreeSet<String> {
     let bytes = text.as_bytes();
