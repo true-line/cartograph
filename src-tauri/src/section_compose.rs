@@ -79,7 +79,8 @@ pub(crate) struct ComposeOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) gated: Option<GatedStats>,
     /// Whether the claims were reviewed before staging (#2419):
-    /// `reviewed`, `review_unavailable` (the reply was not the schema's) or
+    /// `reviewed`, `review_unavailable` (the reply was not the schema's),
+    /// `review_too_large` (the request was over the input ceiling) or
     /// `not_reviewed_cloud` (a cloud consent covers one payload).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) review: Option<&'static str>,
@@ -835,8 +836,9 @@ fn run_blocking(
 /// bounded call of `claim-reviewer@1` on a local provider, and each claim it
 /// judges an overreach left out as `claim_overreaches`. A cloud provider is
 /// not called again, since its consent covers the composition's payload
-/// alone; a reply that is not the schema's leaves the claims as they are.
-/// Returns the claims kept and how the review went.
+/// alone; a reply that is not the schema's, or a request over the input
+/// ceiling, leaves the claims as they are. Returns the claims kept and how
+/// the review went.
 pub(crate) fn review(
     state: &AppState,
     provider: &dyn LlmProvider,
@@ -852,6 +854,15 @@ pub(crate) fn review(
         return Ok((composed, "reviewed"));
     }
     let action = review_action(prepared, &composed.finish.claims);
+    // A request over the input ceiling is not sent: the claims stay as the
+    // staging checks left them.
+    let ceiling = limits()?
+        .values()
+        .input_bytes
+        .saturating_sub(INPUT_MARGIN_BYTES);
+    if payload_bytes(&action) > ceiling {
+        return Ok((composed, "review_too_large"));
+    }
     let text = complete(state, provider, &action, None, check, job_id)?.text;
     let Some(verdicts) = claim_review::decode(&text, composed.finish.claims.len()) else {
         return Ok((composed, "review_unavailable"));
@@ -1049,22 +1060,43 @@ pub(crate) fn compose_gated(
             ..ComposeOutcome::none("no_claim_admitted")
         });
     };
-    let staged = stage_as(
-        state,
-        prepared,
-        Composed {
-            finish,
-            left_out: outcome.left_out,
-            reasons: gated_reasons(outcome.left_out),
-        },
-        job_id,
-        (
-            gated_compose::DRAFT_RULES_ROLE,
-            gated_compose::definition_fingerprint(),
-        ),
-    )?;
+    let mut composed = Composed {
+        finish,
+        left_out: outcome.left_out,
+        reasons: gated_reasons(outcome.left_out),
+    };
+    // The staging checks, then the claim review, as for a one-call
+    // composition (#2419).
+    if let Some(reason) = screen(prepared, &mut composed) {
+        return Ok(ComposeOutcome {
+            left_out: composed.left_out,
+            left_out_reasons: composed.reasons,
+            gated: Some(stats),
+            ..ComposeOutcome::none(reason)
+        });
+    }
+    let (composed, review) = review(state, provider, prepared, composed, check, Some(job_id))?;
+    let staged = if composed.finish.claims.is_empty() {
+        ComposeOutcome {
+            left_out: composed.left_out,
+            left_out_reasons: composed.reasons,
+            ..ComposeOutcome::none("claim_overreaches")
+        }
+    } else {
+        stage_as(
+            state,
+            prepared,
+            composed,
+            job_id,
+            (
+                gated_compose::DRAFT_RULES_ROLE,
+                gated_compose::definition_fingerprint(),
+            ),
+        )?
+    };
     Ok(ComposeOutcome {
         gated: Some(stats),
+        review: Some(review),
         ..staged
     })
 }
