@@ -436,7 +436,15 @@ pub fn embedding_inputs(
         || candidates.len() > embedding_cache::MAX_ROWS
         || hops.len() > embedding_cache::MAX_ROWS
     {
-        return Err(SemanticError::Index("embedding plan count bounds".into()));
+        return Err(SemanticError::Index(format!(
+            "embedding plan count bounds: {} pairs (max {}), {} candidates (max {}), {} hops (max {})",
+            pairs.len(),
+            embedding_cache::MAX_ROWS / 2,
+            candidates.len(),
+            embedding_cache::MAX_ROWS,
+            hops.len(),
+            embedding_cache::MAX_ROWS,
+        )));
     }
     let mut texts: Vec<&String> = pairs
         .iter()
@@ -1344,7 +1352,11 @@ mod tests {
         let texts = embedding_inputs(&hops, &candidates, &[]).unwrap();
         assert_eq!(texts.len(), 206_000);
         let over: Vec<_> = (0..embedding_cache::MAX_ROWS + 1).map(candidate).collect();
-        assert!(embedding_inputs(&hops, &over, &[]).is_err());
+        let message = embedding_inputs(&hops, &over, &[]).unwrap_err().to_string();
+        assert!(
+            message.contains("262145 candidates (max 262144)"),
+            "{message}"
+        );
         // A combined plan past the row bound names the counts that tripped,
         // never a text (#258).
         let wide: Vec<_> = (0..250_000).map(candidate).collect();
