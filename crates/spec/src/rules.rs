@@ -162,6 +162,9 @@ fn definition_shape<'a>(
             f,
             "Call; callee {callee}; arguments {arguments:?}; dependency {dependency}; returned value unresolved"
         ),
+        DefinitionExpressionKind::Await { value } => {
+            write!(f, "Await of {value}; settled value unresolved")
+        }
         DefinitionExpressionKind::KeywordArgument { name, value } => {
             write!(f, "Keyword argument; name {name}; value {value}")
         }

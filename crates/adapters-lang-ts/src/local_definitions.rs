@@ -384,6 +384,49 @@ impl<'tree, G: FnMut(RuleGapReason, TsNode<'tree>) -> String> Recovery<'_, 'tree
                         self.unsupported(node)
                     }
                 }
+                // A query-builder step (`qb.getMany()`,
+                // `connection.getRepository(ctx, X)`): a call whose returned
+                // value stays unresolved (AC-1046). Any other call, an
+                // optional call and spread arguments keep a Gap.
+                "call_expression" if recorded_call(self.cx, node) => {
+                    let callee = node.child_by_field_name("function").ok_or(())?;
+                    let list = node.child_by_field_name("arguments").ok_or(())?;
+                    let mut cursor = list.walk();
+                    let items: Vec<_> = list
+                        .named_children(&mut cursor)
+                        .filter(|child| child.kind() != "comment")
+                        .collect();
+                    if items.iter().any(|item| item.kind() == "spread_element") {
+                        self.unsupported(node)
+                    } else {
+                        let callee = self.expression(callee, depth + 1, arena)?;
+                        let mut arguments = Vec::with_capacity(items.len());
+                        for item in items {
+                            arguments.push(self.expression(item, depth + 1, arena)?);
+                        }
+                        let resolution = DependencyResolution::Unresolved {
+                            gap_id: (self.gap)(RuleGapReason::UnresolvedCall, node),
+                        };
+                        let dependency = self.dependency(node, resolution, arena)?;
+                        DefinitionExpressionKind::Call {
+                            callee,
+                            arguments,
+                            dependency,
+                        }
+                    }
+                }
+                // `await qb.getMany()`: the awaited expression (AC-1046). An
+                // await of an unrecorded call stays one unsupported node.
+                "await_expression" if recorded_await(self.cx, node) => {
+                    let mut cursor = node.walk();
+                    let value = node
+                        .named_children(&mut cursor)
+                        .find(|child| child.kind() != "comment")
+                        .ok_or(())?;
+                    DefinitionExpressionKind::Await {
+                        value: self.expression(value, depth + 1, arena)?,
+                    }
+                }
                 _ => self.unsupported(node),
             }
         };
@@ -419,6 +462,55 @@ struct Arena<'tree> {
     nodes: Vec<DefinitionExpressionNode>,
     dependencies: Vec<DefinitionDependency>,
     reads: Vec<TsNode<'tree>>,
+}
+
+/// TypeORM query-builder methods whose calls a definition records
+/// (AC-1046).
+const QUERY_BUILDER_METHODS: [&str; 15] = [
+    "getRepository",
+    "createQueryBuilder",
+    "leftJoin",
+    "innerJoin",
+    "leftJoinAndSelect",
+    "innerJoinAndSelect",
+    "where",
+    "andWhere",
+    "orWhere",
+    "orderBy",
+    "addOrderBy",
+    "getMany",
+    "getOne",
+    "getCount",
+    "getManyAndCount",
+];
+
+/// Whether a call is a query-builder step this arena records: a
+/// non-optional `x.method(...)` call with one of [`QUERY_BUILDER_METHODS`].
+/// Other calls stay one unsupported node, so recording calls does not grow
+/// every service call's evidence.
+fn recorded_call(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
+    node.kind() == "call_expression"
+        && node.child_by_field_name("optional_chain").is_none()
+        && node
+            .child_by_field_name("arguments")
+            .is_some_and(|list| list.kind() == "arguments")
+        && node
+            .child_by_field_name("function")
+            .filter(|callee| callee.kind() == "member_expression")
+            .and_then(|callee| callee.child_by_field_name("property"))
+            .is_some_and(|property| {
+                property.kind() == "property_identifier"
+                    && QUERY_BUILDER_METHODS.contains(&cx.text(&property))
+            })
+}
+
+/// Whether an await is recorded: its operand is not a call, or is a
+/// recorded one.
+fn recorded_await(cx: &FileCx<'_>, node: TsNode<'_>) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|child| child.kind() != "comment")
+        .is_some_and(|value| value.kind() != "call_expression" || recorded_call(cx, value))
 }
 
 fn binding_id(cx: &FileCx<'_>, declaration: TsNode<'_>) -> String {

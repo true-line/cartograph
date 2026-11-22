@@ -549,3 +549,90 @@ fn local_definition_cache_retargets_every_new_source_and_complete_hash() {
         1
     );
 }
+
+#[test]
+fn local_definitions_record_calls_and_awaits_with_unresolved_values() {
+    // AC-1046 (T-1046): an awaited query-builder call chain is recorded node
+    // by node; each call's returned value and the awaited value stay
+    // unresolved, and the builder's local name is followed.
+    let code = r#"async function check(order: any, connection: any, ctx: any, variantIds: any) {
+        const qb = connection
+            .getRepository(ctx, ProductVariant)
+            .createQueryBuilder('variant')
+            .where('variant.deletedAt IS NULL')
+            .andWhere('variant.id IN (:...variantIds)', { variantIds });
+        const availableVariants = await qb.getMany();
+        if (availableVariants.length !== variantIds.length) {
+            return 'unavailable';
+        }
+    }"#;
+    let (_, rules) = extract(code);
+    let rule = rules
+        .iter()
+        .find(|rule| {
+            rule.conditions[0]
+                .expression
+                .display
+                .as_str()
+                .contains("availableVariants")
+        })
+        .unwrap();
+    let defs = definitions(rule);
+    let available = defs
+        .iter()
+        .find(|d| original(code, &d.declaration).starts_with("availableVariants"))
+        .unwrap();
+    let root = &available.expression.nodes[available.expression.root as usize];
+    let DefinitionExpressionKind::Await { value } = root.kind else {
+        panic!("{:?}", root.kind);
+    };
+    let DefinitionExpressionKind::Call {
+        dependency,
+        ref arguments,
+        ..
+    } = available.expression.nodes[value as usize].kind
+    else {
+        panic!();
+    };
+    assert!(arguments.is_empty());
+    assert!(matches!(
+        available.dependencies[dependency as usize].resolution,
+        DependencyResolution::Unresolved { .. }
+    ));
+    let qb = defs
+        .iter()
+        .find(|d| original(code, &d.declaration).starts_with("qb"))
+        .expect("the builder's local name is followed");
+    let calls = qb
+        .expression
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, DefinitionExpressionKind::Call { .. }))
+        .count();
+    assert_eq!(calls, 4);
+    // The `{ variantIds }` object argument keeps an explicit Gap.
+    assert!(
+        qb.expression
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, DefinitionExpressionKind::Unsupported { .. }))
+    );
+    for definition in defs {
+        for node in &definition.expression.nodes {
+            assert_eq!(
+                original(code, &node.expression.source),
+                node.expression.display.as_str()
+            );
+        }
+    }
+    let spread = r#"function f(xs: any) {
+        const n = Math.max(...xs);
+        if (n > 3) return 1;
+    }"#;
+    let (_, rules) = extract(spread);
+    let n = &definitions(&rules[0])[0];
+    assert!(matches!(
+        n.expression.nodes[n.expression.root as usize].kind,
+        DefinitionExpressionKind::Unsupported { .. }
+    ));
+}

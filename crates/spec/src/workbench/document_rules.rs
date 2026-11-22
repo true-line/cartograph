@@ -3241,6 +3241,93 @@ def store_abuse_data(user):\n    if not user.email:\n        raise ValueError('n
         assert!(!out.finish().contains("own code"));
     }
 
+    // AC-1046 (T-1046): a guard testing what a TypeORM query builder
+    // selected states the query: its entity, its conditions and the list it
+    // is limited to.
+    #[test]
+    fn a_query_builder_selection_is_stated_in_its_guard() {
+        let source = "export function configureDefaultOrderProcess(options) {
+    const orderProcess: OrderProcess<OrderState> = {
+        transitions: {
+            AddingItems: { to: ['ArrangingPayment', 'Cancelled'] },
+            ArrangingPayment: { to: ['AddingItems', 'Cancelled'] },
+            Cancelled: { to: [] },
+        },
+        async onTransitionStart(fromState, toState, { ctx, order }) {
+            if (fromState === 'AddingItems' && order.lines.length > 0) {
+                const qb = connection
+                    .getRepository(ctx, ProductVariant)
+                    .createQueryBuilder('variant')
+                    .leftJoin('variant.product', 'product')
+                    .where('variant.deletedAt IS NULL')
+                    .andWhere('product.deletedAt IS NULL')
+                    .andWhere('variant.id IN (:...variantIds)', { variantIds });
+                const availableVariants = await qb.getMany();
+                if (availableVariants.length !== variantIds.length) {
+                    return 'unavailable';
+                }
+            }
+        },
+    };
+    return orderProcess;
+}
+";
+        let render = |source: &str| -> String {
+            let facts = adapters_lang_ts::extract_source(
+                source.as_bytes(),
+                "src/config/order/default-order-process.ts",
+                &adapters_lang_ts::SourceId {
+                    repo: "repo",
+                    commit: "2cc309deb5394af176314552ac7320a7b26a0104",
+                },
+            )
+            .unwrap();
+            let (held_nodes, held_edges) =
+                crate::workbench::compacted_for_tests(&facts.nodes, &facts.edges);
+            let nodes: Vec<&Node> = held_nodes.iter().collect();
+            let edges: Vec<&Edge> = held_edges.iter().collect();
+            let knowledge = Stories {
+                included: Vec::new(),
+                filtered: 0,
+                areas: BTreeMap::new(),
+                file_areas: BTreeMap::new(),
+            };
+            let budget = Budget::new(None).unwrap();
+            let mut assertions = Assertions::new(&budget);
+            let mut asserted = BTreeSet::new();
+            let mut out = Text::new(&budget, "").unwrap();
+            rules_per_capability(
+                (&nodes, &edges),
+                &knowledge,
+                (&mut assertions, &mut asserted),
+                &mut out,
+            )
+            .unwrap();
+            out.finish()
+        };
+        let text = render(source);
+        assert!(
+            text.contains(
+                "Here the available variants are the product variants that are not deleted and whose product is not deleted, among the variant ids."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("deletedAt"), "{text}");
+        // An inner join also drops variants with no product, and a second
+        // `where` replaces the earlier conditions: neither is read.
+        for changed in [
+            source.replace(".leftJoin(", ".innerJoin("),
+            source.replace(
+                ".andWhere('product.deletedAt IS NULL')",
+                ".where('product.deletedAt IS NULL')",
+            ),
+        ] {
+            assert_ne!(changed, source);
+            let text = render(&changed);
+            assert!(!text.contains("Here the available variants"), "{text}");
+        }
+    }
+
     // AC-0951: a state machine is stated under the area of the file that
     // declares it, with each state and where it may move; the guard of its
     // `onTransitionStart` hook is a row of the area's own code; with no

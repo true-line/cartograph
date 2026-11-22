@@ -60,7 +60,9 @@ operators is source structure, not constant folding or arithmetic interpretation
 Preserve operand order, grouping and short-circuit/optional structure exactly.
 Calls, new, assignment/update/delete, callbacks, await/yield, templates, regex,
 type wrappers and other unsupported forms retain an explicit Gap rather than
-being approximated as a simpler expression. No source is executed or substituted.
+being approximated as a simpler expression. Exceptions: Python calls (AC-1034)
+and, in TypeScript, TypeORM query-builder steps and an `await` of a recorded
+form (AC-1046) are recorded with their values unresolved. No source is executed or substituted.
 
 ## Bounds, sanitization and validation
 
@@ -72,7 +74,7 @@ Do not expose secrets through operator fields, new identifiers, diagnostics,
 unsupported fallbacks or secret-only hashes.
 
 Initial hard caps per rule are 16 definitions, 64 arena nodes total across all
-definitions, 128 initializer dependencies total, expression depth 8 and definition
+definitions, 128 initializer dependencies total, expression depth 16 (AC-1046) and definition
 chain depth 4. Keep the existing rule dependency cap 128, rule payload 64 KiB and
 per-file rule payload 1 MiB. Bound producer traversal independently of emitted
 data; budget exhaustion emits a fixed analysis/definition-limit Gap. Never mark
