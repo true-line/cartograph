@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::SpecArtifactPreview;
-use crate::export_save::{sanitize_export_name, write_export_with};
+#[cfg(test)]
+use crate::export_save::write_export_with;
+use crate::export_save::{move_export_into, sanitize_export_name};
 
 /// One artifact as the Workbench preview showed it (AC-0242 identity).
 #[derive(Debug, Clone, Deserialize)]
@@ -242,7 +244,7 @@ fn pretty_at<W: Write>(
 /// [`write_bundle_json`] of [`matching_bundle_file`].
 pub(crate) struct BundleFileStream<'a> {
     expected: &'a ExpectedSpecBundle,
-    body: BufWriter<std::fs::File>,
+    body: BufWriter<tempfile::NamedTempFile>,
     contents: BufWriter<std::fs::File>,
     /// Each artifact's file name and the span of its JSON-encoded content
     /// in `contents`.
@@ -255,7 +257,7 @@ impl<'a> BundleFileStream<'a> {
     /// A stream for the preview `expected`, spooled in the temp directory.
     pub(crate) fn new(expected: &'a ExpectedSpecBundle) -> Result<Self, String> {
         let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
-        let mut body = BufWriter::with_capacity(1 << 16, tempfile::tempfile().map_err(fail)?);
+        let mut body = BufWriter::with_capacity(1 << 16, new_temp().map_err(fail)?);
         let contents = BufWriter::with_capacity(1 << 16, tempfile::tempfile().map_err(fail)?);
         body.write_all(b"{\n  \"mode\": ")
             .and_then(|()| serde_json::to_writer(&mut body, &expected.mode).map_err(Into::into))
@@ -308,7 +310,10 @@ impl<'a> BundleFileStream<'a> {
 
     /// Check the bundle's counts and bases against the preview and finish
     /// the file, returned rewound to its start.
-    pub(crate) fn finish(mut self, bundle: &spec::SpecBundle<()>) -> Result<std::fs::File, String> {
+    pub(crate) fn finish(
+        mut self,
+        bundle: &spec::SpecBundle<()>,
+    ) -> Result<tempfile::NamedTempFile, String> {
         if let Some(failure) = self.failure.take() {
             return Err(failure);
         }
@@ -328,7 +333,10 @@ impl<'a> BundleFileStream<'a> {
             .map_err(|err| format!("Failed to write export file: {err}"))
     }
 
-    fn finish_file(self, bundle: &spec::SpecBundle<()>) -> std::io::Result<std::fs::File> {
+    fn finish_file(
+        self,
+        bundle: &spec::SpecBundle<()>,
+    ) -> std::io::Result<tempfile::NamedTempFile> {
         use std::io::{Read, Seek, SeekFrom};
         let Self {
             mut body,
@@ -430,7 +438,7 @@ pub(crate) fn write_bundle_file(path: &Path, file: &SpecBundleFile) -> Result<()
 pub(crate) fn stream_bundle_file(
     expected: &ExpectedSpecBundle,
     compile: impl FnOnce(&mut dyn FnMut(spec::SpecArtifact)) -> Result<spec::SpecBundle<()>, String>,
-) -> Result<std::fs::File, String> {
+) -> Result<tempfile::NamedTempFile, String> {
     let mut stream = BundleFileStream::new(expected)?;
     let bundle = compile(&mut |artifact| stream.push(artifact))?;
     stream.finish(&bundle)
@@ -438,7 +446,7 @@ pub(crate) fn stream_bundle_file(
 
 /// Compile the full bundle for the preview the Workbench shows, one artifact
 /// at a time into a temp file (#2215), refuse it if it is no longer that
-/// selection, then ask where to save it and copy it there. Returns
+/// selection, then ask where to save it and move it there. Returns
 /// `Ok(false)` when the save panel is cancelled. The full bundle never
 /// crosses IPC (#1582, AC-0740).
 #[tauri::command]
@@ -462,13 +470,19 @@ pub(crate) async fn save_spec_bundle_export<R: tauri::Runtime>(
         return Ok(false);
     };
     let path = handle.path().to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut file = file;
-        write_export_with(&path, |out| std::io::copy(&mut file, out).map(drop))
-    })
-    .await
-    .map_err(|_| "Failed to write export file: worker failed".to_string())??;
+    tauri::async_runtime::spawn_blocking(move || move_export_into(&path, file))
+        .await
+        .map_err(|_| "Failed to write export file: worker failed".to_string())??;
     Ok(true)
+}
+
+/// The bundle file's temp file: named, so the finished file can be renamed
+/// into place, and owner-only.
+fn new_temp() -> std::io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(".cartograph-bundle-")
+        .suffix(".partial")
+        .tempfile()
 }
 
 #[cfg(test)]

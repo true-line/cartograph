@@ -47,17 +47,7 @@ pub(crate) fn write_export_with(
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<(), String> {
     let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
-    // Replacing a symlink would swap the link for a file; write through it to
-    // its target instead, as the previous in-place write did.
-    let target = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).map_err(fail)?,
-        _ => path.to_path_buf(),
-    };
-    // An existing destination keeps its permissions; a new export stays
-    // owner-only (the temp file's mode) rather than widening to the umask.
-    let existing = std::fs::metadata(&target)
-        .ok()
-        .map(|meta| meta.permissions());
+    let (target, existing) = export_target(path).map_err(fail)?;
     let parent = match target.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -78,6 +68,55 @@ pub(crate) fn write_export_with(
         return Err(fail(err));
     }
     Ok(())
+}
+
+/// The file an export to `path` replaces, and its permissions if it exists.
+/// Replacing a symlink would swap the link for a file, so a symlink resolves
+/// to its target, as the previous in-place write did. An existing
+/// destination keeps its permissions; a new export stays owner-only (the
+/// temp file's mode) rather than widening to the umask.
+fn export_target(
+    path: &Path,
+) -> std::io::Result<(std::path::PathBuf, Option<std::fs::Permissions>)> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let existing = std::fs::metadata(&target)
+        .ok()
+        .map(|meta| meta.permissions());
+    Ok((target, existing))
+}
+
+/// Put a finished export, already written to the temp file `file`, at
+/// `path` with the same atomic replace as [`write_export_with`]. The temp
+/// file is renamed into place, so the export is never copied; only when
+/// `path` is on another filesystem is it copied there through
+/// [`write_export_with`] (#2215).
+pub(crate) fn move_export_into(path: &Path, file: tempfile::NamedTempFile) -> Result<(), String> {
+    move_export_with(path, file, |temp, target| temp.persist(target).map(drop))
+}
+
+fn move_export_with(
+    path: &Path,
+    file: tempfile::NamedTempFile,
+    rename: impl FnOnce(tempfile::NamedTempFile, &Path) -> Result<(), tempfile::PersistError>,
+) -> Result<(), String> {
+    let fail = |err: std::io::Error| format!("Failed to write export file: {err}");
+    let (target, existing) = export_target(path).map_err(fail)?;
+    file.as_file().sync_all().map_err(fail)?;
+    if let Some(permissions) = existing {
+        file.as_file().set_permissions(permissions).map_err(fail)?;
+    }
+    match rename(file, &target) {
+        Ok(()) => Ok(()),
+        Err(err) if err.error.kind() == std::io::ErrorKind::CrossesDevices => {
+            let mut file = err.file;
+            std::io::Seek::rewind(&mut file).map_err(fail)?;
+            write_export_with(path, |out| std::io::copy(&mut file, out).map(drop))
+        }
+        Err(err) => Err(fail(err.error)),
+    }
 }
 
 /// A new, exclusively created temporary file next to the export target.
@@ -130,6 +169,7 @@ pub(crate) async fn save_export_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Seek;
 
     #[test]
     fn sanitizes_basename_and_strips_path_separators() {
@@ -259,5 +299,76 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "through link");
+    }
+
+    /// A temp file holding `text`, as the bundle stream leaves it.
+    fn finished_temp(text: &str) -> tempfile::NamedTempFile {
+        let mut temp = tempfile::NamedTempFile::new().unwrap();
+        temp.write_all(text.as_bytes()).unwrap();
+        temp
+    }
+
+    // AC-1213 (T-1213): a finished export is renamed into place, replacing
+    // the destination atomically, keeping its permissions and following a
+    // symlink; across filesystems it is copied there instead, and its temp
+    // file is removed either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_export_is_moved_into_place_or_copied_across_filesystems() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("bundle.json");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let temp = finished_temp("moved");
+        let temp_path = temp.path().to_path_buf();
+        move_export_into(&target, temp).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "moved");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(!temp_path.exists());
+
+        let fresh = dir.path().join("fresh.json");
+        move_export_into(&fresh, finished_temp("fresh")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o077,
+            0
+        );
+
+        let link = dir.path().join("linked.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        move_export_into(&link, finished_temp("through link")).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "through link");
+
+        let mut temp = finished_temp("copied");
+        temp.seek(std::io::SeekFrom::End(0)).unwrap();
+        let temp_path = temp.path().to_path_buf();
+        move_export_with(&target, temp, |file, _| {
+            Err(tempfile::PersistError {
+                error: std::io::ErrorKind::CrossesDevices.into(),
+                file,
+            })
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "copied");
+        assert!(!temp_path.exists());
+
+        let error = move_export_with(&target, finished_temp("refused"), |file, _| {
+            Err(tempfile::PersistError {
+                error: std::io::ErrorKind::PermissionDenied.into(),
+                file,
+            })
+        })
+        .unwrap_err();
+        assert!(error.starts_with("Failed to write export file:"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "copied");
     }
 }
