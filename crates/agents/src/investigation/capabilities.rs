@@ -99,11 +99,15 @@ pub enum Capability {
     FindingWithholding,
     /// The saved `LocalFinish4096V1` generation for new local desktop starts.
     LocalFinishGeneration,
+    /// Each step is one native tool call in a tool-calling runtime (Pi for
+    /// local models, the Agent SDK for Claude) instead of one JSON action
+    /// (ADR-0085).
+    NativeToolRuntime,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::CompactDisclosure,
         Self::TurnProgress,
         Self::InspectionRequirements,
@@ -125,6 +129,7 @@ impl Capability {
         Self::TypedCitationCorrection,
         Self::FindingWithholding,
         Self::LocalFinishGeneration,
+        Self::NativeToolRuntime,
     ];
 
     const fn bit(self) -> u32 {
@@ -219,7 +224,7 @@ use SpecialistRole as R;
 /// Every built-in specialist version, in `SpecialistId` declaration order:
 /// id, role, role version, prompt generation, availability, capabilities.
 #[rustfmt::skip]
-pub const SPECIALIST_TABLE: [SpecialistRow; 46] = [
+pub const SPECIALIST_TABLE: [SpecialistRow; 47] = [
     row(S::DomainAnalystV1, R::DomainAnalyst, 1, 1, A::Retired, &[]),
     row(S::EvidenceAuditorV1, R::EvidenceAuditor, 1, 1, A::Retired, &[]),
     row(S::DomainAnalyst, R::DomainAnalyst, 2, 2, A::Retired, &[]),
@@ -257,6 +262,7 @@ pub const SPECIALIST_TABLE: [SpecialistRow; 46] = [
     row(S::DomainAnalystV26, R::DomainAnalyst, 26, 14, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
     row(S::DomainAnalystV27, R::DomainAnalyst, 27, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
     row(S::DomainAnalystV28, R::DomainAnalyst, 28, 14, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
+    row(S::DomainAnalystV29, R::DomainAnalyst, 29, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration, C::NativeToolRuntime]),
     row(S::EvidenceAuditorV11, R::EvidenceAuditor, 11, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
     row(S::EvidenceAuditorV12, R::EvidenceAuditor, 12, 10, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries]),
     row(S::EvidenceAuditorV13, R::EvidenceAuditor, 13, 12, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::FinishFeedbackWitness, C::TypedCitationCorrection]),

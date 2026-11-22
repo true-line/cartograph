@@ -23,7 +23,7 @@ fn table_rows_follow_enum_order_and_ids() {
 #[test]
 fn every_capability_matches_the_legacy_predicates() {
     for id in SpecialistId::all() {
-        let legacy: [(Capability, bool); 21] = [
+        let legacy: [(Capability, bool); 22] = [
             (C::CompactDisclosure, legacy_uses_compact_disclosure(id)),
             (C::TurnProgress, legacy_uses_turn_progress(id)),
             (
@@ -81,6 +81,8 @@ fn every_capability_matches_the_legacy_predicates() {
                 C::LocalFinishGeneration,
                 legacy_uses_local_finish_generation(id),
             ),
+            // ADR-0085: new with @29; no earlier arm answered it.
+            (C::NativeToolRuntime, id == SpecialistId::DomainAnalystV29),
         ];
         for (capability, expected) in legacy {
             assert_eq!(id.has(capability), expected, "{id:?} {capability:?}");
@@ -145,6 +147,7 @@ fn legacy_uses_compact_disclosure(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -191,6 +194,7 @@ fn legacy_uses_turn_progress(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -240,6 +244,7 @@ fn legacy_uses_coverage_qualification(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -280,6 +285,7 @@ fn legacy_uses_completion_obligations(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -313,6 +319,7 @@ fn legacy_uses_policy_selection(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -344,6 +351,7 @@ fn legacy_uses_query_history_disclosure(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -373,6 +381,7 @@ fn legacy_uses_next_prompt_admission(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -420,6 +429,7 @@ fn legacy_version(id: SpecialistId) -> u32 {
         SpecialistId::DomainAnalystV26 => 26,
         SpecialistId::DomainAnalystV27 => 27,
         SpecialistId::DomainAnalystV28 => 28,
+        SpecialistId::DomainAnalystV29 => 29,
     }
 }
 
@@ -434,6 +444,7 @@ fn legacy_prompt_generation(id: SpecialistId) -> u32 {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     ) {
         return 14;
     }
@@ -474,6 +485,7 @@ fn legacy_prompt_generation(id: SpecialistId) -> u32 {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     ) {
         return 10;
     }
@@ -499,18 +511,24 @@ fn legacy_uses_combined_finish_feedback(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
 fn legacy_uses_finish_patch(id: SpecialistId) -> bool {
     matches!(
         id,
-        SpecialistId::DomainAnalystV27 | SpecialistId::DomainAnalystV28
+        SpecialistId::DomainAnalystV27
+            | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
 fn legacy_uses_visible_action_schema(id: SpecialistId) -> bool {
-    id == SpecialistId::DomainAnalystV28
+    matches!(
+        id,
+        SpecialistId::DomainAnalystV28 | SpecialistId::DomainAnalystV29
+    )
 }
 
 fn legacy_uses_exact_source_reservation(id: SpecialistId) -> bool {
@@ -521,6 +539,7 @@ fn legacy_uses_exact_source_reservation(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
@@ -547,6 +566,7 @@ fn legacy_uses_acquisition_choices(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
             | SpecialistId::EvidenceAuditorV14
@@ -568,6 +588,7 @@ fn legacy_uses_exact_node_queries(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
             | SpecialistId::EvidenceAuditorV14
@@ -586,6 +607,7 @@ fn legacy_uses_capacity_exclusions(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
@@ -601,6 +623,7 @@ fn legacy_uses_finish_feedback_witness(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
@@ -618,6 +641,7 @@ fn legacy_uses_typed_citation_correction(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
@@ -660,6 +684,7 @@ fn offered_set_matches_the_pre_table_desktop_catalog() {
             S::DomainAnalystV23,
             S::DomainAnalystV27,
             S::DomainAnalystV28,
+            S::DomainAnalystV29,
         ]);
     }
     let offered = offered_specialists();
@@ -681,7 +706,14 @@ fn each_role_has_exactly_one_current_version_and_it_is_the_newest() {
             .filter(|row| row.availability == Availability::Current)
             .collect();
         assert_eq!(current.len(), 1, "{role:?}");
-        let newest = rows.iter().map(|row| row.version).max().unwrap();
+        // A version that needs the tool-calling runtime is offered beside the
+        // current one until that runtime ships with the app (ADR-0085).
+        let newest = rows
+            .iter()
+            .filter(|row| !row.capabilities.contains(Capability::NativeToolRuntime))
+            .map(|row| row.version)
+            .max()
+            .unwrap();
         assert_eq!(current[0].version, newest, "{role:?}");
     }
 }
@@ -694,6 +726,7 @@ fn legacy_uses_local_finish_generation(id: SpecialistId) -> bool {
         SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
 
@@ -704,5 +737,6 @@ fn legacy_uses_finding_withholding(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV26
             | SpecialistId::DomainAnalystV27
             | SpecialistId::DomainAnalystV28
+            | SpecialistId::DomainAnalystV29
     )
 }
