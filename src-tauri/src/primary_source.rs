@@ -2095,6 +2095,9 @@ impl PrimarySourceStore {
         if ingest::coverage::wants(layers, ingest::coverage::INFRA_LAYERS) {
             lanes.extend(iac::tf_paths(root).unwrap_or_default());
         }
+        // Workflows and Dockerfiles (AC-1057) are read for every layer
+        // selection, so they join it whenever the source is captured.
+        lanes.extend(ingest::pipelines::pipeline_paths(root).unwrap_or_default());
         let combined = (!lanes.is_empty())
             .then(|| {
                 let mut paths = selection.files.clone();
