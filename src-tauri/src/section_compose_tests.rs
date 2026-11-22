@@ -595,12 +595,16 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
              "claim_kind": "implemented_behavior", "citation_ids": cites},
             {"statement": "Shoppers place orders from every channel there is.",
              "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place up to 17 orders a day.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
         ]})
         .to_string(),
         prompts: Mutex::new(Vec::new()),
     };
+    // The staging checks run first: the claim stating an uncited number
+    // keeps its own reason and is never reviewed.
     let composed = || {
-        compose(
+        let mut composed = compose(
             &state,
             &composer,
             &prepared,
@@ -609,7 +613,10 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
             None,
         )
         .unwrap()
-        .unwrap()
+        .unwrap();
+        assert_eq!(screen(&prepared, &mut composed), None);
+        assert_eq!(composed.reasons["number_not_cited"], 1);
+        composed
     };
     let reviewer = Scripted {
         reply: json!({"verdicts": [
@@ -633,10 +640,11 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
         kept.finish.claims[0].statement,
         "Shoppers place orders for themselves."
     );
-    assert_eq!((kept.left_out, kept.reasons["claim_overreaches"]), (1, 1));
+    assert_eq!((kept.left_out, kept.reasons["claim_overreaches"]), (2, 1));
     // The reviewer read both claims and the cited capability's text.
     let prompt = reviewer.prompts.lock().unwrap()[0].clone();
     assert!(prompt.contains("2. Shoppers place orders from every channel there is."));
+    assert!(!prompt.contains("17 orders"));
     assert!(prompt.contains(&format!("{}: ", id("cap:orders"))) && prompt.contains("Place orders"));
     // A reply that is not the schema's keeps every claim.
     let unreadable = Scripted {

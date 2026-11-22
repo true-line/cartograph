@@ -588,35 +588,16 @@ pub(crate) fn stage(
     )
 }
 
-/// [`stage`] recording `role`, its definition fingerprint, as the author.
-fn stage_as(
-    state: &AppState,
-    prepared: &Prepared,
-    composed: Composed,
-    job_id: i64,
-    role: (&str, String),
-) -> Result<ComposeOutcome, String> {
-    let Composed {
-        mut finish,
-        mut left_out,
-        reasons,
-    } = composed;
-    let mut reasons = reasons;
+/// Leave out each claim of `composed` a staging check refuses, counting it
+/// under the check's reason (SPEC-16 rule 3, #2328, #2349, #2371, #2416).
+/// The reason that left out the last claim, if every claim is left out.
+/// Running it again on what it kept leaves out nothing more.
+fn screen(prepared: &Prepared, composed: &mut Composed) -> Option<&'static str> {
     let (nodes, edges) = (&prepared.nodes, &prepared.edges);
-    // The draft is recorded against the graph the section was compiled
-    // from, so that graph must still be the current one.
-    let current = {
-        let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let (_, ((nodes, edges), _)) = crate::curated::read_graph(&graph)?;
-        spec::graph_content_hash(&nodes, &edges)
-    };
-    let graph_content_hash = spec::graph_content_hash(nodes, edges);
-    if current != graph_content_hash {
-        return Ok(ComposeOutcome::none("graph_changed"));
-    }
     // SPEC-16 rule 3 (AC-0683): a statement naming a source identifier it
     // cites is not staged.
-    let cited: BTreeSet<String> = finish
+    let cited: BTreeSet<String> = composed
+        .finish
         .claims
         .iter()
         .flat_map(|claim| claim.citations.iter().cloned())
@@ -659,14 +640,47 @@ fn stage_as(
         }),
     ];
     for (reason, keep) in checks {
-        if leave_out(&mut finish, (&mut left_out, &mut reasons), reason, keep) {
-            return Ok(ComposeOutcome {
-                left_out,
-                left_out_reasons: reasons,
-                ..ComposeOutcome::none(reason)
-            });
+        let counts = (&mut composed.left_out, &mut composed.reasons);
+        if leave_out(&mut composed.finish, counts, reason, keep) {
+            return Some(reason);
         }
     }
+    None
+}
+
+/// [`stage`] recording `role`, its definition fingerprint, as the author.
+fn stage_as(
+    state: &AppState,
+    prepared: &Prepared,
+    composed: Composed,
+    job_id: i64,
+    role: (&str, String),
+) -> Result<ComposeOutcome, String> {
+    let mut composed = composed;
+    let (nodes, edges) = (&prepared.nodes, &prepared.edges);
+    // The draft is recorded against the graph the section was compiled
+    // from, so that graph must still be the current one.
+    let current = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let (_, ((nodes, edges), _)) = crate::curated::read_graph(&graph)?;
+        spec::graph_content_hash(&nodes, &edges)
+    };
+    let graph_content_hash = spec::graph_content_hash(nodes, edges);
+    if current != graph_content_hash {
+        return Ok(ComposeOutcome::none("graph_changed"));
+    }
+    if let Some(reason) = screen(prepared, &mut composed) {
+        return Ok(ComposeOutcome {
+            left_out: composed.left_out,
+            left_out_reasons: composed.reasons,
+            ..ComposeOutcome::none(reason)
+        });
+    }
+    let Composed {
+        finish,
+        left_out,
+        reasons,
+    } = composed;
     let cited: BTreeSet<String> = finish
         .claims
         .iter()
@@ -781,7 +795,16 @@ fn run_blocking(
         &check,
         Some(execution.id()),
     )? {
-        Ok(composed) => {
+        Ok(mut composed) => {
+            // The deterministic checks run first, so each claim they refuse
+            // keeps its own reason; only what passes them is reviewed.
+            if let Some(reason) = screen(&prepared, &mut composed) {
+                return Ok(ComposeOutcome {
+                    left_out: composed.left_out,
+                    left_out_reasons: composed.reasons,
+                    ..ComposeOutcome::none(reason)
+                });
+            }
             let (composed, review) = review(
                 state,
                 provider,
