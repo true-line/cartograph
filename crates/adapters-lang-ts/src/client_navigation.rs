@@ -36,6 +36,9 @@ pub const COMPUTED_TARGET_REASON: &str =
 /// Gap reason: a navigation target that names no recovered screen.
 pub const UNKNOWN_SCREEN_REASON: &str = "navigation target is not a recovered screen";
 
+/// `(byte_start, byte_end)` of a call.
+type ByteRange = (u64, u64);
+
 /// `(file, exported owner, member)` of a function or static method.
 type Key = (String, String, Option<String>);
 
@@ -66,6 +69,9 @@ struct Call {
     /// The calling Symbol, or the caller's file at module level.
     source: String,
     conditional: bool,
+    /// The call whose `const` result a branch around the site reads
+    /// ([`result_branch`]), as its byte range.
+    result_of: Option<ByteRange>,
     evidence: EvidenceRef,
 }
 
@@ -183,6 +189,92 @@ fn conditional(node: TsNode<'_>) -> bool {
         child = parent;
     }
     false
+}
+
+/// The call a branch around `node` tests the result of (ADR-0050 decision
+/// 4, result step): the innermost `if` or ternary, within `node`'s callable,
+/// whose condition reads a name bound by `const name = call(…)` or
+/// `const name = await call(…)` earlier in an enclosing block of the same
+/// callable. Returns that call's byte range. Only `const` qualifies, so the
+/// name still holds the call's result when the condition reads it.
+fn result_branch(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<ByteRange> {
+    let mut child = node;
+    while let Some(parent) = child.parent() {
+        if callable::is_callable(parent) {
+            return None;
+        }
+        if matches!(parent.kind(), "if_statement" | "ternary_expression")
+            && let Some(condition) = parent.child_by_field_name("condition")
+            && condition.id() != child.id()
+        {
+            let mut names = Vec::new();
+            identifiers(cx, condition, &mut names);
+            if let Some(call) = names.iter().find_map(|name| bound_call(cx, parent, name)) {
+                return Some((call.start_byte() as u64, call.end_byte() as u64));
+            }
+        }
+        child = parent;
+    }
+    None
+}
+
+/// Every identifier read in `node`, outside nested callables. Property
+/// names are `property_identifier` nodes, so they are never read.
+fn identifiers(cx: &FileCx<'_>, node: TsNode<'_>, out: &mut Vec<String>) {
+    if node.kind() == "identifier" {
+        out.push(cx.text(&node).to_string());
+        return;
+    }
+    let mut walk = node.walk();
+    for child in node.named_children(&mut walk) {
+        if !callable::is_callable(child) {
+            identifiers(cx, child, out);
+        }
+    }
+}
+
+/// The call bound to `name` by the nearest declaration of `name` before
+/// `site` in an enclosing block, without leaving `site`'s callable. `None`
+/// when that declaration is not `const name = [await] call(…)`.
+fn bound_call<'tree>(cx: &FileCx<'_>, site: TsNode<'tree>, name: &str) -> Option<TsNode<'tree>> {
+    let mut child = site;
+    while let Some(parent) = child.parent() {
+        if callable::is_callable(parent) {
+            return None;
+        }
+        if parent.kind() == "statement_block" {
+            let mut walk = parent.walk();
+            let before: Vec<_> = parent
+                .named_children(&mut walk)
+                .take_while(|statement| statement.id() != child.id())
+                .collect();
+            for statement in before.into_iter().rev() {
+                if !matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                ) {
+                    continue;
+                }
+                let mut inner = statement.walk();
+                for declarator in statement.named_children(&mut inner) {
+                    if declarator
+                        .child_by_field_name("name")
+                        .is_none_or(|n| n.kind() != "identifier" || cx.text(&n) != name)
+                    {
+                        continue;
+                    }
+                    let constant = statement.child(0).is_some_and(|k| k.kind() == "const");
+                    let mut value = declarator.child_by_field_name("value")?;
+                    if value.kind() == "await_expression" {
+                        value = value.named_child(0)?;
+                    }
+                    return (constant && value.kind() == "call_expression").then_some(value);
+                }
+            }
+        }
+        child = parent;
+    }
+    None
 }
 
 fn target(cx: &FileCx<'_>, proofs: &Proofs<'_, '_>, local: &Constants, arg: TsNode<'_>) -> Target {
@@ -353,6 +445,7 @@ pub(crate) fn extract<'tree>(
                     args: read(&args[..args.len().min(1)]),
                     source,
                     conditional: conditional(node),
+                    result_of: result_branch(cx, node),
                     evidence: evidence(cx, node),
                 });
                 continue;
@@ -365,6 +458,7 @@ pub(crate) fn extract<'tree>(
                     args: read(&args),
                     source,
                     conditional: conditional(node),
+                    result_of: result_branch(cx, node),
                     evidence: evidence(cx, node),
                 });
             }
@@ -379,6 +473,7 @@ pub(crate) fn extract<'tree>(
                 args: read(&args),
                 source,
                 conditional: conditional(node),
+                result_of: result_branch(cx, node),
                 evidence: evidence(cx, node),
             });
         }
@@ -428,9 +523,9 @@ pub(crate) fn complete(
     #[derive(Default)]
     struct Link {
         evidence: Vec<EvidenceRef>,
-        /// Each call: its evidence, whether it is conditional, and how the
-        /// router was proven.
-        sites: Vec<(EvidenceRef, bool, &'static str)>,
+        /// Each call: its evidence, whether it is conditional, how the
+        /// router was proven, and the call whose result a branch reads.
+        sites: Vec<(EvidenceRef, bool, &'static str, Option<ByteRange>)>,
     }
     let mut links: BTreeMap<(String, String), Link> = BTreeMap::new();
     let (mut gap_nodes, mut gap_edges) = (Vec::new(), Vec::new());
@@ -484,7 +579,7 @@ pub(crate) fn complete(
                     .entry((call.source.clone(), screen.clone()))
                     .or_default();
                 link.sites
-                    .push((call.evidence.clone(), call.conditional, via));
+                    .push((call.evidence.clone(), call.conditional, via, call.result_of));
                 link.evidence.append(&mut cited);
                 continue;
             }
@@ -517,21 +612,26 @@ pub(crate) fn complete(
         });
         link.evidence.dedup();
         let order = |e: &EvidenceRef| (e.path.clone(), e.byte_start, e.byte_end);
-        link.sites.sort_by_key(|(e, _, _)| order(e));
+        link.sites.sort_by_key(|(e, _, _, _)| order(e));
         // The store keeps one edge per (source, target): every call stays
         // listed with its own flag (ADR in #987, decision 3).
-        let conditional = link.sites.iter().all(|(_, conditional, _)| *conditional);
+        let conditional = link.sites.iter().all(|(_, conditional, _, _)| *conditional);
         let sites: Vec<_> = link
             .sites
             .iter()
-            .map(|(e, conditional, via)| {
-                serde_json::json!({
+            .map(|(e, conditional, via, result_of)| {
+                let mut site = serde_json::json!({
                     "path": e.path,
                     "byte_start": e.byte_start,
                     "byte_end": e.byte_end,
                     "conditional": conditional,
                     "via": via,
-                })
+                });
+                // Only a branch on a bound call's result records it (AC-1309).
+                if let Some((start, end)) = result_of {
+                    site["result_of"] = serde_json::json!({"byte_start": start, "byte_end": end});
+                }
+                site
             })
             .collect();
         edges.push(Edge {
@@ -572,6 +672,7 @@ mod fact_access_tests {
             args: vec![target],
             source: "sym:nav".into(),
             conditional: false,
+            result_of: None,
             evidence: evidence(at),
         }
     }
