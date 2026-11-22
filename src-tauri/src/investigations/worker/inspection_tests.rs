@@ -141,11 +141,14 @@ fn inspection_resolver_rejects_role_rebinding_and_start_replay_precedes_freshnes
     let targets = changed.inspection_requirements.as_mut().unwrap();
     targets[0].role = TaskRangeRole::ConditionExpression;
     targets[0].target_id = targets[0].content_id().unwrap();
-    let error = crate::investigations::commands::start(
-        changed,
-        fixture.app.handle().clone(),
-        Instant::now(),
-    )
+    // @5 is retired (AC-1062); this checks its own rebinding refusal.
+    let error = crate::investigations::commands::with_retired_starts(|| {
+        crate::investigations::commands::start(
+            changed,
+            fixture.app.handle().clone(),
+            Instant::now(),
+        )
+    })
     .unwrap_err();
     assert!(matches!(
         error,
