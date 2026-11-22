@@ -341,6 +341,15 @@ fn run_inner<R: tauri::Runtime>(
             #[cfg(test)]
             audit_probe: None,
         };
+        // ADR-0085: a tool-calling version gets its own runtime for this run;
+        // the runtime process ends when the run's provider is dropped.
+        let provider = super::tool_runtime::provider_for_run(
+            request.specialist_id,
+            &id,
+            &provider,
+            super::tool_runtime::RuntimeCommand::from_env().as_ref(),
+        )
+        .map_err(|_| HostError::InvalidInput)?;
         let result = worker
             .execute_inner(&request, completion_request.as_ref(), provider.as_ref())
             .map_err(|failure| {

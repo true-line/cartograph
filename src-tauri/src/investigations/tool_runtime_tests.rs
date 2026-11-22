@@ -1,0 +1,124 @@
+use super::*;
+use std::time::Duration;
+
+fn local(model: &str) -> llm::OllamaProvider {
+    llm::OllamaProvider::new("http://127.0.0.1:1/", model, Duration::from_secs(5)).unwrap()
+}
+
+fn runtime() -> RuntimeCommand {
+    RuntimeCommand {
+        node: "node".into(),
+        entry: "agent-runtime/src/main.ts".into(),
+    }
+}
+
+// AC-1429: only a tool-calling version gets the runtime; every other
+// version keeps the provider it resolved, with no runtime configured.
+#[test]
+fn only_a_tool_calling_version_runs_on_the_runtime() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(local("qwen3:30b-a3b"));
+    let same = provider_for_run(SpecialistId::DomainAnalystV28, "inv_1", &provider, None).unwrap();
+    assert!(Arc::ptr_eq(&same, &provider));
+    assert_eq!(
+        provider_for_run(SpecialistId::DomainAnalystV29, "inv_1", &provider, None).err(),
+        Some(ToolRuntimeError::NotInstalled),
+        "a tool-calling start without the runtime fails before any request"
+    );
+    let wrapped = provider_for_run(
+        SpecialistId::DomainAnalystV29,
+        "inv_1",
+        &provider,
+        Some(&runtime()),
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(&wrapped, &provider));
+    assert_eq!(
+        wrapped.bounded_profile().unwrap(),
+        provider.bounded_profile().unwrap(),
+        "the run's provider identity is unchanged"
+    );
+}
+
+#[test]
+fn the_proxy_targets_the_resolved_providers_own_upstream() {
+    let windowed = local("qwen3:30b-a3b").with_context_window(32768).unwrap();
+    let profile = windowed.bounded_profile().unwrap();
+    assert_eq!(
+        upstream(
+            &profile.provider_id,
+            &profile.requested_model,
+            &profile.endpoint_id
+        ),
+        Ok((
+            "http://127.0.0.1:1".to_owned(),
+            ProxyBackend::Ollama,
+            Some(32768)
+        ))
+    );
+    let plain = local("qwen3:30b-a3b").bounded_profile().unwrap();
+    assert_eq!(
+        upstream(
+            &plain.provider_id,
+            &plain.requested_model,
+            &plain.endpoint_id
+        )
+        .unwrap()
+        .2,
+        None
+    );
+    let vllm = llm::openai_compatible::OpenAiCompatibleProvider::new(
+        "http://127.0.0.1:8000/",
+        "glm-5.3-flash",
+        Duration::from_secs(5),
+    )
+    .unwrap()
+    .bounded_profile()
+    .unwrap();
+    assert_eq!(
+        upstream(&vllm.provider_id, &vllm.requested_model, &vllm.endpoint_id),
+        Ok((
+            "http://127.0.0.1:8000".to_owned(),
+            ProxyBackend::OpenAiCompatible,
+            None
+        ))
+    );
+    assert_eq!(
+        upstream("anthropic:x", "x", "https://api.anthropic.com/v1/messages"),
+        Err(ToolRuntimeError::UnsupportedProvider)
+    );
+}
+
+#[test]
+fn the_runtime_is_named_by_the_environment_and_gets_no_app_secrets() {
+    let vars = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    };
+    assert_eq!(RuntimeCommand::from_vars(&vars(&[])), None);
+    assert_eq!(
+        RuntimeCommand::from_vars(&vars(&[("CARTOGRAPH_AGENT_RUNTIME", "")])),
+        None
+    );
+    assert_eq!(
+        RuntimeCommand::from_vars(&vars(&[("CARTOGRAPH_AGENT_RUNTIME", "/r/main.ts")])),
+        Some(RuntimeCommand {
+            node: "node".into(),
+            entry: "/r/main.ts".into()
+        })
+    );
+    let command = RuntimeCommand {
+        node: "/opt/node".into(),
+        entry: "/r/main.ts".into(),
+    }
+    .command();
+    assert_eq!(command.get_program(), "/opt/node");
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["/r/main.ts"]);
+    for (key, value) in command.get_envs() {
+        assert_eq!(key, "PATH", "only PATH reaches the runtime");
+        assert!(value.is_some());
+    }
+}

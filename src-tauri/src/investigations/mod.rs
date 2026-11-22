@@ -25,6 +25,7 @@ pub(crate) mod source_candidate_workspace;
 pub(crate) mod source_preparation_workspace;
 #[cfg(unix)]
 pub(crate) mod source_retained_workspace;
+pub(crate) mod tool_runtime;
 mod worker;
 
 pub(super) use events::emit_changed;
