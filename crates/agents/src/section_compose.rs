@@ -179,7 +179,10 @@ pub fn definition_fingerprint() -> String {
     let unlisted = unlisted_response_schema();
     crate::source_basis::domain_hash(
         b"cartograph:section-composer-definition:v1\0",
-        format!("{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{schema}\0{unlisted}").as_bytes(),
+        format!(
+            "{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{CORRECTION}\0{schema}\0{unlisted}"
+        )
+        .as_bytes(),
     )
 }
 
@@ -279,6 +282,25 @@ pub(crate) fn prompt_with(input: &ComposeInput<'_>, max_claims: usize) -> String
         out.push_str("</derived_facts>\n");
     }
     out
+}
+
+/// What a composition asked once more is told (#2449): the misses a second
+/// sample can avoid, since the request already holds what it needs.
+pub const CORRECTION: &str = "An earlier reply to this request was read, and its claims that spelled \
+     out a route, stated a number or described endpoints that no fact they cite shows were left \
+     out. Write the claims again: describe each operation in domain terms, and state a number \
+     only when a fact you cite shows it.";
+
+/// `action` asked once more (#2449): the same request, followed by the
+/// [`CORRECTION`].
+pub fn corrected(action: &CompletionAction) -> CompletionAction {
+    let mut action = action.clone();
+    action.action_id.push_str(":corrected");
+    action
+        .payload
+        .prompt
+        .push_str(&format!("\n<correction>\n{CORRECTION}\n</correction>\n"));
+    action
 }
 
 /// The one completion action of a composition.
