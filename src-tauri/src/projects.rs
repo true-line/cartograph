@@ -98,6 +98,7 @@ pub(crate) const KEPT_TABLES: &[&str] = &[
     "settings_investigation_choice",
     "run_limit_settings",
     "settings_local_model",
+    "settings_local_context",
     "egress_log",
     "investigation_mcp_clients",
 ];
