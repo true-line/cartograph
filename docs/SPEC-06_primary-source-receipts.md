@@ -328,5 +328,8 @@ forget removes it (AC-1043). Each fact whose observed evidence cites one
 captured input file gets a provenance-only `obs-input-v1` receipt for those
 exact spans, owned by the input identity and stored within its source's
 receipt share; the preview counts them and a forget reclaims them (AC-1045,
-ADR-0079). Until observed bindings are published (AC-1047), no observed fact
-is verified.
+ADR-0079). Each retained one is published as the fact's observed binding,
+beside its primary binding and in the same transaction, in
+`source_node_observations` or `source_edge_observations` (association
+schema v3); a later recovery that no longer binds it reclaims it
+(AC-1047). Readers do not yet resolve the observed role (AC-1049).

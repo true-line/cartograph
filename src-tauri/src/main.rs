@@ -3138,18 +3138,24 @@ fn reclaim_superseded_receipts(
     state: &AppState,
     source: &RegisteredSource,
     primary: primary_source::PrimaryInput,
+    input_capture: Option<&str>,
 ) {
-    let Some(capture_id) = primary
+    // The code capture supersedes the source's own receipts and the input
+    // capture its observed ones; a source with no captured code of its own
+    // may still have captured observation inputs (ADR-0079).
+    let capture_id = primary
         .capture
         .as_ref()
-        .map(|capture| capture.id().to_owned())
-    else {
+        .map(|capture| capture.id().to_owned());
+    if capture_id.is_none() && input_capture.is_none() {
         return;
-    };
+    }
     // The prepared input holds the shared retention guard; the reclaim
     // needs the exclusive one.
     drop(primary);
-    if primary_source::reclaim_superseded(state, source, &capture_id).is_err() {
+    if primary_source::reclaim_superseded_by(state, source, capture_id.as_deref(), input_capture)
+        .is_err()
+    {
         eprintln!("cartograph: superseded receipts were kept; they settle on the next recovery");
     }
 }
@@ -3188,13 +3194,22 @@ fn load_into_graph_with_bindings_and_omissions(
     let adapters_lang_ts::Extraction { nodes, edges, .. } = extraction;
     let facts = FactStore::from_facts(nodes, edges).map_err(pack_err)?;
     load_packed_into_graph(
-        graph, facts, repo, root, commit, bindings, coverage, omissions,
+        graph,
+        facts,
+        repo,
+        root,
+        commit,
+        bindings,
+        &[],
+        coverage,
+        omissions,
     )
 }
 
 /// [`load_into_graph_with_bindings_and_omissions`] for facts already packed
 /// in recovery order: nothing is decoded but repeated edges, whose evidence
-/// is merged (#1574, #725).
+/// is merged (#1574, #725). `observations` replaces the repo's observed
+/// bindings (ADR-0079).
 #[allow(clippy::too_many_arguments)]
 fn load_packed_into_graph(
     graph: &mut SqliteGraphStore,
@@ -3203,6 +3218,7 @@ fn load_packed_into_graph(
     _root: &std::path::Path,
     commit: &str,
     bindings: &[core_graph::source::SourceBinding],
+    observations: &[core_graph::source::SourceBinding],
     coverage: Option<&core_graph::coverage::CoverageRecord>,
     omissions: core_graph::source::SourceOmissions<'_>,
 ) -> Result<ReconcileStats, String> {
@@ -3330,8 +3346,14 @@ fn load_packed_into_graph(
         }
     }
     if !graph
-        .apply_patch_with_source_bindings_and_coverage_if_snapshot_matches(
-            &expected, &patch, repo, bindings, coverage, omissions,
+        .apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+            &expected,
+            &patch,
+            repo,
+            bindings,
+            observations,
+            coverage,
+            omissions,
         )
         .map_err(|error| error.to_string())?
     {
@@ -5865,6 +5887,7 @@ fn run_ingest<R: tauri::Runtime>(
                 root,
                 commit,
                 &bindings,
+                &[],
                 Some(&record),
                 omissions,
             )
@@ -5877,7 +5900,7 @@ fn run_ingest<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
-    reclaim_superseded_receipts(state, source, primary);
+    reclaim_superseded_receipts(state, source, primary, None);
 
     relink_found_adrs(
         state,
@@ -6317,6 +6340,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
                 root,
                 &cloned.commit_sha,
                 &bindings,
+                &[],
                 Some(&record),
                 omissions,
             )
@@ -6328,7 +6352,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
-    reclaim_superseded_receipts(&state, &source, primary);
+    reclaim_superseded_receipts(&state, &source, primary, None);
     relink_found_adrs(
         &state,
         &operation,
@@ -6585,32 +6609,46 @@ fn add_system_blocking<R: tauri::Runtime>(
         // The captured observation inputs are retained with the source, so
         // the bytes their evidence cites outlive this recovery (ADR-0080),
         // with a receipt for each observation's exact span (ADR-0079).
-        if let Some(capture) = observed.capture() {
-            let mut observed_receipts = observed_receipts_packed(capture, &facts).map_err(&fail)?;
-            let (omitted, omitted_facts) = state
-                .primary_sources
-                .persist_input(source, capture, &observed_receipts, charged)
-                .map_err(&fail)?
-                .keep_retained(&mut observed_receipts);
-            // Observed receipts the store had no room for are store-capacity
-            // omissions too. A fact keeps an omission record only when it has
-            // no retained receipt of its own, so a declaration binding is
-            // never reported as omitted.
-            for (path, count) in omitted {
-                *omitted_stored_receipts.entry(path).or_default() += count;
-            }
-            let recorded: std::collections::BTreeSet<_> = receipts
-                .iter()
-                .map(adapters_lang_ts::captured::Citable::fact_key)
-                .chain(omitted_stored_facts.iter().map(|(fact, _)| fact))
-                .cloned()
-                .collect();
-            omitted_stored_facts.extend(
-                omitted_facts
+        // Each retained observed receipt binds its fact in the observed role,
+        // owned by this repo (AC-1047).
+        let observations = match observed.capture() {
+            Some(capture) => {
+                let mut observed_receipts =
+                    observed_receipts_packed(capture, &facts).map_err(&fail)?;
+                let (omitted, omitted_facts) = state
+                    .primary_sources
+                    .persist_input(source, capture, &observed_receipts, charged)
+                    .map_err(&fail)?
+                    .keep_retained(&mut observed_receipts);
+                // Observed receipts the store had no room for are store-capacity
+                // omissions too. A fact keeps an omission record only when it has
+                // no retained receipt of its own, so a declaration binding is
+                // never reported as omitted.
+                for (path, count) in omitted {
+                    *omitted_stored_receipts.entry(path).or_default() += count;
+                }
+                let recorded: std::collections::BTreeSet<_> = receipts
+                    .iter()
+                    .map(adapters_lang_ts::captured::Citable::fact_key)
+                    .chain(omitted_stored_facts.iter().map(|(fact, _)| fact))
+                    .cloned()
+                    .collect();
+                omitted_stored_facts.extend(
+                    omitted_facts
+                        .into_iter()
+                        .filter(|(fact, _)| !recorded.contains(fact)),
+                );
+                primary_source::matching_bindings_packed(&facts, &observed_receipts)
+                    .map_err(&fail)?
                     .into_iter()
-                    .filter(|(fact, _)| !recorded.contains(fact)),
-            );
-        }
+                    .map(|binding| core_graph::source::SourceBinding {
+                        repo_key: repo.clone(),
+                        ..binding
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         reads.omitted_stored_receipts = omitted_stored_receipts;
         reads.record_stored_omissions(omitted_stored_facts);
         let bindings =
@@ -6690,6 +6728,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                     root,
                     &commit,
                     &bindings,
+                    &observations,
                     Some(&record),
                     omissions,
                 )
@@ -6697,7 +6736,12 @@ fn add_system_blocking<R: tauri::Runtime>(
                 .published,
             );
         }
-        reclaim_superseded_receipts(&state, source, primary);
+        reclaim_superseded_receipts(
+            &state,
+            source,
+            primary,
+            observed.capture().map(source_capture::Capture::id),
+        );
         // The latest publication of a repo owns its stored inventory.
         recorded.insert(
             repo.clone(),
@@ -14449,6 +14493,113 @@ export function App() {
         let receipts = super::observed_receipts_packed(&capture, &facts).unwrap();
         assert_eq!(receipts.len(), 1);
         assert!(receipts[0].matches_node(&resource("res:a", INPUT, "last")));
+    }
+
+    #[test]
+    fn observed_receipts_bind_their_facts_and_superseded_ones_are_reclaimed() {
+        // AC-1047 (ADR-0079, #385): a recovery publishes an observed binding
+        // from each fact its captured state enriched to that fact's observed
+        // receipt, beside its primary binding; the preview counts it as a
+        // current reference; recovering a changed state rebinds the fact and
+        // reclaims the receipt nothing binds any more, tombstoned with the
+        // input capture that superseded it, not the code capture.
+        use tauri::Manager;
+        let state_with = |url: &str| {
+            format!(
+                r#"{{"format_version":"1.0","values":{{"root_module":{{"resources":[
+            {{"address":"aws_sqs_queue.jobs","mode":"managed","type":"aws_sqs_queue","name":"jobs",
+             "values":{{"url":"{url}"}},"sensitive_values":{{}}}}]}}}}}}"#
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        let root = system.join("infra");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.tf"),
+            "resource \"aws_sqs_queue\" \"jobs\" {\n  name = \"jobs\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ready.ts"),
+            "export function ready(ok: boolean) { if (!ok) return false; return true; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            system.join("state.json"),
+            state_with("https://sqs.example/a"),
+        )
+        .unwrap();
+        let manifest = system.join("cartograph.system.toml");
+        std::fs::write(
+            &manifest,
+            "[[repos]]\nurl = \"infra\"\nlayers = [\"infra\", \"server\"]\nstate_json = \"state.json\"\n",
+        )
+        .unwrap();
+        let app = preflight_test_app(dir.path());
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        let observed = || {
+            let source = state.sources.lock().unwrap().list().unwrap().remove(0);
+            let observations = state
+                .graph
+                .lock()
+                .unwrap()
+                .source_observations_for_repo(&source.repo_key)
+                .unwrap();
+            (source, observations)
+        };
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+            .unwrap();
+        let (source, first) = observed();
+        assert_eq!(first.len(), 1);
+        let fact = core_graph::FactKey::Node {
+            id: format!("res:{}@aws_sqs_queue.jobs", source.repo_key),
+        };
+        assert_eq!(first[0].fact, fact);
+        assert!(first[0].receipt_id.starts_with("obs-input-v1:"));
+        assert_eq!(
+            state
+                .graph
+                .lock()
+                .unwrap()
+                .current_source_observation(&fact)
+                .unwrap()
+                .as_ref(),
+            Some(&first[0])
+        );
+        let preview = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert_eq!(preview.input_receipts, 1);
+        assert!(preview.current_references >= 1);
+        let first_input = preview.input_capture_ids.clone();
+        assert_eq!(first_input.len(), 1);
+
+        std::fs::write(
+            system.join("state.json"),
+            state_with("https://sqs.example/b"),
+        )
+        .unwrap();
+        super::add_system_blocking(manifest.to_string_lossy().into_owned(), handle.clone())
+            .unwrap();
+        let (_, second) = observed();
+        assert_eq!(second.len(), 1);
+        assert_ne!(second[0].receipt_id, first[0].receipt_id);
+        let preview = super::primary_source::preview(&state, &source.source_id).unwrap();
+        assert_eq!(preview.input_receipts, 1);
+        assert!(!preview.capture_ids.is_empty());
+        let receipts = state.primary_sources.receipts.lock().unwrap();
+        assert!(matches!(
+            receipts.receipt_status(&first[0].receipt_id).unwrap(),
+            super::primary_source::ReceiptStatus::Superseded { .. }
+        ));
+        // The superseding capture is the new input capture.
+        let superseding = receipts
+            .tombstone_capture_ids(&first[0].receipt_id)
+            .unwrap();
+        assert_eq!(superseding.len(), 1);
+        assert_ne!(superseding, first_input);
+        assert!(preview.input_capture_ids.contains(&superseding[0]));
+        assert!(!preview.capture_ids.contains(&superseding[0]));
     }
 
     #[test]

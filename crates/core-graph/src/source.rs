@@ -291,6 +291,8 @@ fn bounded(value: &str, maximum: usize) -> Result<(), GraphError> {
 // Exact owned SQL is checked before use. A partial/future schema is never
 // silently CREATE-repaired, and this version does not use graph user_version.
 const META_SCHEMA_V2: &str = "CREATE TABLE source_binding_meta (singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1), version INTEGER NOT NULL CHECK (version = 2)) STRICT";
+const META_SCHEMA: &str = "CREATE TABLE source_binding_meta (singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1), version INTEGER NOT NULL CHECK (version = 3)) STRICT";
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_V1: &[(&str, &str, &str)] = &[
     (
@@ -408,7 +410,7 @@ const OMISSIONS_SCHEMA: &[(&str, &str, &str)] = &[
     ),
 ];
 
-const SCHEMA: &[(&str, &str, &str)] = &[
+const SCHEMA_V2: &[(&str, &str, &str)] = &[
     ("table", "source_binding_meta", META_SCHEMA_V2),
     (
         "table",
@@ -517,7 +519,71 @@ const SCHEMA: &[(&str, &str, &str)] = &[
     ),
 ];
 
-const OWNED_SCHEMA_WHERE: &str = "name GLOB 'source_binding_*' OR name GLOB 'source_omission_*' OR name IN ('source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions') OR (tbl_name IN ('source_binding_meta', 'source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions', 'source_omission_index') AND name NOT GLOB 'sqlite_*') OR (type = 'trigger' AND tbl_name IN ('nodes', 'edges'))";
+/// The observed binding role (ADR-0079, AC-1047): the same shape as the
+/// primary binding tables, invalidated by the same fact writes.
+const OBSERVATIONS_SCHEMA: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "source_node_observations",
+        "CREATE TABLE source_node_observations (node_id TEXT PRIMARY KEY NOT NULL REFERENCES nodes(id) ON DELETE CASCADE CHECK (length(CAST(node_id AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), receipt_id TEXT NOT NULL CHECK (length(CAST(receipt_id AS BLOB)) BETWEEN 1 AND 256), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72)) STRICT",
+    ),
+    (
+        "table",
+        "source_edge_observations",
+        "CREATE TABLE source_edge_observations (source TEXT NOT NULL CHECK (length(CAST(source AS BLOB)) BETWEEN 1 AND 8192), label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) BETWEEN 1 AND 256), destination TEXT NOT NULL CHECK (length(CAST(destination AS BLOB)) BETWEEN 1 AND 8192), repo_key TEXT NOT NULL CHECK (length(CAST(repo_key AS BLOB)) BETWEEN 1 AND 256), receipt_id TEXT NOT NULL CHECK (length(CAST(receipt_id AS BLOB)) BETWEEN 1 AND 256), emitted_fact_digest TEXT NOT NULL CHECK (length(CAST(emitted_fact_digest AS BLOB)) = 72), PRIMARY KEY (source, label, destination), FOREIGN KEY (source, destination, label) REFERENCES edges(src, dst, label) ON DELETE CASCADE) STRICT",
+    ),
+    (
+        "index",
+        "source_observation_nodes_repo",
+        "CREATE INDEX source_observation_nodes_repo ON source_node_observations(repo_key)",
+    ),
+    (
+        "index",
+        "source_observation_edges_repo",
+        "CREATE INDEX source_observation_edges_repo ON source_edge_observations(repo_key)",
+    ),
+    (
+        "trigger",
+        "source_observation_node_insert",
+        "CREATE TRIGGER source_observation_node_insert AFTER INSERT ON nodes BEGIN DELETE FROM source_node_observations WHERE node_id = NEW.id; DELETE FROM source_edge_observations WHERE source = NEW.id OR destination = NEW.id; END",
+    ),
+    (
+        "trigger",
+        "source_observation_node_update",
+        "CREATE TRIGGER source_observation_node_update BEFORE UPDATE ON nodes BEGIN DELETE FROM source_node_observations WHERE node_id = OLD.id OR node_id = NEW.id; DELETE FROM source_edge_observations WHERE OLD.id != NEW.id AND (source = OLD.id OR destination = OLD.id OR source = NEW.id OR destination = NEW.id); END",
+    ),
+    (
+        "trigger",
+        "source_observation_node_delete",
+        "CREATE TRIGGER source_observation_node_delete BEFORE DELETE ON nodes BEGIN DELETE FROM source_node_observations WHERE node_id = OLD.id; DELETE FROM source_edge_observations WHERE source = OLD.id OR destination = OLD.id; END",
+    ),
+    (
+        "trigger",
+        "source_observation_edge_insert",
+        "CREATE TRIGGER source_observation_edge_insert AFTER INSERT ON edges BEGIN DELETE FROM source_edge_observations WHERE source = NEW.src AND label = NEW.label AND destination = NEW.dst; END",
+    ),
+    (
+        "trigger",
+        "source_observation_edge_update",
+        "CREATE TRIGGER source_observation_edge_update BEFORE UPDATE ON edges BEGIN DELETE FROM source_edge_observations WHERE (source = OLD.src AND label = OLD.label AND destination = OLD.dst) OR (source = NEW.src AND label = NEW.label AND destination = NEW.dst); END",
+    ),
+    (
+        "trigger",
+        "source_observation_edge_delete",
+        "CREATE TRIGGER source_observation_edge_delete BEFORE DELETE ON edges BEGIN DELETE FROM source_edge_observations WHERE source = OLD.src AND label = OLD.label AND destination = OLD.dst; END",
+    ),
+];
+
+/// The current schema: v2's objects under the v3 meta, plus the observed
+/// binding role.
+static SCHEMA: std::sync::LazyLock<Vec<(&str, &str, &str)>> = std::sync::LazyLock::new(|| {
+    std::iter::once(("table", "source_binding_meta", META_SCHEMA))
+        .chain(SCHEMA_V2.iter().skip(1).copied())
+        .chain(OBSERVATIONS_SCHEMA.iter().copied())
+        .collect()
+});
+
+const OWNED_SCHEMA_WHERE: &str = "name GLOB 'source_binding_*' OR name GLOB 'source_omission_*' OR name GLOB 'source_observation_*' OR name IN ('source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions', 'source_node_observations', 'source_edge_observations') OR (tbl_name IN ('source_binding_meta', 'source_node_bindings', 'source_edge_bindings', 'source_node_omissions', 'source_edge_omissions', 'source_omission_index', 'source_node_observations', 'source_edge_observations') AND name NOT GLOB 'sqlite_*') OR (type = 'trigger' AND tbl_name IN ('nodes', 'edges'))";
 
 pub(crate) fn preflight_selection_schema(connection: &Connection) -> Result<(), GraphError> {
     // Only the opt-in bounded path changes admission behavior. Before the
@@ -585,10 +651,10 @@ pub(crate) fn check_schema(connection: &Connection) -> Result<(), GraphError> {
     let generation = crate::generation::validate_for_owner(connection)?;
     let mut actual = owned_schema(connection)?;
     generation.strip_objects(&mut actual);
-    if !matches_schema(&actual, SCHEMA) {
+    if !matches_schema(&actual, &SCHEMA) {
         return Err(GraphError::SourceBinding("incompatible association schema"));
     }
-    if !has_version(connection, 2)? {
+    if !has_version(connection, SCHEMA_VERSION)? {
         return Err(GraphError::SourceBinding("unsupported association version"));
     }
     Ok(())
@@ -599,23 +665,29 @@ pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<(), GraphError
     let generation = crate::generation::validate_for_owner(connection)?;
     let mut actual = owned_schema(connection)?;
     generation.strip_objects(&mut actual);
-    if actual.is_empty() {
-        for (_, _, sql) in SCHEMA {
-            transaction.execute_batch(sql)?;
-        }
-        transaction.execute(
-            "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 2)",
-            [],
-        )?;
+    // Each exact earlier version migrates additively in this transaction:
+    // v1 gains the omission tables (AC-0314), v1 and v2 the observed binding
+    // tables (AC-1047), all empty.
+    let added: &[&[(&str, &str, &str)]] = if actual.is_empty() {
+        &[SCHEMA_V2.split_at(1).1, OBSERVATIONS_SCHEMA]
     } else if matches_schema(&actual, SCHEMA_V1) && has_version(connection, 1)? {
-        for (_, _, sql) in OMISSIONS_SCHEMA {
+        &[OMISSIONS_SCHEMA, OBSERVATIONS_SCHEMA]
+    } else if matches_schema(&actual, SCHEMA_V2) && has_version(connection, 2)? {
+        &[OBSERVATIONS_SCHEMA]
+    } else {
+        &[]
+    };
+    if !added.is_empty() {
+        for (_, _, sql) in added.iter().flat_map(|objects| objects.iter()) {
             transaction.execute_batch(sql)?;
         }
-        transaction.execute_batch("DROP TABLE source_binding_meta")?;
-        transaction.execute_batch(META_SCHEMA_V2)?;
+        if !actual.is_empty() {
+            transaction.execute_batch("DROP TABLE source_binding_meta")?;
+        }
+        transaction.execute_batch(META_SCHEMA)?;
         transaction.execute(
-            "INSERT INTO source_binding_meta(singleton, version) VALUES (1, 2)",
-            [],
+            "INSERT INTO source_binding_meta(singleton, version) VALUES (1, ?1)",
+            [SCHEMA_VERSION],
         )?;
     }
     check_schema(connection)?;
@@ -632,17 +704,46 @@ pub(crate) fn clear(transaction: &Transaction<'_>) -> Result<(), GraphError> {
     Ok(())
 }
 
+/// Which association a fact's source binding plays (ADR-0079): the
+/// primary declaration binding, or the observed binding to a captured
+/// observation input. Each has its own pair of tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingRole {
+    /// The fact's declaration, bound to its registered source's receipt.
+    Primary,
+    /// The fact's observation, bound to its source's input receipt.
+    Observed,
+}
+
+impl BindingRole {
+    fn tables(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Primary => ("source_node_bindings", "source_edge_bindings"),
+            Self::Observed => ("source_node_observations", "source_edge_observations"),
+        }
+    }
+}
+
 fn load_binding(
     connection: &Connection,
     fact: &FactKey,
 ) -> Result<Option<SourceBinding>, GraphError> {
+    load_role(connection, BindingRole::Primary, fact)
+}
+
+fn load_role(
+    connection: &Connection,
+    role: BindingRole,
+    fact: &FactKey,
+) -> Result<Option<SourceBinding>, GraphError> {
+    let (nodes, edges) = role.tables();
     let row: Option<(String, String, String)> = match fact {
-        FactKey::Node { id } => connection.prepare_cached(
-            "SELECT repo_key, receipt_id, emitted_fact_digest FROM source_node_bindings WHERE node_id = ?1",
-        )?.query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?,
-        FactKey::Edge { source, label, destination } => connection.prepare_cached(
-            "SELECT repo_key, receipt_id, emitted_fact_digest FROM source_edge_bindings WHERE source = ?1 AND label = ?2 AND destination = ?3",
-        )?.query_row(params![source, label, destination], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?,
+        FactKey::Node { id } => connection.prepare_cached(&format!(
+            "SELECT repo_key, receipt_id, emitted_fact_digest FROM {nodes} WHERE node_id = ?1",
+        ))?.query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?,
+        FactKey::Edge { source, label, destination } => connection.prepare_cached(&format!(
+            "SELECT repo_key, receipt_id, emitted_fact_digest FROM {edges} WHERE source = ?1 AND label = ?2 AND destination = ?3",
+        ))?.query_row(params![source, label, destination], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?,
     };
     row.map(|(repo_key, receipt_id, emitted_fact_digest)| {
         let binding = SourceBinding {
@@ -1176,17 +1277,50 @@ impl SqliteGraphStore {
         coverage: Option<&crate::coverage::CoverageRecord>,
         omissions: SourceOmissions<'_>,
     ) -> Result<bool, GraphError> {
+        self.apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+            expected,
+            patch,
+            repo_key,
+            bindings,
+            &[],
+            coverage,
+            omissions,
+        )
+    }
+
+    /// [`Self::apply_patch_with_source_bindings_and_coverage_if_snapshot_matches`],
+    /// also replacing this repo's observed bindings with `observations` in the
+    /// same write transaction (ADR-0079, AC-1047). Each role is checked like
+    /// the primary one: every association must match its final fact, and no
+    /// fact may hold another repo's association of the same role.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_patch_with_source_roles_and_coverage_if_snapshot_matches(
+        &mut self,
+        expected: &impl crate::ExpectedSnapshot,
+        patch: &GraphPatch,
+        repo_key: &str,
+        bindings: &[SourceBinding],
+        observations: &[SourceBinding],
+        coverage: Option<&crate::coverage::CoverageRecord>,
+        omissions: SourceOmissions<'_>,
+    ) -> Result<bool, GraphError> {
         bounded(repo_key, MAX_REPO_BYTES)?;
-        if bindings.len() > MAX_BINDINGS {
-            return Err(GraphError::SourceBinding("too many associations"));
-        }
-        let mut seen = BTreeSet::new();
-        for binding in bindings {
-            binding.validate()?;
-            if binding.repo_key != repo_key || !seen.insert(&binding.fact) {
-                return Err(GraphError::SourceBinding(
-                    "duplicate or wrong-owner association",
-                ));
+        let roles = [
+            (BindingRole::Primary, bindings),
+            (BindingRole::Observed, observations),
+        ];
+        for (_, associations) in roles {
+            if associations.len() > MAX_BINDINGS {
+                return Err(GraphError::SourceBinding("too many associations"));
+            }
+            let mut seen = BTreeSet::new();
+            for binding in associations {
+                binding.validate()?;
+                if binding.repo_key != repo_key || !seen.insert(&binding.fact) {
+                    return Err(GraphError::SourceBinding(
+                        "duplicate or wrong-owner association",
+                    ));
+                }
             }
         }
         let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
@@ -1196,42 +1330,62 @@ impl SqliteGraphStore {
         }
         // Check before patch triggers invalidate touched rows: a caller cannot
         // replace another repo's association by upserting its fact first.
-        for binding in bindings {
-            if load_binding(&self.conn, &binding.fact)?.is_some_and(|old| old.repo_key != repo_key)
-            {
-                return Err(GraphError::SourceBinding(
-                    "fact belongs to another source association",
-                ));
+        for (role, associations) in roles {
+            for binding in associations {
+                if load_role(&self.conn, role, &binding.fact)?
+                    .is_some_and(|old| old.repo_key != repo_key)
+                {
+                    return Err(GraphError::SourceBinding(
+                        "fact belongs to another source association",
+                    ));
+                }
             }
         }
-        transaction.execute(
-            "DELETE FROM source_node_bindings WHERE repo_key = ?1",
-            [repo_key],
-        )?;
-        transaction.execute(
-            "DELETE FROM source_edge_bindings WHERE repo_key = ?1",
-            [repo_key],
-        )?;
+        // Observed rows are not generation-watched; a change to them alone is
+        // still a row event (ADR-0079).
+        let mut observed_changed = 0;
+        for (role, _) in roles {
+            let (nodes, edges) = role.tables();
+            let removed = transaction.execute(
+                &format!("DELETE FROM {nodes} WHERE repo_key = ?1"),
+                [repo_key],
+            )? + transaction.execute(
+                &format!("DELETE FROM {edges} WHERE repo_key = ?1"),
+                [repo_key],
+            )?;
+            if role == BindingRole::Observed {
+                observed_changed += removed;
+            }
+        }
         self.apply_patch_rows(patch)?;
-        for binding in bindings {
-            if current_digest(&self.conn, &binding.fact)?.as_deref()
-                != Some(binding.emitted_fact_digest.as_str())
-            {
-                return Err(GraphError::SourceBinding(
-                    "missing fact or complete fact digest mismatch",
-                ));
+        for (role, associations) in roles {
+            let (nodes, edges) = role.tables();
+            for binding in associations {
+                if current_digest(&self.conn, &binding.fact)?.as_deref()
+                    != Some(binding.emitted_fact_digest.as_str())
+                {
+                    return Err(GraphError::SourceBinding(
+                        "missing fact or complete fact digest mismatch",
+                    ));
+                }
+                let inserted = match &binding.fact {
+                    FactKey::Node { id } => transaction.prepare_cached(&format!(
+                        "INSERT INTO {nodes}(node_id, repo_key, receipt_id, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4)",
+                    ))?.execute(params![id, repo_key, binding.receipt_id, binding.emitted_fact_digest])?,
+                    FactKey::Edge { source, label, destination } => transaction.prepare_cached(&format!(
+                        "INSERT INTO {edges}(source, label, destination, repo_key, receipt_id, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    ))?.execute(params![source, label, destination, repo_key, binding.receipt_id, binding.emitted_fact_digest])?,
+                };
+                if inserted != 1 {
+                    return Err(GraphError::SourceBinding("association publication failed"));
+                }
+                if role == BindingRole::Observed {
+                    observed_changed += 1;
+                }
             }
-            let inserted = match &binding.fact {
-                FactKey::Node { id } => transaction.prepare_cached(
-                    "INSERT INTO source_node_bindings(node_id, repo_key, receipt_id, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4)",
-                )?.execute(params![id, repo_key, binding.receipt_id, binding.emitted_fact_digest])?,
-                FactKey::Edge { source, label, destination } => transaction.prepare_cached(
-                    "INSERT INTO source_edge_bindings(source, label, destination, repo_key, receipt_id, emitted_fact_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )?.execute(params![source, label, destination, repo_key, binding.receipt_id, binding.emitted_fact_digest])?,
-            };
-            if inserted != 1 {
-                return Err(GraphError::SourceBinding("association publication failed"));
-            }
+        }
+        if observed_changed > 0 {
+            crate::generation::bump(&transaction)?;
         }
         replace_omissions(&transaction, repo_key, omissions)?;
         crate::coverage::replace(&transaction, repo_key, coverage)?;
@@ -1275,11 +1429,50 @@ impl SqliteGraphStore {
         &self,
         repo_key: &str,
     ) -> Result<Vec<SourceBinding>, GraphError> {
+        self.source_role_for_repo(BindingRole::Primary, repo_key)
+    }
+
+    /// [`Self::source_bindings_for_repo`] for the observed role (ADR-0079).
+    pub fn source_observations_for_repo(
+        &self,
+        repo_key: &str,
+    ) -> Result<Vec<SourceBinding>, GraphError> {
+        self.source_role_for_repo(BindingRole::Observed, repo_key)
+    }
+
+    /// Copy a fact's observed binding and verify its complete fact in the
+    /// same read revision, like [`Self::current_source_binding`] (ADR-0079).
+    pub fn current_source_observation(
+        &self,
+        fact: &FactKey,
+    ) -> Result<Option<SourceBinding>, GraphError> {
+        fact.validate()?;
+        let transaction = self.conn.unchecked_transaction()?;
+        check_schema(&self.conn)?;
+        let binding = load_role(&self.conn, BindingRole::Observed, fact)?;
+        if let Some(binding) = &binding
+            && current_digest(&self.conn, fact)?.as_deref()
+                != Some(binding.emitted_fact_digest.as_str())
+        {
+            return Err(GraphError::SourceBinding(
+                "missing fact or complete fact digest mismatch",
+            ));
+        }
+        transaction.commit()?;
+        Ok(binding)
+    }
+
+    fn source_role_for_repo(
+        &self,
+        role: BindingRole,
+        repo_key: &str,
+    ) -> Result<Vec<SourceBinding>, GraphError> {
         bounded(repo_key, MAX_REPO_BYTES)?;
+        let (node_table, edge_table) = role.tables();
         let transaction = self.conn.unchecked_transaction()?;
         check_schema(&self.conn)?;
         let count: i64 = self.conn.query_row(
-            "SELECT (SELECT count(*) FROM source_node_bindings WHERE repo_key = ?1) + (SELECT count(*) FROM source_edge_bindings WHERE repo_key = ?1)",
+            &format!("SELECT (SELECT count(*) FROM {node_table} WHERE repo_key = ?1) + (SELECT count(*) FROM {edge_table} WHERE repo_key = ?1)"),
             [repo_key], |row| row.get(0),
         )?;
         if usize::try_from(count)
@@ -1291,7 +1484,7 @@ impl SqliteGraphStore {
         }
         let mut bindings = Vec::new();
         {
-            let mut statement = self.conn.prepare("SELECT node_id, receipt_id, emitted_fact_digest FROM source_node_bindings WHERE repo_key = ?1 ORDER BY node_id")?;
+            let mut statement = self.conn.prepare(&format!("SELECT node_id, receipt_id, emitted_fact_digest FROM {node_table} WHERE repo_key = ?1 ORDER BY node_id"))?;
             let rows = statement.query_map([repo_key], |row| {
                 Ok(SourceBinding {
                     fact: FactKey::Node { id: row.get(0)? },
@@ -1307,7 +1500,7 @@ impl SqliteGraphStore {
             }
         }
         {
-            let mut statement = self.conn.prepare("SELECT source, label, destination, receipt_id, emitted_fact_digest FROM source_edge_bindings WHERE repo_key = ?1 ORDER BY source, label, destination")?;
+            let mut statement = self.conn.prepare(&format!("SELECT source, label, destination, receipt_id, emitted_fact_digest FROM {edge_table} WHERE repo_key = ?1 ORDER BY source, label, destination"))?;
             let rows = statement.query_map([repo_key], |row| {
                 Ok(SourceBinding {
                     fact: FactKey::Edge {

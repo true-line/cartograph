@@ -3,7 +3,7 @@
 //! they are not new policy ceilings or allocator/RSS bounds.
 use context_hub::logical::{map, slots, sum};
 
-const SOURCE_OBJECTS: usize = 22;
+const SOURCE_OBJECTS: usize = 32;
 const SOURCE_GENERATION_TRIGGERS: usize = 12;
 const COVERAGE_OBJECTS: usize = 2;
 const COVERAGE_GENERATION_TRIGGERS: usize = 3;

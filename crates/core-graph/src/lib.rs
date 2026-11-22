@@ -23,7 +23,8 @@ pub use bounded::{
 };
 pub use generation::{GenerationError, RevisionedSnapshot, StoreRevision};
 pub use source::{
-    FactKey, OmissionLookup, ReceiptOmissionKind, SourceBinding, SourceOmission, SourceOmissions,
+    BindingRole, FactKey, OmissionLookup, ReceiptOmissionKind, SourceBinding, SourceOmission,
+    SourceOmissions,
 };
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};

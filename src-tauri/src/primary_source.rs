@@ -1795,7 +1795,7 @@ impl ReceiptStore {
                     },
                 )
                 .map_err(storage_error)?;
-            source_id(&tombstone.source_id).map_err(storage_error)?;
+            receipt_owner(&tombstone.source_id).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
             return Ok(ReceiptStatus::CaptureForgotten { tombstone });
         }
@@ -1822,7 +1822,8 @@ impl ReceiptStore {
             .map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
         if let Some((tombstone, cause)) = tombstone {
-            source_id(&tombstone.source_id).map_err(storage_error)?;
+            // An observed receipt's tombstone names its input owner (ADR-0079).
+            receipt_owner(&tombstone.source_id).map_err(storage_error)?;
             return Ok(if cause == ReclaimCause::Superseded.as_str() {
                 ReceiptStatus::Superseded { tombstone }
             } else {
@@ -1830,6 +1831,22 @@ impl ReceiptStore {
             });
         }
         Ok(ReceiptStatus::Unknown)
+    }
+
+    /// The capture ids the tombstone of a reclaimed receipt records.
+    #[cfg(test)]
+    pub(crate) fn tombstone_capture_ids(&self, receipt_id: &str) -> Result<Vec<String>, String> {
+        let ids: String = self
+            .conn
+            .query_row(
+                "SELECT t.capture_ids FROM receipt_reclaims r
+                 JOIN receipt_tombstones t ON t.id = r.tombstone_id
+                 WHERE r.receipt_id = ?1",
+                [receipt_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        serde_json::from_str(&ids).map_err(storage_error)
     }
 }
 
@@ -2520,7 +2537,7 @@ pub(crate) struct RetentionPreview {
 struct LockedPreview {
     preview: RetentionPreview,
     pins: std::collections::BTreeSet<String>,
-    /// This source's receipts the current graph binds.
+    /// This source's receipts, and its inputs', the current graph binds.
     bound: std::collections::BTreeSet<String>,
 }
 
@@ -2550,16 +2567,26 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             store.ids(input_id(&source.source_id)?.as_str())?,
         )
     };
-    let current = state
-        .graph
-        .lock()
-        .map_err(storage_error)?
-        .source_bindings_for_repo(&source.repo_key)
-        .map_err(storage_error)?;
+    let (current, observed) = {
+        let graph = state.graph.lock().map_err(storage_error)?;
+        (
+            graph
+                .source_bindings_for_repo(&source.repo_key)
+                .map_err(storage_error)?,
+            // The observed role binds the input's receipts (ADR-0079).
+            graph
+                .source_observations_for_repo(&source.repo_key)
+                .map_err(storage_error)?,
+        )
+    };
     let current_count = current
         .iter()
         .filter(|binding| receipt_ids.binary_search(&binding.receipt_id).is_ok())
-        .count();
+        .count()
+        + observed
+            .iter()
+            .filter(|binding| input_receipt_ids.binary_search(&binding.receipt_id).is_ok())
+            .count();
     // Bind the complete associations, not only their count: retained receipts
     // can become current again without changing the capture/receipt inventory.
     // This records the associations observed at preview/recheck; it does not
@@ -2576,6 +2603,18 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
         })
         .collect();
     current_bindings.sort_unstable();
+    let mut current_observations: Vec<_> = observed
+        .iter()
+        .map(|binding| {
+            (
+                &binding.fact,
+                &binding.repo_key,
+                &binding.receipt_id,
+                &binding.emitted_fact_digest,
+            )
+        })
+        .collect();
+    current_observations.sort_unstable();
     let capture_ids: Vec<_> = inventory
         .iter()
         .map(|capture| capture.capture_id.clone())
@@ -2625,6 +2664,7 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             &receipt_ids,
             &input_receipt_ids,
             &current_bindings,
+            &current_observations,
             &staged_references,
             &investigation_references,
             &packet_references,
@@ -2644,6 +2684,11 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
     let bound = current
         .iter()
         .filter(|binding| receipt_ids.binary_search(&binding.receipt_id).is_ok())
+        .chain(
+            observed
+                .iter()
+                .filter(|binding| input_receipt_ids.binary_search(&binding.receipt_id).is_ok()),
+        )
         .map(|binding| binding.receipt_id.clone())
         .collect();
     Ok(LockedPreview {
@@ -2665,7 +2710,8 @@ fn preview_locked(state: &AppState, source: &RegisteredSource) -> Result<LockedP
             receipts: receipt_ids.len() + input_receipt_ids.len(),
             input_receipts: input_receipt_ids.len(),
             current_references: current_count,
-            historical_references: receipt_ids.len().saturating_sub(current_count),
+            historical_references: (receipt_ids.len() + input_receipt_ids.len())
+                .saturating_sub(current_count),
             staged_references: staged_references.len(),
             investigation_references: investigation_references.len(),
             packet_references: packet_references.len(),
@@ -2748,20 +2794,35 @@ pub(crate) fn forget(state: &AppState, id: &str, fingerprint: &str) -> Result<u6
 /// receipts, and no task can prepare against it; a busy source is skipped
 /// and settles on its next publish. Receipts a prepared task cites stay
 /// pinned until it has staged ([`InFlightPin`]).
+#[cfg(test)]
 pub(crate) fn reclaim_superseded(
     state: &AppState,
     source: &RegisteredSource,
     capture_id: &str,
 ) -> Result<u64, String> {
-    reclaim_superseded_with(state, source, capture_id, || {})
+    reclaim_superseded_with(state, source, Some(capture_id), None, || {})
 }
 
-/// [`reclaim_superseded`], pausing between its two keep-set snapshots so
+/// [`reclaim_superseded`] for a recovery that captured `capture_id` for the
+/// source's code and `input_capture_id` for its observation inputs, either of
+/// which may be absent. Each owner's superseded receipts are tombstoned with
+/// the capture that superseded them (ADR-0079).
+pub(crate) fn reclaim_superseded_by(
+    state: &AppState,
+    source: &RegisteredSource,
+    capture_id: Option<&str>,
+    input_capture_id: Option<&str>,
+) -> Result<u64, String> {
+    reclaim_superseded_with(state, source, capture_id, input_capture_id, || {})
+}
+
+/// [`reclaim_superseded_by`], pausing between its two keep-set snapshots so
 /// tests can stage a task in the handoff.
 pub(crate) fn reclaim_superseded_with(
     state: &AppState,
     source: &RegisteredSource,
-    capture_id: &str,
+    capture_id: Option<&str>,
+    input_capture_id: Option<&str>,
     between_snapshots: impl FnOnce(),
 ) -> Result<u64, String> {
     let Ok(_guard) = state.primary_sources.guard(&source.source_id, true) else {
@@ -2788,12 +2849,25 @@ pub(crate) fn reclaim_superseded_with(
         .cloned()
         .chain(in_flight)
         .collect();
-    state
+    let mut store = state
         .primary_sources
         .receipts
         .lock()
-        .map_err(storage_error)?
-        .reclaim_superseded(source, &[capture_id.to_owned()], &keep)
+        .map_err(storage_error)?;
+    let mut reclaimed = 0;
+    if let Some(capture_id) = capture_id {
+        reclaimed += store.reclaim_superseded(source, &[capture_id.to_owned()], &keep)?;
+    }
+    // Observed receipts the published observed role no longer binds are
+    // reclaimed with the input capture that superseded them (ADR-0079,
+    // AC-1047).
+    if let Some(input_capture_id) = input_capture_id
+        && locked.preview.input_receipts > 0
+    {
+        let owner = source.owning_as(input_id(&source.source_id)?.as_str().to_owned());
+        reclaimed += store.reclaim_superseded(&owner, &[input_capture_id.to_owned()], &keep)?;
+    }
+    Ok(reclaimed)
 }
 
 #[tauri::command]
