@@ -294,3 +294,22 @@ export const RejectedActionRemainsVisible: Story = {
     await expect(args.onRetry).toHaveBeenCalledWith(94);
   },
 };
+
+export const AgentJobEndedAtRestart: Story = {
+  // AC-1709: a held agent job ended at startup is cancelled with its reason,
+  // offers no Retry (the host retries no agent job) and clears.
+  args: { jobs: [
+    job({ id: 7, kind: 'area-ask:local', status: 'cancelled', error: 'The app stopped before this held agent job started; it was not started.' }),
+    job({ id: 4, kind: 'ingest-source-v1:src_queued', status: 'queued' }),
+  ] },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('The app stopped before this held agent job started; it was not started.')).toBeVisible();
+    await expect(canvas.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('button', { name: 'Clear finished' }));
+    const alert = within(canvas.getByRole('alert'));
+    await expect(alert.getByText(/Remove 1 finished job\?/)).toBeInTheDocument();
+    await userEvent.click(alert.getByRole('button', { name: 'Confirm clear' }));
+    await expect(args.onClearFinished).toHaveBeenCalledTimes(1);
+  },
+};

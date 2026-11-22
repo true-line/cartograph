@@ -291,8 +291,62 @@ pub(crate) fn start_job_blocking(
         let held = hold(state, job.id);
         (job, held)
     };
+    // AC-1709: hold the job's lock while waiting, so a restart can tell
+    // that this waiter stopped. A job that cannot be locked never starts.
+    let reservation = match reserve_held(state, job.id) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            if let Ok(mut jobs) = state.jobs.lock() {
+                let _ = jobs.cancel(job.id);
+            }
+            return Err(error);
+        }
+    };
     let (plan, _hold) = wait_for_place(state, hold, agent_mode(kind), &|| emit(&job))?;
-    crate::claim_job(state, &plan)
+    claim_reserved(state, &plan, reservation)
+}
+
+/// Why a held agent job was ended at startup (AC-1709).
+pub(crate) const HELD_STOPPED: &str =
+    "The app stopped before this held agent job started; it was not started.";
+
+/// AC-1709: at startup, cancel queued host agent jobs whose held waiter
+/// stopped. Only an existing, free lock proves that; a missing or busy one
+/// leaves the job queued. Investigations have their own pass
+/// (`investigations::recover`). Nothing is re-armed.
+pub(crate) fn recover_held_jobs(
+    jobs: &Mutex<JobStore>,
+    locks: &crate::job_execution::JobExecutionLocks,
+) -> Result<Vec<Job>, String> {
+    let plans = {
+        let store = jobs.lock().map_err(|error| error.to_string())?;
+        store
+            .list()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| {
+                job.status == "queued"
+                    && job.investigation_id.is_none()
+                    && agent_mode(&job.kind).is_some()
+            })
+            .filter_map(|job| store.claim_plan(job.id, ClaimMode::StartQueued).ok())
+            .collect::<Vec<_>>()
+    };
+    let mut ended = Vec::new();
+    for plan in plans {
+        let Ok(reservation) = locks.try_reserve(&plan.held_lock_target()) else {
+            continue;
+        };
+        if let Some(job) = jobs
+            .lock()
+            .map_err(|error| error.to_string())?
+            .cancel_held(&plan, reservation, HELD_STOPPED)
+            .map_err(|error| error.to_string())?
+        {
+            ended.push(job);
+        }
+    }
+    Ok(ended)
 }
 
 /// [`start_job_blocking`] off the async runtime, reporting a held job.
@@ -394,6 +448,58 @@ mod tests {
             created_at: "2026-11-21T00:00:00Z".into(),
             updated_at: "2026-11-21T00:00:00Z".into(),
         }
+    }
+
+    // AC-1709 (T-1709): a held host agent job is ended at startup only once
+    // its waiter's existing lock is free; other queued work is never touched.
+    #[test]
+    fn a_held_agent_job_whose_waiter_stopped_is_ended_at_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = JobStore::open(directory.path().join("state.db")).unwrap();
+        let locks = crate::job_execution::JobExecutionLocks::open(
+            directory.path(),
+            store.execution_namespace(),
+        )
+        .unwrap();
+        let jobs = Mutex::new(store);
+        let held = jobs.lock().unwrap().enqueue("area-ask:local").unwrap().id;
+        let ingest = jobs
+            .lock()
+            .unwrap()
+            .enqueue("ingest-source-v1:src_1")
+            .unwrap()
+            .id;
+        let status = |id: i64| jobs.lock().unwrap().get(id).unwrap().status;
+        let lock = |id: i64| {
+            let plan = jobs
+                .lock()
+                .unwrap()
+                .claim_plan(id, ClaimMode::StartQueued)
+                .unwrap();
+            locks.try_reserve(plan.lock_target()).unwrap()
+        };
+
+        // No waiter lock yet: not proof that a waiter stopped.
+        assert!(recover_held_jobs(&jobs, &locks).unwrap().is_empty());
+        assert_eq!(status(held), "queued");
+
+        // A live waiter holds the lock.
+        let waiter = lock(held);
+        drop(lock(ingest));
+        assert!(recover_held_jobs(&jobs, &locks).unwrap().is_empty());
+        assert_eq!(status(held), "queued");
+
+        drop(waiter);
+        let ended = recover_held_jobs(&jobs, &locks).unwrap();
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].id, held);
+        assert_eq!(ended[0].status, "cancelled");
+        assert_eq!(ended[0].error.as_deref(), Some(HELD_STOPPED));
+        assert_eq!(status(ingest), "queued");
+        assert!(recover_held_jobs(&jobs, &locks).unwrap().is_empty());
+        // A terminal row: Clear finished removes it, the queued ingest stays.
+        assert_eq!(jobs.lock().unwrap().clear_finished().unwrap(), 1);
+        assert_eq!(status(ingest), "queued");
     }
 
     // AC-1704 (T-1704): only agent kinds are gated; the mode is the last segment.
