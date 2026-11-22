@@ -195,12 +195,16 @@ impl PrimarySourceStore {
             .map_err(|_| PinnedReadError::Operational)
     }
 
+    /// The guard of a registered source also covers its observation input
+    /// identity, whose observed receipts it owns (ADR-0079).
     fn validate_task_guard(
         &self,
         guard: &RetentionGuard,
         source: &str,
     ) -> Result<(), PinnedReadError> {
-        if guard.source_id != source || guard.app_path != self.storage.app_path {
+        let covered = source == guard.source_id
+            || source == crate::observation_inputs::input_source_id(&guard.source_id);
+        if !covered || guard.app_path != self.storage.app_path {
             return Err(PinnedReadError::Invalid);
         }
         self.storage
@@ -217,7 +221,41 @@ impl PrimarySourceStore {
         binding: &core_graph::source::SourceBinding,
         validated_receipt: Option<&Receipt>,
     ) -> Result<bool, PinnedReadError> {
+        self.task_binding_forgotten_as(
+            guard,
+            core_graph::BindingRole::Primary,
+            binding,
+            validated_receipt,
+        )
+    }
+
+    /// The receipt owner a binding in `role` admits under `guard`: the
+    /// registered source and the binding's repo for a primary binding, the
+    /// source's input identity for an observed one (ADR-0079).
+    fn role_owner(
+        guard: &RetentionGuard,
+        role: core_graph::BindingRole,
+        binding_repo: &str,
+    ) -> (String, String) {
+        match role {
+            core_graph::BindingRole::Primary => (guard.source_id.clone(), binding_repo.to_owned()),
+            core_graph::BindingRole::Observed => {
+                let input = crate::observation_inputs::input_source_id(&guard.source_id);
+                (input.clone(), input)
+            }
+        }
+    }
+
+    /// [`Self::task_binding_forgotten`] for a binding in `role`.
+    pub(crate) fn task_binding_forgotten_as(
+        &self,
+        guard: &RetentionGuard,
+        role: core_graph::BindingRole,
+        binding: &core_graph::source::SourceBinding,
+        validated_receipt: Option<&Receipt>,
+    ) -> Result<bool, PinnedReadError> {
         self.validate_task_guard(guard, &guard.source_id)?;
+        let (owner, owner_repo) = Self::role_owner(guard, role, &binding.repo_key);
         let store = self
             .receipts
             .lock()
@@ -232,15 +270,15 @@ impl PrimarySourceStore {
                 Ok(false)
             }
             ReceiptStatus::CaptureForgotten { tombstone } => {
-                if tombstone.source_id != guard.source_id {
+                if tombstone.source_id != owner {
                     return Err(PinnedReadError::Invalid);
                 }
                 // receipt_status already validates the current stored receipt.
                 // Reuse the original guarded read instead of a third decode.
                 let receipt = validated_receipt.ok_or(PinnedReadError::Unavailable)?;
                 if receipt.id() != binding.receipt_id
-                    || receipt.source_id().as_str() != guard.source_id
-                    || receipt.repo_key() != binding.repo_key
+                    || receipt.source_id().as_str() != owner
+                    || receipt.repo_key() != owner_repo
                     || receipt.fact_key() != &binding.fact
                     || receipt.fact_digest() != binding.emitted_fact_digest
                 {
@@ -249,7 +287,7 @@ impl PrimarySourceStore {
                 Ok(true)
             }
             ReceiptStatus::Reclaimed { tombstone } => {
-                if tombstone.source_id != guard.source_id {
+                if tombstone.source_id != owner {
                     return Err(PinnedReadError::Invalid);
                 }
                 Ok(true)
@@ -265,7 +303,29 @@ impl PrimarySourceStore {
         repo: &str,
         receipt_id: &str,
     ) -> Result<Receipt, PinnedReadError> {
+        self.task_receipt_as(
+            guard,
+            core_graph::BindingRole::Primary,
+            fact,
+            digest,
+            repo,
+            receipt_id,
+        )
+    }
+
+    /// [`Self::task_receipt`] for a binding in `role`; `repo` is the
+    /// binding's repo key.
+    pub(crate) fn task_receipt_as(
+        &self,
+        guard: &RetentionGuard,
+        role: core_graph::BindingRole,
+        fact: &FactKey,
+        digest: &str,
+        repo: &str,
+        receipt_id: &str,
+    ) -> Result<Receipt, PinnedReadError> {
         self.validate_task_guard(guard, &guard.source_id)?;
+        let (owner, owner_repo) = Self::role_owner(guard, role, repo);
         if receipt_id.is_empty() || receipt_id.len() > 256 {
             return Err(PinnedReadError::Invalid);
         }
@@ -279,8 +339,8 @@ impl PrimarySourceStore {
             .map_err(|_| PinnedReadError::Operational)?;
         receipt_storage(&tx).map_err(|_| PinnedReadError::Operational)?;
         let receipt = stored_receipt(&tx, receipt_id)?;
-        if receipt.source_id().as_str() != guard.source_id
-            || receipt.repo_key() != repo
+        if receipt.source_id().as_str() != owner
+            || receipt.repo_key() != owner_repo
             || receipt.fact_key() != fact
             || receipt.fact_digest() != digest
         {
