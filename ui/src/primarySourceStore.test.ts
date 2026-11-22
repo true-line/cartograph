@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { usePrimarySourceStore, type CapturedDescription, type CapturedText, type RetainedSource } from './primarySourceStore';
+import { usePrimarySourceStore, type CapturedDescription, type CapturedText, type ObservedDescription, type RetainedSource } from './primarySourceStore';
 import { useAppStore, type GraphNode } from './store';
 import { inspectionTarget } from './investigationFixtures';
 import type { InvestigationInspectionTarget } from './investigationTypes';
@@ -215,6 +215,7 @@ describe('authoritative inspection targets (AC-0261)', () => {
   it('resolves viewer ordinal to the host role index without reading agent evidence', async () => {
     const commands: string[] = [];
     mockIPC((command, args) => {
+      if (command === 'describe_observed_source') return null;
       commands.push(command);
       if (command === 'describe_captured_source') return targetDescription;
       expect(args).toEqual({ fact: inspectionTarget.fact, expectedGraphSnapshotId: 'snapshot:original',
@@ -231,7 +232,8 @@ describe('authoritative inspection targets (AC-0261)', () => {
   it('discards a late resolved target after same-fact reselection', async () => {
     let reply: (value: InvestigationInspectionTarget) => void = () => {};
     mockIPC((command) => command === 'describe_captured_source' ? targetDescription
-      : new Promise<InvestigationInspectionTarget>((resolve) => { reply = resolve; }));
+      : command === 'describe_observed_source' ? null
+        : new Promise<InvestigationInspectionTarget>((resolve) => { reply = resolve; }));
     await usePrimarySourceStore.getState().inspect(node('rule:stock'));
     const selecting = usePrimarySourceStore.getState().resolveInspectionTarget(8);
     await usePrimarySourceStore.getState().inspect(node('rule:stock'));
@@ -247,5 +249,63 @@ describe('authoritative inspection targets (AC-0261)', () => {
     await usePrimarySourceStore.getState().inspect(node('rule:stock'));
     expect(await usePrimarySourceStore.getState().resolveInspectionTarget(8)).toBeNull();
     expect(usePrimarySourceStore.getState().requirementError).toContain('could not be bound');
+  });
+});
+
+describe('observed source citation (AC-1049)', () => {
+  const observed = (id: string): ObservedDescription => ({
+    fact: { kind: 'node', id }, receipt_id: `obs-input-v1:${id}`, emitted_fact_digest: `digest:${id}`,
+    source_id: 'input/src_first', registered_source_id: 'src_first', repo_key: 'local/src_first',
+    ranges: [{ index: 0, path: 'state.json', byte_start: 40, byte_end: 60 }],
+    scope: 'observed_input_only', input_closure: 'input_closure_not_established',
+  });
+
+  it('loads an observed binding beside a missing primary one and reads its span', async () => {
+    const reads: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command === 'describe_captured_source') throw new Error('no primary binding');
+      if (command === 'describe_observed_source') return observed('res');
+      if (command === 'read_observed_source') {
+        reads.push(args);
+        return { receipt_id: 'obs-input-v1:res', range_index: 0, path: 'state.json', byte_start: 40, byte_end: 60, text: '"aws_sqs_queue.jobs"' };
+      }
+    });
+    await usePrimarySourceStore.getState().inspect(node('res'));
+    await vi.waitFor(() => expect(usePrimarySourceStore.getState().observed?.receipt_id).toBe('obs-input-v1:res'));
+    expect(usePrimarySourceStore.getState().description).toBeNull();
+    await usePrimarySourceStore.getState().readObservedRange(0);
+    expect(reads).toEqual([{ fact: { kind: 'node', id: 'res' }, receiptId: 'obs-input-v1:res', rangeIndex: 0 }]);
+    expect(usePrimarySourceStore.getState().observedText?.text).toBe('"aws_sqs_queue.jobs"');
+    expect(usePrimarySourceStore.getState().text).toBeNull();
+  });
+
+  it('rejects an observed description for another fact and a late one after reselection', async () => {
+    let reply: (value: ObservedDescription) => void = () => {};
+    let calls = 0;
+    mockIPC((command) => {
+      if (command === 'describe_captured_source') return description('second');
+      if (command === 'describe_observed_source') {
+        calls += 1;
+        return calls === 1 ? new Promise<ObservedDescription>((resolve) => { reply = resolve; }) : observed('other');
+      }
+    });
+    await usePrimarySourceStore.getState().inspect(node('first'));
+    await usePrimarySourceStore.getState().inspect(node('second'));
+    reply(observed('first'));
+    await vi.waitFor(() => expect(usePrimarySourceStore.getState().observedError).toContain('unavailable'));
+    expect(usePrimarySourceStore.getState().observed).toBeNull();
+  });
+
+  it('rejects observed text for a different receipt', async () => {
+    mockIPC((command) => {
+      if (command === 'describe_captured_source') return description('res');
+      if (command === 'describe_observed_source') return observed('res');
+      return { receipt_id: 'obs-input-v1:other', range_index: 0, path: 'state.json', byte_start: 40, byte_end: 60, text: 'x' };
+    });
+    await usePrimarySourceStore.getState().inspect(node('res'));
+    await vi.waitFor(() => expect(usePrimarySourceStore.getState().observed).not.toBeNull());
+    await usePrimarySourceStore.getState().readObservedRange(0);
+    expect(usePrimarySourceStore.getState().observedText).toBeNull();
+    expect(usePrimarySourceStore.getState().observedError).toContain('unavailable');
   });
 });

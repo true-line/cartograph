@@ -2392,13 +2392,26 @@ fn bound_receipt(
     fact: &FactKey,
     expected: Option<&str>,
 ) -> Result<(Receipt, RetentionGuard), String> {
+    bound_receipt_as(state, fact, expected, core_graph::BindingRole::Primary)
+        .map(|(receipt, guard, _)| (receipt, guard))
+}
+
+/// The receipt a fact's current binding in `role` cites. A primary binding
+/// admits only the registered source's own receipts; an observed binding
+/// admits only that source's input identity (ADR-0079).
+fn bound_receipt_as(
+    state: &AppState,
+    fact: &FactKey,
+    expected: Option<&str>,
+    role: core_graph::BindingRole,
+) -> Result<(Receipt, RetentionGuard, core_graph::source::SourceBinding), String> {
+    let current = |graph: &core_graph::SqliteGraphStore| match role {
+        core_graph::BindingRole::Primary => graph.current_source_binding(fact),
+        core_graph::BindingRole::Observed => graph.current_source_observation(fact),
+    };
     // Preliminary metadata locates the guard; release all mutexes before the
     // try-only OS lock, then make the authoritative current-binding check.
-    let preliminary = state
-        .graph
-        .lock()
-        .map_err(storage_error)?
-        .current_source_binding(fact)
+    let preliminary = current(&*state.graph.lock().map_err(storage_error)?)
         .map_err(storage_error)?
         .ok_or_else(unavailable)?;
     let source = state
@@ -2408,11 +2421,7 @@ fn bound_receipt(
         .get_by_repo(&preliminary.repo_key)?
         .ok_or_else(unavailable)?;
     let guard = state.primary_sources.guard(&source.source_id, false)?;
-    let binding = state
-        .graph
-        .lock()
-        .map_err(storage_error)?
-        .current_source_binding(fact)
+    let binding = current(&*state.graph.lock().map_err(storage_error)?)
         .map_err(storage_error)?
         .ok_or_else(unavailable)?;
     if binding.repo_key != source.repo_key {
@@ -2427,14 +2436,21 @@ fn bound_receipt(
         .lock()
         .map_err(storage_error)?
         .get(&binding.receipt_id)?;
-    if receipt.source_id().as_str() != source.source_id
-        || receipt.repo_key() != source.repo_key
+    let (owner, owner_repo) = match role {
+        core_graph::BindingRole::Primary => (source.source_id.clone(), source.repo_key.clone()),
+        core_graph::BindingRole::Observed => {
+            let input = input_id(&source.source_id)?.as_str().to_owned();
+            (input.clone(), input)
+        }
+    };
+    if receipt.source_id().as_str() != owner
+        || receipt.repo_key() != owner_repo
         || receipt.fact_key() != fact
         || receipt.fact_digest() != binding.emitted_fact_digest
     {
         return Err(unavailable());
     }
-    Ok((receipt, guard))
+    Ok((receipt, guard, binding))
 }
 
 pub(crate) fn describe(state: &AppState, fact: &FactKey) -> Result<CapturedDescription, String> {
@@ -2481,6 +2497,16 @@ pub(crate) fn read(
     range_index: usize,
 ) -> Result<CapturedText, String> {
     let (receipt, _guard) = bound_receipt(state, fact, Some(receipt_id))?;
+    text_of(state, &receipt, range_index)
+}
+
+/// Read one cited range back from its retained capture; the caller holds the
+/// source's retention guard.
+fn text_of(
+    state: &AppState,
+    receipt: &Receipt,
+    range_index: usize,
+) -> Result<CapturedText, String> {
     let range = receipt.ranges().get(range_index).ok_or_else(unavailable)?;
     let text = state
         .primary_sources
@@ -2497,6 +2523,74 @@ pub(crate) fn read(
         byte_start: range.evidence.byte_start,
         byte_end: range.evidence.byte_end,
     })
+}
+
+/// A fact's observed binding: the exact spans of a captured observation
+/// input (Terraform state, Pulumi export or trace) that observed it. It is
+/// shown and cited beside the declaration, never in its place (ADR-0079).
+#[derive(Serialize)]
+pub(crate) struct ObservedDescription {
+    pub fact: FactKey,
+    pub receipt_id: String,
+    pub emitted_fact_digest: String,
+    /// The input identity, `input/<registered source id>`.
+    pub source_id: String,
+    pub registered_source_id: String,
+    /// The repo that owns the binding.
+    pub repo_key: String,
+    pub ranges: Vec<CapturedRange>,
+    pub scope: &'static str,
+    pub input_closure: &'static str,
+}
+
+pub(crate) fn describe_observed(
+    state: &AppState,
+    fact: &FactKey,
+) -> Result<ObservedDescription, String> {
+    let (receipt, _guard, binding) =
+        bound_receipt_as(state, fact, None, core_graph::BindingRole::Observed)?;
+    let registered_source_id = receipt
+        .source_id()
+        .as_str()
+        .strip_prefix(crate::observation_inputs::INPUT_REPO_PREFIX)
+        .ok_or_else(unavailable)?
+        .to_owned();
+    Ok(ObservedDescription {
+        fact: receipt.fact_key().clone(),
+        receipt_id: receipt.id().to_owned(),
+        emitted_fact_digest: receipt.fact_digest().to_owned(),
+        source_id: receipt.source_id().as_str().to_owned(),
+        registered_source_id,
+        repo_key: binding.repo_key,
+        ranges: receipt
+            .ranges()
+            .iter()
+            .enumerate()
+            .map(|(index, range)| CapturedRange {
+                index,
+                path: range.evidence.path.clone(),
+                byte_start: range.evidence.byte_start,
+                byte_end: range.evidence.byte_end,
+            })
+            .collect(),
+        scope: "observed_input_only",
+        input_closure: "input_closure_not_established",
+    })
+}
+
+pub(crate) fn read_observed(
+    state: &AppState,
+    fact: &FactKey,
+    receipt_id: &str,
+    range_index: usize,
+) -> Result<CapturedText, String> {
+    let (receipt, _guard, _) = bound_receipt_as(
+        state,
+        fact,
+        Some(receipt_id),
+        core_graph::BindingRole::Observed,
+    )?;
+    text_of(state, &receipt, range_index)
 }
 
 #[derive(Serialize)]
@@ -2870,6 +2964,32 @@ pub(crate) fn reclaim_superseded_with(
     Ok(reclaimed)
 }
 
+/// The complete digest of the fact the caller selected, which must be the
+/// fact it names.
+fn expected_digest(
+    fact: &FactKey,
+    expected_node: Option<core_graph::Node>,
+    expected_edge: Option<core_graph::Edge>,
+) -> Result<String, String> {
+    match (fact, expected_node, expected_edge) {
+        (FactKey::Node { id }, Some(node), None) if node.id == *id => {
+            core_graph::source::node_digest(&node).map_err(storage_error)
+        }
+        (
+            FactKey::Edge {
+                source,
+                label,
+                destination,
+            },
+            None,
+            Some(edge),
+        ) if edge.src == *source && edge.label == *label && edge.dst == *destination => {
+            core_graph::source::edge_digest(&edge).map_err(storage_error)
+        }
+        _ => Err(unavailable()),
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn describe_captured_source(
     fact: FactKey,
@@ -2878,23 +2998,7 @@ pub(crate) async fn describe_captured_source(
     app: tauri::AppHandle,
 ) -> Result<CapturedDescription, String> {
     crate::off_ui_thread(move || {
-        let expected_digest = match (&fact, expected_node, expected_edge) {
-            (FactKey::Node { id }, Some(node), None) if node.id == *id => {
-                core_graph::source::node_digest(&node).map_err(storage_error)?
-            }
-            (
-                FactKey::Edge {
-                    source,
-                    label,
-                    destination,
-                },
-                None,
-                Some(edge),
-            ) if edge.src == *source && edge.label == *label && edge.dst == *destination => {
-                core_graph::source::edge_digest(&edge).map_err(storage_error)?
-            }
-            _ => return Err(unavailable()),
-        };
+        let expected_digest = expected_digest(&fact, expected_node, expected_edge)?;
         let description = describe(&app.state::<AppState>(), &fact)?;
         if description.emitted_fact_digest != expected_digest {
             return Err(
@@ -2916,6 +3020,53 @@ pub(crate) async fn read_captured_source(
 ) -> Result<CapturedText, String> {
     crate::off_ui_thread(move || read(&app.state::<AppState>(), &fact, &receipt_id, range_index))
         .await
+}
+
+/// The fact's observed binding, when a captured observation input observed
+/// it (ADR-0079, AC-1049); `None` when it has none.
+#[tauri::command]
+pub(crate) async fn describe_observed_source(
+    fact: FactKey,
+    expected_node: Option<core_graph::Node>,
+    expected_edge: Option<core_graph::Edge>,
+    app: tauri::AppHandle,
+) -> Result<Option<ObservedDescription>, String> {
+    crate::off_ui_thread(move || {
+        let expected_digest = expected_digest(&fact, expected_node, expected_edge)?;
+        let state = app.state::<AppState>();
+        let present = state
+            .graph
+            .lock()
+            .map_err(storage_error)?
+            .current_source_observation(&fact)
+            .map_err(storage_error)?
+            .is_some();
+        if !present {
+            return Ok(None);
+        }
+        let description = describe_observed(&state, &fact)?;
+        if description.emitted_fact_digest != expected_digest {
+            return Err(
+                "Selected fact changed; refresh the graph before inspecting observed source."
+                    .into(),
+            );
+        }
+        Ok(Some(description))
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn read_observed_source(
+    fact: FactKey,
+    receipt_id: String,
+    range_index: usize,
+    app: tauri::AppHandle,
+) -> Result<CapturedText, String> {
+    crate::off_ui_thread(move || {
+        read_observed(&app.state::<AppState>(), &fact, &receipt_id, range_index)
+    })
+    .await
 }
 
 #[tauri::command]

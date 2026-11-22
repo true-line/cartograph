@@ -57,8 +57,9 @@ also make "verified" mean two different things.
    admissible for a primary binding only when its `source_id` is the
    registered source's id. For an observed binding, only the source's
    `input/` identity is admissible.
-   - `describe_captured_source` returns observed ranges in a separate
-     `observed` list.
+   - The app describes and reads the observed binding through its own
+     `describe_observed_source` and `read_observed_source`, beside the
+     unchanged primary `describe_captured_source` (AC-1049).
    - Scoped MCP evidence takes a role, `primary` or `observed`, with `primary`
      as the default.
 5. **What "verified" means.** A fact is observed-verified when its observed
@@ -75,8 +76,9 @@ also make "verified" mean two different things.
    the owner's share, plus retention accounting and forget.
 2. **AC-1047:** the observed binding tables and their publication, plus
    superseded-reclaim keep-sets that include observed bindings.
-3. **AC-1049:** the read paths (describe/read, scoped MCP evidence role) and
-   the UI "observed in" citation.
+3. **AC-1049:** the app read paths (describe/read) and the UI "observed in"
+   citation.
+4. **AC-1051:** the scoped MCP evidence role.
 
 ## Consequences
 

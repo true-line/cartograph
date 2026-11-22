@@ -1206,6 +1206,10 @@ export default function App() {
               text={capturedSelectionMatches ? primarySource.text : null}
               loading={!capturedSelectionMatches || primarySource.loading} error={capturedSelectionMatches ? primarySource.error : null}
               onRead={(index) => void primarySource.readRange(index)}
+              observed={capturedSelectionMatches ? primarySource.observed : null}
+              observedText={capturedSelectionMatches ? primarySource.observedText : null}
+              observedError={capturedSelectionMatches ? primarySource.observedError : null}
+              onReadObserved={(index) => void primarySource.readObservedRange(index)}
               requirementBusy={primarySource.requirementBusy}
               requirementError={primarySource.requirementError ?? investigations.inspectionDraftError}
               onRequire={(index) => {
