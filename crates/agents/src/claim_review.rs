@@ -1,12 +1,13 @@
 //! The claim reviewer's request and reply, as pure functions (#2419).
 //!
 //! `claim-reviewer@1` reads the claims a composition produced beside the
-//! text of the facts each one cites, in one bounded call, and says of each
-//! whether its facts show it. It catches what a lexical check cannot: a
-//! rule stated for a wider scope than the capability it belongs to, detail
-//! resting on a fact whose name does not show it, a misread condition or
-//! actor. It calls no tool and writes nothing; the host leaves out each
-//! claim it judges an overreach.
+//! text of the facts each one cites, in one bounded call asked
+//! [`REVIEW_SAMPLES`] times, and says of each whether its facts show it. It
+//! catches what a lexical check cannot: a rule stated for a wider scope than
+//! the capability it belongs to, detail resting on a fact whose name does
+//! not show it, a misread condition or actor. It calls no tool and writes
+//! nothing; the host leaves out each claim a majority of the samples judges
+//! an overreach.
 
 use llm::{AnalysisTier, CompletionAction, CompletionPayload};
 use serde::Deserialize;
@@ -17,17 +18,19 @@ use std::fmt::Write as _;
 pub const CLAIM_REVIEWER_ROLE: &str = "claim-reviewer@1";
 
 /// Most characters of one fact's text the reviewer reads.
-pub const FACT_TEXT_CHARS: usize = 400;
+pub const FACT_TEXT_CHARS: usize = 600;
 
 const SYSTEM: &str = "You are Cartograph's claim reviewer. You check claims of a product \
 specification against the facts they cite, one verdict per claim. A claim is shown when \
-every assertion in it is shown by one of its cited facts. It is partly shown when small \
-details are not shown but nothing it says is wrong or wider than its facts. It is an \
-overreach when it says something its cited facts do not show or contradict: a rule stated \
-for a wider scope than the capability it is listed under (other capabilities, a whole area, \
-every call, form or provider), a list of jobs, actions, screens or steps that no cited \
-fact's name or text names, a condition, status or message other than the rule's, or the \
-wrong actor. Judge only from the facts given, never from what such a system usually does.";
+every assertion in it is shown by one of its cited facts. It is partly shown when its main \
+assertion is shown and only details are not: a describing word no fact states, or everyday \
+operations (viewing, listing, creating, changing, removing) on the thing a cited capability \
+manages. It is an overreach when its main assertion is not shown or is contradicted: a rule \
+stated for a wider scope than the capability it is listed under (other capabilities, a whole \
+area, every call, form or provider); a condition, status or message other than the rule's; \
+the wrong actor; a caller group, platform or component no cited fact names; or jobs, screens \
+or steps beyond those everyday operations that no cited fact names. Judge only from the facts \
+given, never from what such a system usually does.";
 
 /// One claim to review: its statement and the ids it cites.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +158,34 @@ pub fn decode(text: &str, claims: usize) -> Option<Vec<Verdict>> {
         }
     }
     verdicts.into_iter().collect()
+}
+
+/// How many times the same review is asked (#2458): one sample's verdicts
+/// vary between identical calls, so a claim is left out on a majority.
+pub const REVIEW_SAMPLES: usize = 3;
+
+/// Which of `claims` claims a majority of the readable `samples` judges an
+/// overreach (#2458): more than half of them, of at least two readable
+/// samples. `None` when fewer than two samples could be read.
+pub fn overreaching(samples: &[Vec<Verdict>], claims: usize) -> Option<Vec<bool>> {
+    let readable: Vec<&Vec<Verdict>> = samples
+        .iter()
+        .filter(|verdicts| verdicts.len() == claims)
+        .collect();
+    if readable.len() < 2 {
+        return None;
+    }
+    Some(
+        (0..claims)
+            .map(|n| {
+                let votes = readable
+                    .iter()
+                    .filter(|verdicts| verdicts[n] == Verdict::Overreach)
+                    .count();
+                votes * 2 > readable.len()
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
