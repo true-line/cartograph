@@ -304,6 +304,12 @@ impl CitedText {
         }
     }
 
+    /// The text indexed for cited fact `id` (its id, label and props, or an
+    /// edge's ends, label and props), if it is cited (#2419).
+    pub fn text(&self, id: &str) -> Option<&str> {
+        self.by_citation.get(id).map(String::as_str)
+    }
+
     /// The first numeral, count or version `statement` states that no fact
     /// of `citations` shows, if any (#2349): `17`, `0.0.0.0:7777`, `15s`
     /// or `v2` must appear in a cited fact, so a figure is never taken
