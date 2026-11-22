@@ -3,6 +3,8 @@ use super::*;
 const LEDGER: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger.class");
 const STORE: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger$Store.class");
 const AUDIT: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger$Audit.class");
+const ENTRY: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger$Entry.class");
+const KIND: &[u8] = include_bytes!("../tests/fixtures/classes/com/acme/pay/Ledger$Kind.class");
 
 const REPO: &str = "acme/pay";
 const DIR: &str = "lib/classes/com/acme/pay";
@@ -19,6 +21,8 @@ fn files() -> Vec<(String, Vec<u8>)> {
         (format!("{DIR}/Ledger$Store.class"), STORE.to_vec()),
         (format!("{DIR}/Ledger.class"), LEDGER.to_vec()),
         (format!("{DIR}/Ledger$Audit.class"), AUDIT.to_vec()),
+        (format!("{DIR}/Ledger$Entry.class"), ENTRY.to_vec()),
+        (format!("{DIR}/Ledger$Kind.class"), KIND.to_vec()),
     ]
 }
 
@@ -64,6 +68,16 @@ fn class_files_are_symbols_with_artifact_evidence() {
     assert_eq!(ledger.props["binary_name"], "com.acme.pay.Ledger");
     let store = node(&out, &sym("Ledger$Store.class", "Ledger.Store"));
     assert_eq!(store.props["kind"], "class");
+    assert_eq!(store.props["binary_name"], "com.acme.pay.Ledger$Store");
+    assert_eq!(
+        node(&out, &sym("Ledger$Kind.class", "Ledger.Kind")).props["kind"],
+        "enum"
+    );
+    // Constructors list the parameters the source declares: no enclosing
+    // instance for an inner class, no name and ordinal for an enum.
+    node(&out, &sym("Ledger$Entry.class", "Ledger.Entry.Entry(int)"));
+    node(&out, &sym("Ledger$Kind.class", "Ledger.Kind.Kind(int)"));
+    node(&out, &sym("Ledger$Store.class", "Ledger.Store.Store()"));
     let audit = node(&out, &sym("Ledger$Audit.class", "Ledger.Audit"));
     assert_eq!(audit.props["kind"], "interface");
     for name in [
@@ -204,6 +218,8 @@ fn referenced_classes_are_imports() {
         .map(|e| e.dst.as_str())
         .collect();
     assert!(imports.contains("mod:java.util.List"), "{imports:?}");
+    // Named only in a method descriptor, never as a class constant.
+    assert!(imports.contains("mod:java.time.Clock"), "{imports:?}");
     assert!(
         imports.contains("mod:java.util.function.Supplier"),
         "{imports:?}"

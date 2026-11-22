@@ -37,6 +37,27 @@ public class Ledger {
         }
     }
 
+    public void accepts(java.time.Clock clock) {}
+
+    class Entry {
+        final int amount;
+
+        Entry(int amount) {
+            this.amount = amount;
+        }
+    }
+
+    enum Kind {
+        DEBIT(-1),
+        CREDIT(1);
+
+        final int sign;
+
+        Kind(int sign) {
+            this.sign = sign;
+        }
+    }
+
     static class Store {
         long amount(String id) {
             return id.length();
