@@ -20,6 +20,7 @@ let model = defaultModel;
 let contextWindow: number | null = null;
 let ollamaPort: number | null = null;
 let acpAgent: { program: string; args: string[] } | null = null;
+let acpAgentFailure: string | null = null;
 let modelFailure: string | null = null;
 let installed: Array<{ name: string; digest: string }> | string = [
   { name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
@@ -28,7 +29,7 @@ const meta = {
   title: 'Surfaces/ConfigureWindow', component: ConfigureWindow, args: { api: tauriRunLimitsApi },
   beforeEach: () => {
     calls = []; stored = shipped; loadFailure = null; model = defaultModel; modelFailure = null; contextWindow = null;
-    ollamaPort = null; acpAgent = null;
+    ollamaPort = null; acpAgent = null; acpAgentFailure = null;
     installed = [{ name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
     mockIPC((command, args) => {
       calls.push([command, args]);
@@ -55,11 +56,11 @@ const meta = {
         ollamaPort = port === 11434 ? null : port;
         return ollamaPort;
       }
-      if (command === 'get_acp_agent') return acpAgent;
+      if (command === 'get_acp_agent') { if (acpAgentFailure) throw new Error(acpAgentFailure); return acpAgent; }
       if (command === 'set_acp_agent') {
         const command = (args as { command: { program: string; args: string[] } | null }).command;
         if (command && !command.program.startsWith('/')) throw new Error('ACP agent command: the program must be an absolute path of 1..=1024 characters');
-        acpAgent = command;
+        acpAgent = command; acpAgentFailure = null;
         return acpAgent;
       }
       if (command === 'set_local_context_window') { contextWindow = (args as { tokens: number | null }).tokens; return contextWindow; }
@@ -266,5 +267,19 @@ export const SetThenClearAcpAgent: Story = {
     await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('Cleared'));
     await expect(calls).toContainEqual(['set_acp_agent', { command: null }]);
     await expect(program).toHaveValue('');
+  },
+};
+
+export const InvalidStoredAcpAgentCanBeCleared: Story = {
+  // AC-1350: a stored agent command that no longer validates can still be cleared.
+  beforeEach: () => { acpAgentFailure = 'ACP agent command: stored arguments are not a list'; },
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    const section = within(await c.findByRole('region', { name: 'ACP agent' }));
+    await waitFor(() => expect(section.getByRole('alert')).toHaveTextContent('stored arguments are not a list'));
+    await userEvent.click(section.getByRole('button', { name: 'Clear agent' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('Cleared'));
+    await expect(calls).toContainEqual(['set_acp_agent', { command: null }]);
+    await expect(section.getByLabelText(/^Program/)).toHaveValue('');
   },
 };

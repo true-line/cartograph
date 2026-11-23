@@ -104,6 +104,7 @@ describe('dispatch of a reviewed packet (AC-1350)', () => {
     useWorkPacketStore.setState({ detail });
     await useWorkPacketStore.getState().dispatch();
     expect(useWorkPacketStore.getState().error).toMatch(/No ACP agent is configured/);
+    expect(useWorkPacketStore.getState().notice).toBeNull();
     expect(useWorkPacketStore.getState().detail).toBe(detail);
   });
 });

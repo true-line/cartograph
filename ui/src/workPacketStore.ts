@@ -134,8 +134,14 @@ export const useWorkPacketStore = create<WorkPacketState>((set, get) => {
       const detail = get().detail;
       if (!detail) return;
       set({ notice: 'Dispatching to the configured ACP agent. This runs until its turn ends.' });
-      const dispatched = await invokeOr<PacketDetail | null>('dispatch_work_packet', null, { packetId: detail.packet_id });
-      if (!dispatched || dispatched.packet_id !== detail.packet_id) throw new Error('Dispatch requires the local core.');
+      let dispatched: PacketDetail | null;
+      try {
+        dispatched = await invokeOr<PacketDetail | null>('dispatch_work_packet', null, { packetId: detail.packet_id });
+        if (!dispatched || dispatched.packet_id !== detail.packet_id) throw new Error('Dispatch requires the local core.');
+      } catch (error) {
+        set({ notice: null });
+        throw error;
+      }
       set({ detail: dispatched, notice: dispatched.dispatch?.head_revision
         ? `Dispatched. The agent's work is on local branch ${dispatched.dispatch.branch}; review it before merging.`
         : 'Dispatched. The agent made no commit.' });

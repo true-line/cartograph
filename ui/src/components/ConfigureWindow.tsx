@@ -60,6 +60,8 @@ function AcpAgentSection({ api }: { api: AcpAgentApi }) {
       </div>
     </form>}
     {current === undefined && !error && <p className="muted">Loading…</p>}
+    {current === undefined && error && <button type="button" disabled={busy}
+      onClick={() => void save(null)}>Clear agent</button>}
     {saved && <p className="muted" role="status">{saved}</p>}
     {error && <p className="error-text" role="alert">{error}</p>}
   </section>;
