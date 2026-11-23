@@ -507,6 +507,12 @@ pub struct ContextSnapshot {
 }
 
 impl ContextSnapshot {
+    /// The number of nodes and edges the snapshot holds.
+    pub fn counts(&self) -> (usize, usize) {
+        let nodes = self.node_ids.len();
+        (nodes, self.facts.len() - nodes)
+    }
+
     /// Construct a snapshot from graph copies, rejecting duplicate identities.
     ///
     /// The versioned identity includes every original property, including raw

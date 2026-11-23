@@ -3,7 +3,7 @@
 
 use super::{
     AcquisitionSink, HostError,
-    context::{AcquisitionRequest, FrozenContext, bounded_json},
+    context::{AcquisitionRequest, FrozenContext, ScopeFacts, bounded_json},
     runtime::{LiveTask, RunClock, descriptor},
 };
 use crate::jobs::investigations::{
@@ -535,6 +535,21 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 ledger: Box::new(context.ledger.clone()),
                 usage,
             })?;
+        }
+        // #2475: name the prepared scope's size. Display only: a failed
+        // write never changes the run's outcome.
+        if let ScopeFacts::Held(snapshot) = &context.snapshot
+            && let Ok(mut jobs) = self.state.jobs.lock()
+        {
+            let (nodes, edges) = snapshot.counts();
+            let _ = jobs.record_investigation_scope_size(
+                &self.detail.summary.investigation_id,
+                &crate::jobs::investigations::ScopeSize {
+                    scope_snapshot_id: snapshot.id().into(),
+                    nodes: nodes as u64,
+                    edges: edges as u64,
+                },
+            );
         }
 
         let enable_audit = self.dispatch_audit;
