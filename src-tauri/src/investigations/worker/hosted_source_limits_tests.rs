@@ -429,7 +429,16 @@ fn hosted_refused_read_is_withheld_and_recorded() {
         request,
     );
     deny_every_read(&f);
+    let graph = || {
+        let state = f.base.base.app.state::<AppState>();
+        let graph = state.graph.lock().unwrap();
+        let (revision, ((nodes, edges), _)) = crate::curated::read_graph(&graph).unwrap();
+        (revision, spec::graph_content_hash(&nodes, &edges))
+    };
+    let before = graph();
     run_with_approvals(&f, provider.clone());
+    // #679 test 1: a refusal is propose-only and writes nothing to the graph.
+    assert_eq!(graph(), before);
     let state = f.base.base.app.state::<AppState>();
     let detail = state
         .jobs
