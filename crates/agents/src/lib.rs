@@ -34,6 +34,7 @@ pub mod pipeline_roster;
 pub mod prepared;
 pub mod reconciliation;
 pub mod roster;
+pub mod rule_scope;
 pub mod section_change;
 pub mod section_compose;
 pub mod section_draft;
