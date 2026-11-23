@@ -117,3 +117,40 @@ export const MissingSaveReceipt: Story = {
     await expect(args.onSaved).not.toHaveBeenCalled();
   },
 };
+
+// #2474: the guide suggests the keys the last recovery's client calls could
+// not resolve; adding one starts a configuration row with that exact key.
+export const SuggestionsFromLastRecovery: Story = {
+  args: {
+    suggestions: {
+      keys: [
+        { key: 'window.API_URL', calls: 15, sites: ['static/js/a.js', 'static/js/b.js', 'static/js/c.js', 'static/js/d.js'] },
+        { key: 'VITE_API', calls: 1, sites: ['web/api.ts'] },
+      ],
+      computedSites: ['static/js/legacy.js'],
+    },
+  },
+  play: async ({ canvasElement, args }) => {
+    const c = within(canvasElement);
+    const panel = within(c.getByRole('region', { name: 'Suggested from the last recovery' }));
+    await expect(panel.getByText(/15 calls in static\/js\/a\.js, static\/js\/b\.js, static\/js\/c\.js and 1 more files/)).toBeInTheDocument();
+    await expect(panel.getByText(/1 file builds a whole fetch URL at runtime \(static\/js\/legacy\.js\)/)).toBeInTheDocument();
+    await userEvent.click(panel.getByRole('button', { name: 'Add window.API_URL' }));
+    await expect(c.getByLabelText('Configuration key 1')).toHaveValue('window.API_URL');
+    await expect(panel.getByRole('button', { name: 'window.API_URL added' })).toBeDisabled();
+    await userEvent.type(c.getByLabelText('Repository 1'), '../api');
+    await userEvent.type(c.getByLabelText('Configuration value 1'), 'https://app.example.test');
+    await userEvent.click(c.getByRole('button', { name: 'Preview manifest' }));
+    await expect(args.preview).toHaveBeenCalledWith(expect.objectContaining({
+      env: [{ key: 'window.API_URL', value: 'https://app.example.test' }],
+    }));
+  },
+};
+
+export const NoSuggestionsWithoutClientGaps: Story = {
+  args: { suggestions: { keys: [], computedSites: [] } },
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    await expect(c.queryByRole('region', { name: 'Suggested from the last recovery' })).not.toBeInTheDocument();
+  },
+};
