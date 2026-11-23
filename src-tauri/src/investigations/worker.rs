@@ -530,26 +530,13 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 &history,
             )?;
         } else {
-            self.transition(InvestigationTransition::InputPrepared {
+            self.apply(InvestigationTransition::InputPrepared {
                 coverage_archive: context.coverage_archive.clone().map(Box::new),
                 ledger: Box::new(context.ledger.clone()),
                 usage,
             })?;
-        }
-        // #2475: name the prepared scope's size. Display only: a failed
-        // write never changes the run's outcome.
-        if let ScopeFacts::Held(snapshot) = &context.snapshot
-            && let Ok(mut jobs) = self.state.jobs.lock()
-        {
-            let (nodes, edges) = snapshot.counts();
-            let _ = jobs.record_investigation_scope_size(
-                &self.detail.summary.investigation_id,
-                &crate::jobs::investigations::ScopeSize {
-                    scope_snapshot_id: snapshot.id().into(),
-                    nodes: nodes as u64,
-                    edges: edges as u64,
-                },
-            );
+            self.record_scope_size(&context);
+            super::emit_changed(self.app, &self.detail);
         }
 
         let enable_audit = self.dispatch_audit;
@@ -1291,6 +1278,25 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         }
         self.detail = detail;
         Ok(())
+    }
+
+    /// #2475: name the prepared scope's size before the UI is told the scope
+    /// is prepared, so the refresh that notice triggers already sees it.
+    /// Display only: a failed write never changes the run's outcome.
+    pub(super) fn record_scope_size(&self, context: &FrozenContext) {
+        if let ScopeFacts::Held(snapshot) = &context.snapshot
+            && let Ok(mut jobs) = self.state.jobs.lock()
+        {
+            let (nodes, edges) = snapshot.counts();
+            let _ = jobs.record_investigation_scope_size(
+                &self.detail.summary.investigation_id,
+                &crate::jobs::investigations::ScopeSize {
+                    scope_snapshot_id: snapshot.id().into(),
+                    nodes: nodes as u64,
+                    edges: edges as u64,
+                },
+            );
+        }
     }
 
     fn apply(&mut self, transition: InvestigationTransition) -> Result<(), Failure> {

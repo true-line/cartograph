@@ -506,6 +506,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             return Err(error.into());
         }
         self.detail = result?;
+        self.record_scope_size(context);
         super::super::emit_changed(self.app, &self.detail);
         Ok(())
     }
