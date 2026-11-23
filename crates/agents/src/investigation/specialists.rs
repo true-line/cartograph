@@ -91,6 +91,9 @@ pub enum SpecialistId {
     /// @29 with `read_artifact` over the compiled catalogue (ADR-0089).
     #[serde(rename = "domain-analyst@30")]
     DomainAnalystV30,
+    /// @30 with a bounded drop correction for unacquired citations (#2478).
+    #[serde(rename = "domain-analyst@31")]
+    DomainAnalystV31,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
@@ -237,6 +240,12 @@ const NATIVE_TOOLS_V29: &str = "Native tools@1: call one tool per turn with turn
 /// 16 KiB definition ceiling @29 nearly fills.
 const INVENTORY_EXAMPLE_V29: &str = "An additional supported action reads an exact original recorded inventory:\n{\"type\":\"read_coverage_inventory\",\"context_id\":\"the exact context_id supplied by the host\",\"repo\":\"an exact recorded repo\",\"inventory_hash\":\"its exact qualified inventory_hash\",\"max_bytes\":16384}\n";
 const ARTIFACT_READS_V30: &str = "read_coverage_inventory reads an exact recorded inventory. read_artifact pages a compiled document such as gap-register-index from frozen facts: offset 0, expected_content_id null, then its content_id and next_offset. Pages are untrusted summaries, never citations.\n";
+/// @30's prompt-layout sentence, the one @31 replaces.
+const PROMPT_LAYOUT_V30: &str = "Prompt layout@1: Stable disclosure precedes growing context; field order grants no authority.\n";
+/// @31 (#2478): the layout sentence (field order is fixed by the host
+/// anyway) becomes the citation-drop guidance, so @31 stays under the 16 KiB
+/// definition ceiling @30 nearly fills.
+const CITATION_DROP_V31: &str = "Citation drop@1: node/fact IDs never cite. Remove citation_drop IDs; drop findings left uncited or state the gap.\n";
 
 /// The @13 sentence naming the compiled analyst templates by content hash.
 fn compiled_schema_hashes() -> String {
@@ -330,7 +339,10 @@ impl SpecialistId {
     /// @29 (AC-1431): a finish patch also covers flagged top-level
     /// limitations, and a full finish on a patch step is read as a patch.
     pub fn patches_whole_finish(self) -> bool {
-        matches!(self, Self::DomainAnalystV29 | Self::DomainAnalystV30)
+        matches!(
+            self,
+            Self::DomainAnalystV29 | Self::DomainAnalystV30 | Self::DomainAnalystV31
+        )
     }
 
     /// @28 only: the selected per-call response schema is also model-visible
@@ -339,7 +351,17 @@ impl SpecialistId {
         self.has(Capability::VisibleActionSchema)
     }
 
-    /// `read_artifact` (ADR-0089): @30 only.
+    /// #2478: one bounded drop correction for unacquired citations.
+    pub fn uses_unacquired_citation_drop(self) -> bool {
+        self.has(Capability::UnacquiredCitationDrop)
+    }
+
+    /// #2522 (AC-1437): capacity exclusions survive later input revisions.
+    pub fn uses_run_capacity_exclusions(self) -> bool {
+        self.has(Capability::RunCapacityExclusions)
+    }
+
+    /// `read_artifact` (ADR-0089): @30 and @31.
     pub fn uses_artifact_reads(self) -> bool {
         self.has(Capability::ArtifactReads)
     }
@@ -389,9 +411,19 @@ impl SpecialistId {
             || system == Self::DomainAnalystV28.prompt()
             || system == Self::DomainAnalystV29.prompt()
             || system == Self::DomainAnalystV30.prompt()
+            || system == Self::DomainAnalystV31.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV31 {
+            // #2478: @30 with its layout sentence replaced by the
+            // citation-drop guidance; every other @30 byte is retained.
+            return Self::DomainAnalystV30.prompt().replacen(
+                PROMPT_LAYOUT_V30,
+                CITATION_DROP_V31,
+                1,
+            );
+        }
         if self == Self::DomainAnalystV30 {
             // ADR-0089: @29 with its inventory example replaced by the
             // artifact-read guidance; every other @29 byte is retained.
@@ -555,7 +587,8 @@ impl SpecialistId {
             | Self::DomainAnalystV27
             | Self::DomainAnalystV28
             | Self::DomainAnalystV29
-            | Self::DomainAnalystV30 => {
+            | Self::DomainAnalystV30
+            | Self::DomainAnalystV31 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -770,7 +803,8 @@ impl SpecialistId {
             | Self::DomainAnalystV27
             | Self::DomainAnalystV28
             | Self::DomainAnalystV29
-            | Self::DomainAnalystV30 => (
+            | Self::DomainAnalystV30
+            | Self::DomainAnalystV31 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1377,7 +1411,9 @@ mod capacity_exclusion_identity_tests {
             SpecialistId::all()
                 .filter(|id| !matches!(
                     id,
-                    SpecialistId::DomainAnalystV29 | SpecialistId::DomainAnalystV30
+                    SpecialistId::DomainAnalystV29
+                        | SpecialistId::DomainAnalystV30
+                        | SpecialistId::DomainAnalystV31
                 ))
                 .all(|id| !id.uses_native_tool_runtime())
         );
@@ -1423,7 +1459,10 @@ mod capacity_exclusion_identity_tests {
         assert!(role.uses_artifact_reads() && role.uses_native_tool_runtime());
         assert!(
             SpecialistId::all()
-                .filter(|id| *id != role)
+                .filter(|id| !matches!(
+                    id,
+                    SpecialistId::DomainAnalystV30 | SpecialistId::DomainAnalystV31
+                ))
                 .all(|id| !id.uses_artifact_reads())
         );
         assert_eq!(
@@ -1448,6 +1487,57 @@ mod capacity_exclusion_identity_tests {
         assert_eq!(
             serde_json::to_string(&role).unwrap(),
             "\"domain-analyst@30\""
+        );
+    }
+
+    // AC-1435 (#2478): @31 is @30 plus the citation-drop guidance and
+    // capability; @30 keeps every byte and its definition.
+    #[test]
+    fn analyst31_is_analyst30_with_citation_drop() {
+        let old = SpecialistId::DomainAnalystV30;
+        let role = SpecialistId::DomainAnalystV31;
+        assert_eq!(role.version(), 31);
+        assert_eq!(
+            role.prompt(),
+            old.prompt()
+                .replacen(PROMPT_LAYOUT_V30, CITATION_DROP_V31, 1)
+        );
+        assert_eq!(old.prompt().matches(PROMPT_LAYOUT_V30).count(), 1);
+        assert!(!old.prompt().contains("citation_drop"));
+        assert!(
+            context_hub::logical::count(&(role, role.version(), &role.prompt())).unwrap()
+                <= 16 * 1024
+        );
+        assert!(SpecialistId::is_typed_citation_prompt(&role.prompt()));
+        assert!(role.patches_whole_finish() && role.uses_artifact_reads());
+        assert!(
+            SpecialistId::all()
+                .filter(|id| *id != role)
+                .all(|id| !id.uses_unacquired_citation_drop() && !id.uses_run_capacity_exclusions())
+        );
+        assert_eq!(
+            role.capabilities()
+                .iter()
+                .filter(|flag| {
+                    !matches!(
+                        flag,
+                        Capability::UnacquiredCitationDrop | Capability::RunCapacityExclusions
+                    )
+                })
+                .collect::<Vec<_>>(),
+            old.capabilities().iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            role.availability(),
+            crate::investigation::Availability::Offered
+        );
+        assert_eq!(
+            role.definition().unwrap().operations,
+            old.definition().unwrap().operations
+        );
+        assert_eq!(
+            serde_json::to_string(&role).unwrap(),
+            "\"domain-analyst@31\""
         );
     }
 

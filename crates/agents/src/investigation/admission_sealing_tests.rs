@@ -277,6 +277,7 @@ fn admission_sealing_mode_survives_receipt_roundtrip_at_every_finish_reserve_bou
                 fixture.metadata.refusal_count = 1;
                 fixture.metadata.last_refusal_id = Some("b".repeat(64));
                 fixture.metadata.feedback = Some(staged_finish::RefusalFeedback {
+                    citation_drop: None,
                     prose_correction: None,
                     schema_version: 1,
                     citation_correction: None,

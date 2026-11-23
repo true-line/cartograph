@@ -713,6 +713,78 @@ fn capacity_exclusion_durable_replay_preserves_analyst20_and_excludes_for_21() {
     }
 }
 
+// AC-1437 (#2522): @31 keeps a capacity-refused read withdrawn at later input
+// revisions; @30 keeps the revision-local rule byte-for-byte.
+#[test]
+fn analyst31_capacity_exclusion_outlives_the_refused_revision() {
+    for role in ["domain-analyst@30", "domain-analyst@31"] {
+        let (mut f, offered) = action_fixture_for(role);
+        let response = fixture::response(&f, &offered);
+        let tx = f.store.conn.transaction().unwrap();
+        let next = refuse_capacity(
+            &tx,
+            &f.task,
+            &response,
+            &offered,
+            CapacityRefusalReason::PromptCapacity,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        f.task = next;
+        let tx = f.store.conn.unchecked_transaction().unwrap();
+        let cutoff = f.basis.invocation_ordinal + 1;
+        let same =
+            admission_journal::capacity_exclusion_candidates(&tx, &f.task, cutoff, &f.ledger)
+                .unwrap();
+        assert!(same.contains(&response.action_hash), "{role}");
+        let later = admission_journal::capacity_exclusion_candidates(
+            &tx,
+            &f.task,
+            cutoff,
+            &InvestigationInputLedger {
+                revision: f.ledger.revision + 1,
+                ..f.ledger.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            later.contains(&response.action_hash),
+            role == "domain-analyst@31",
+            "{role}"
+        );
+        // Never before the refused call, and never at an earlier revision.
+        assert!(
+            admission_journal::capacity_exclusion_candidates(
+                &tx,
+                &f.task,
+                f.basis.invocation_ordinal,
+                &InvestigationInputLedger {
+                    revision: f.ledger.revision + 1,
+                    ..f.ledger.clone()
+                },
+            )
+            .unwrap()
+            .is_empty()
+        );
+        if f.ledger.revision > 0 {
+            assert!(
+                admission_journal::capacity_exclusion_candidates(
+                    &tx,
+                    &f.task,
+                    cutoff,
+                    &InvestigationInputLedger {
+                        revision: f.ledger.revision - 1,
+                        ..f.ledger.clone()
+                    },
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+        drop(tx);
+    }
+}
+
 // AC-0596: authenticated revision-local exclusion, historical @13 unchanged.
 #[test]
 fn auditor14_capacity_exclusion_reopens_without_ledger_credit() {

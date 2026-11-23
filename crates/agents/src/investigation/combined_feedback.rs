@@ -140,6 +140,7 @@ impl RefusalFeedback {
         ) -> Result<(), InvestigationError>,
     ) -> Result<Option<Self>, InvestigationError> {
         let mut feedback = Self {
+            citation_drop: None,
             schema_version: 6,
             prose_correction: Some(ProseCorrection::Combined(Box::new(CombinedCorrections {
                 entries: Vec::new(),

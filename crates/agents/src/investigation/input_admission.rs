@@ -910,6 +910,7 @@ impl InvestigationInput {
             SpecialistId::DomainAnalystV28,
             SpecialistId::DomainAnalystV29,
             SpecialistId::DomainAnalystV30,
+            SpecialistId::DomainAnalystV31,
             SpecialistId::EvidenceAuditorV11,
             SpecialistId::EvidenceAuditorV12,
             SpecialistId::EvidenceAuditorV13,
@@ -1224,6 +1225,7 @@ impl InvestigationInput {
                 | SpecialistId::DomainAnalystV28
                 | SpecialistId::DomainAnalystV29
                 | SpecialistId::DomainAnalystV30
+                | SpecialistId::DomainAnalystV31
         ) && self
             .acquisition_choices
             .as_ref()
@@ -1330,6 +1332,7 @@ impl InvestigationInput {
                     | SpecialistId::DomainAnalystV28
                     | SpecialistId::DomainAnalystV29
                     | SpecialistId::DomainAnalystV30
+                    | SpecialistId::DomainAnalystV31
             ) && choices.capacity_exhausted())
             || self
                 .action_feedback

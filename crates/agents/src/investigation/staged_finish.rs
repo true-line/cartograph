@@ -167,7 +167,46 @@ pub struct RefusalFeedback {
     /// version-one record, preserving its canonical bytes and fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation_correction: Option<acquisition_choices::CitationCorrection>,
+    /// Version seven (@31, #2478): citation ids the frozen disclosure never
+    /// offered, to remove under the single repair. Absent everywhere else,
+    /// preserving every earlier record's canonical bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_drop: Option<CitationDrop>,
     pub unmet: Vec<FeedbackEntry>,
+}
+
+/// Drop-only citation correction: never an acquisition offer, evidence or a
+/// second repair. Ids are sorted, unique, bounded plain identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CitationDrop {
+    pub citation_ids: Vec<String>,
+}
+
+/// 12 findings of at most 8 citations each.
+pub const MAX_CITATION_DROP_IDS: usize = 96;
+const MAX_CITATION_DROP_ID_BYTES: usize = 128;
+
+/// Plain identifier bytes only, so a drop never echoes authored prose.
+pub fn plain_citation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_CITATION_DROP_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:/#@-".contains(&b))
+}
+
+impl CitationDrop {
+    fn validate(&self) -> Result<(), InvestigationError> {
+        if self.citation_ids.is_empty()
+            || self.citation_ids.len() > MAX_CITATION_DROP_IDS
+            || !self.citation_ids.iter().all(|id| plain_citation_id(id))
+            || !self.citation_ids.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(InvestigationError::InvalidInput);
+        }
+        Ok(())
+    }
 }
 
 /// Synthetic serialization envelope for sizing only, never a real refusal,
@@ -331,6 +370,7 @@ impl RefusalFeedback {
             return Err(InvestigationError::InvalidInput);
         }
         let feedback = Self {
+            citation_drop: None,
             prose_correction: None,
             schema_version: 1,
             citation_correction: None,
@@ -367,7 +407,9 @@ impl RefusalFeedback {
         policy: &InvestigationPolicy,
     ) -> Result<Vec<u8>, InvestigationError> {
         if self.schema_version
-            != if matches!(self.prose_correction, Some(ProseCorrection::Combined(_))) {
+            != if self.citation_drop.is_some() {
+                7
+            } else if matches!(self.prose_correction, Some(ProseCorrection::Combined(_))) {
                 6
             } else if matches!(
                 self.prose_correction,
@@ -389,8 +431,12 @@ impl RefusalFeedback {
             } else {
                 1
             }
-            || (self.unmet.is_empty() && self.prose_correction.is_none())
+            || (self.unmet.is_empty()
+                && self.prose_correction.is_none()
+                && self.citation_drop.is_none())
             || (self.prose_correction.is_some() && self.citation_correction.is_some())
+            || (self.citation_drop.is_some()
+                && (self.prose_correction.is_some() || self.citation_correction.is_some()))
             || self.unmet.len() > policy.max_completion_obligations()
             || self.unmet.iter().any(|entry| {
                 !crate::source_basis::hash(&entry.obligation_id)
@@ -436,6 +482,9 @@ impl RefusalFeedback {
         }
         if let Some(correction) = &self.citation_correction {
             correction.validate_feedback(&self.unmet, policy)?;
+        }
+        if let Some(drop) = &self.citation_drop {
+            drop.validate()?;
         }
         // The correction shares the old total ceiling with generic feedback.
         // Component validity never implies that their combination fits.
@@ -760,6 +809,7 @@ pub(super) fn admit_finish_with_locator(
         consistency,
     );
     let mut citation_correction = None;
+    let mut citation_drop = None;
     let mut prose_correction = None;
     let admitted = match admitted {
         Ok(result) => match input.admit_narrative(result, finish) {
@@ -780,6 +830,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@28"
                     | "domain-analyst@29"
                     | "domain-analyst@30"
+                    | "domain-analyst@31"
             ) && consistency.is_some() =>
         {
             match input.validate_correction_prose(finish, model.as_deref()) {
@@ -885,6 +936,34 @@ pub(super) fn admit_finish_with_locator(
             }
             None
         }
+        // #2478: offered unacquired targets keep the typed acquisition
+        // correction (choice mode only); every other non-offered id, in any
+        // mode, gets one drop-only correction under the same single repair.
+        Err(InvestigationError::InvalidCitation)
+            if request.specialist_id == "domain-analyst@31" =>
+        {
+            citation_correction = input.typed_citation_correction(
+                disclosure,
+                finish,
+                model.as_deref(),
+                policy,
+                consistency,
+            )?;
+            if citation_correction.is_none() {
+                citation_drop = Some(CitationDrop {
+                    citation_ids: input
+                        .citation_drop_ids(
+                            disclosure,
+                            finish,
+                            model.as_deref(),
+                            policy,
+                            consistency,
+                        )?
+                        .ok_or(InvestigationError::InvalidCitation)?,
+                });
+            }
+            None
+        }
         Err(error) => return Err(error),
     };
     let unmet = assessment
@@ -905,6 +984,7 @@ pub(super) fn admit_finish_with_locator(
                         | "domain-analyst@28"
                         | "domain-analyst@29"
                         | "domain-analyst@30"
+                        | "domain-analyst@31"
                 ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
@@ -964,8 +1044,10 @@ pub(super) fn admit_finish_with_locator(
             | "domain-analyst@28"
             | "domain-analyst@29"
             | "domain-analyst@30"
+            | "domain-analyst@31"
     ) && consistency.is_some()
         && citation_correction.is_none()
+        && citation_drop.is_none()
         && let Some(feedback) = RefusalFeedback::collect_input_corrections_with_policy(
             input,
             finish,
@@ -984,7 +1066,7 @@ pub(super) fn admit_finish_with_locator(
     let mut accepted = assessment.clone();
     if matches!(
         request.specialist_id.as_str(),
-        "domain-analyst@29" | "domain-analyst@30"
+        "domain-analyst@29" | "domain-analyst@30" | "domain-analyst@31"
     ) && finish.outcome == CompletionOutcome::Supported
         && let Some(result) = &admitted
     {
@@ -995,7 +1077,7 @@ pub(super) fn admit_finish_with_locator(
             .iter()
             .any(|item| item.obligation_id == entry.obligation_id && !item.capacity_disclosed)
     });
-    if !undisclosed && prose_correction.is_none() {
+    if !undisclosed && prose_correction.is_none() && citation_drop.is_none() {
         // A correction never constructs a result or discharges an obligation.
         let admitted = admitted.ok_or(InvestigationError::InvalidCitation)?;
         Ok(FinishDecision::Accepted(AcceptedCandidate {
@@ -1007,7 +1089,9 @@ pub(super) fn admit_finish_with_locator(
         }))
     } else {
         let feedback = RefusalFeedback {
-            schema_version: if matches!(
+            schema_version: if citation_drop.is_some() {
+                7
+            } else if matches!(
                 prose_correction,
                 Some(
                     ProseCorrection::UnverifiedEnumerationClaimAt(_)
@@ -1029,8 +1113,14 @@ pub(super) fn admit_finish_with_locator(
             },
             prose_correction,
             citation_correction,
+            citation_drop,
             unmet,
         };
+        // A drop that cannot fit the unchanged feedback ceiling stays the
+        // terminal citation refusal it replaced.
+        if feedback.citation_drop.is_some() && feedback.bytes_with_policy(policy).is_err() {
+            return Err(InvestigationError::InvalidCitation);
+        }
         feedback.bytes_with_policy(policy)?;
         Ok(FinishDecision::Refused {
             assessment,

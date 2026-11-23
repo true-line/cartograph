@@ -170,6 +170,7 @@ impl RefusalRecord {
                     | "domain-analyst@28"
                     | "domain-analyst@29"
                     | "domain-analyst@30"
+                    | "domain-analyst@31"
             ))
             || (matches!(
                 request.specialist_id.as_str(),
@@ -180,6 +181,7 @@ impl RefusalRecord {
                     | "domain-analyst@28"
                     | "domain-analyst@29"
                     | "domain-analyst@30"
+                    | "domain-analyst@31"
             ) && self.feedback.prose_correction.is_some()
                 && !combined)
         {
@@ -226,8 +228,12 @@ impl RefusalRecord {
                     | "domain-analyst@28"
                     | "domain-analyst@29"
                     | "domain-analyst@30"
+                    | "domain-analyst@31"
             ))
             || request.limit_profile != policy.profile()
+            // #2478: the drop-only correction is @31's alone.
+            || (self.feedback.citation_drop.is_some()
+                && request.specialist_id != "domain-analyst@31")
             || ((self.feedback.citation_correction.is_some()
                 || self.feedback.prose_correction.is_some())
                 && !matches!(
@@ -245,6 +251,7 @@ impl RefusalRecord {
                         | "domain-analyst@28"
                         | "domain-analyst@29"
                         | "domain-analyst@30"
+                        | "domain-analyst@31"
                 ))
         {
             return Err(InvestigationError::InvalidInput);
@@ -318,7 +325,9 @@ impl RefusalRecord {
                 .ok_or(InvestigationError::InvalidInput)?
                 .validate_stored_citation_correction(correction)?;
         }
-        if self.feedback.prose_correction.is_some() && consistency.is_none() {
+        if (self.feedback.prose_correction.is_some() || self.feedback.citation_drop.is_some())
+            && consistency.is_none()
+        {
             return Err(InvestigationError::InvalidInput);
         }
         if let Some(ProseCorrection::LimitationDeniesAcquiredEvidence(conflict)) =

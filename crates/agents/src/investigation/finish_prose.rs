@@ -164,6 +164,7 @@ mod tests {
     #[test]
     fn analyst20_prose_feedback_is_closed_and_historical_bytes_stay_absent() {
         let feedback = RefusalFeedback {
+            citation_drop: None,
             schema_version: 3,
             prose_correction: Some(ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse),
             citation_correction: None,
@@ -208,6 +209,7 @@ mod tests {
             },
         };
         let mut feedback = RefusalFeedback {
+            citation_drop: None,
             schema_version: 4,
             prose_correction: Some(ProseCorrection::ParaphraseReplayAt(location)),
             citation_correction: None,
@@ -243,6 +245,7 @@ mod tests {
             ProseCorrection::UnverifiedConfigurationClaimAt(location.clone()),
         ] {
             let mut feedback = RefusalFeedback {
+                citation_drop: None,
                 schema_version: 5,
                 prose_correction: Some(correction),
                 citation_correction: None,

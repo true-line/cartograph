@@ -279,6 +279,7 @@ fn captured_analyst_lane_admits_analyst28_like_analyst27() {
     assert!(captured_analyst_lane("domain-analyst@29", false, Cloud).is_err());
     for role in [
         "domain-analyst@30",
+        "domain-analyst@31",
         "domain-analyst@16",
         "evidence-auditor@14",
     ] {

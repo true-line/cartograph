@@ -685,12 +685,18 @@ pub(super) fn load_for_task(
             RefusalFeedback::max_bytes_with_policy(&policy)?,
         )?
         .ok_or(InvestigationStoreError::Invalid)?;
-        if feedback.citation_correction.is_some()
+        if (feedback.citation_correction.is_some()
             && !task
                 .detail
                 .summary
                 .specialist_id
-                .uses_typed_citation_correction()
+                .uses_typed_citation_correction())
+            || (feedback.citation_drop.is_some()
+                && !task
+                    .detail
+                    .summary
+                    .specialist_id
+                    .uses_unacquired_citation_drop())
         {
             return Err(InvestigationStoreError::Invalid);
         }
@@ -1047,8 +1053,12 @@ pub(super) fn append_for_task_with_merge(
                 | "domain-analyst@28"
                 | "domain-analyst@29"
                 | "domain-analyst@30"
+                | "domain-analyst@31"
         )
     {
+        return Err(InvestigationStoreError::Invalid);
+    }
+    if feedback.citation_drop.is_some() && request.specialist_id != "domain-analyst@31" {
         return Err(InvestigationStoreError::Invalid);
     }
     let mut record = RefusalRecord {

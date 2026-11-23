@@ -467,6 +467,49 @@ impl InvestigationInput {
         Ok(Some(correction))
     }
 
+    /// #2478 (@31 only): the exact, sorted, deduplicated citation ids of a
+    /// finish that the frozen disclosure does not offer, for a drop-only
+    /// correction in either acquisition mode. `None` keeps the terminal
+    /// refusal: another role, no invalid id, or an id that is not a plain
+    /// identifier (rejected authored text is never echoed).
+    pub(super) fn citation_drop_ids(
+        &self,
+        disclosure: &InvestigationDisclosure,
+        finish: &staged_finish::StagedFinish,
+        model: Option<&str>,
+        policy: &InvestigationPolicy,
+        consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
+    ) -> Result<Option<Vec<String>>, InvestigationError> {
+        if self.payload.system != SpecialistId::DomainAnalystV31.prompt() {
+            return Ok(None);
+        }
+        if finish.schema_version != 1 || finish.narrative.is_some() {
+            return Err(InvestigationError::InvalidAction);
+        }
+        self.validate_correction_prose(finish, model)?;
+        self.validate_acquisition_projection()?;
+        let InvestigationAction::Finish { findings, .. } = &finish.action else {
+            return Err(InvestigationError::InvalidAction);
+        };
+        let citations =
+            disclosure.eligible_citations_consistent(&self.ledger, policy, consistency)?;
+        let invalid = findings
+            .iter()
+            .flat_map(|finding| &finding.citation_ids)
+            .filter(|id| !citations.contains(*id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if invalid.is_empty()
+            || invalid.len() > staged_finish::MAX_CITATION_DROP_IDS
+            || !invalid
+                .iter()
+                .all(|id| staged_finish::plain_citation_id(id))
+        {
+            return Ok(None);
+        }
+        Ok(Some(invalid.into_iter().collect()))
+    }
+
     /// The host supplies canonical query-response JSON in original response order
     /// and exact source spans. This pure method verifies their hashes and bound
     /// membership; it cannot verify that the host read a database or source file.

@@ -495,6 +495,11 @@ fn request_family(
             &["domain-analyst@30"],
             b"cartograph:investigation-client-intent:v7\0",
         )),
+        ("investigation-v2", 7, "domain-analyst@31") => Ok((
+            7,
+            &["domain-analyst@31"],
+            b"cartograph:investigation-client-intent:v7\0",
+        )),
         ("investigation-v2", 7, "domain-analyst@14") => Ok((
             7,
             &["domain-analyst@14"],

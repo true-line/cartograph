@@ -239,6 +239,7 @@ fn obligation_acquisition_choices_follow_admission_and_attempts() {
     f.metadata.refusal_count = 1;
     f.metadata.last_refusal_id = Some("d".repeat(64));
     f.metadata.feedback = Some(staged_finish::RefusalFeedback {
+        citation_drop: None,
         prose_correction: None,
         schema_version: 1,
         citation_correction: None,

@@ -106,11 +106,18 @@ pub enum Capability {
     /// `read_artifact`: one page of a compiled catalogue artifact from the
     /// frozen basis, supplied as untrusted context (ADR-0089).
     ArtifactReads,
+    /// One bounded drop correction naming unacquired citation ids, in
+    /// choice and finish-only modes, under the single repair (#2478).
+    UnacquiredCitationDrop,
+    /// A read refused for prompt capacity stays withdrawn from the offered
+    /// choices for the rest of the run, not only at its own input revision
+    /// (#2522).
+    RunCapacityExclusions,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 25] = [
         Self::CompactDisclosure,
         Self::TurnProgress,
         Self::InspectionRequirements,
@@ -134,6 +141,8 @@ impl Capability {
         Self::LocalFinishGeneration,
         Self::NativeToolRuntime,
         Self::ArtifactReads,
+        Self::UnacquiredCitationDrop,
+        Self::RunCapacityExclusions,
     ];
 
     const fn bit(self) -> u32 {
@@ -228,7 +237,7 @@ use SpecialistRole as R;
 /// Every built-in specialist version, in `SpecialistId` declaration order:
 /// id, role, role version, prompt generation, availability, capabilities.
 #[rustfmt::skip]
-pub const SPECIALIST_TABLE: [SpecialistRow; 48] = [
+pub const SPECIALIST_TABLE: [SpecialistRow; 49] = [
     row(S::DomainAnalystV1, R::DomainAnalyst, 1, 1, A::Retired, &[]),
     row(S::EvidenceAuditorV1, R::EvidenceAuditor, 1, 1, A::Retired, &[]),
     row(S::DomainAnalyst, R::DomainAnalyst, 2, 2, A::Retired, &[]),
@@ -268,6 +277,7 @@ pub const SPECIALIST_TABLE: [SpecialistRow; 48] = [
     row(S::DomainAnalystV28, R::DomainAnalyst, 28, 14, A::Current, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration]),
     row(S::DomainAnalystV29, R::DomainAnalyst, 29, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration, C::NativeToolRuntime]),
     row(S::DomainAnalystV30, R::DomainAnalyst, 30, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration, C::NativeToolRuntime, C::ArtifactReads]),
+    row(S::DomainAnalystV31, R::DomainAnalyst, 31, 14, A::Offered, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::CombinedFinishFeedback, C::FinishPatch, C::VisibleActionSchema, C::ExactSourceReservation, C::AcquisitionChoices, C::ExactNodeQueries, C::CapacityExclusions, C::FinishFeedbackWitness, C::TypedCitationCorrection, C::FindingWithholding, C::LocalFinishGeneration, C::NativeToolRuntime, C::ArtifactReads, C::UnacquiredCitationDrop, C::RunCapacityExclusions]),
     row(S::EvidenceAuditorV11, R::EvidenceAuditor, 11, 10, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission]),
     row(S::EvidenceAuditorV12, R::EvidenceAuditor, 12, 10, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries]),
     row(S::EvidenceAuditorV13, R::EvidenceAuditor, 13, 12, A::Retired, &[C::CompactDisclosure, C::TurnProgress, C::CoverageQualification, C::CompletionObligations, C::PolicySelection, C::QueryHistoryDisclosure, C::NextPromptAdmission, C::QueryBudgetRefusals, C::AcquisitionChoices, C::ExactNodeQueries, C::FinishFeedbackWitness, C::TypedCitationCorrection]),
