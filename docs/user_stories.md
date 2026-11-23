@@ -1811,7 +1811,7 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **AC-0925** Given recovered `Endpoint` facts, when D1 §1.3 is compiled, then after the Capability frame it states how many HTTP endpoints no included Capability cites, of how many, how many of those have no resolved handler (their `HANDLES` edge reaches no Symbol, so no rule can group them) and how many have a handler that no capability rule groups, counted by framework, and points to `endpoint-inventory.md` for the list; an endpoint recorded with Gap confidence is not counted (it is in the gap register); it states nothing when every endpoint is cited or there is none (#2007).
 - **Security:** Agents propose only; acceptance never upgrades a tier or writes a fact (R-INT-1, R-INT-3). Egress consent and redaction per step are unchanged. No write to the ingested target.
 - **Performance:** A drafting run is bounded by the existing call, byte and time limits; a draft is at most 256 claims and 256 KiB.
-- **Trace:** W13 (#1748) · `spec`, `agents`, `context-hub`, `app`, `ui` · ADR-0064, ADR-0061, ADR-0058 · T-0663..0670, T-0682..0684, T-0861, T-0862, T-0925, T-0980, T-0981
+- **Trace:** W13 (#1748) · `spec`, `agents`, `context-hub`, `app`, `ui` · ADR-0064, ADR-0061, ADR-0058, ADR-0090 · T-0663..0670, T-0682..0684, T-0861, T-0862, T-0925, T-0980, T-0981
 
 ### US-0048 — Keep authored sections current as the code changes
 - **Actor:** Engineer or product owner

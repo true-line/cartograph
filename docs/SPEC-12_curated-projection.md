@@ -96,6 +96,17 @@ Per read: `view`, `revision`, `graph_basis`. Per item and per listed record:
 `source_support` (count of captured items and of unverified items), `state`
 and `reason`.
 
+## Attested context
+
+[ADR-0090](adr/ADR-0090-attested-context.md) adds attested context as the
+fourth record kind. It is designed, not built. An accepted attested record
+(one an engineer stated or confirmed) gets the first state that applies:
+`withdrawn`, `disputed`, `already-covered`, `unresolvable`, `stale` or
+`eligible`. A record only agents attested is not accepted and does not
+enter. The revision and the policy move to version 4. An attested record
+never changes a base fact or the Gap count, and its DR-4 `tier` and
+`confidence` are empty: it is labelled *attested* with its contributors.
+
 ## Findings
 
 [ADR-0074](adr/ADR-0074-curated-findings.md) makes an investigation finding
