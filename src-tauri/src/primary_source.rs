@@ -2150,13 +2150,15 @@ impl PrimarySourceStore {
             .cloned()
             .collect();
         // Droppable groups, in the order they are kept: shipped JVM class
-        // files (AC-1215), the files the active plugins claim (AC-1069),
-        // then the documentation walk's selection (AC-1065). Each is tried
-        // with the readers and everything before it, and the last is the
-        // first left out, so a later group never costs an earlier one, a
-        // reader or a lane its capture.
+        // files (AC-1215) and JavaScript bundle maps (AC-1216), the files the
+        // active plugins claim (AC-1069), then the documentation walk's
+        // selection (AC-1065). Each is tried with the readers and everything
+        // before it, and the last is the first left out, so a later group
+        // never costs an earlier one, a reader or a lane its capture.
         let classes = if wants_lanes {
-            adapters_artifact_jvm::class_paths(root).unwrap_or_default()
+            let mut shipped = adapters_artifact_jvm::class_paths(root).unwrap_or_default();
+            shipped.extend(adapters_artifact_js::artifact_paths(root).unwrap_or_default());
+            shipped
         } else {
             Vec::new()
         };

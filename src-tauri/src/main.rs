@@ -314,6 +314,9 @@ struct LayerBreakdown {
     kotlin: LayerSummary,
     /// Compiled JVM classes shipped without their source (AC-1215).
     jvm_classes: LayerSummary,
+    /// Original sources recovered from shipped JavaScript bundles' source
+    /// maps (AC-1216).
+    js_bundles: LayerSummary,
     tf: LayerSummary,
     webext: LayerSummary,
     tools: LayerSummary,
@@ -337,6 +340,7 @@ impl LayerBreakdown {
         self.java.add(other.java);
         self.kotlin.add(other.kotlin);
         self.jvm_classes.add(other.jvm_classes);
+        self.js_bundles.add(other.js_bundles);
         self.tf.add(other.tf);
         self.webext.add(other.webext);
         self.tools.add(other.tools);
@@ -355,6 +359,7 @@ impl LayerBreakdown {
             + self.java.files
             + self.kotlin.files
             + self.jvm_classes.files
+            + self.js_bundles.files
             + self.tf.files
     }
 }
@@ -1433,6 +1438,10 @@ fn repo_coverage(
                 adapters_artifact_jvm::EXTRACTOR_ID,
                 count(&layers.jvm_classes),
             ),
+            (
+                adapters_artifact_js::EXTRACTOR_ID,
+                count(&layers.js_bundles),
+            ),
             ("t0.iac-terraform", count(&layers.tf)),
             (
                 ingest::toolchain::TOOLCHAIN_EXTRACTOR_ID,
@@ -2370,6 +2379,41 @@ fn extract_tree_packed(
             edges: distinct_edge_count(&jvm.edges),
         };
         facts.extend(jvm.nodes, jvm.edges).map_err(pack_err)?;
+
+        // Original sources a shipped JavaScript bundle's source map carries,
+        // read under the bundle with artifact evidence (AC-1216). A capture
+        // holding every map file its bundles name is read instead of the
+        // checkout, as the class files are.
+        let js_id = adapters_artifact_js::SourceId { repo, commit };
+        let mut js_progress =
+            |path: &str| on_file(&format!("Reading JavaScript bundle source maps — {path}"));
+        let captured = captured_lane_paths(primary, "");
+        let read_captured = |path: &str| {
+            primary
+                .ok_or_else(|| std::io::Error::other("no capture"))?
+                .file(path)
+                .map(|file| file.bytes().to_vec())
+                .map_err(|_| std::io::Error::other("captured file is unavailable"))
+        };
+        let js = if primary.is_some()
+            && adapters_artifact_js::capture_holds_maps(&captured, &read_captured)
+        {
+            adapters_artifact_js::extract_dir_from(
+                &js_id,
+                &captured,
+                &read_captured,
+                &mut js_progress,
+            )
+        } else {
+            adapters_artifact_js::extract_dir(root, &js_id, &mut js_progress)
+        }
+        .map_err(|error| error.to_string())?;
+        layers.js_bundles = LayerSummary {
+            files: js.nodes.iter().filter(|node| node.label == "File").count() as u64,
+            nodes: distinct_node_count(&js.nodes),
+            edges: distinct_edge_count(&js.edges),
+        };
+        facts.extend(js.nodes, js.edges).map_err(pack_err)?;
     }
     if wants_infra {
         let tf_id = iac::SourceId { repo, commit };
@@ -5293,6 +5337,7 @@ fn record_ingest_metrics(
             adapters_artifact_jvm::EXTRACTOR_ID,
             layers.jvm_classes.files,
         ),
+        (adapters_artifact_js::EXTRACTOR_ID, layers.js_bundles.files),
         ("t0.iac-terraform", layers.tf.files),
         ("t0.webextension", layers.webext.files),
     ]
@@ -12964,6 +13009,62 @@ export function queueOrder() {
                 .nodes
                 .iter()
                 .all(|node| !node.id.contains("@build/"))
+        );
+    }
+
+    #[test]
+    fn shipped_bundle_sources_are_their_own_layer() {
+        // AC-1216: the sources a shipped bundle's map carries are read into
+        // the graph under the bundle with artifact evidence and reported as
+        // their own layer; a bundle in build output is not read.
+        let dir = tempfile::tempdir().unwrap();
+        let map = serde_json::json!({
+            "version": 3,
+            "sources": ["webpack://shop/./src/api.ts", "webpack://shop/./src/cart.ts"],
+            "sourcesContent": [
+                "export function loadCart() {\n  return 1;\n}\n",
+                "import { loadCart } from './api';\nexport function showCart() {\n  return loadCart();\n}\n"
+            ],
+            "mappings": ""
+        })
+        .to_string();
+        for (rel, text) in [
+            ("public/app.js", "x();\n//# sourceMappingURL=app.js.map\n"),
+            ("public/app.js.map", map.as_str()),
+            (
+                "build/app.js",
+                "x();\n//# sourceMappingURL=../public/app.js.map\n",
+            ),
+        ] {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let (extraction, summary) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/js-app",
+            "workdir",
+            &["server".into()],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(summary.js_bundles.files, 2);
+        assert!(summary.js_bundles.edges > 0);
+        let cart = extraction
+            .nodes
+            .iter()
+            .find(|node| node.id == "sym:local/js-app@public/app.js!/src/cart.ts#showCart")
+            .expect("recovered source");
+        assert_eq!(cart.props["prov"]["extractor_id"], "t0.artifact-js");
+        assert_eq!(cart.props["prov"]["basis"]["kind"], "artifact");
+        assert!(
+            extraction
+                .nodes
+                .iter()
+                .all(|node| !node.id.contains("@build/app.js!"))
         );
     }
 

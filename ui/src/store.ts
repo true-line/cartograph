@@ -119,6 +119,8 @@ export interface IngestSummary {
     kotlin: LayerSummary;
     /** Compiled JVM classes shipped without source (AC-1215). */
     jvm_classes?: LayerSummary;
+    /** Sources recovered from shipped JavaScript bundles' maps (AC-1216). */
+    js_bundles?: LayerSummary;
     webext: LayerSummary;
     /** Config-file evidence: Tool nodes + DEFINED_IN proofs (#215). */
     tools: LayerSummary;

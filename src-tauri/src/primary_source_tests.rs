@@ -5149,6 +5149,86 @@ fn shipped_jvm_classes_are_read_from_the_capture() {
     );
 }
 
+// AC-1216: a shipped bundle's map file joins its capture; the bundle reader
+// recovers the map's sources from the retained bytes, not the checkout.
+#[test]
+fn shipped_bundle_maps_are_read_from_the_capture() {
+    let map = serde_json::json!({
+        "version": 3,
+        "sources": ["webpack://shop/./src/cart.ts"],
+        "sourcesContent": ["export function showCart() {\n  return 1;\n}\n"],
+        "mappings": ""
+    })
+    .to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "shipped");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join("public")).unwrap();
+    std::fs::write(
+        root.join("public/app.js"),
+        "x();\n//# sourceMappingURL=app.js.map\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("public/app.js.map"), &map).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["server".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    assert!(
+        capture
+            .manifest()
+            .files
+            .iter()
+            .any(|entry| entry.path == "public/app.js.map")
+    );
+    // The checkout changes after capture; the read must not see it.
+    std::fs::write(root.join("public/app.js.map"), b"{").unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let cart = format!(
+        "sym:{}@public/app.js!/src/cart.ts#showCart",
+        source.repo_key
+    );
+    let node = extraction
+        .nodes
+        .iter()
+        .find(|node| node.id == cart)
+        .expect("the captured map was read");
+    assert_eq!(node.props["prov"]["extractor_id"], "t0.artifact-js");
+    assert!(
+        !extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "Gap" && node.props["path"] == "public/app.js")
+    );
+}
+
 // AC-1053: a source's `.tf` files join its capture when infrastructure is
 // recovered; the Terraform pass parses the retained bytes, not the checkout,
 // and each surviving Terraform fact whose provenance lies in one captured file

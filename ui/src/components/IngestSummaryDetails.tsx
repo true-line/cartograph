@@ -104,6 +104,15 @@ export function IngestSummaryDetails({
               </dd>
             </div>
           ) : null}
+          {summary.layers.js_bundles && summary.layers.js_bundles.files > 0 ? (
+            <div>
+              <dt>JS bundle sources</dt>
+              <dd data-testid="js-bundles-layer-summary">
+                {summary.layers.js_bundles.files} files · {summary.layers.js_bundles.nodes}{' '}
+                nodes · {summary.layers.js_bundles.edges} edges
+              </dd>
+            </div>
+          ) : null}
           <div>
             <dt>Terraform</dt>
             <dd data-testid="tf-layer-summary">

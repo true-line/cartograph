@@ -479,6 +479,12 @@ const DETERMINISTIC: &[(&str, &str, Option<&[&str]>)] = &[
         "compiled JVM class",
         Some(APPLICATION_LAYERS),
     ),
+    // Original sources recovered from shipped bundles' maps (AC-1216).
+    (
+        "t0.artifact-js",
+        "JavaScript bundle source map",
+        Some(APPLICATION_LAYERS),
+    ),
     ("t0.iac-terraform", "Terraform", Some(INFRA_LAYERS)),
     (
         crate::toolchain::TOOLCHAIN_EXTRACTOR_ID,
