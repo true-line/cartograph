@@ -193,6 +193,7 @@ impl Fixture {
         let mut pages = previous_pages.to_vec();
         let mut details = previous_details.to_vec();
         let raw = match kind {
+            ContextPreviewKind::Artifact => unreachable!("artifact previews are tested separately"),
             ContextPreviewKind::Query => {
                 let key = crate::TaskFactKey::Node {
                     id: "preview:fact".into(),
@@ -255,6 +256,7 @@ impl Fixture {
             }
         };
         match kind {
+            ContextPreviewKind::Artifact => unreachable!("artifact previews are tested separately"),
             ContextPreviewKind::Query => pages.push(&raw),
             ContextPreviewKind::Inventory => details.push(&raw),
         }
