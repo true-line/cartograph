@@ -5727,6 +5727,75 @@ fn a_java_symbol_with_a_spaced_generic_signature_resolves_for_inspection() {
     }
 }
 
+// AC-1439 (#2523): a Java rule owner whose captured range is longer than one
+// inspection target may name is refused as `RangeTooLarge`, not `Stale`, and
+// rule-bearing suggestions never offer such a range, so every one resolves.
+#[test]
+fn an_oversized_java_rule_owner_is_range_too_large_and_never_suggested() {
+    let filler: String = (0..400)
+        .map(|index| format!("    int local{index} = values.size() + {index};\n"))
+        .collect();
+    let java = format!(
+        "package demo;\n\nimport java.util.Map;\n\nclass Registry {{\n  Object determine(Map<Class<?>, Object> values, String name) {{\n    if (values == null) {{\n      throw new IllegalArgumentException(name);\n    }}\n{filler}    return name;\n  }}\n\n  void small(String name) {{\n    if (name == null) {{\n      throw new IllegalStateException();\n    }}\n  }}\n}}\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "java-oversized");
+    std::fs::write(root.join("Registry.java"), &java).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    publish(&state, &source, &parsed);
+    let symbol = parsed
+        .extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Symbol" && node.id.contains("determine("))
+        .expect("the oversized Java method is recovered")
+        .clone();
+    let fact = FactKey::from_node(&symbol);
+    let description = primary_source::describe(&state, &fact).unwrap();
+    let task_fact = crate::task_evidence::task_fact(&fact);
+    let limit = agents::investigation::MAX_INSPECTION_RANGE_BYTES;
+    assert!(
+        description
+            .ranges
+            .iter()
+            .any(|range| range.byte_end - range.byte_start > limit),
+        "the fixture has a range longer than one target"
+    );
+    for range in &description.ranges {
+        let outcome = crate::investigations::inspection::resolve_typed(
+            &state,
+            &task_fact,
+            &description.graph_snapshot_id,
+            &description.receipt_id,
+            range.index,
+        );
+        if range.byte_end - range.byte_start > limit {
+            assert_eq!(
+                outcome.err(),
+                Some(crate::investigations::inspection::InspectionError::RangeTooLarge)
+            );
+        } else {
+            outcome.unwrap();
+        }
+    }
+    let suggested =
+        crate::investigations::rule_sources::rule_bearing_sources(&state, None, None, 7).unwrap();
+    assert!(!suggested.is_empty());
+    for source in &suggested {
+        crate::investigations::inspection::resolve_typed(
+            &state,
+            &source.fact,
+            &source.graph_snapshot_id,
+            &source.receipt_id,
+            source.range_index,
+        )
+        .unwrap_or_else(|error| panic!("{:?} resolves: {error:?}", source.fact));
+    }
+}
+
 /// Receipts the production TS lane mints from `capture` (ADR-0072 slice 2).
 fn receipts_from(
     state: &AppState,
