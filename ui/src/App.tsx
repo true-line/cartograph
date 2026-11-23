@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { isCompletionSpecialist } from './investigationFamilies';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
-import { createRepositoryLabeler } from './repositoryLabels';
+import { createRepositoryLabeler, systemDisplayName } from './repositoryLabels';
 import { curatedRecordStatuses } from './curated';
 import { railSurface, SURFACES, surfaceLabel, type SurfaceView } from './views';
 import { NavRail } from './components/NavRail';
@@ -568,8 +568,10 @@ export default function App() {
   }, [selectedNode, selectedFact, selectedRequest]);
 
   useEffect(() => {
-    if (view === 'settings') void usePrimarySourceStore.getState().loadSources();
-  }, [view]);
+    // Workspace names coverage sources from the registry too (#2471): a source
+    // with no recovered facts is not in the system contents.
+    if (view === 'settings' || view === 'workspace') void usePrimarySourceStore.getState().loadSources();
+  }, [view, systemContents]);
 
   const navigate = useCallback(
     (next: SurfaceView) => {
@@ -766,8 +768,9 @@ export default function App() {
       : { kind: 'system', label: 'Whole system' };
   // Atlas names repositories as Workspace does, not by `local/src_<hash>` keys (#1601).
   const atlasRepoLabel = useMemo(() => createRepositoryLabeler(systemContents), [systemContents]);
-  // Evidence-backed contents survive relaunch; synthetic nodes name no system (AC-0085).
-  const systemName = systemContents.length > 0 ? 'Ingested system' : null;
+  // Evidence-backed contents survive relaunch; synthetic nodes name no system
+  // (AC-0085). The breadcrumb names the recovered system, as Workspace does (#2469).
+  const systemName = useMemo(() => systemDisplayName(systemContents), [systemContents]);
   const status = ingestBusy
     ? 'Ingesting…'
     : backend === 'up'
@@ -799,7 +802,9 @@ export default function App() {
         return (
           <>
             <WorkspaceSurface
+              loading={backend === 'unknown'}
               systemContents={systemContents}
+              registeredSources={primarySource.sources}
               summary={ingestSummary}
               recordedCoverage={recordedCoverage}
               recordedCoverageError={recordedCoverageError}

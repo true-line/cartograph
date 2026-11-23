@@ -763,3 +763,97 @@ export const DraftAdapterWorkPacketsInCoverage: Story = {
     ).not.toBeInTheDocument();
   },
 };
+
+const LOCAL_KEY = 'local/src_536205a518ecd1d02e552e71e72ece1d';
+const LOCAL_SOURCE: SystemRepo[] = [{ repo: LOCAL_KEY, display_name: 'simplelogin', commit: 'workdir' }];
+
+export const RelaunchNamesThePersistedSystem: Story = {
+  // #2469: after a relaunch there is no ingest summary; the heading names the
+  // persisted system, not "Ingested system".
+  args: { summary: null, systemContents: LOCAL_SOURCE },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('heading', { level: 2, name: 'simplelogin' })).toBeInTheDocument();
+    await expect(canvas.queryByText('Ingested system')).not.toBeInTheDocument();
+  },
+};
+
+export const FirstReadSaysItIsLoading: Story = {
+  // #2469: while the first read of the persisted system runs, the landing
+  // says so instead of claiming there is no system.
+  args: { summary: null, findings: null, bundle: null, systemContents: [], loading: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('heading', { level: 2, name: 'Loading the recovered system…' })).toBeInTheDocument();
+    await expect(canvas.queryByText('No system yet')).not.toBeInTheDocument();
+  },
+};
+
+export const CoverageNamesLocalSourcesByFolder: Story = {
+  // #2471: the coverage inventory names a local source by its folder, in the
+  // heading and in the producers' reasons; the exact key is the heading's title.
+  args: {
+    summary: {
+      ...meta.args.summary,
+      repo: LOCAL_KEY,
+      coverage: [{
+        ...COVERAGE[0],
+        repo: LOCAL_KEY,
+        producers: COVERAGE[0].producers.map((producer) => ({
+          ...producer,
+          stopping_reason: producer.stopping_reason.replace('acme/api', LOCAL_KEY),
+        })),
+      }],
+    },
+    systemContents: LOCAL_SOURCE,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inventory = canvas.getByTestId('coverage-inventory');
+    await expect(inventory).toHaveTextContent('completed over 7 files of simplelogin@0123456789abcdef');
+    await expect(inventory).not.toHaveTextContent(/local\/src_/);
+    await expect(within(inventory).getByText('simplelogin')).toHaveAttribute('title', LOCAL_KEY);
+  },
+};
+
+export const RecordedCoverageNamesLocalSources: Story = {
+  // #2471: restored and stale inventories use the same readable names.
+  args: {
+    summary: null,
+    systemContents: LOCAL_SOURCE,
+    recordedCoverage: [{
+      repo: LOCAL_KEY,
+      status: 'stale',
+      inventory_hash: 'blake3:fedcba9876543210fedc',
+      compared: ['registration', 'plugins'],
+      inventory: null,
+    }],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const stale = canvas.getByTestId('stale-coverage');
+    await expect(stale).toHaveTextContent('simplelogin blake3:fedcba987654: stale, not current.');
+    await expect(within(stale).getByText('simplelogin')).toHaveAttribute('title', LOCAL_KEY);
+  },
+};
+
+export const CoverageNamesASourceWithNoFacts: Story = {
+  // #2471: a source whose ingest recovered no evidence-bearing fact is not in
+  // the system contents; its heading and coverage still read by its registered name.
+  args: {
+    summary: {
+      ...meta.args.summary,
+      repo: LOCAL_KEY,
+      coverage: [{ ...COVERAGE[0], repo: LOCAL_KEY }],
+    },
+    systemContents: [],
+    registeredSources: [{ repo_key: LOCAL_KEY, display_name: 'empty-folder' }],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('heading', { level: 2, name: 'empty-folder' })).toBeInTheDocument();
+    const inventory = canvas.getByTestId('coverage-inventory');
+    await expect(within(inventory).getByText('empty-folder')).toHaveAttribute('title', LOCAL_KEY);
+    await expect(canvasElement).not.toHaveTextContent(/local\/src_/);
+  },
+};
