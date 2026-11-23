@@ -9113,6 +9113,7 @@ pub fn run() {
             attested_capture::state_attested_gap_answer,
             attested_capture::review_attested_record,
             attested_capture::list_attested_records,
+            attested_capture::propose_attested_from_finding,
             investigations::commands::list_investigations,
             investigations::commands::list_specialist_task_activity,
             investigations::commands::check_local_ollama,

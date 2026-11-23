@@ -13,6 +13,10 @@
 //!   stored record at the attestation count they read. Confirming is what
 //!   makes an agent's record engineer-backed.
 //! - [`attested_records`] lists the stored records, newest first.
+//! - [`propose_from_finding`] takes a finding of a completed investigation
+//!   or chat as its agent's answer to a Gap: `agent-attested, unconfirmed`
+//!   until the engineer confirms it. The same content from another agent
+//!   is recorded as that agent agreeing.
 //!
 //! Recorded hashes always come from the current graph, so a record made
 //! here goes stale as soon as a fact it rests on changes.
@@ -173,6 +177,129 @@ pub(crate) fn attested_records(
         .attested()
         .list(limit, before)
         .map_err(|e| e.to_string())
+}
+
+/// The finding `finding_id` of the completed investigation
+/// `investigation_id`, proposed by the run's agent as the answer to the Gap
+/// `gap_id` for `slot`. The engineer who chose it, when `directed`, is
+/// recorded as directing the agent. The graph must still be the one the
+/// run read, so the recorded hashes are the ones the finding rests on.
+pub(crate) fn propose_from_finding(
+    state: &crate::AppState,
+    investigation_id: &str,
+    finding_id: &str,
+    gap_id: &str,
+    slot: &str,
+    directed: bool,
+) -> Result<StoredAttested, String> {
+    use agents::attested_proposal::{ProposalRun, Proposer, follow_up, proposal};
+    use agents::investigation::InvestigationStatus;
+    let (detail, result, ledger) = {
+        let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let detail = jobs
+            .investigation(investigation_id)
+            .map_err(|e| e.to_string())?;
+        let result = jobs
+            .investigation_result(investigation_id)
+            .map_err(|e| e.to_string())?;
+        let ledger = jobs
+            .investigation_ledger(investigation_id)
+            .map_err(|e| e.to_string())?;
+        (detail, result, ledger)
+    };
+    if detail.summary.status != InvestigationStatus::Completed {
+        return Err("run_not_completed".into());
+    }
+    let (Some(result), Some(ledger)) = (result, ledger) else {
+        return Err("run_not_completed".into());
+    };
+    let finding = result
+        .findings
+        .iter()
+        .find(|finding| finding.finding_id == finding_id)
+        .ok_or("unknown_finding")?;
+    let directed_by = if directed {
+        Some(engineer(state)?.id)
+    } else {
+        None
+    };
+    let (nodes, edges) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let (_, ((nodes, edges), _)) = crate::curated::read_graph(&graph)?;
+        (nodes, edges)
+    };
+    let current = context_hub::ContextSnapshot::new(nodes.clone(), edges.clone())
+        .ok()
+        .map(|snapshot| snapshot.id().to_owned());
+    if current.as_deref() != Some(ledger.graph_snapshot_id.as_str()) {
+        return Err("graph_changed".into());
+    }
+    let gap = nodes
+        .iter()
+        .find(|node| node.id == gap_id)
+        .ok_or("gap_not_found")?;
+    if !context_hub::curated::is_gap(gap) {
+        return Err("gap_recovered".into());
+    }
+    let run = ProposalRun {
+        run: detail.summary.investigation_id.clone(),
+        role: serde_json::to_value(detail.summary.specialist_id)
+            .ok()
+            .and_then(|role| role.as_str().map(str::to_owned))
+            .ok_or("unknown_role")?,
+        definition_fingerprint: detail.specialist.prompt_fingerprint.clone(),
+        provider: detail.provider.provider_id.clone(),
+        model: detail.provider.model.clone(),
+    };
+    let drafts = state.drafts.lock().map_err(|e| e.to_string())?;
+    let store = drafts.attested();
+    let agent = store
+        .agent(&run.role, &run.provider, &run.model)
+        .map_err(|e| e.to_string())?;
+    let proposer = Proposer {
+        agent: agent.id,
+        directed_by,
+    };
+    let record = proposal(
+        &run,
+        finding,
+        &ledger.citations,
+        AttestedTarget::Gap {
+            gap_id: gap_id.to_owned(),
+            slot: slot.to_owned(),
+        },
+        &proposer,
+        |fact| spec::citation_id(&crate::investigations::section_drafts::fact_key(fact)),
+        |cited| spec::cited_fact_hashes(&nodes, &edges, cited),
+    )
+    .map_err(|refusal| refusal.code().to_owned())?;
+    if record.recorded_hashes.len() != record.supporting.len() {
+        return Err("supporting_fact_not_found".into());
+    }
+    let stored = store.stage(record).map_err(|e| e.to_string())?;
+    match follow_up(&stored, &run, &proposer) {
+        None => Ok(stored),
+        Some(agreed) => store
+            .attest(&stored.record_id, stored.attestation_count(), agreed)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// The engineer proposes a finding of a completed run as its agent's answer
+/// to a Gap.
+#[tauri::command]
+pub(crate) async fn propose_attested_from_finding(
+    investigation_id: String,
+    finding_id: String,
+    gap_id: String,
+    slot: String,
+    app: tauri::AppHandle,
+) -> Result<StoredAttested, String> {
+    crate::off_ui_thread(move || {
+        let state = app.state::<crate::AppState>();
+        propose_from_finding(&state, &investigation_id, &finding_id, &gap_id, &slot, true)
+    })
+    .await
 }
 
 /// Record the project's engineer.
