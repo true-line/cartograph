@@ -873,3 +873,36 @@ fn failure_record_terminal_diagnostics_are_closed() {
         }
     }
 }
+
+// AC-1609: a discarded source read keeps a closed, text-free step and class.
+#[test]
+fn source_read_discard_diagnostic_is_closed() {
+    let diagnostic = InvestigationTerminalDiagnostic::SourceReadDiscarded {
+        step: SourceDiscardStep::PublishCommit,
+        error_class: SourceDiscardClass::StoreCapacity,
+    };
+    let value = serde_json::to_value(diagnostic).unwrap();
+    assert_eq!(
+        value,
+        json!({"schema":"investigation-terminal-diagnostic@7","step":"publish_commit","error_class":"store_capacity"})
+    );
+    assert_eq!(
+        serde_json::from_value::<InvestigationTerminalDiagnostic>(value.clone()).unwrap(),
+        diagnostic
+    );
+    for field in ["step", "error_class", "schema", "message"] {
+        let mut changed = value.clone();
+        changed[field] = json!("provider prose");
+        assert!(serde_json::from_value::<InvestigationTerminalDiagnostic>(changed).is_err());
+    }
+    // The sizing record is at least as wide as every real one.
+    let widest = serde_json::to_vec(&InvestigationTerminalDiagnostic::widest_source_discard())
+        .unwrap()
+        .len();
+    for step in SourceDiscardStep::ALL {
+        for error_class in SourceDiscardClass::ALL {
+            let record = InvestigationTerminalDiagnostic::SourceReadDiscarded { step, error_class };
+            assert!(serde_json::to_vec(&record).unwrap().len() <= widest);
+        }
+    }
+}
