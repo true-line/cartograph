@@ -5,9 +5,14 @@
 //! two artifacts share is listed once in `assertions` and referenced by
 //! index. The file is compact JSON with one entry per line.
 //!
+//! v3 adds one thing: an artifact that is a rendering of another artifact
+//! in the bundle (`fact-index.md` of `fact-index.json`) is written in
+//! `files` as `{"rendered_from": "<file name>"}`, and the reader renders it,
+//! checking the result against the artifact's content identity.
+//!
 //! [`BundleFileV2`] writes it one artifact at a time, so a host can stream a
-//! bundle it never holds whole (AC-1212). [`read_bundle_file`] reads a v2
-//! file or a v1 file (the AC-0740 shape) back to the same [`SpecBundle`].
+//! bundle it never holds whole (AC-1212). [`read_bundle_file`] reads a v3,
+//! v2 or v1 file (the AC-0740 shape) back to the same [`SpecBundle`].
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
@@ -20,6 +25,31 @@ use crate::{CuratedBasis, ExportMode, GraphBasis, SpecArtifact, SpecAssertion, S
 
 /// The `schema` a v2 bundle file opens with. A file without one is v1.
 pub const BUNDLE_FILE_SCHEMA_V2: &str = "cartograph.spec-bundle-file/v2";
+
+/// The `schema` the writer writes: v2 with rendered artifacts carried once.
+pub const BUNDLE_FILE_SCHEMA_V3: &str = "cartograph.spec-bundle-file/v3";
+
+/// An artifact the reader renders from another: its id, the id of the
+/// artifact it is rendered from, and the rendering.
+struct Rendered {
+    id: &'static str,
+    from: &'static str,
+    render: fn(&str) -> Option<String>,
+}
+
+const RENDERED: &[Rendered] = &[Rendered {
+    id: crate::workbench::fact_index::MARKDOWN_ID,
+    from: crate::workbench::fact_index::JSON_ID,
+    render: crate::workbench::fact_index::markdown_from_json,
+}];
+
+/// A `files` value: the content, or (v3) the file it is rendered from.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FileValue {
+    Text(String),
+    Rendered { rendered_from: String },
+}
 
 /// One evidence source in the file's `sources` table.
 #[derive(Serialize, Deserialize)]
@@ -128,6 +158,9 @@ pub enum BundleFileError {
     RepeatedFileName(String),
     /// An index, or a file name, points at nothing in the file.
     Dangling(String),
+    /// A rendered artifact cannot be rendered from the file it names, or
+    /// the rendering is not the content its identity was computed over.
+    Rendering(String),
 }
 
 impl std::fmt::Display for BundleFileError {
@@ -141,6 +174,7 @@ impl std::fmt::Display for BundleFileError {
             ),
             Self::RepeatedFileName(name) => write!(f, "two artifacts share the file name {name:?}"),
             Self::Dangling(what) => write!(f, "bundle file refers to a missing {what}"),
+            Self::Rendering(name) => write!(f, "bundle file cannot render {name:?}"),
         }
     }
 }
@@ -172,6 +206,8 @@ pub struct BundleFileV2 {
     source_ids: HashMap<(String, String), u32>,
     listed: HashMap<[u8; 32], u32>,
     names: HashSet<String>,
+    /// Each pushed artifact's id and file name, in push order.
+    pushed: Vec<(String, String)>,
     artifacts: usize,
     line: Vec<u8>,
 }
@@ -211,7 +247,25 @@ impl BundleFileV2 {
         artifacts.write_all(if self.artifacts == 0 { b"" } else { b",\n" })?;
         serde_json::to_writer(&mut *artifacts, &line)?;
         self.artifacts += 1;
+        self.pushed
+            .push((artifact.id.clone(), artifact.file_name.clone()));
         Ok(())
+    }
+
+    /// For each artifact pushed, in order, the file name of the artifact it
+    /// is rendered from when the bundle holds that artifact: its `files`
+    /// entry is then [`BundleFileV2::rendered_entry`], not its content.
+    pub fn rendered_from(&self) -> Vec<Option<String>> {
+        self.pushed
+            .iter()
+            .map(|(id, _)| {
+                let rule = RENDERED.iter().find(|rule| rule.id == id)?;
+                self.pushed
+                    .iter()
+                    .find(|(other, _)| other == rule.from)
+                    .map(|(_, file_name)| file_name.clone())
+            })
+            .collect()
     }
 
     /// The index of `assertion` in the file's table, listing it first if
@@ -294,7 +348,7 @@ impl BundleFileV2 {
         files: impl FnOnce(&mut W) -> io::Result<()>,
     ) -> Result<(), BundleFileError> {
         out.write_all(b"{\"schema\":")?;
-        serde_json::to_writer(&mut *out, BUNDLE_FILE_SCHEMA_V2)?;
+        serde_json::to_writer(&mut *out, BUNDLE_FILE_SCHEMA_V3)?;
         out.write_all(b",\n\"mode\":")?;
         serde_json::to_writer(&mut *out, &head.mode)?;
         for (key, count) in [
@@ -365,16 +419,31 @@ impl BundleFileV2 {
         out.write_all(b":")?;
         out.write_all(content_json)
     }
+
+    /// One `files` entry for an artifact the reader renders from the file
+    /// `from` (see [`BundleFileV2::rendered_from`]).
+    pub fn rendered_entry(
+        out: &mut dyn Write,
+        index: usize,
+        name: &str,
+        from: &str,
+    ) -> io::Result<()> {
+        Self::file_entry(out, index, name, b"")?;
+        out.write_all(b"{\"rendered_from\":")?;
+        serde_json::to_writer(&mut *out, from)?;
+        out.write_all(b"}")
+    }
 }
 
-/// The v2 bundle file of `bundle`, written to `out`: [`BundleFileV2`] over
-/// in-memory buffers, for a bundle already held whole.
+/// The bundle file (v3) of `bundle`, written to `out`: [`BundleFileV2`]
+/// over in-memory buffers, for a bundle already held whole.
 pub fn write_bundle_file(bundle: &SpecBundle, out: &mut impl Write) -> Result<(), BundleFileError> {
     let mut writer = BundleFileV2::new();
     let (mut artifacts, mut assertions) = (Vec::new(), Vec::new());
     for artifact in &bundle.artifacts {
         writer.push(artifact, &mut artifacts, &mut assertions)?;
     }
+    let rendered = writer.rendered_from();
     let head = SpecBundle {
         mode: bundle.mode,
         artifacts: Vec::new(),
@@ -392,6 +461,10 @@ pub fn write_bundle_file(bundle: &SpecBundle, out: &mut impl Write) -> Result<()
         &mut assertions.as_slice(),
         |out| {
             for (i, artifact) in bundle.artifacts.iter().enumerate() {
+                if let Some(from) = &rendered[i] {
+                    BundleFileV2::rendered_entry(out, i, &artifact.file_name, from)?;
+                    continue;
+                }
                 let content = serde_json::to_vec(&artifact.content)?;
                 BundleFileV2::file_entry(out, i, &artifact.file_name, &content)?;
             }
@@ -418,7 +491,7 @@ struct FileV2<'a> {
     artifacts: Vec<FileArtifact<'a>>,
     #[serde(borrow)]
     assertions: Vec<FileAssertion<'a>>,
-    files: HashMap<String, String>,
+    files: HashMap<String, FileValue>,
 }
 
 /// Only the `schema`, to tell the versions apart.
@@ -428,18 +501,20 @@ struct Version {
     schema: Option<String>,
 }
 
-/// Read a bundle file of either version: every artifact with its content
-/// and its full assertions. A v1 file is the AC-0740 shape, read as it was
-/// written; a v2 file is expanded from its tables (ADR-0086).
+/// Read a bundle file of any version: every artifact with its content and
+/// its full assertions. A v1 file is the AC-0740 shape, read as it was
+/// written; a v2 or v3 file is expanded from its tables (ADR-0086), a v3
+/// file's rendered artifacts rendered and checked against their identity.
 pub fn read_bundle_file(text: &str) -> Result<SpecBundle, BundleFileError> {
     match serde_json::from_str::<Version>(text)?.schema.as_deref() {
         None => Ok(serde_json::from_str(text)?),
-        Some(BUNDLE_FILE_SCHEMA_V2) => expand(serde_json::from_str(text)?),
+        Some(BUNDLE_FILE_SCHEMA_V2) => expand(serde_json::from_str(text)?, false),
+        Some(BUNDLE_FILE_SCHEMA_V3) => expand(serde_json::from_str(text)?, true),
         Some(other) => Err(BundleFileError::UnknownSchema(other.to_string())),
     }
 }
 
-fn expand(file: FileV2<'_>) -> Result<SpecBundle, BundleFileError> {
+fn expand(file: FileV2<'_>, renders: bool) -> Result<SpecBundle, BundleFileError> {
     let FileV2 {
         mode,
         assertion_count,
@@ -457,12 +532,50 @@ fn expand(file: FileV2<'_>) -> Result<SpecBundle, BundleFileError> {
         .into_iter()
         .map(|line| assertion(line, &sources))
         .collect::<Result<Vec<_>, _>>()?;
+    // The id of each artifact by file name, to check what a rendered
+    // artifact is rendered from.
+    let ids: HashMap<&str, &str> = artifacts
+        .iter()
+        .map(|line| (line.file_name.as_ref(), line.id.as_ref()))
+        .collect();
+    let mut rendered_names = Vec::new();
+    for (name, value) in &files {
+        if let FileValue::Rendered { rendered_from } = value {
+            if !renders {
+                return Err(BundleFileError::Rendering(name.clone()));
+            }
+            rendered_names.push((name.clone(), rendered_from.clone()));
+        }
+    }
+    let mut rendered_set = HashSet::new();
+    for (name, from) in rendered_names {
+        let rule = RENDERED.iter().find(|rule| {
+            ids.get(name.as_str()) == Some(&rule.id) && ids.get(from.as_str()) == Some(&rule.from)
+        });
+        let source = match files.get(&from) {
+            Some(FileValue::Text(source)) => Some(source.as_str()),
+            _ => None,
+        };
+        let content = rule
+            .zip(source)
+            .and_then(|(rule, source)| (rule.render)(source))
+            .ok_or_else(|| BundleFileError::Rendering(name.clone()))?;
+        rendered_set.insert(name.clone());
+        files.insert(name, FileValue::Text(content));
+    }
     let artifacts = artifacts
         .into_iter()
         .map(|line| {
-            let content = files
-                .remove(line.file_name.as_ref())
-                .ok_or_else(|| BundleFileError::Dangling(format!("file {:?}", line.file_name)))?;
+            let content = match files.remove(line.file_name.as_ref()) {
+                Some(FileValue::Text(content)) => content,
+                _ => {
+                    return Err(BundleFileError::Dangling(format!(
+                        "file {:?}",
+                        line.file_name
+                    )));
+                }
+            };
+            let rendered = rendered_set.contains(line.file_name.as_ref());
             let listed = line
                 .assertions
                 .iter()
@@ -473,7 +586,7 @@ fn expand(file: FileV2<'_>) -> Result<SpecBundle, BundleFileError> {
                         .ok_or_else(|| BundleFileError::Dangling(format!("assertion {i}")))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(SpecArtifact {
+            let artifact = SpecArtifact {
                 id: line.id.into_owned(),
                 file_name: line.file_name.into_owned(),
                 title: line.title.into_owned(),
@@ -482,7 +595,12 @@ fn expand(file: FileV2<'_>) -> Result<SpecBundle, BundleFileError> {
                 content_id: line.content_id.into_owned(),
                 content,
                 assertions: listed,
-            })
+            };
+            // A rendering must be the content the identity was taken over.
+            if rendered && !artifact.verify_identity() {
+                return Err(BundleFileError::Rendering(artifact.file_name));
+            }
+            Ok(artifact)
         })
         .collect::<Result<Vec<_>, BundleFileError>>()?;
     Ok(SpecBundle {
@@ -557,8 +675,10 @@ mod tests {
     const INPUT: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.input.json");
     /// The v1 file of `INPUT` (AC-0740).
     const V1: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.v1.json");
-    /// The v2 file of `INPUT` (ADR-0086).
-    const V2: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.expected.json");
+    /// The v2 file of `INPUT` (ADR-0086), kept as reader input.
+    const V2: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.v2.json");
+    /// The v3 file of `INPUT`, the one the writer writes.
+    const V3: &str = include_str!("../../../ui/src/fixtures/spec-bundle-file.expected.json");
 
     fn fixture_bundle() -> SpecBundle {
         let fixture: Fixture = serde_json::from_str(INPUT).expect("fixture parses");
@@ -633,16 +753,31 @@ mod tests {
         }
     }
 
-    // ADR-0086 (#1582): the v2 file of the AC-0740 fixture is pinned byte for
-    // byte, reads back to the bundle it was written from, and the v1 file of
-    // the same fixture reads to that same bundle.
+    // ADR-0086 (#1582): the v3 file of the AC-0740 fixture is pinned byte for
+    // byte, reads back to the bundle it was written from, and the v1 and v2
+    // files of the same fixture read to that same bundle.
     #[test]
-    fn the_fixture_writes_the_pinned_v2_file_and_both_versions_read_alike() {
+    fn the_fixture_writes_the_pinned_v3_file_and_every_version_reads_alike() {
         let bundle = fixture_bundle();
         let written = v2(&bundle);
-        assert_eq!(written, V2);
+        assert_eq!(written, V3);
         assert_eq!(read_bundle_file(&written).unwrap(), bundle);
+        assert_eq!(read_bundle_file(V2).unwrap(), bundle);
         assert_eq!(read_bundle_file(V1).unwrap(), bundle);
+    }
+
+    // ADR-0086 amendment: only a v3 file may name a file to render from.
+    #[test]
+    fn a_v2_file_naming_a_rendering_is_refused() {
+        let tampered = V2.replacen(
+            "\"README.md\":\"",
+            "\"README.md\":{\"rendered_from\":\"flow-dossiers.md\"},\"unused\":\"",
+            1,
+        );
+        assert!(matches!(
+            read_bundle_file(&tampered),
+            Err(BundleFileError::Rendering(name)) if name == "README.md"
+        ));
     }
 
     // ADR-0086 decisions 2 to 6: content only in `files`, one source row per
@@ -674,7 +809,7 @@ mod tests {
         ]);
         let written = v2(&bundle);
         let value: serde_json::Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(value["schema"], BUNDLE_FILE_SCHEMA_V2);
+        assert_eq!(value["schema"], BUNDLE_FILE_SCHEMA_V3);
         assert_eq!(
             value["sources"],
             serde_json::json!([

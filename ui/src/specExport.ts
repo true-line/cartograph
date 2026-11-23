@@ -129,8 +129,13 @@ export function expectedSpecBundle(bundle: SpecBundle): ExpectedSpecBundle {
   };
 }
 
-/** The `schema` a v2 bundle file opens with (ADR-0086). */
-export const BUNDLE_FILE_SCHEMA_V2 = 'cartograph.spec-bundle-file/v2';
+/** The `schema` the bundle file opens with (ADR-0086, v3). */
+export const BUNDLE_FILE_SCHEMA_V3 = 'cartograph.spec-bundle-file/v3';
+
+/** Artifacts the bundle file carries as a rendering of another artifact in
+ *  the bundle (ADR-0086 v3): the spec crate's reader renders them back.
+ *  Mirrors `RENDERED` in `crates/spec/src/bundle_file.rs`. */
+const RENDERED: ReadonlyArray<{ id: string; from: string }> = [{ id: 'fact-index', from: 'fact-index-json' }];
 
 /** An assertion as the v2 file lists it: `ref` for an id that is `node:` or
  *  `edge:` and its subject id, and evidence naming its source by index. The
@@ -167,7 +172,7 @@ function lines(entries: string[]): string {
   return entries.length === 0 ? '[]' : `[\n${entries.join(',\n')}\n]`;
 }
 
-/** The v2 bundle file's text (ADR-0086). The host's `save_spec_bundle_export`
+/** The bundle file's text (ADR-0086, v3). The host's `save_spec_bundle_export`
  *  writes the same bytes (AC-0740); this copy only serves the browser
  *  preview, whose bundles are small. Content is only in `files`, each
  *  evidence source once in `sources`, each assertion once in `assertions`;
@@ -207,7 +212,7 @@ export function specBundleFileContent(bundle: SpecBundle, artifacts: SpecArtifac
     return JSON.stringify({ id, file_name, title, format, schema, content_id, assertions: indexes });
   });
   const head = [
-    `{"schema":${JSON.stringify(BUNDLE_FILE_SCHEMA_V2)}`,
+    `{"schema":${JSON.stringify(BUNDLE_FILE_SCHEMA_V3)}`,
     `"mode":${JSON.stringify(bundle.mode)}`,
     `"assertion_count":${bundle.assertion_count}`,
     `"gap_count":${bundle.gap_count}`,
@@ -218,9 +223,12 @@ export function specBundleFileContent(bundle: SpecBundle, artifacts: SpecArtifac
   if (bundle.curated_basis != null) head.push(`"curated_basis":${JSON.stringify(bundle.curated_basis)}`);
   // `files` is written entry by entry: a JS object would move array-index
   // names ahead of the rest, and the file keeps the artifacts' order.
-  const files = artifacts.map(
-    (artifact) => `${JSON.stringify(artifact.file_name)}:${JSON.stringify(artifact.content)}`,
-  );
+  const files = artifacts.map((artifact) => {
+    const rule = RENDERED.find((r) => r.id === artifact.id);
+    const from = rule && artifacts.find((other) => other.id === rule.from);
+    const value = from ? `{"rendered_from":${JSON.stringify(from.file_name)}}` : JSON.stringify(artifact.content);
+    return `${JSON.stringify(artifact.file_name)}:${value}`;
+  });
   return [
     ...head,
     `"sources":${lines(sources)}`,

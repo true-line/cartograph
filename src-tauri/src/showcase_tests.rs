@@ -245,12 +245,10 @@ fn showcase_recover_and_export() {
         for artifact in &bundle.artifacts {
             std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
         }
-        // #1582: keep the complete diagnostic bundle, but avoid whitespace
-        // expansion and a second bundle-sized serialization buffer.
-        let mut writer =
-            std::io::BufWriter::new(std::fs::File::create(root.join("bundle.json")).unwrap());
-        serde_json::to_writer(&mut writer, &bundle).unwrap();
-        writer.flush().unwrap();
+        // #1582: the complete bundle as the bundle file Export bundle writes
+        // (ADR-0086), its artifact and assertion tables spooled to temp
+        // files as the host does, so no table-sized buffer is held.
+        write_showcase_bundle_file(&bundle, &root.join("bundle.json"));
         // #2049: the structured views the Workbench draws, for screenshots
         // of the app's diagrams from the same run.
         let preview = crate::export_spec_with_views_blocking(mode, &state).unwrap();
@@ -950,4 +948,59 @@ fn showcase_t2_yield() {
         writer.write_all(b"\n").unwrap();
     }
     writer.flush().unwrap();
+}
+
+/// The bundle file of `bundle` at `path`, through [`spec::bundle_file::BundleFileV2`]
+/// with its tables spooled to temp files (#1582).
+fn write_showcase_bundle_file(bundle: &spec::SpecBundle, path: &Path) {
+    use spec::bundle_file::BundleFileV2;
+    use std::io::{BufWriter, Seek, SeekFrom};
+    let spool = || BufWriter::new(tempfile::tempfile().unwrap());
+    let rewound = |spool: BufWriter<std::fs::File>| {
+        let mut file = spool.into_inner().unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file
+    };
+    let (mut artifacts, mut assertions) = (spool(), spool());
+    let mut writer = BundleFileV2::new();
+    for artifact in &bundle.artifacts {
+        writer
+            .push(artifact, &mut artifacts, &mut assertions)
+            .unwrap();
+    }
+    let rendered = writer.rendered_from();
+    let head = spec::SpecBundle {
+        mode: bundle.mode,
+        artifacts: Vec::new(),
+        assertion_count: bundle.assertion_count,
+        gap_count: bundle.gap_count,
+        drift_count: bundle.drift_count,
+        security_count: bundle.security_count,
+        graph_basis: bundle.graph_basis.clone(),
+        curated_basis: bundle.curated_basis.clone(),
+    };
+    let mut out = BufWriter::new(std::fs::File::create(path).unwrap());
+    writer
+        .finish(
+            &head,
+            &mut out,
+            &mut rewound(artifacts),
+            &mut rewound(assertions),
+            |out| {
+                for (i, artifact) in bundle.artifacts.iter().enumerate() {
+                    match &rendered[i] {
+                        Some(from) => {
+                            BundleFileV2::rendered_entry(out, i, &artifact.file_name, from)?
+                        }
+                        None => {
+                            BundleFileV2::file_entry(out, i, &artifact.file_name, b"")?;
+                            serde_json::to_writer(&mut *out, &artifact.content)?;
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    out.flush().unwrap();
 }
