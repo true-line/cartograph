@@ -180,6 +180,24 @@ fn choices_from(
     Ok(result)
 }
 
+/// Test-only: the current graph snapshot id, the context id and every
+/// recorded inventory obligation for `scope`, as the desktop's choices
+/// offer them, for the manual pilot harnesses (AC-1083).
+#[cfg(test)]
+pub(crate) fn recorded_obligations_for_test<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    scope: &InvestigationScope,
+) -> Result<(String, String, Vec<Obligation>), String> {
+    let state = app.state::<AppState>();
+    let choices = current_choices(app, &state, scope)?;
+    let obligations = choices
+        .inventories
+        .into_iter()
+        .filter_map(|choice| choice.obligation)
+        .collect();
+    Ok((choices.graph_snapshot_id, choices.context_id, obligations))
+}
+
 #[tauri::command]
 pub(crate) async fn investigation_obligation_choices(
     scope: InvestigationScope,
