@@ -101,3 +101,23 @@ export function parseMinutes(text: string, minMinutes: number, maxMinutes: numbe
 export function formatMinutes(minutes: number): string {
   return Number.isInteger(minutes) ? String(minutes) : minutes.toFixed(1);
 }
+
+/** The ACP agent command reviewed work packets are dispatched to (AC-1350, ADR-0092). */
+export interface AcpAgentCommand {
+  program: string;
+  args: string[];
+}
+
+export interface AcpAgentApi {
+  load(): Promise<AcpAgentCommand | null>;
+  save(command: AcpAgentCommand | null): Promise<AcpAgentCommand | null>;
+}
+
+export const tauriAcpAgentApi: AcpAgentApi = {
+  load: () => invoke<AcpAgentCommand | null>('get_acp_agent'),
+  save: (command) => invoke<AcpAgentCommand | null>('set_acp_agent', { command }),
+};
+
+/** One argument per non-blank line; surrounding whitespace is dropped. */
+export const parseAgentArgs = (text: string): string[] =>
+  text.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);

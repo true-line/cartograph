@@ -82,3 +82,29 @@ describe('host-authoritative packet tray (AC-0248, AC-0251)', () => {
     expect(useWorkPacketStore.getState().notice).toBeNull();
   });
 });
+
+describe('dispatch of a reviewed packet (AC-1350)', () => {
+  const packetId = 'work-packet-v1:' + 'c'.repeat(64);
+  type Detail = NonNullable<ReturnType<typeof useWorkPacketStore.getState>['detail']>;
+  it('dispatches by packet id and shows the returned branch', async () => {
+    const calls: unknown[] = [];
+    mockIPC((command, args) => {
+      expect(command).toBe('dispatch_work_packet'); calls.push(args);
+      return { packet_id: packetId, execution: 'submitted', dispatch: { branch: 'cartograph/packet-cccccccccccc', head_revision: 'd'.repeat(40) } };
+    });
+    useWorkPacketStore.setState({ detail: { packet_id: packetId } as Detail });
+    await useWorkPacketStore.getState().dispatch();
+    expect(calls).toEqual([{ packetId }]);
+    expect(useWorkPacketStore.getState().detail?.execution).toBe('submitted');
+    expect(useWorkPacketStore.getState().notice).toMatch(/local branch cartograph\/packet-cccccccccccc/);
+  });
+  it('states a missing agent in words and keeps the packet', async () => {
+    mockIPC(() => { throw { code: 'agent_not_configured' }; });
+    const detail = { packet_id: packetId } as Detail;
+    useWorkPacketStore.setState({ detail });
+    await useWorkPacketStore.getState().dispatch();
+    expect(useWorkPacketStore.getState().error).toMatch(/No ACP agent is configured/);
+    expect(useWorkPacketStore.getState().notice).toBeNull();
+    expect(useWorkPacketStore.getState().detail).toBe(detail);
+  });
+});

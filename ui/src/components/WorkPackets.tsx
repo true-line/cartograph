@@ -69,7 +69,10 @@ export function WorkPackets({ state, repositories }: Props & { repositories?: st
           <button type="button" disabled={state.busy} onClick={() => void state.review('changes_requested', note)}>Request changes</button>
           <button type="button" disabled={state.busy} onClick={() => void state.assess()}>Assess source freshness</button>
           <button type="button" disabled={state.busy} onClick={() => void state.exportPacket()}>Export packet Markdown</button>
-</div></section>}
+          <button type="button" disabled={state.busy || state.detail.review.status !== 'reviewed' || state.detail.execution !== 'unoffered'}
+            onClick={() => void state.dispatch()}>Dispatch to ACP agent</button>
+</div>
+        <p className="muted">Dispatch runs the configured ACP agent on this reviewed packet in its own local worktree. Its work comes back as a local branch; nothing is pushed or merged.</p></section>}
       </div></div>
   </section>;
 }

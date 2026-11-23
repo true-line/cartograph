@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { CONTEXT_WINDOWS, DEFAULT_OLLAMA_PORT, formatContextWindow, formatMinutes, parseMinutes, parsePort,
-  tauriContextWindowApi, tauriLocalModelApi, tauriOllamaPortApi, toMinutes, type ContextWindowApi, type InstalledModel,
+import { CONTEXT_WINDOWS, DEFAULT_OLLAMA_PORT, formatContextWindow, formatMinutes, parseAgentArgs, parseMinutes, parsePort,
+  tauriAcpAgentApi, tauriContextWindowApi, type AcpAgentApi, type AcpAgentCommand, tauriLocalModelApi, tauriOllamaPortApi, toMinutes, type ContextWindowApi, type InstalledModel,
   type LocalModelApi, type LocalModelChoice, type OllamaPortApi, type RunLimits, type RunLimitsApi } from '../runLimits';
 
 export interface ConfigureWindowProps {
@@ -8,6 +8,63 @@ export interface ConfigureWindowProps {
   modelApi?: LocalModelApi;
   contextApi?: ContextWindowApi;
   portApi?: OllamaPortApi;
+  agentApi?: AcpAgentApi;
+}
+
+/** Configure → ACP agent (AC-1350): the agent program reviewed work packets are dispatched to. */
+function AcpAgentSection({ api }: { api: AcpAgentApi }) {
+  const [current, setCurrent] = useState<AcpAgentCommand | null | undefined>(undefined);
+  const [program, setProgram] = useState('');
+  const [args, setArgs] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const show = (next: AcpAgentCommand | null) => {
+    setCurrent(next); setProgram(next?.program ?? ''); setArgs(next?.args.join('\n') ?? '');
+  };
+  useEffect(() => { api.load().then(show, (e: unknown) => setError(String(e))); }, [api]);
+
+  const save = async (command: AcpAgentCommand | null) => {
+    setBusy(true); setError(null); setSaved(null);
+    try {
+      const next = await api.save(command);
+      show(next);
+      setSaved(next ? `Saved. Reviewed packets are dispatched to ${next.program}.` : 'Cleared. No packet can be dispatched until an agent is set.');
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  const trimmed = program.trim();
+
+  return <section className="configure-section" aria-label="ACP agent">
+    <h2>ACP agent</h2>
+    <p className="muted">The Agent Client Protocol program a reviewed work packet is dispatched to. It runs on this Mac in its own
+      worktree, may read and edit only inside it, and its work comes back as a local branch; nothing is pushed or merged.</p>
+    {current !== undefined && <form onSubmit={(event) => {
+      event.preventDefault();
+      if (trimmed) void save({ program: trimmed, args: parseAgentArgs(args) });
+    }}>
+      <label className="configure-field">
+        <span>Program (absolute path)</span>
+        <input type="text" spellCheck={false} value={program} disabled={busy} maxLength={1024}
+          onChange={(event) => setProgram(event.target.value)} />
+      </label>
+      <label className="configure-field">
+        <span>Arguments (one per line)</span>
+        <textarea rows={3} spellCheck={false} value={args} disabled={busy} onChange={(event) => setArgs(event.target.value)} />
+        <small className="muted">At most 32 arguments. No shell is involved, so quote nothing.</small>
+      </label>
+      <div className="configure-actions">
+        <button type="submit" disabled={busy || !trimmed}>Use this agent</button>
+        <button type="button" className="secondary-button" disabled={busy || current === null}
+          onClick={() => void save(null)}>Clear agent</button>
+      </div>
+    </form>}
+    {current === undefined && !error && <p className="muted">Loading…</p>}
+    {current === undefined && error && <button type="button" disabled={busy}
+      onClick={() => void save(null)}>Clear agent</button>}
+    {saved && <p className="muted" role="status">{saved}</p>}
+    {error && <p className="error-text" role="alert">{error}</p>}
+  </section>;
 }
 
 /** Configure → Ollama port (#1653): the loopback port new desktop investigations reach Ollama on. */
@@ -167,7 +224,7 @@ function LocalModelSection({ api }: { api: LocalModelApi }) {
  * apart from the app Settings page. Every other cap stays fixed.
  */
 export function ConfigureWindow({ api, modelApi = tauriLocalModelApi, contextApi = tauriContextWindowApi,
-  portApi = tauriOllamaPortApi }: ConfigureWindowProps) {
+  portApi = tauriOllamaPortApi, agentApi = tauriAcpAgentApi }: ConfigureWindowProps) {
   const [limits, setLimits] = useState<RunLimits | null>(null);
   const [task, setTask] = useState('');
   const [call, setCall] = useState('');
@@ -245,5 +302,6 @@ export function ConfigureWindow({ api, modelApi = tauriLocalModelApi, contextApi
     <LocalModelSection api={modelApi} />
     <ContextWindowSection api={contextApi} />
     <OllamaPortSection api={portApi} />
+    <AcpAgentSection api={agentApi} />
   </main>;
 }

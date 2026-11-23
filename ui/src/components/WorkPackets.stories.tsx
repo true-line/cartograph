@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { WorkPackets, WorkPacketTray } from './WorkPackets';
 import { useWorkPacketStore } from '../workPacketStore';
-import { packetFixture, packetRequestFixture } from '../workPacketFixtures';
+import { packetFixture, packetRequestFixture, packetReviewedFixture } from '../workPacketFixtures';
 
 const state = { ...useWorkPacketStore.getInitialState(), snapshotId: packetRequestFixture.expected_snapshot_id,
   facts: packetRequestFixture.facts, artifacts: packetRequestFixture.artifacts, decisions: packetRequestFixture.interpretation_decisions,
@@ -56,5 +56,35 @@ export const SubmittedDispatch: Story = {
     await expect(dispatch).toHaveTextContent('1 changed path · 2 agent requests refused. Not pushed or merged');
     await expect(dispatch).toHaveTextContent('src/adapter.rs');
     await expect(canvas.queryByText('unoffered')).toBeNull();
+  },
+};
+
+export const DispatchOnlyAReviewedPacket: Story = {
+  // AC-1350: Dispatch is offered only on a reviewed, never-dispatched packet.
+  args: { state: { ...state, detail: packetReviewedFixture, dispatch: fn(async () => {}) } },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const button = canvas.getByRole('button', { name: 'Dispatch to ACP agent' });
+    await expect(button).toBeEnabled();
+    await userEvent.click(button);
+    await expect(args.state.dispatch).toHaveBeenCalledTimes(1);
+    await expect(canvas.getByRole('region', { name: 'Packet review' })).toHaveTextContent('nothing is pushed or merged');
+  },
+};
+
+export const DispatchWithheldBeforeReviewAndAfterDispatch: Story = {
+  // AC-1350: a draft packet offers no dispatch; SubmittedPacketOffersNoSecondDispatch covers a dispatched one.
+  args: { state: { ...state, dispatch: fn(async () => {}) } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('button', { name: 'Dispatch to ACP agent' })).toBeDisabled();
+  },
+};
+
+export const SubmittedPacketOffersNoSecondDispatch: Story = {
+  args: { state: { ...state, detail: { ...submitted, review: packetReviewedFixture.review }, dispatch: fn(async () => {}) } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('button', { name: 'Dispatch to ACP agent' })).toBeDisabled();
   },
 };
