@@ -62,6 +62,43 @@ const productionRosterCatalog = {
   }),
 };
 
+const areaChoices = [{ area: 'subsystem:aliases', name: 'Aliases', files: 4, sections: [], briefing_bytes: 0 }];
+
+export const AreaScopedQuestion: Story = {
+  // #2477: an area scope picks one recovered subsystem and starts on it.
+  beforeEach: () => {
+    mockIPC((command) => command === 'area_choices' ? areaChoices : null);
+    return () => clearMocks();
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('radio', { name: /Evidence auditor/ }));
+    await userEvent.selectOptions(canvas.getByLabelText('Scope'), 'area');
+    await waitFor(() => expect(canvas.getByRole('option', { name: 'Aliases · 4 files' })).toBeInTheDocument());
+    await userEvent.type(canvas.getByLabelText('Question'), 'What rules govern deleting an alias?');
+    await expect(canvas.getByRole('button', { name: 'Start investigation' })).toBeDisabled();
+    await userEvent.selectOptions(canvas.getByLabelText('Area'), 'subsystem:aliases');
+    await userEvent.click(canvas.getByRole('button', { name: 'Start investigation' }));
+    await expect(args.state.start).toHaveBeenCalledWith({ specialist_id: 'evidence-auditor@3',
+      question: 'What rules govern deleting an alias?', scope: { type: 'area', id: 'subsystem:aliases' },
+      provider_mode: 'local', limit_profile: investigationCatalog.limits.profile });
+  },
+};
+
+export const AreaScopeDetail: Story = {
+  // #2477: a saved area task names its area, not an anchor and hop count.
+  beforeEach: () => {
+    mockIPC((command) => command === 'area_choices' ? areaChoices : null);
+    return () => clearMocks();
+  },
+  args: { state: state({ detail: investigationDetail('inv-fixture', { scope: { type: 'area', id: 'subsystem:aliases' } }) }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByText('Scope: Area · Aliases')).toBeVisible());
+    await expect(canvas.queryByText(/undefined/)).not.toBeInTheDocument();
+  },
+};
+
 export const ScopedSpecialistQuestion: Story = {
   // AC-0180/0190: exact host specialist, chosen graph scope and provider form the request.
   play: async ({ canvasElement, args }) => {
