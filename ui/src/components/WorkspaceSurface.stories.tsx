@@ -836,3 +836,24 @@ export const RecordedCoverageNamesLocalSources: Story = {
     await expect(within(stale).getByText('simplelogin')).toHaveAttribute('title', LOCAL_KEY);
   },
 };
+
+export const CoverageNamesASourceWithNoFacts: Story = {
+  // #2471: a source whose ingest recovered no evidence-bearing fact is not in
+  // the system contents; its heading and coverage still read by its registered name.
+  args: {
+    summary: {
+      ...meta.args.summary,
+      repo: LOCAL_KEY,
+      coverage: [{ ...COVERAGE[0], repo: LOCAL_KEY }],
+    },
+    systemContents: [],
+    registeredSources: [{ repo_key: LOCAL_KEY, display_name: 'empty-folder' }],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('heading', { level: 2, name: 'empty-folder' })).toBeInTheDocument();
+    const inventory = canvas.getByTestId('coverage-inventory');
+    await expect(within(inventory).getByText('empty-folder')).toHaveAttribute('title', LOCAL_KEY);
+    await expect(canvasElement).not.toHaveTextContent(/local\/src_/);
+  },
+};

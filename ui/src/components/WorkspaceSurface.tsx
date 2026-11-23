@@ -13,6 +13,9 @@ import type {
 
 export interface WorkspaceSurfaceProps {
   summary: IngestSummary | null;
+  /** Every registered source's name (#2471), so a coverage inventory of a
+   *  source with no recovered facts still reads by name. */
+  registeredSources?: readonly { repo_key: string; display_name: string }[];
   /** The first read of the persisted system is still running (#2469): say
    *  so rather than claim there is no system. */
   loading?: boolean;
@@ -68,6 +71,7 @@ function recoveryAuthority(findings: FindingsSummary, distribution: TierDistribu
 export function WorkspaceSurface({
   summary,
   loading = false,
+  registeredSources = [],
   recordedCoverage = [],
   recordedCoverageError = null,
   findings,
@@ -81,7 +85,14 @@ export function WorkspaceSurface({
   onInvestigate,
 }: WorkspaceSurfaceProps) {
   const recovered = findings !== null && findings.graph_facts > 0;
-  const repoLabel = createRepositoryLabeler(systemContents);
+  // Registered sources name a source the graph holds no fact for, such as an
+  // ingest that recovered nothing (#2471); graph membership is unchanged.
+  const repoLabel = createRepositoryLabeler([
+    ...(systemContents ?? []),
+    ...registeredSources
+      .filter(({ repo_key }) => !systemContents?.some(({ repo }) => repo === repo_key))
+      .map(({ repo_key, display_name }) => ({ repo: repo_key, display_name })),
+  ]);
 
   const systemName =
     (summary?.repo ? repoLabel(summary.repo) : null) ??

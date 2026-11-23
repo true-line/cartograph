@@ -568,8 +568,10 @@ export default function App() {
   }, [selectedNode, selectedFact, selectedRequest]);
 
   useEffect(() => {
-    if (view === 'settings') void usePrimarySourceStore.getState().loadSources();
-  }, [view]);
+    // Workspace names coverage sources from the registry too (#2471): a source
+    // with no recovered facts is not in the system contents.
+    if (view === 'settings' || view === 'workspace') void usePrimarySourceStore.getState().loadSources();
+  }, [view, systemContents]);
 
   const navigate = useCallback(
     (next: SurfaceView) => {
@@ -802,6 +804,7 @@ export default function App() {
             <WorkspaceSurface
               loading={backend === 'unknown'}
               systemContents={systemContents}
+              registeredSources={primarySource.sources}
               summary={ingestSummary}
               recordedCoverage={recordedCoverage}
               recordedCoverageError={recordedCoverageError}
