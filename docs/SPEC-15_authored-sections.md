@@ -308,8 +308,10 @@ part 2). A composition is handed the eligible and agent-attested,
 unconfirmed records that answer its section and scope, or a Gap among its
 citable facts, with their label and statement and no contributor, and a
 claim citing one records the record's identity as the id's hash. Two
-records sharing one `A-` id fail the projection (AC-1077, part 3). Not
-built: capture paths and surfaces.
+records sharing one `A-` id fail the projection (AC-1077, part 3). The
+gated §1.5 workflow drafts them after the rule rows, one row per record,
+and gates each claim against the record's statement. Not built: capture
+paths and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting
