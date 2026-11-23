@@ -254,10 +254,17 @@ mod tests {
         std::fs::create_dir_all(&spaced).unwrap();
         std::fs::create_dir_all(sibling.join("nested")).unwrap();
         let out = classify(&[s(&spaced), s(&sibling.join("nested"))]);
-        // The sibling's nested folder is not inside the spaced folder.
+        // The sibling's nested folder is not inside the spaced folder. Windows
+        // drops trailing spaces from path names, so there the two names are
+        // one folder and the nested drop is inside it.
+        let nested = if cfg!(windows) {
+            None
+        } else {
+            Some(DropSource::Local)
+        };
         assert_eq!(
             out.iter().map(|c| c.source).collect::<Vec<_>>(),
-            [Some(DropSource::Local), Some(DropSource::Local)]
+            [Some(DropSource::Local), nested]
         );
         assert_eq!(out[0].path, s(&spaced));
 
