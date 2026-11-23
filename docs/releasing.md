@@ -139,8 +139,16 @@ classifies the credential set:
 | `ARTIFACT_SIGNING_PROFILE` | Public-trust certificate profile name |
 
 With none of them the build is `unsigned-dev`, with all five it is `signed`,
-and a partial set fails closed. The workflow steps that sign are still to come
-(#227), so until they land `release.yml` publishes macOS only.
+and a partial set fails closed. `.github/workflows/windows-installer.yml`
+holds the installer job. It compiles with no signing input in the
+environment (#480), then on the signed path fetches the pinned
+`Microsoft.ArtifactSigning.Client` package (sha256-checked), signs in to Azure
+with the GitHub OIDC token, signs both sidecars with `scripts/windows-sign.ps1`,
+and lets `tauri bundle` sign the app and the installer through the same
+script. Every shipped binary must then report a valid, timestamped
+Authenticode signature or nothing is uploaded. `windows.yml` calls it without
+secrets, so pull requests and main stay `unsigned-dev` (#631). Until a signing
+caller lands in `release.yml` (#227), releases publish macOS only.
 
 ## Required GitHub secrets
 

@@ -952,3 +952,26 @@ test('scheduled real-repository lanes stay off pull requests and share one Mac s
   assert.ok(jobs['scale-showcase'].includes('node scripts/showcase-watch.mjs scale'));
   assert.ok(jobs['release-tags'].includes('node scripts/release-tags.mjs --window-hours 3'));
 });
+
+test('Windows installer signs only for a secret-passing caller and fails closed (ADR-0093, #227)', () => {
+  const dir = path.join(root, '.github/workflows');
+  const caller = readFileSync(path.join(dir, 'windows.yml'), 'utf8');
+  const installer = readFileSync(path.join(dir, 'windows-installer.yml'), 'utf8');
+  // Pull requests and main call the installer with no secret (#631).
+  assert.match(caller, /uses: \.\/\.github\/workflows\/windows-installer\.yml\n(?! +secrets:)/u);
+  assert.doesNotMatch(triggers(installer), /pull_request|workflow_dispatch/u);
+  assert.doesNotMatch(installer, /^permissions:/mu);
+  // Classify before compiling; compile with no signing input in scope.
+  const classify = installer.indexOf('node scripts/signing-secrets.mjs windows');
+  const compile = installer.indexOf('--no-bundle');
+  assert.ok(classify > 0 && compile > classify);
+  const compileStep = installer.slice(installer.lastIndexOf('- name:', compile), compile);
+  assert.doesNotMatch(compileStep, /secrets\.|env:/u);
+  assert.match(installer, /\$sha256 = '35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a'/u);
+  assert.match(installer, /npx tauri bundle --target x86_64-pc-windows-msvc --bundles nsis/u);
+  // The signed path verifies every shipped binary, timestamp included.
+  assert.match(installer, /\$signature\.Status -ne 'Valid' -or -not \$signature\.TimeStamperCertificate/u);
+  assert.match(installer, /"name=Cartograph_\$\{version\}_x64_\$env:MODE"/u);
+  const sign = readFileSync(path.join(root, 'scripts/windows-sign.ps1'), 'utf8');
+  assert.match(sign, /\/fd SHA256 \/tr 'http:\/\/timestamp\.acs\.microsoft\.com' \/td SHA256/u);
+});
