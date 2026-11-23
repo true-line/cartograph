@@ -146,26 +146,45 @@ fn source_path(url: &str, map_dir: &str) -> Option<String> {
         .then_some(path)
 }
 
-/// A bundle as read: its bytes, or the digest and length of one larger than
-/// [`MAX_ARTIFACT_BYTES`] whose tail names a map.
+/// A bundle or map as read: its bytes, or the digest and length of one
+/// larger than [`MAX_ARTIFACT_BYTES`], which is never held whole.
 enum Content {
+    /// The file's bytes.
     Bytes(Vec<u8>),
+    /// A file over the limit.
     TooLarge {
+        /// `sha256:` digest of the whole file.
         digest: String,
+        /// Its length.
         len: u64,
     },
-    /// A large file that names no map.
+    /// A large bundle that names no map.
     Skipped,
 }
 
+impl Content {
+    /// Bytes already held, over the limit or not.
+    fn of(bytes: Vec<u8>) -> Content {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            Content::TooLarge {
+                digest: digest(&bytes),
+                len: bytes.len() as u64,
+            }
+        } else {
+            Content::Bytes(bytes)
+        }
+    }
+}
+
+/// A bundle of the checkout: read whole when within the limit; otherwise
+/// its tail tells whether it names a map, and only then is it streamed
+/// through its digest.
 fn read_bundle_file(path: &std::path::Path) -> std::io::Result<Content> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     if len <= MAX_ARTIFACT_BYTES as u64 {
-        let mut bytes = Vec::with_capacity(len as usize);
-        file.read_to_end(&mut bytes)?;
-        return Ok(Content::Bytes(bytes));
+        return read_limited(path);
     }
     file.seek(SeekFrom::Start(len - TAIL_BYTES))?;
     let mut tail = Vec::new();
@@ -173,8 +192,25 @@ fn read_bundle_file(path: &std::path::Path) -> std::io::Result<Content> {
     if source_map::mapping_url(&tail).is_none() {
         return Ok(Content::Skipped);
     }
-    file.seek(SeekFrom::Start(0))?;
+    read_limited(path)
+}
+
+/// A file of the checkout, read whole only within [`MAX_ARTIFACT_BYTES`]:
+/// a larger one is streamed through its digest.
+fn read_limited(path: &std::path::Path) -> std::io::Result<Content> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_ARTIFACT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() <= MAX_ARTIFACT_BYTES {
+        return Ok(Content::Bytes(bytes));
+    }
     let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let mut len = bytes.len() as u64;
+    drop(bytes);
     let mut buf = vec![0; 64 * 1024];
     loop {
         let n = file.read(&mut buf)?;
@@ -182,6 +218,7 @@ fn read_bundle_file(path: &std::path::Path) -> std::io::Result<Content> {
             break;
         }
         hasher.update(&buf[..n]);
+        len += n as u64;
     }
     Ok(Content::TooLarge {
         digest: hex_digest(&hasher.finalize()),
@@ -278,7 +315,7 @@ fn read_bundle(
     bundle: &str,
     bytes: &[u8],
     present: &BTreeSet<String>,
-    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    read: &dyn Fn(&str) -> std::io::Result<Content>,
     out: &mut Read,
 ) {
     let Some(url) = source_map::mapping_url(bytes) else {
@@ -314,8 +351,22 @@ fn read_bundle(
                 return;
             };
             let map = match read(&map_rel) {
-                Ok(map) => map,
-                Err(_) => {
+                Ok(Content::Bytes(map)) => map,
+                Ok(Content::TooLarge { digest, len }) => {
+                    out.gaps.push(gap(
+                        id,
+                        bundle,
+                        "too_large",
+                        &format!("{map_rel} is over {MAX_ARTIFACT_BYTES} bytes"),
+                        &Cited {
+                            digest,
+                            kind: MAP_KIND,
+                            len,
+                        },
+                    ));
+                    return;
+                }
+                Ok(Content::Skipped) | Err(_) => {
                     out.gaps.push(gap(
                         id,
                         bundle,
@@ -326,16 +377,6 @@ fn read_bundle(
                     return;
                 }
             };
-            if map.len() > MAX_ARTIFACT_BYTES {
-                out.gaps.push(gap(
-                    id,
-                    bundle,
-                    "too_large",
-                    &format!("{map_rel} is over {MAX_ARTIFACT_BYTES} bytes"),
-                    &Cited::of(&map, MAP_KIND),
-                ));
-                return;
-            }
             let cited = Cited::of(&map, MAP_KIND);
             let dir = dir_of(&map_rel).to_string();
             (map, cited, dir)
@@ -403,11 +444,12 @@ pub fn extract(
     present: &BTreeSet<String>,
     read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
 ) -> std::io::Result<Extraction> {
+    let read = |rel: &str| read(rel).map(Content::of);
     let mut ordered: Vec<&(String, Vec<u8>)> = bundles.iter().collect();
     ordered.sort_by(|a, b| a.0.cmp(&b.0));
     let mut reads = Read::default();
     for (bundle, bytes) in ordered {
-        read_bundle(id, bundle, bytes, present, read, &mut reads);
+        read_bundle(id, bundle, bytes, present, &read, &mut reads);
     }
     finish(id, reads)
 }
@@ -532,7 +574,7 @@ pub fn extract_dir(
 ) -> std::io::Result<Extraction> {
     let walked = walk(root)?;
     let present: BTreeSet<String> = walked.iter().cloned().collect();
-    let read = |rel: &str| std::fs::read(root.join(rel));
+    let read = |rel: &str| read_limited(&root.join(rel));
     let mut reads = Read::default();
     for rel in walked.iter().filter(|rel| is_bundle(rel)) {
         match read_bundle_file(&root.join(rel))? {
@@ -600,9 +642,44 @@ pub fn extract_dir_from(
         if source_map::mapping_url(&bytes).is_some() {
             on_file(rel);
         }
-        read_bundle(id, rel, &bytes, &present, read, &mut reads);
+        let read = |rel: &str| read(rel).map(Content::of);
+        read_bundle(id, rel, &bytes, &present, &read, &mut reads);
     }
     finish(id, reads)
+}
+
+/// Whether a capture holding `paths` holds every map file its bundles name
+/// (`read` returning their retained bytes), so [`extract_dir_from`] reads
+/// the same inputs the checkout read would. A capture whose bundles name
+/// only inline maps, or none, holds them all.
+pub fn capture_holds_maps(
+    paths: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+) -> bool {
+    let held: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    paths
+        .iter()
+        .filter(|rel| is_bundle(rel) && !dir_of(rel).split('/').any(skipped_dir))
+        .all(|rel| {
+            let Ok(bytes) = read(rel) else {
+                return false;
+            };
+            match external_map(rel, &bytes) {
+                Some(map) => held.contains(map.as_str()),
+                None => true,
+            }
+        })
+}
+
+/// The repository path of the map file a bundle names, or `None` for no
+/// map, an inline map, or one named outside the repository.
+fn external_map(bundle: &str, bytes: &[u8]) -> Option<String> {
+    let url = source_map::mapping_url(bytes)?;
+    if url.starts_with("data:") || url.contains("://") || url.starts_with('/') {
+        return None;
+    }
+    let plain = url.split(['?', '#']).next().unwrap_or_default();
+    normalize(dir_of(bundle).split('/').chain(plain.split('/')), true)
 }
 
 /// The bundles of the walk of `root` that name a map file, and the map
@@ -614,14 +691,7 @@ pub fn artifact_paths(root: &std::path::Path) -> std::io::Result<Vec<String>> {
         let Ok(Content::Bytes(bytes)) = read_bundle_file(&root.join(&rel)) else {
             continue;
         };
-        let Some(url) = source_map::mapping_url(&bytes) else {
-            continue;
-        };
-        if url.starts_with("data:") || url.contains("://") || url.starts_with('/') {
-            continue;
-        }
-        let plain = url.split(['?', '#']).next().unwrap_or_default();
-        if let Some(map) = normalize(dir_of(&rel).split('/').chain(plain.split('/')), true)
+        if let Some(map) = external_map(&rel, &bytes)
             && root.join(&map).is_file()
         {
             out.insert(rel);

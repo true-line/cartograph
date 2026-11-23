@@ -256,6 +256,70 @@ fn a_capture_read_in_any_order_matches_the_checkout() {
     );
 }
 
+/// AC-1216: a map over the limit is a `too_large` Gap citing the whole
+/// file's digest, and is never read whole.
+#[test]
+fn an_oversized_map_is_a_gap_not_a_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.js"),
+        "x();\n//# sourceMappingURL=app.js.map\n",
+    )
+    .unwrap();
+    // A sparse file: the length is over the limit without the disk use.
+    let map = std::fs::File::create(dir.path().join("app.js.map")).unwrap();
+    map.set_len(MAX_ARTIFACT_BYTES as u64 + 10).unwrap();
+    drop(map);
+    let out = extract_dir(dir.path(), &id(), &mut |_| {}).unwrap();
+    let gap = node(&out, &format!("gap:{REPO}@app.js#js-bundle"));
+    assert_eq!(gap.props["reason_code"], "too_large");
+    let EvidenceBasis::Artifact { refs } = provenance(&gap.props).basis.unwrap() else {
+        panic!("artifact basis");
+    };
+    assert_eq!(refs[0].kind, MAP_KIND);
+    assert_eq!(
+        refs[0].at,
+        ArtifactLocator::Offset {
+            start: 0,
+            end: MAX_ARTIFACT_BYTES as u64 + 10
+        }
+    );
+    assert_eq!(refs[0].digest, digest(&vec![0; MAX_ARTIFACT_BYTES + 10]));
+}
+
+/// AC-1216: a capture is read only when it holds every map file its
+/// bundles name, whatever the file is called; inline maps need none.
+#[test]
+fn a_capture_is_read_when_it_holds_the_named_maps() {
+    let files = std::collections::BTreeMap::from([
+        ("a.js", "x();\n//# sourceMappingURL=maps/a.json\n"),
+        ("maps/a.json", "{}"),
+        (
+            "b.js",
+            "x();\n//# sourceMappingURL=data:application/json,%7B%7D\n",
+        ),
+        ("build/c.js", "x();\n//# sourceMappingURL=c.js.map\n"),
+    ]);
+    let read = |rel: &str| {
+        files
+            .get(rel)
+            .map(|text| text.as_bytes().to_vec())
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let paths = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(capture_holds_maps(
+        &paths(&["a.js", "maps/a.json", "b.js", "build/c.js"]),
+        &read
+    ));
+    assert!(capture_holds_maps(&paths(&["b.js"]), &read));
+    assert!(!capture_holds_maps(&paths(&["a.js", "b.js"]), &read));
+}
+
 /// AC-1216: a business rule read from a recovered source is supporting
 /// evidence, never confirmed from the artifact alone.
 #[test]

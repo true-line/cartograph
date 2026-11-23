@@ -2381,22 +2381,26 @@ fn extract_tree_packed(
 
         // Original sources a shipped JavaScript bundle's source map carries,
         // read under the bundle with artifact evidence (AC-1216). A capture
-        // that retained the maps is read whole, as the class files are.
+        // holding every map file its bundles name is read instead of the
+        // checkout, as the class files are.
         let js_id = adapters_artifact_js::SourceId { repo, commit };
         let mut js_progress =
             |path: &str| on_file(&format!("Reading JavaScript bundle source maps — {path}"));
-        let js = if let (Some(capture), false) =
-            (primary, captured_lane_paths(primary, ".map").is_empty())
+        let captured = captured_lane_paths(primary, "");
+        let read_captured = |path: &str| {
+            primary
+                .ok_or_else(|| std::io::Error::other("no capture"))?
+                .file(path)
+                .map(|file| file.bytes().to_vec())
+                .map_err(|_| std::io::Error::other("captured file is unavailable"))
+        };
+        let js = if primary.is_some()
+            && adapters_artifact_js::capture_holds_maps(&captured, &read_captured)
         {
             adapters_artifact_js::extract_dir_from(
                 &js_id,
-                &captured_lane_paths(primary, ""),
-                &|path| {
-                    capture
-                        .file(path)
-                        .map(|file| file.bytes().to_vec())
-                        .map_err(|_| std::io::Error::other("captured file is unavailable"))
-                },
+                &captured,
+                &read_captured,
                 &mut js_progress,
             )
         } else {
