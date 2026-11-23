@@ -1,0 +1,265 @@
+# Reusable Windows NSIS installer with both sidecars (#227, ADR-0093).
+# The five Artifact Signing secrets produce an installer whose every binary is
+# Authenticode signed, timestamped and verified. No secrets produce a visibly
+# labeled unsigned-dev installer; any partial set fails closed. windows.yml
+# calls it on pull requests and main without secrets (#631: no pull-request
+# run ever reads one); a caller that signs passes the five secrets and grants
+# id-token: write for the GitHub OIDC exchange with Azure.
+name: Windows installer
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact branch, tag, or SHA to package
+        required: false
+        type: string
+        default: ''
+    secrets:
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      ARTIFACT_SIGNING_ENDPOINT:
+        required: false
+      ARTIFACT_SIGNING_ACCOUNT:
+        required: false
+      ARTIFACT_SIGNING_PROFILE:
+        required: false
+    outputs:
+      signing_mode:
+        description: signed or unsigned-dev
+        value: ${{ jobs.installer.outputs.signing_mode }}
+      artifact_name:
+        description: Uploaded Windows installer artifact name
+        value: ${{ jobs.installer.outputs.artifact_name }}
+
+# No permissions block: the job runs with what the caller grants, which is
+# contents: read from windows.yml and adds id-token: write from a signer.
+jobs:
+  installer:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      signing_mode: ${{ steps.installer.outputs.mode }}
+      artifact_name: ${{ steps.installer.outputs.name }}
+    steps:
+      - name: Checkout exact validation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
+          persist-credentials: false
+
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        shell: pwsh
+        run: |
+          $configuration = Get-Content rust-toolchain.toml -Raw
+          $channel = [regex]::Match($configuration, '(?m)^channel\s*=\s*"(\d+\.\d+\.\d+)"\s*$')
+          if (-not $channel.Success) { throw 'Expected a pinned Rust release in rust-toolchain.toml' }
+          "channel=$($channel.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ui/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install pinned Windows Rust toolchain
+          executable: rustup.exe
+          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--target","x86_64-pc-windows-msvc"]'
+          timeout-seconds: '300'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-installer
+          cache-bin: "false"
+
+      # npm is a .cmd script on Windows, which only a shell can start, so the
+      # bounded command runs it through pwsh.
+      - name: Install locked root dependencies
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked root dependencies
+          executable: pwsh.exe
+          arguments-json: '["-NoProfile","-Command","npm ci"]'
+          timeout-seconds: '600'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      - name: Install locked UI dependencies
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install locked UI dependencies
+          executable: pwsh.exe
+          arguments-json: '["-NoProfile","-Command","npm ci"]'
+          working-directory: ui
+          timeout-seconds: '600'
+          attempts: '2'
+          retry-delay-seconds: '5'
+
+      # Fail closed before anything is built (ADR-0093): no secret is
+      # unsigned-dev, all five are signed, a partial set stops the job.
+      - name: Classify Windows signing credentials
+        id: signing
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          node scripts/signing-secrets.mjs windows >> $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Compile with no signing input in the environment (#480): Cargo runs
+      # build scripts and proc macros, so nothing secret may be visible here.
+      # The sidecar build scripts refuse to run if a signing input is set.
+      - name: Compile app and sidecars without signing inputs
+        shell: pwsh
+        run: |
+          node scripts/build-mcp-relay.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/build-agent-runtime.mjs x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx tauri build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.windows-bundle.conf.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The signing client is pinned by version and sha256; signtool comes
+      # from the runner's Windows SDK. Its dlib needs the .NET 10 runtime.
+      - name: Fetch Artifact Signing client
+        if: steps.signing.outputs.mode == 'signed'
+        id: client
+        shell: pwsh
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          $version = '1.0.151'
+          $sha256 = '35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a'
+          $root = Join-Path $env:RUNNER_TEMP 'artifact-signing'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $package = Join-Path $root 'client.nupkg'
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$version/microsoft.artifactsigning.client.$version.nupkg" -OutFile $package
+          if ((Get-FileHash -Algorithm SHA256 $package).Hash -ne $sha256) { throw 'Artifact Signing client sha256 mismatch' }
+          Expand-Archive -Path $package -DestinationPath (Join-Path $root 'client') -Force
+          $dlib = Join-Path $root 'client/bin/x64/Azure.CodeSigning.Dlib.dll'
+          if (-not (Test-Path $dlib)) { throw "Missing $dlib" }
+          if (-not (dotnet --list-runtimes | Select-String '^Microsoft\.NETCore\.App 10\.')) { throw 'The Artifact Signing dlib needs the .NET 10 runtime' }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'No x64 signtool.exe in the Windows SDK' }
+          # Only the Azure CLI session from the next step may authenticate.
+          $metadata = Join-Path $root 'metadata.json'
+          @{
+            Endpoint = $env:ARTIFACT_SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:ARTIFACT_SIGNING_ACCOUNT
+            CertificateProfileName = $env:ARTIFACT_SIGNING_PROFILE
+            ExcludeCredentials = @('EnvironmentCredential', 'ManagedIdentityCredential', 'WorkloadIdentityCredential',
+              'SharedTokenCacheCredential', 'VisualStudioCredential', 'VisualStudioCodeCredential',
+              'AzurePowerShellCredential', 'AzureDeveloperCliCredential', 'InteractiveBrowserCredential')
+          } | ConvertTo-Json | Set-Content -Encoding utf8 $metadata
+          # Tauri reads signCommand from config; it names this script by absolute path.
+          $script = (Resolve-Path scripts/windows-sign.ps1).Path
+          $config = Join-Path $root 'tauri.windows-sign.conf.json'
+          @{ bundle = @{ windows = @{ signCommand = "pwsh -NoProfile -File `"$script`" %1" } } } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $config
+          "signtool=$($signtool.FullName)" >> $env:GITHUB_OUTPUT
+          "dlib=$dlib" >> $env:GITHUB_OUTPUT
+          "metadata=$metadata" >> $env:GITHUB_OUTPUT
+          "config=$config" >> $env:GITHUB_OUTPUT
+
+      # GitHub OIDC to Azure, with no stored credential (ADR-0093).
+      - name: Sign in to Azure through OIDC
+        if: steps.signing.outputs.mode == 'signed'
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL) { throw 'The signing caller must grant id-token: write' }
+          $request = "$env:ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange"
+          $token = (Invoke-RestMethod -Uri $request -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }).value
+          az login --service-principal --username $env:AZURE_CLIENT_ID --tenant $env:AZURE_TENANT_ID --federated-token $token --allow-no-subscriptions --output none
+          if ($LASTEXITCODE -ne 0) { throw 'Azure OIDC sign-in failed' }
+
+      - name: Sign sidecars
+        if: steps.signing.outputs.mode == 'signed'
+        shell: pwsh
+        env:
+          ARTIFACT_SIGNING_SIGNTOOL: ${{ steps.client.outputs.signtool }}
+          ARTIFACT_SIGNING_DLIB: ${{ steps.client.outputs.dlib }}
+          ARTIFACT_SIGNING_METADATA: ${{ steps.client.outputs.metadata }}
+        # Both copies: the externalBin sources the bundler packages, and the
+        # release-directory copies the compile step already placed.
+        run: |
+          foreach ($sidecar in @('target/mcp-relay/cartograph-mcp-x86_64-pc-windows-msvc.exe',
+              'target/agent-runtime/cartograph-agent-x86_64-pc-windows-msvc.exe',
+              'target/x86_64-pc-windows-msvc/release/cartograph-mcp.exe',
+              'target/x86_64-pc-windows-msvc/release/cartograph-agent.exe')) {
+            ./scripts/windows-sign.ps1 -Path $sidecar
+          }
+
+      # Packaging only: tauri bundle runs no Cargo compilation. On the signed
+      # path its signCommand signs the app executable and the installer.
+      - name: Bundle installer
+        shell: pwsh
+        env:
+          ARTIFACT_SIGNING_SIGNTOOL: ${{ steps.client.outputs.signtool }}
+          ARTIFACT_SIGNING_DLIB: ${{ steps.client.outputs.dlib }}
+          ARTIFACT_SIGNING_METADATA: ${{ steps.client.outputs.metadata }}
+          SIGN_CONFIG: ${{ steps.client.outputs.config }}
+        run: |
+          $configs = @('--config', 'src-tauri/tauri.windows-bundle.conf.json')
+          if ($env:SIGN_CONFIG) { $configs += @('--config', $env:SIGN_CONFIG) }
+          npx tauri bundle --target x86_64-pc-windows-msvc --bundles nsis @configs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify installer and sidecars
+        id: installer
+        shell: pwsh
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+        run: |
+          $bundle = 'target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $setup = @(Get-ChildItem -Path $bundle -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { throw "Expected one NSIS installer in $bundle, found $($setup.Count)" }
+          $relay = 'target/x86_64-pc-windows-msvc/release/cartograph-mcp.exe'
+          $agent = 'target/x86_64-pc-windows-msvc/release/cartograph-agent.exe'
+          foreach ($sidecar in @($relay, $agent)) {
+            if (-not (Test-Path $sidecar)) { throw "Missing sidecar $sidecar" }
+          }
+          # AC-1427: the agent runtime starts and announces itself.
+          $ready = '' | & $agent | Select-Object -First 1
+          "agent runtime: $ready"
+          if ($ready -notmatch '"type":"ready"') { throw 'The agent runtime did not print its ready line' }
+          # ADR-0093: on the signed path every shipped binary has a valid,
+          # timestamped Authenticode signature, or nothing is uploaded.
+          $binaries = @($setup[0].FullName, 'target/x86_64-pc-windows-msvc/release/app.exe', $relay, $agent)
+          foreach ($binary in $binaries) {
+            $signature = Get-AuthenticodeSignature $binary
+            "${binary}: $($signature.Status)"
+            if ($env:MODE -eq 'signed' -and ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate)) {
+              throw "$binary is not validly signed and timestamped"
+            }
+          }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          "name=Cartograph_${version}_x64_$env:MODE" >> $env:GITHUB_OUTPUT
+          "mode=$env:MODE" >> $env:GITHUB_OUTPUT
+          "path=$($setup[0].FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.installer.outputs.name }}
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
