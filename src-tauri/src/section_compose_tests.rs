@@ -492,6 +492,48 @@ fn a_claim_asserting_more_than_its_facts_show_is_left_out() {
     );
 }
 
+/// AC-1342 (T-1342, #1752 re-check 13): a claim naming a platform no cited
+/// fact names is left out as `platform_not_cited`.
+#[test]
+fn a_claim_naming_an_uncited_platform_is_left_out() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let cites = [id("cap:orders")];
+    let provider = Scripted {
+        reply: json!({"claims": [
+            {"statement": "Shoppers place orders from the Android application.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place orders for themselves.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
+    let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
+    assert_eq!((outcome.claims, outcome.left_out), (1, 1), "{outcome:?}");
+    assert_eq!(
+        outcome.left_out_reasons,
+        BTreeMap::from([("platform_not_cited", 1)])
+    );
+}
+
 #[test]
 fn a_system_composition_tries_each_excerpt_listed_then_unlisted() {
     // AC-1322 (T-1322, #2399): rules come before the listed ids.

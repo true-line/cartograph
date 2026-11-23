@@ -717,7 +717,7 @@ fn screen(prepared: &Prepared, composed: &mut Composed) -> Option<&'static str> 
     let rule_capability = spec::excerpt_rule_capabilities(&prepared.text);
     let capabilities = capability_ids(&prepared.facts);
     type Check<'a> = (&'static str, &'a dyn Fn(&Claim) -> bool);
-    let checks: [Check<'_>; 6] = [
+    let checks: [Check<'_>; 7] = [
         ("statement_names_source", &|claim| {
             !source.named_in(&claim.statement, &claim.citations)
         }),
@@ -733,6 +733,12 @@ fn screen(prepared: &Prepared, composed: &mut Composed) -> Option<&'static str> 
         }),
         ("endpoint_not_cited", &|claim| {
             !shown.endpoint_claim_uncited(&claim.statement, &claim.citations)
+        }),
+        // A platform a claim names is named by a fact it cites (AC-1342).
+        ("platform_not_cited", &|claim| {
+            shown
+                .uncited_platform(&claim.statement, &claim.citations)
+                .is_none()
         }),
         // A claim asserts no more than its cited facts show (#2371).
         ("claim_not_supported", &|claim| {
