@@ -26,6 +26,11 @@ pub(super) mod metadata_admission;
 #[path = "context_paged.rs"]
 mod paged;
 
+// The worker dispatches artifact reads in the next ADR-0089 slice.
+#[cfg_attr(not(test), allow(dead_code))]
+#[path = "context_artifacts.rs"]
+pub(super) mod artifacts;
+
 /// The facts a task's scope reads from (#1602).
 pub(super) enum ScopeFacts {
     /// The scope's projection, held in memory.
@@ -139,6 +144,8 @@ pub(super) struct FrozenContext {
     /// Their evidence stays here for ordinals and limits; prompts withhold it.
     pub(super) withheld: std::collections::BTreeSet<String>,
     pub(super) coverage_archive: Option<InvestigationCoverageArchive>,
+    /// Retained detail bodies in ledger order: one per coverage read, then
+    /// one per artifact page (ADR-0089), the order prompt preparation reads.
     pub(super) inventory_details: Vec<String>,
     qualified: Option<CoverageContext>,
     pub(super) policy: Arc<InvestigationPolicy>,
@@ -196,6 +203,9 @@ pub(super) struct ProspectiveContextView<'a> {
 pub(super) enum PreparedContextReadKind {
     Query,
     Inventory,
+    /// A compiled-artifact page (ADR-0089).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Artifact,
 }
 
 /// Next-family metadata preparation can identify the cumulative read-byte
@@ -1385,11 +1395,20 @@ impl FrozenContext {
                 base.queries.len().checked_add(1) == Some(next.queries.len())
                     && next.queries.starts_with(&base.queries)
                     && next.coverage_reads == base.coverage_reads
+                    && next.artifact_reads == base.artifact_reads
             }
             PreparedContextReadKind::Inventory => {
                 base.coverage_reads.len().checked_add(1) == Some(next.coverage_reads.len())
                     && next.coverage_reads.starts_with(&base.coverage_reads)
                     && next.queries == base.queries
+                    && next.artifact_reads == base.artifact_reads
+            }
+            PreparedContextReadKind::Artifact => {
+                base.artifact_reads.len().checked_add(1) == Some(next.artifact_reads.len())
+                    && next.artifact_reads.starts_with(&base.artifact_reads)
+                    && next.queries == base.queries
+                    && next.coverage_reads == base.coverage_reads
+                    && next.citations == base.citations
             }
         };
         if !one_manifest || base.revision.checked_add(1) != Some(next.revision) {
@@ -1405,6 +1424,11 @@ impl FrozenContext {
             PreparedContextReadKind::Inventory => prepared
                 .ledger()
                 .coverage_reads
+                .last()
+                .map(|manifest| (manifest.response_bytes, &manifest.response_hash)),
+            PreparedContextReadKind::Artifact => prepared
+                .ledger()
+                .artifact_reads
                 .last()
                 .map(|manifest| (manifest.response_bytes, &manifest.response_hash)),
         }
@@ -1434,7 +1458,11 @@ impl FrozenContext {
         inventory_details.extend(self.inventory_details.iter().map(String::as_str));
         match prepared.kind() {
             PreparedContextReadKind::Query => query_pages.push(prepared.raw()),
-            PreparedContextReadKind::Inventory => inventory_details.push(prepared.raw()),
+            // Coverage bodies precede every artifact page.
+            PreparedContextReadKind::Inventory => {
+                inventory_details.insert(self.ledger.coverage_reads.len(), prepared.raw())
+            }
+            PreparedContextReadKind::Artifact => inventory_details.push(prepared.raw()),
         }
         Ok(ProspectiveContextView {
             ledger: prepared.ledger(),
@@ -1456,7 +1484,9 @@ impl FrozenContext {
         // All allocation and UTF-8 conversion precede durable publication.
         match prepared.kind() {
             PreparedContextReadKind::Query => self.query_pages.try_reserve(1),
-            PreparedContextReadKind::Inventory => self.inventory_details.try_reserve(1),
+            PreparedContextReadKind::Inventory | PreparedContextReadKind::Artifact => {
+                self.inventory_details.try_reserve(1)
+            }
         }
         .map_err(|_| HostError::LimitExceeded)?;
         let mut usage = sink.usage().clone();
@@ -1476,7 +1506,12 @@ impl FrozenContext {
         self.retain_rows(rows);
         match kind {
             PreparedContextReadKind::Query => self.query_pages.push(raw),
-            PreparedContextReadKind::Inventory => self.inventory_details.push(raw),
+            // `self.ledger` is now the published ledger: insert this body
+            // after the earlier coverage bodies, before any artifact page.
+            PreparedContextReadKind::Inventory => self
+                .inventory_details
+                .insert(self.ledger.coverage_reads.len() - 1, raw),
+            PreparedContextReadKind::Artifact => self.inventory_details.push(raw),
         }
         drop(guards);
         Ok(())

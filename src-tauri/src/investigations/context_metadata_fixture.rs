@@ -208,6 +208,9 @@ impl Fixture {
     }
     pub(super) fn prepare(&self, kind: PreparedContextReadKind) -> Publication {
         let (prepared, original, tool, preview_kind) = match kind {
+            PreparedContextReadKind::Artifact => {
+                unreachable!("artifact reads are tested separately")
+            }
             PreparedContextReadKind::Query => {
                 let query = InvestigationQuery {
                     scope: InvestigationScope::All,

@@ -352,57 +352,10 @@ impl CompiledArtifact {
         if expected_basis_id != self.basis_id || expected_content_id != self.artifact.content_id {
             return Err(ReadError::StaleBasis);
         }
-        let content = &self.artifact.content;
-        if offset > content.len() || !content.is_char_boundary(offset) {
-            return Err(ReadError::InvalidRequest);
-        }
-        let mut end = offset
-            .saturating_add(max_content_bytes.get())
-            .min(content.len());
-        while !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        let candidate = self.page_at(offset, end);
-        if fits(&candidate, max_response_bytes.get()) {
-            return if end > offset || offset == content.len() {
-                Ok(candidate)
-            } else {
-                Err(ReadError::Limit)
-            };
-        }
-        // The complete page may have a smaller null-cursor envelope; it was
-        // tried above. All remaining candidates are partial, with monotonic
-        // serialized prefix lengths and numeric continuation widths.
-        let (mut low, mut high) = (offset, end);
-        while low < high {
-            let mut middle = low + (high - low).div_ceil(2);
-            while !content.is_char_boundary(middle) {
-                middle -= 1;
-            }
-            if middle == low {
-                break;
-            }
-            if fits(&self.page_at(offset, middle), max_response_bytes.get()) {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
-        }
-        // `high` can lie inside a multibyte character after a failed candidate.
-        // Check the next complete character to avoid losing a fitting boundary.
-        let next = content[low..end]
-            .chars()
-            .next()
-            .map(|character| low + character.len_utf8());
-        if let Some(next) = next
-            && fits(&self.page_at(offset, next), max_response_bytes.get())
-        {
-            low = next;
-        }
-        if low == offset {
-            return Err(ReadError::Limit);
-        }
-        Ok(self.page_at(offset, low))
+        let end = fitting_end(&self.artifact.content, offset, max_content_bytes, |end| {
+            fits(&self.page_at(offset, end), max_response_bytes.get())
+        })?;
+        Ok(self.page_at(offset, end))
     }
 
     fn page_at(&self, offset: usize, end: usize) -> ArtifactPage<'_> {
@@ -420,6 +373,67 @@ impl CompiledArtifact {
             content: &self.artifact.content[offset..end],
         }
     }
+}
+
+/// The end of the largest UTF-8-safe page from `offset` that `fits_at`
+/// admits, at most `max_content_bytes` long. Shared by MCP artifact reads and
+/// in-app artifact reads (ADR-0089). The end-of-content offset yields one
+/// empty final page; any other page must make progress.
+pub(crate) fn fitting_end(
+    content: &str,
+    offset: usize,
+    max_content_bytes: NonZeroUsize,
+    fits_at: impl Fn(usize) -> bool,
+) -> Result<usize, ReadError> {
+    if offset > content.len() || !content.is_char_boundary(offset) {
+        return Err(ReadError::InvalidRequest);
+    }
+    let mut end = offset
+        .saturating_add(max_content_bytes.get())
+        .min(content.len());
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    if fits_at(end) {
+        return if end > offset || offset == content.len() {
+            Ok(end)
+        } else {
+            Err(ReadError::Limit)
+        };
+    }
+    // The complete page may have a smaller null-cursor envelope; it was
+    // tried above. All remaining candidates are partial, with monotonic
+    // serialized prefix lengths and numeric continuation widths.
+    let (mut low, mut high) = (offset, end);
+    while low < high {
+        let mut middle = low + (high - low).div_ceil(2);
+        while !content.is_char_boundary(middle) {
+            middle -= 1;
+        }
+        if middle == low {
+            break;
+        }
+        if fits_at(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    // `high` can lie inside a multibyte character after a failed candidate.
+    // Check the next complete character to avoid losing a fitting boundary.
+    let next = content[low..end]
+        .chars()
+        .next()
+        .map(|character| low + character.len_utf8());
+    if let Some(next) = next
+        && fits_at(next)
+    {
+        low = next;
+    }
+    if low == offset {
+        return Err(ReadError::Limit);
+    }
+    Ok(low)
 }
 
 fn fits(value: &impl Serialize, cap: usize) -> bool {

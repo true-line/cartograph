@@ -30,6 +30,8 @@ impl FrozenContext {
         let kind = match prepared.kind() {
             PreparedContextReadKind::Query => ContextPreviewKind::Query,
             PreparedContextReadKind::Inventory => ContextPreviewKind::Inventory,
+            // Artifact pages have no metadata admission yet (ADR-0089 step 3).
+            PreparedContextReadKind::Artifact => return Err(HostError::InvalidInput.into()),
         };
         if self.policy.profile() != INVESTIGATION_V2_POLICY.profile()
             || (prepared.kind() == PreparedContextReadKind::Query) != prepared.guards.is_some()
@@ -44,7 +46,9 @@ impl FrozenContext {
         // is moved, not reconstructed from a newer graph or registry snapshot.
         match prepared.kind() {
             PreparedContextReadKind::Query => self.query_pages.try_reserve(1),
-            PreparedContextReadKind::Inventory => self.inventory_details.try_reserve(1),
+            PreparedContextReadKind::Inventory | PreparedContextReadKind::Artifact => {
+                self.inventory_details.try_reserve(1)
+            }
         }
         .map_err(|_| HostError::LimitExceeded)?;
         clock.deadline()?;
@@ -89,7 +93,11 @@ impl FrozenContext {
         self.retain_rows(rows);
         match kind {
             PreparedContextReadKind::Query => self.query_pages.push(raw),
-            PreparedContextReadKind::Inventory => self.inventory_details.push(raw),
+            // Coverage bodies precede any artifact page.
+            PreparedContextReadKind::Inventory => self
+                .inventory_details
+                .insert(self.ledger.coverage_reads.len() - 1, raw),
+            PreparedContextReadKind::Artifact => self.inventory_details.push(raw),
         }
         drop(guards);
         Ok(detail)
