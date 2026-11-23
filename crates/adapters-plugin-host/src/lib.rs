@@ -365,7 +365,7 @@ impl PluginHost {
         store.set_epoch_deadline(ticks);
 
         let bindings = Adapter::instantiate(&mut store, &plugin.component, &linker)
-            .map_err(|e| HostError::Instantiation(e.to_string()))?;
+            .map_err(|e| classify_instantiation_error(e, limits))?;
 
         let wit_id = WitSourceId {
             repo: id.repo.clone(),
@@ -409,6 +409,17 @@ impl Drop for PluginHost {
         if let Some(handle) = self.ticker.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// An instantiation failure, classified as a call's would be: a component
+/// whose start-up runs out of fuel (or memory, or time) exceeded that bound,
+/// and anything else is an instantiation failure. Seen on Windows, where
+/// start-up under a one-unit fuel bound traps before the call.
+fn classify_instantiation_error(err: wasmtime::Error, limits: PluginLimits) -> HostError {
+    match classify_call_error(err, limits, u64::MAX) {
+        HostError::CallFailed(message) => HostError::Instantiation(message),
+        bounded => bounded,
     }
 }
 
@@ -718,6 +729,21 @@ mod tests {
             max_memory_bytes,
             max_table_elements,
         }
+    }
+
+    /// AC-0070: a start-up that runs out of fuel is the fuel bound, not an
+    /// instantiation failure, so the file is refused as bound-exceeded (#227).
+    #[test]
+    fn instantiation_out_of_fuel_is_a_fuel_bound() {
+        let limits = PluginLimits::default();
+        assert!(matches!(
+            classify_instantiation_error(wasmtime::Error::new(wasmtime::Trap::OutOfFuel), limits),
+            HostError::FuelExhausted(fuel) if fuel == limits.max_fuel
+        ));
+        assert!(matches!(
+            classify_instantiation_error(wasmtime::Error::msg("missing import"), limits),
+            HostError::Instantiation(message) if message == "missing import"
+        ));
     }
 
     /// Regression test for a Codex review finding on PR #202: the
