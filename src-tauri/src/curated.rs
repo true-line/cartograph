@@ -807,6 +807,7 @@ pub(crate) fn project(
         cited_fact_hashes: &cited_hashes,
         findings: &review.findings,
         cited_fact_digests: &cited_digests,
+        attested: &[],
         policy_version: core::CURATED_POLICY_VERSION,
     })
     .map_err(|error| match error {

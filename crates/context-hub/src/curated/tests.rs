@@ -144,6 +144,7 @@ impl Fixture {
             cited_fact_hashes: &std::collections::BTreeMap::new(),
             findings: &[],
             cited_fact_digests: &std::collections::BTreeMap::new(),
+            attested: &[],
             policy_version: &self.policy,
         })
     }
@@ -175,7 +176,7 @@ fn eligible_record_is_an_item_with_dr4_fields() {
     let projection = Fixture::new(vec![record("r1")]).run();
     assert_eq!(projection.view, CuratedView::Curated);
     assert_eq!(projection.graph_basis, GRAPH_HASH);
-    assert!(projection.revision.starts_with("curated-revision-v3:"));
+    assert!(projection.revision.starts_with("curated-revision-v4:"));
     assert!(projection.listed.is_empty());
     let [item] = projection.items.as_slice() else {
         panic!("one item");
