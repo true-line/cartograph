@@ -382,7 +382,10 @@ impl ReadSession {
         let source_revisions = crate::source_revisions_of(&base.graph.0);
         let curated = {
             let content_hash = &graph_content_hash;
-            let overlay = curated::overlay_nodes(&base, &capabilities, &actors, &rejected_hashes);
+            // A session reads no Subsystem, so a draft citing an area is
+            // listed as missing here; the export resolves it (#2511).
+            let overlay =
+                curated::overlay_nodes(&base, &capabilities, &actors, &[], &rejected_hashes);
             CuratedRead::of(curated::project(
                 &review,
                 &curated::Snapshot {
