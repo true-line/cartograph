@@ -839,3 +839,51 @@ export const FilterLargeTriggerListPreservesSelection: Story = {
     await expect(select).toHaveValue('screen:alias-popup');
   },
 };
+
+export const ClientKindSelectsByKindNotRoute: Story = {
+  // #2472: "client" in a server route is not a client trigger. The Kind
+  // filter selects screens, extension contexts and commands by kind.
+  decorators: [(Story) => <div style={{ width: 500, maxWidth: '100%' }}><Story /></div>],
+  args: {
+    flows: [
+      { ...VERIFIED, trigger: 'ep:GET:/developer/clients/<client_id>', trigger_name: 'GET /developer/clients/<client_id>' },
+      { ...VERIFIED, trigger: 'ep:GET:/developer/new_client', trigger_name: 'GET /developer/new_client' },
+      { ...VERIFIED, trigger: 'screen:alias-popup', trigger_kind: 'Screen', trigger_name: 'Create alias' },
+      { ...VERIFIED, trigger: 'cmd:new-alias', trigger_kind: 'Command', trigger_name: 'New alias shortcut' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const kind = canvas.getByRole('combobox', { name: 'Kind' });
+    const select = canvas.getByRole('combobox', { name: 'Trigger source' });
+    await expect(within(kind).getByRole('option', { name: 'Client-side (2)' })).toBeInTheDocument();
+    await expect(within(kind).getByRole('option', { name: 'HTTP endpoints (2)' })).toBeInTheDocument();
+    await userEvent.selectOptions(kind, 'client-side');
+    await expect(canvas.getByText('2 of 4 triggers match')).toBeInTheDocument();
+    // Options outside the retained-selection group are the filter's matches.
+    const names = [...select.querySelectorAll(':scope > option')].map((option) => option.textContent);
+    await expect(names).toContain('Create alias');
+    await expect(names).toContain('New alias shortcut');
+    await expect(names.filter((name) => name?.includes('client'))).toEqual([]);
+    const toolbar = kind.closest('.flow-inspector-toolbar') as HTMLElement;
+    await expect(toolbar.scrollWidth).toBeLessThanOrEqual(toolbar.clientWidth + 1);
+    await userEvent.click(canvas.getByRole('button', { name: 'Clear filter' }));
+    await expect(kind).toHaveValue('');
+    await expect(canvas.getByText('4 of 4 triggers match')).toBeInTheDocument();
+  },
+};
+
+export const NoClientTriggersIsStated: Story = {
+  // #2472: a system with only server triggers says no client-side trigger
+  // was recovered instead of offering route substrings.
+  args: {
+    flows: [
+      { ...VERIFIED, trigger: 'ep:GET:/developer/clients/<client_id>', trigger_name: 'GET /developer/clients/<client_id>' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'Kind' }), 'client-side');
+    await expect(canvas.getByText(/no client-side triggers \(screens, extension contexts or commands\) were recovered/)).toBeInTheDocument();
+  },
+};
