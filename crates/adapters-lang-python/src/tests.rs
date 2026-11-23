@@ -7918,6 +7918,34 @@ def above():
 }
 
 #[test]
+fn an_on_breach_callback_leaves_the_refusal_status_unrecorded() {
+    // AC-0881 (#2539): an `on_breach` callback on the decorator or on the
+    // limiter answers a breach with its own response, so no 429 is
+    // recorded; a plain limit records it.
+    let on_decorator = decorated_route(
+        "@limiter.limit(\"5/minute\", on_breach=lambda limit: None)",
+        None,
+        &[],
+    );
+    let limits = rate_limits_at(&on_decorator, "/x");
+    assert_eq!(limits["entries"][0]["on_breach"], true, "{limits}");
+    assert!(limits["exceeded_status"].is_null(), "{limits}");
+    let on_limiter = decorated_route(
+        "@limiter.limit(\"5/minute\")",
+        Some(
+            "from flask_limiter import Limiter\n\n\
+             limiter = Limiter(key_func=lambda: \"k\", on_breach=lambda limit: None)\n",
+        ),
+        &[],
+    );
+    let limits = rate_limits_at(&on_limiter, "/x");
+    assert_eq!(limits["entries"][0]["on_breach"], true, "{limits}");
+    assert!(limits["exceeded_status"].is_null(), "{limits}");
+    let plain = decorated_route("@limiter.limit(\"5/minute\")", None, &[]);
+    assert_eq!(rate_limits_at(&plain, "/x")["exceeded_status"], 429);
+}
+
+#[test]
 fn a_limit_on_something_not_a_limiter_records_nothing() {
     // AC-0881 (T-0881): `.limit` on a name that is not a proven
     // flask-limiter `Limiter` is not a rate limit.

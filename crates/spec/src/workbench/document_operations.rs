@@ -385,10 +385,13 @@ fn operations_and_limits(
         if let Some((text, unresolved, _)) = rate_limits(endpoint, mode) {
             // The rule names its operation: two operations sharing one limit
             // state two rules, which the drafter's repeated-rule check keeps.
-            let mut rule = format!(
-                "{} accepts {text}; requests past it are refused with 429.",
-                NodeName(endpoint)
-            );
+            // The refusal is the recorded status; a breach callback's
+            // response replaces it, and its status is not recorded.
+            let refusal = match endpoint.props["rate_limits"]["exceeded_status"].as_u64() {
+                Some(status) => format!("requests past it are refused with {status}"),
+                None => "requests past it get the response of a breach callback".to_owned(),
+            };
+            let mut rule = format!("{} accepts {text}; {refusal}.", NodeName(endpoint));
             if unresolved {
                 rule.push_str(" A declared limit's value is not resolved.");
             }
