@@ -382,6 +382,18 @@ are read from their loader's validated contents, and documentation drift
 compares paths against the checkout's tree. Documentation facts carry no
 receipt.
 
+## Captured API reference reads (AC-1067, #385)
+
+The caller lists the declared API references (`api_docs::api_doc_paths`:
+`.cartograph/api-docs.toml` when it is read, and each declared reference,
+from the repository config and the system manifest) only when their load
+names no gap, and they join the reader selections beside the lanes. The
+capture records the retained list (`api_doc_paths`). When it holds them,
+`api_docs::load_api_docs_from_capture` reads the declarations and contents
+from the retained bytes, in recovery and in the relinking after publication;
+otherwise, and with no capture, the loader reads the checkout, so a gap's
+reason is always the checkout's.
+
 ## Directory-built lane facts (AC-1037, #385)
 
 The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each
