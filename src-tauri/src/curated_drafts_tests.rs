@@ -499,7 +499,7 @@ fn a_withheld_overlay_capability_resolves_no_draft() {
         }),
         cites: [core_graph::overlay::BaseRef::Node("cap:checkout".into())].into(),
     }];
-    let printed = overlay_nodes(&base, &derived, &[], &BTreeSet::new());
+    let printed = overlay_nodes(&base, &derived, &[], &[], &BTreeSet::new());
     assert_eq!(
         printed
             .iter()
@@ -507,5 +507,5 @@ fn a_withheld_overlay_capability_resolves_no_draft() {
             .collect::<Vec<_>>(),
         ["capability:returns"]
     );
-    assert!(overlay_nodes(&base, &derived, &[], &rejected).is_empty());
+    assert!(overlay_nodes(&base, &derived, &[], &[], &rejected).is_empty());
 }

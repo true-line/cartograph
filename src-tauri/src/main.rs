@@ -7915,6 +7915,7 @@ impl SpecRead {
                     &base,
                     &knowledge.capabilities,
                     &knowledge.actors,
+                    &knowledge.subsystems,
                     &rejected_hashes,
                 );
                 let projection = curated::project(

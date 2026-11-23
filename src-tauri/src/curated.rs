@@ -724,8 +724,9 @@ pub(crate) enum DerivedDecisions<'a> {
 pub(crate) struct Snapshot<'a> {
     pub nodes: &'a [Node],
     pub edges: &'a [Edge],
-    /// The knowledge overlay's Capabilities and Actors current for
-    /// `revision` (#2040): a draft may cite them beside the base facts.
+    /// The knowledge overlay's Capabilities, Actors and printed areas current
+    /// for `revision` (#2040, #2511): a draft may cite them beside the base
+    /// facts.
     pub overlay: &'a [&'a Node],
     pub derived_decisions: DerivedDecisions<'a>,
     pub coverage: &'a [core_graph::coverage::StoredCoverage],
@@ -772,9 +773,9 @@ pub(crate) fn project(
         .collect();
     let current = current_assertion_hashes(snapshot, &decided, &review.settled)?;
     // The current hash of each fact an accepted draft cites, over the
-    // snapshot's nodes and edges, then the overlay's Capabilities and Actors
-    // (ADR-0064 decision 8, #2040). One pass, and none when no draft is
-    // accepted. A base fact keeps its own hash.
+    // snapshot's nodes and edges, then the overlay's Capabilities, Actors
+    // and printed areas (ADR-0064 decision 8, #2040, #2511). One pass, and
+    // none when no draft is accepted. A base fact keeps its own hash.
     let cited: BTreeSet<String> = review
         .drafts
         .iter()
@@ -819,15 +820,18 @@ pub(crate) fn project(
     })
 }
 
-/// The overlay Capabilities and Actors a `best-effort` export of `base`
-/// prints, for [`Snapshot::overlay`] (#2040): the knowledge stories
+/// The overlay Capabilities, Actors and areas a `best-effort` export of
+/// `base` prints, for [`Snapshot::overlay`] (#2040): the knowledge stories
 /// validated as the export validates them, so a story the export withholds
-/// (it, or a fact it rests on, was rejected) resolves no draft. A refused
+/// (it, or a fact it rests on, was rejected) resolves no draft. The
+/// `subsystems` the stories are arranged by are the areas D1 prints, which a
+/// draft may cite (#2319); each one kept resolves too (#2511). A refused
 /// overlay resolves none.
 pub(crate) fn overlay_nodes<'a>(
     base: &'a core_graph::RevisionedSnapshot,
     capabilities: &'a [core_graph::overlay::OverlayFact],
     actors: &'a [core_graph::overlay::OverlayFact],
+    subsystems: &'a [core_graph::overlay::OverlayFact],
     rejected: &BTreeSet<String>,
 ) -> Vec<&'a Node> {
     let Some(candidates) = capabilities
@@ -853,7 +857,13 @@ pub(crate) fn overlay_nodes<'a>(
         spec::ExportMode::BestEffort,
         rejected,
     )
-    .map(|stories| stories.included_nodes().collect())
+    .map(|stories| {
+        let mode = spec::ExportMode::BestEffort;
+        let stories = stories.with_areas(base, subsystems, mode, rejected);
+        let mut nodes: Vec<&'a Node> = stories.included_nodes().collect();
+        nodes.extend(stories.area_nodes());
+        nodes
+    })
     .unwrap_or_default()
 }
 
