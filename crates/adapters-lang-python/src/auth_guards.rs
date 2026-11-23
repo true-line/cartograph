@@ -1215,6 +1215,9 @@ pub(crate) fn collect(
                     .child_by_field_name("attribute")
                     .is_some_and(|attribute| cx.text(&attribute) == "wsgi_app");
             if let Some(name) = limiter_def(cx, root, node, left, right, bindings) {
+                if has_keyword(cx, right, "on_breach") {
+                    out.limiter_breach.push((cx.path.to_string(), name.clone()));
+                }
                 out.limiter_defs.push((cx.path.to_string(), name));
             }
             if wsgi {
@@ -1238,6 +1241,19 @@ pub(crate) fn collect(
         "delete_statement" => target_writes(cx, node, bindings, out),
         _ => {}
     });
+}
+
+/// Whether `call` passes the keyword argument `name`.
+fn has_keyword(cx: &FileCx<'_>, call: TsNode<'_>, name: &str) -> bool {
+    call.child_by_field_name("arguments")
+        .is_some_and(|arguments| {
+            named(arguments).into_iter().any(|argument| {
+                argument.kind() == "keyword_argument"
+                    && argument
+                        .child_by_field_name("name")
+                        .is_some_and(|key| cx.text(&key) == name)
+            })
+        })
 }
 
 /// The name `assignment` binds when it is a module-level

@@ -137,6 +137,9 @@ pub struct Extraction {
     module_attr_writes: BTreeSet<String>,
     /// Module-level flask-limiter `Limiter` instances (#1157).
     limiter_defs: Vec<(String, String)>,
+    /// The limiters among them constructed with an `on_breach` callback,
+    /// whose response replaces flask-limiter's 429 (#2539).
+    limiter_breach: Vec<(String, String)>,
     /// Limit decorators on route handlers and module limit constants (#1998).
     pending_limits: Vec<rate_limits::PendingLimit>,
     limit_constants: Vec<rate_limits::LimitConstant>,
@@ -2617,6 +2620,7 @@ fn extract_dir_with(
             out.wild_mounts.extend(extraction.wild_mounts);
             out.module_attr_writes.extend(extraction.module_attr_writes);
             out.limiter_defs.extend(extraction.limiter_defs);
+            out.limiter_breach.extend(extraction.limiter_breach);
             out.pending_limits.extend(extraction.pending_limits);
             out.limit_constants.extend(extraction.limit_constants);
             out.attribute_write_objects
