@@ -49,8 +49,9 @@ passed off as recovered fact.
    latest attestation sets the standing, and earlier ones are kept. The
    first attestation states the statement.
    - An **agent attestation** records the role and its definition
-     fingerprint, the model and provider, the producing run or chat, and the
-     contributor id of the engineer who directed it.
+     fingerprint, the model and provider, the producing run or chat, and,
+     when an engineer directed it, that engineer's contributor id (none when
+     agents attest one another).
    - An **engineer attestation** records a verb (`stated`, `confirmed`,
      `disputed` or `withdrew`), the time, the conversation or investigation
      it came from, and the engineer's contributor id.
@@ -98,9 +99,11 @@ passed off as recovered fact.
    - The fact index of ADR-0058 decision 6 gains the attested records a
      document cites, under their `A-` ids, so the export still fails on a
      citation without a row (amends ADR-0064 decision 9).
-8. **Lifecycle states in the curated projection.** Accepted records are
-   projected as a fourth kind (amends ADR-0061 decision 1). Each record gets
-   the first state that applies:
+8. **Lifecycle states in the curated projection.** Attested records are
+   projected as a fourth kind (amends ADR-0061 decision 1): an
+   engineer-backed record as accepted, and an agent-only record under its
+   own inclusion state, `agent-attested, unconfirmed`, which is projected
+   but never accepted. Each record gets the first state that applies:
    - `withdrawn`: its latest engineer attestation is `withdrew`;
    - `disputed`: an engineer disputes a statement an agent made, or a
      confirmation is followed by a dispute. It is shown as disputed and
