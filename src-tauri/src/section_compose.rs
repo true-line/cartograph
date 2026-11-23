@@ -60,9 +60,18 @@ pub(crate) struct Prepared {
     title: &'static str,
     text: String,
     facts: Vec<ComposeFact>,
-    /// The attested records the composer was handed, `A-` id to record
-    /// identity: the hash a draft citing one records (ADR-0090 decision 6).
-    attested: BTreeMap<String, String>,
+    /// The attested records the composer was handed, by `A-` id (ADR-0090
+    /// decision 6).
+    attested: BTreeMap<String, HandedAttested>,
+}
+
+/// An attested record a composition was handed.
+#[derive(Debug, Clone)]
+struct HandedAttested {
+    /// Its identity: the hash a draft citing it records.
+    identity: String,
+    /// Its statement: what a claim citing it is checked against.
+    statement: String,
 }
 
 /// What a composition produced.
@@ -513,9 +522,15 @@ fn prepared(
     } else {
         section_compose::action_unlisted(&input, action_id)
     };
-    let attested: BTreeMap<String, String> = in_scope
+    let attested: BTreeMap<String, HandedAttested> = in_scope
         .iter()
-        .map(|record| (record.citation_id.clone(), record.record_id.clone()))
+        .map(|record| {
+            let handed = HandedAttested {
+                identity: record.record_id.clone(),
+                statement: record.statement.clone(),
+            };
+            (record.citation_id.clone(), handed)
+        })
         .collect();
     citable.extend(attested.keys().cloned());
     Ok(Prepared {
@@ -693,7 +708,7 @@ fn screen(prepared: &Prepared, composed: &mut Composed) -> Option<&'static str> 
     // A route a statement spells out must be shown by a fact it cites
     // (#2328), not taken from the section text around it; so must a figure
     // or version, and a claim about endpoints cites one (#2349).
-    let shown = spec::CitedText::of(nodes, edges, &prepared.overlay, &cited);
+    let shown = cited_text(prepared, &cited);
     // A rule from the excerpt is stated for the capability it is listed
     // under, so a claim citing it cites that capability too (#2416).
     let rule_capability = spec::excerpt_rule_capabilities(&prepared.text);
@@ -868,8 +883,8 @@ fn stage_as(
     // with its identity as the hash the projection compares (ADR-0090
     // decision 6).
     for id in &cited {
-        if let Some(identity) = prepared.attested.get(id) {
-            citation_set.insert(id.clone(), identity.clone());
+        if let Some(handed) = prepared.attested.get(id) {
+            citation_set.insert(id.clone(), handed.identity.clone());
         }
     }
     let draft = match admit(&address, &citation_set, finish) {
@@ -1303,11 +1318,23 @@ fn review_action(prepared: &Prepared, claims: &[Claim]) -> CompletionAction {
     )
 }
 
+/// What each `cited` fact of `prepared` shows, and each cited attested
+/// record its statement (ADR-0090 decision 6).
+fn cited_text(prepared: &Prepared, cited: &BTreeSet<String>) -> spec::CitedText {
+    let mut shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, cited);
+    for (id, handed) in &prepared.attested {
+        if cited.contains(id) {
+            shown.insert_attested(id, &handed.statement);
+        }
+    }
+    shown
+}
+
 /// The text of each `cited` fact of `prepared` by citation id: its indexed
 /// text, and for a rule of the excerpt the capability it is listed under
 /// and the rule in domain terms (#2419).
 fn cited_facts(prepared: &Prepared, cited: &BTreeSet<String>) -> BTreeMap<String, String> {
-    let shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, cited);
+    let shown = cited_text(prepared, cited);
     let rules = spec::excerpt_rules(&prepared.text);
     cited
         .iter()

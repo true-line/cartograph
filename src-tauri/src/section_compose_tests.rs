@@ -1148,7 +1148,7 @@ fn attested_for_capabilities(state: &AppState, withdrawn: bool) -> (String, Stri
                     scope: "system".into(),
                 },
             },
-            statement: "Checkout is used by the shop staff only.".into(),
+            statement: "Checkout is used by the 3 shop staff only.".into(),
             supporting: cited.into_iter().collect(),
             recorded_hashes,
             attestations: vec![says(EngineerVerb::Stated)],
@@ -1164,7 +1164,9 @@ fn attested_for_capabilities(state: &AppState, withdrawn: bool) -> (String, Stri
 
 // AC-1077 (T-1077, ADR-0090 decision 6): a composition is handed the
 // attested records of its section and scope, and a claim citing one is
-// staged with the record's identity as the id's hash.
+// staged with the record's identity as the id's hash. The figure only the
+// record states is shown by it, so the claim is kept, and the reviewer is
+// handed the record's statement as its cited text.
 #[test]
 fn a_composition_may_cite_an_attested_record_of_its_section() {
     let (_dir, state) = state();
@@ -1172,7 +1174,7 @@ fn a_composition_may_cite_an_attested_record_of_its_section() {
     let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
     let provider = Scripted {
         reply: json!({"claims": [
-            {"statement": "Checkout takes an order for the shop staff.",
+            {"statement": "Checkout takes an order for the 3 shop staff.",
              "claim_kind": "implemented_behavior",
              "citation_ids": [id("cap:checkout"), attested.clone()]},
         ]})
@@ -1191,10 +1193,15 @@ fn a_composition_may_cite_an_attested_record_of_its_section() {
     .unwrap();
     let prompt = provider.prompts.lock().unwrap().remove(0);
     assert!(prompt.contains(&format!(
-        "{attested} | attested | Checkout is used by the shop staff only.\n"
+        "{attested} | attested | Checkout is used by the 3 shop staff only.\n"
     )));
     // Contributors are project data: the composer is not told them.
     assert!(!prompt.contains("Placeholder Engineer"));
+    let facts = cited_facts(&prepared, &BTreeSet::from([attested.clone()]));
+    assert_eq!(
+        facts.get(&attested).map(String::as_str),
+        Some("Checkout is used by the 3 shop staff only.")
+    );
 
     let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
     let outcome = stage(&state, &prepared, composed, job.id()).unwrap();

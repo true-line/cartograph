@@ -314,6 +314,15 @@ impl CitedText {
         }
     }
 
+    /// Index `statement` as what the attested record cited by `id` shows
+    /// (ADR-0090 decision 6): a figure or term it states is shown by a claim
+    /// citing it, as a fact's are, so the record can fill the gap it was
+    /// made for.
+    pub fn insert_attested(&mut self, id: &str, statement: &str) {
+        self.by_citation.insert(id.to_owned(), statement.to_owned());
+        self.figures.insert(id.to_owned(), statement.to_owned());
+    }
+
     /// The text indexed for cited fact `id` (its id, label and props, or an
     /// edge's ends, label and props), if it is cited (#2419).
     pub fn text(&self, id: &str) -> Option<&str> {
@@ -1263,6 +1272,40 @@ mod tests {
         assert_eq!(
             text.uncited_number("It reads 9 bytes.", std::slice::from_ref(&id)),
             Some("9")
+        );
+    }
+
+    // AC-1077 (ADR-0090 decision 6): a cited attested record shows what its
+    // statement states, figures and terms alike, and nothing for a claim
+    // that does not cite it.
+    #[test]
+    fn an_attested_statement_shows_what_it_states_to_a_claim_citing_it() {
+        let capability = Node {
+            id: "cap:refund".into(),
+            label: "Capability".into(),
+            props: json!({"title": "Refund an order"}),
+        };
+        let c = citation_id(&FactKey::Node {
+            id: capability.id.clone(),
+        });
+        let a = "A-00000000000000a1".to_owned();
+        let cited: BTreeSet<String> = [c.clone(), a.clone()].into();
+        let mut text = CitedText::of(&[capability], &[], &[], &cited);
+        let claim = "A refund over 500 is approved by a supervisor.";
+        assert_eq!(
+            text.uncited_number(claim, &[c.clone(), a.clone()]),
+            Some("500")
+        );
+        text.insert_attested(&a, "A refund over 500 is approved by a supervisor.");
+        assert_eq!(text.uncited_number(claim, &[c.clone(), a.clone()]), None);
+        assert!(!text.support(claim, &[c.clone(), a.clone()]).overreaches());
+        assert_eq!(
+            text.uncited_number(claim, std::slice::from_ref(&c)),
+            Some("500")
+        );
+        assert_eq!(
+            text.text(&a),
+            Some("A refund over 500 is approved by a supervisor.")
         );
     }
 }
