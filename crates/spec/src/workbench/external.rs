@@ -1318,6 +1318,7 @@ pub(super) fn output(
         content: content.finish(),
         assertions: assertions.values,
         subjects: assertions.subjects,
+        attested: Vec::new(),
     })
 }
 

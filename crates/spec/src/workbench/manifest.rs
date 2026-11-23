@@ -237,6 +237,7 @@ pub(super) fn output(
         content: content.finish(),
         assertions: Vec::new(),
         subjects: Vec::new(),
+        attested: Vec::new(),
     })
 }
 
