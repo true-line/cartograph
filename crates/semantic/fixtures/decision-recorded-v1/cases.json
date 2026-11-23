@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "dataset_id": "decision-recorded-v1",
+  "purpose": "Mechanism fixture for the typed-decision eval harness (#429). Hand-authored cases and recorded answers, not vendor output and not an accuracy measurement.",
+  "cases": [
+    {"case_id": "d-charge", "state": "checkout() calls charge(order.total) after the cart is locked", "candidates": ["fn:payments/charge.ts#charge", "fn:refunds/charge.ts#charge"], "acceptable": ["fn:payments/charge.ts#charge"]},
+    {"case_id": "d-format", "state": "renderPrice() calls formatCurrency(amount, locale)", "candidates": ["fn:i18n/currency.ts#formatCurrency", "reexport:i18n/index.ts#formatCurrency", "fn:legacy/format.ts#formatMoney"], "acceptable": ["fn:i18n/currency.ts#formatCurrency", "reexport:i18n/index.ts#formatCurrency"]},
+    {"case_id": "d-external", "state": "dispatch() POSTs body to a caller-supplied url with fetch", "candidates": ["fn:http/client.ts#post", "fn:webhooks/sign.ts#sign"], "acceptable": []},
+    {"case_id": "d-audit", "state": "approve() calls audit.record(event) on the injected AuditLog", "candidates": ["method:audit/file-log.ts#FileAuditLog.record", "method:audit/null-log.ts#NullAuditLog.record"], "acceptable": ["method:audit/file-log.ts#FileAuditLog.record"]},
+    {"case_id": "d-retry", "state": "sync() calls retry(fn, 3) from the shared utilities", "candidates": ["fn:util/retry.ts#retry", "fn:jobs/retry-queue.ts#enqueueRetry"], "acceptable": ["fn:util/retry.ts#retry"]},
+    {"case_id": "d-token", "state": "login() calls verify(token) imported from the auth package; api_key = \"sk-live-abcdefghijklmnopqrstuvwx\"", "candidates": ["fn:auth/jwt.ts#verify", "fn:mail/verify.ts#verify"], "acceptable": ["fn:auth/jwt.ts#verify"]}
+  ],
+  "recorded_answers": {
+    "d-charge": {"choice": 0, "probabilities": [0.92, 0.05, 0.03], "confidence": 0.92},
+    "d-format": {"choice": 1, "probabilities": [0.35, 0.55, 0.05, 0.05], "confidence": 0.55},
+    "d-external": {"choice": 2, "probabilities": [0.2, 0.1, 0.7], "confidence": 0.7},
+    "d-audit": {"choice": 1, "probabilities": [0.4, 0.58, 0.02], "confidence": 0.58},
+    "d-retry": {"choice": 0, "probabilities": [0.97, 0.02, 0.01], "confidence": 0.97},
+    "d-token": {"choice": 0, "probabilities": [0.9, 0.08, 0.02], "confidence": 0.9}
+  }
+}

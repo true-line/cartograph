@@ -8,6 +8,7 @@
 //! facts are never mutation targets (R-INT-1).
 
 pub mod context;
+pub mod decision_eval;
 pub mod embedding_cache;
 mod eval_report;
 pub use eval_report::EvalReport;
