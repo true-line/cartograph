@@ -76,7 +76,7 @@ maintainer landing a real PR.
    — there's no shared Rust trait to implement, so copy the shape from the
    crate you're extending.
 2. Wire the new extension/branch into `extract_tree_incremental`
-   (`src-tauri/src/main.rs`), merging `Extraction`/`LayerBreakdown`/
+   (`src-tauri/src/lib.rs`), merging `Extraction`/`LayerBreakdown`/
    `DeltaSummary` like the existing calls do.
 3. Update `INSTALLED_ADAPTERS` (and remove from `PLANNED_ADAPTERS` if it was
    there) in `crates/ingest/src/preflight.rs` — the single registry driving

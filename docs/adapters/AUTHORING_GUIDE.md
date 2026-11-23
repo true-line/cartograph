@@ -22,7 +22,7 @@ has one (see Path B).
 The whole loop — discover → gate → enable → route → extract → close the
 Preflight finding — is implemented and tested end to end in
 `crates/adapters-plugin-host`. `app::plugin_lane_end_to_end_gate_accept_reingest_closes_finding`
-(`src-tauri/src/main.rs`) is a real, passing test that runs this exact path
+(`src-tauri/src/lib.rs`) is a real, passing test that runs this exact path
 against a compiled fixture. Nothing below is aspirational.
 
 ### 1. The contract
@@ -308,7 +308,7 @@ convention you match by example:
   `Deterministic`, confidence `Confirmed`, evidence span, content hash,
   `extractor_id`) — built via `Provenance::new(..)`, never invented by hand.
 
-Wiring it in (`src-tauri/src/main.rs`):
+Wiring it in (`src-tauri/src/lib.rs`):
 
 1. Add a call inside `extract_tree_incremental` (gated by whichever
    `wants_*` layer hint applies), merging `Extraction`/`LayerBreakdown`/
