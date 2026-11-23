@@ -347,6 +347,16 @@ fn prepared_source_access_started_failures_preserve_truth_and_guards() {
         assert_eq!(read_count(), 1);
         assert_eq!(failure.stage(), SourceAccessStage::AccessStarted);
         assert_eq!(failure.kind(), expected);
+        // AC-1609: a known read failure keeps its closed step and class.
+        assert_eq!(
+            failure.discard_diagnostic(),
+            (expected != SourceReadFailureKind::ReadUnavailable).then_some(
+                InvestigationTerminalDiagnostic::SourceReadDiscarded {
+                    step: agents::investigation::SourceDiscardStep::ReadText,
+                    error_class: agents::investigation::SourceDiscardClass::HostInvalidInput,
+                }
+            )
+        );
         assert!(context.evidence.is_empty());
         assert_eq!(context.ledger, base);
         fixture.cannot_forget(&target.registered_source_id);
@@ -577,6 +587,14 @@ fn prepared_source_size_claim_is_checked_after_charge_before_context_installatio
             assert_eq!(
                 failure.kind(),
                 SourceReadFailureKind::KnownReadFailure(HostError::InvalidInput)
+            );
+            // AC-1609: the understated receipt is named, not folded into a read error.
+            assert_eq!(
+                failure.discard_diagnostic(),
+                Some(InvestigationTerminalDiagnostic::SourceReadDiscarded {
+                    step: agents::investigation::SourceDiscardStep::ReadSizes,
+                    error_class: agents::investigation::SourceDiscardClass::HostInvalidInput,
+                })
             );
         } else {
             assert!(result.is_ok());

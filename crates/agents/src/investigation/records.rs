@@ -672,6 +672,111 @@ pub enum InvestigationTerminalDiagnostic {
         phase: InvestigationFailurePhase,
         error_class: InvestigationOperationalClass,
     },
+    /// An executed source read whose candidate was discarded (AC-1609): the
+    /// closed read or publication step and the error class it failed with.
+    #[serde(rename = "investigation-terminal-diagnostic@7")]
+    SourceReadDiscarded {
+        step: SourceDiscardStep,
+        error_class: SourceDiscardClass,
+    },
+}
+impl InvestigationTerminalDiagnostic {
+    /// The longest serialized `@7` record, for sizing a settlement before the
+    /// actual step and class are known.
+    pub fn widest_source_discard() -> Self {
+        fn width(value: impl Serialize) -> usize {
+            serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len())
+        }
+        let step = SourceDiscardStep::ALL
+            .into_iter()
+            .max_by_key(|step| width(step))
+            .unwrap_or(SourceDiscardStep::ReadText);
+        let error_class = SourceDiscardClass::ALL
+            .into_iter()
+            .max_by_key(|class| width(class))
+            .unwrap_or(SourceDiscardClass::HostOperational);
+        Self::SourceReadDiscarded { step, error_class }
+    }
+}
+/// Where an executed source read was discarded (AC-1609).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDiscardStep {
+    /// The pinned text read itself failed.
+    ReadText,
+    /// The text read does not span the captured byte range.
+    ReadLength,
+    /// The receipt understated the measured source sizes.
+    ReadSizes,
+    /// The source could not be appended to the evidence ledger.
+    ReadEvidence,
+    PublishValidate,
+    PublishSnapshot,
+    PublishProof,
+    PublishPrompt,
+    PublishPrepare,
+    PublishSeal,
+    PublishMeasure,
+    PublishCommit,
+}
+impl SourceDiscardStep {
+    pub const ALL: [Self; 12] = [
+        Self::ReadText,
+        Self::ReadLength,
+        Self::ReadSizes,
+        Self::ReadEvidence,
+        Self::PublishValidate,
+        Self::PublishSnapshot,
+        Self::PublishProof,
+        Self::PublishPrompt,
+        Self::PublishPrepare,
+        Self::PublishSeal,
+        Self::PublishMeasure,
+        Self::PublishCommit,
+    ];
+}
+/// The closed error class of a discarded source read (AC-1609).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDiscardClass {
+    HostInputChanged,
+    HostSourceUnavailable,
+    HostInvalidInput,
+    HostLimitExceeded,
+    HostStoreCapacity,
+    HostOperational,
+    StoreInvalid,
+    StoreMissing,
+    StoreConflict,
+    StoreStale,
+    StoreCapacity,
+    StoreUnavailable,
+    StoreCancelled,
+    StoreOwnership,
+    StoreStorage,
+    ProviderBounded,
+    BoundInvariant,
+}
+impl SourceDiscardClass {
+    pub const ALL: [Self; 17] = [
+        Self::HostInputChanged,
+        Self::HostSourceUnavailable,
+        Self::HostInvalidInput,
+        Self::HostLimitExceeded,
+        Self::HostStoreCapacity,
+        Self::HostOperational,
+        Self::StoreInvalid,
+        Self::StoreMissing,
+        Self::StoreConflict,
+        Self::StoreStale,
+        Self::StoreCapacity,
+        Self::StoreUnavailable,
+        Self::StoreCancelled,
+        Self::StoreOwnership,
+        Self::StoreStorage,
+        Self::ProviderBounded,
+        Self::BoundInvariant,
+    ];
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

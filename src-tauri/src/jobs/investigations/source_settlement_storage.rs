@@ -105,6 +105,7 @@ impl JobStore {
         execution: &JobExecution,
         reservation: &CommittedSourceReservation,
         outcome: KnownSourceDisposition,
+        diagnostic: Option<InvestigationTerminalDiagnostic>,
         active_milliseconds: u64,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
@@ -138,10 +139,16 @@ impl JobStore {
             KnownSourceDisposition::KnownReadDiscarded => DispositionKind::KnownReadDiscarded,
             KnownSourceDisposition::BoundInvariantDefect => DispositionKind::BoundInvariantDefect,
         };
+        // A released read has no discard record; only the discarded kinds
+        // carry the closed step and error class (AC-1609).
+        let diagnostic = match outcome {
+            KnownSourceDisposition::ReleasedBeforeRead => None,
+            _ => diagnostic,
+        };
         let plan = project(
             &tx,
             &before,
-            SourceSettlement::Terminal(kind),
+            SourceSettlement::Discarded { kind, diagnostic },
             active_milliseconds,
         )?;
         let task = persist(&tx, &before, plan)?;

@@ -34,6 +34,12 @@ pub(super) enum SourceSettlement<'a> {
     /// Classification must come from the actual access stage, never a model
     /// proposal. OutcomeUnknown additionally requires real owner-loss proof.
     Terminal(DispositionKind),
+    /// A terminal host-classified outcome with its closed discard record
+    /// (AC-1609). The record is sized in the settlement envelope.
+    Discarded {
+        kind: DispositionKind,
+        diagnostic: Option<InvestigationTerminalDiagnostic>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -111,6 +117,7 @@ pub(super) fn project(
     if active_milliseconds < before.detail.usage.active_milliseconds {
         return Err(InvestigationStoreError::Invalid);
     }
+    let mut diagnostic = None;
     let (kind, reason, continuation) = match outcome {
         SourceSettlement::Acquired(c) => (DispositionKind::Acquired, None, Some(c)),
         SourceSettlement::Unavailable {
@@ -131,6 +138,29 @@ pub(super) fn project(
             ) {
                 return Err(InvestigationStoreError::Invalid);
             }
+            (kind, None, None)
+        }
+        SourceSettlement::Discarded {
+            kind,
+            diagnostic: d,
+        } => {
+            if (!discard_records(kind) && d.is_some())
+                || d.is_some_and(|d| {
+                    !matches!(
+                        d,
+                        InvestigationTerminalDiagnostic::SourceReadDiscarded { .. }
+                    )
+                })
+            {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            if matches!(
+                kind,
+                DispositionKind::Acquired | DispositionKind::ReadUnavailable
+            ) {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            diagnostic = d;
             (kind, None, None)
         }
     };
@@ -162,10 +192,20 @@ pub(super) fn project(
             ledger,
             kind,
             reason,
+            diagnostic,
             active_milliseconds,
             decide,
         )?,
     })
+}
+
+/// The terminal kinds that follow an executed read and may keep its closed
+/// discard record (AC-1609).
+pub(super) fn discard_records(kind: DispositionKind) -> bool {
+    matches!(
+        kind,
+        DispositionKind::KnownReadDiscarded | DispositionKind::BoundInvariantDefect
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -178,6 +218,7 @@ fn materialize(
     ledger: Option<InvestigationInputLedger>,
     kind: DispositionKind,
     reason: Option<UnavailableReason>,
+    diagnostic: Option<InvestigationTerminalDiagnostic>,
     active_milliseconds: u64,
     decide: Option<completion::read_refusals::ReadDecider<'_>>,
 ) -> Result<SettlementProjection, InvestigationStoreError> {
@@ -227,6 +268,9 @@ fn materialize(
             InvestigationStatus::Failed
         };
         task.detail.error = Some(terminal_message(kind)?.into());
+        if diagnostic.is_some() {
+            task.detail.terminal_diagnostic = diagnostic;
+        }
     }
     if acquired {
         let ledger = ledger.as_ref().ok_or(InvestigationStoreError::Invalid)?;

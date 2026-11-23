@@ -7,6 +7,9 @@ use crate::jobs::investigations::{
     SourceContinuation, SourceContinuationOutcome, SourceContinuationSnapshotInput,
 };
 use agents::investigation::staged_attempt::UnavailableReason;
+use agents::investigation::{
+    InvestigationTerminalDiagnostic, SourceDiscardClass, SourceDiscardStep,
+};
 use llm::bounded::{BoundedCallError, PreparedBoundedCompletion};
 use llm::{EgressFirewall, LlmProvider};
 
@@ -48,10 +51,28 @@ enum RetainedOutcome {
 pub(in crate::investigations) struct SourcePublicationFailure {
     outcome: RetainedOutcome,
     error: SourcePublicationError,
+    /// The last publication step entered before the error (AC-1609).
+    step: SourceDiscardStep,
 }
 impl SourcePublicationFailure {
     pub(in crate::investigations) fn error(&self) -> &SourcePublicationError {
         &self.error
+    }
+    /// The closed record of the publication failure (AC-1609).
+    pub(in crate::investigations) fn discard_diagnostic(&self) -> InvestigationTerminalDiagnostic {
+        InvestigationTerminalDiagnostic::SourceReadDiscarded {
+            step: self.step,
+            error_class: match &self.error {
+                SourcePublicationError::BoundInvariant => SourceDiscardClass::BoundInvariant,
+                SourcePublicationError::Host(error) => {
+                    super::prepared_source::host_discard_class(*error)
+                }
+                SourcePublicationError::Store(error) => {
+                    super::prepared_source::store_discard_class(*error)
+                }
+                SourcePublicationError::Bounded(_) => SourceDiscardClass::ProviderBounded,
+            },
+        }
     }
     pub(in crate::investigations) fn stage(&self) -> SourceAccessStage {
         match &self.outcome {
@@ -125,7 +146,8 @@ impl RetainedOutcome {
         clock: &RunClock,
         input: &SourcePublicationInput<'_>,
     ) -> Result<PublishedSourceContinuation, SourcePublicationFailure> {
-        let result = self.prepare_and_commit(context, state, execution, clock, input);
+        let mut step = SourceDiscardStep::PublishValidate;
+        let result = self.prepare_and_commit(context, state, execution, clock, input, &mut step);
         match result {
             Ok((published, refused)) => {
                 if let Self::Acquired(candidate) = self {
@@ -145,6 +167,7 @@ impl RetainedOutcome {
             Err(error) => Err(SourcePublicationFailure {
                 outcome: self,
                 error,
+                step,
             }),
         }
     }
@@ -155,7 +178,9 @@ impl RetainedOutcome {
         execution: &JobExecution,
         clock: &RunClock,
         input: &SourcePublicationInput<'_>,
+        step: &mut SourceDiscardStep,
     ) -> Result<(PublishedSourceContinuation, bool), SourcePublicationError> {
+        *step = SourceDiscardStep::PublishValidate;
         self.validate(context, state)?;
         // #679: the firewall decides the acquired representation toward this
         // provider. A refused read is withheld from the next prompt, and its
@@ -189,6 +214,7 @@ impl RetainedOutcome {
         let refusal: Option<crate::jobs::investigations::ReadDecider<'_>> =
             acquired.is_some().then_some(&decide as _);
         clock.deadline()?;
+        *step = SourceDiscardStep::PublishSnapshot;
         let receipt = self
             .prepared()
             .validation
@@ -211,6 +237,7 @@ impl RetainedOutcome {
         if snapshot.base_ledger() != &context.ledger || input.current.ledger() != &context.ledger {
             return Err(HostError::InputChanged.into());
         }
+        *step = SourceDiscardStep::PublishProof;
         let sizes = if receipt
             .detail()
             .summary
@@ -253,6 +280,7 @@ impl RetainedOutcome {
                 .map_err(HostError::from)?;
         }
 
+        *step = SourceDiscardStep::PublishPrompt;
         let mut evidence = context.evidence.clone();
         if let Self::Acquired(candidate) = self {
             context
@@ -323,6 +351,7 @@ impl RetainedOutcome {
         } else {
             action
         };
+        *step = SourceDiscardStep::PublishPrepare;
         let prepared = input
             .firewall
             .prepare_bounded(input.provider, &action, input.current_prepared.limits())
@@ -336,6 +365,7 @@ impl RetainedOutcome {
         if prepared.profile() != input.current_prepared.profile() {
             return Err(HostError::InvalidInput.into());
         }
+        *step = SourceDiscardStep::PublishSeal;
         let disclosure = candidate
             .seal_disclosure_with_policy(&prepared, &context.policy)
             .map_err(|_| SourcePublicationError::BoundInvariant)?
@@ -348,6 +378,7 @@ impl RetainedOutcome {
             return Err(SourcePublicationError::BoundInvariant);
         }
         drop(disclosure);
+        *step = SourceDiscardStep::PublishMeasure;
         let measured =
             llm::bounded::measure_bounded_action(prepared.profile(), &action, prepared.limits())
                 .map_err(|error| {
@@ -377,6 +408,7 @@ impl RetainedOutcome {
         // and its guards, but release the completed preparation projections.
         drop(action);
         drop(snapshot);
+        *step = SourceDiscardStep::PublishCommit;
         self.validate(context, state)?;
         clock.deadline()?;
         let mut retained_error = None;

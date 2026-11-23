@@ -74,6 +74,8 @@ fn prepared_source_cleanup_before_access_actual_cancel_and_unknown_charge_ack_pr
             reservation.detail().usage.evidence_requests
         );
         assert_eq!(detail.usage.evidence_items, 0);
+        // AC-1609: a read released before access keeps no discard record.
+        assert_eq!(detail.terminal_diagnostic, None);
         assert_eq!(context.ledger, base);
         assert!(context.evidence.is_empty());
         assert_eq!(read_count(), 0);
@@ -108,6 +110,16 @@ fn prepared_source_cleanup_accessed_cancelled_publication_discards_without_acqui
         Ok(detail) => detail,
         Err(error) => panic!("known-read cleanup failed: {}", error.error()),
     };
+    // AC-1609: the run keeps the closed step and class that discarded the read:
+    // cancellation advanced the revision the snapshot expected.
+    assert_eq!(
+        detail.terminal_diagnostic,
+        Some(InvestigationTerminalDiagnostic::SourceReadDiscarded {
+            step: agents::investigation::SourceDiscardStep::PublishSnapshot,
+            error_class: agents::investigation::SourceDiscardClass::StoreStale,
+        })
+    );
+    assert_eq!(saved.disposition_after_reopen(), "\"known_read_discarded\"");
     assert_eq!(
         detail.usage.tool_actions,
         reservation.detail().usage.tool_actions + 1
@@ -275,6 +287,13 @@ fn prepared_source_cleanup_actual_protected_seal_defect_records_bound_invariant_
         Ok(detail) => detail,
         Err(error) => panic!("bound-defect cleanup failed: {}", error.error()),
     };
+    assert_eq!(
+        detail.terminal_diagnostic,
+        Some(InvestigationTerminalDiagnostic::SourceReadDiscarded {
+            step: agents::investigation::SourceDiscardStep::PublishSeal,
+            error_class: agents::investigation::SourceDiscardClass::BoundInvariant,
+        })
+    );
     assert_eq!(
         saved.disposition_after_reopen(),
         "\"bound_invariant_defect\""
