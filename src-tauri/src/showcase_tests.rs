@@ -539,7 +539,9 @@ fn showcase_compose_rules_gated() {
 /// section: outcome, seconds, the job's reported usage, the role and its
 /// definition fingerprint), then waits for the reviewer's decisions: a file
 /// `decisions.json` in the output directory, `[{"draft_id", "decision":
-/// "accepted" | "rejected" | "returned", "reviewer", "note"}]`, written by
+/// "accepted" | "rejected" | "returned", "reviewer", "note", "remove"}]`
+/// (`remove`, optional: the claim numbers an accepted draft is accepted
+/// without, #1748), written by
 /// the person the pilot names after reading the drafts. Nothing is accepted
 /// without that file, a draft it does not name stays pending, and the wait
 /// ends after `CARTOGRAPH_W13_DECISION_WAIT_SECS` (default 6 hours) with no
@@ -698,6 +700,8 @@ fn showcase_w13_pilot() {
         decision: DraftDecision,
         reviewer: String,
         note: Option<String>,
+        #[serde(default)]
+        remove: std::collections::BTreeSet<usize>,
     }
     let decisions_path = output.join("decisions.json");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
@@ -741,14 +745,28 @@ fn showcase_w13_pilot() {
                 Some(note) if !note.is_empty() => format!("{}: {note}", decision.reviewer),
                 _ => decision.reviewer.clone(),
             };
-            let recorded = store
-                .review(
+            assert!(
+                decision.remove.is_empty() || decision.decision == DraftDecision::Accepted,
+                "only an accepted draft is accepted without claims"
+            );
+            let recorded = if decision.remove.is_empty() {
+                store.review(
                     &decision.draft_id,
                     current.review_revision,
                     decision.decision,
                     Some(&note),
                 )
-                .unwrap();
+            } else {
+                // The draft is returned and its successor, the other claims
+                // unchanged, accepted (AC-1607).
+                store.accept_without(
+                    &decision.draft_id,
+                    current.review_revision,
+                    &decision.remove,
+                    Some(&note),
+                )
+            }
+            .unwrap();
             reviewed.push(serde_json::to_value(&recorded).unwrap());
         }
     }

@@ -655,3 +655,73 @@ fn stored_draft_converts_to_projection_input_as_stored() {
         );
     }
 }
+
+// AC-1607 (#1748): accepting a draft without some of its claims returns it
+// with a note naming them and accepts its successor, which holds the other
+// claims unchanged and the hashes of only the ids they cite.
+#[test]
+fn a_draft_is_accepted_without_the_claims_named() {
+    let (_dir, mut store) = store();
+    let mut three = draft("1.5", "A user can check out.");
+    three.claims.push(Claim {
+        statement: "The rule cannot be stated.".into(),
+        kind: ClaimKind::Implemented,
+        citations: vec!["F-0000000000000003".into()],
+    });
+    three.claims.push(Claim {
+        statement: "A user can refund.".into(),
+        kind: ClaimKind::Implemented,
+        citations: vec!["F-0000000000000001".into()],
+    });
+    three
+        .cited_hashes
+        .insert("F-0000000000000003".into(), "hash-3".into());
+    let stored = store.store(&three, &origin(), None).unwrap();
+    let remove = BTreeSet::from([2]);
+    for bad in [
+        BTreeSet::new(),
+        BTreeSet::from([0]),
+        BTreeSet::from([4]),
+        BTreeSet::from([1, 2, 3]),
+    ] {
+        assert!(matches!(
+            store.accept_without(&stored.draft_id, 0, &bad, None),
+            Err(DraftStoreError::InvalidRemoval)
+        ));
+    }
+    assert!(matches!(
+        store.accept_without(&stored.draft_id, 1, &remove, None),
+        Err(DraftStoreError::StaleReviewRevision { .. })
+    ));
+    let accepted = store
+        .accept_without(&stored.draft_id, 0, &remove, Some("reviewer: a non-claim"))
+        .unwrap();
+    assert_eq!(accepted.replaces.as_deref(), Some(stored.draft_id.as_str()));
+    assert_eq!(accepted.review_decision, Some(DraftDecision::Accepted));
+    assert_eq!(accepted.origin, origin());
+    assert_eq!(
+        accepted.draft.claims,
+        [three.claims[0].clone(), three.claims[2].clone()]
+    );
+    assert_eq!(
+        accepted.draft.cited_hashes.keys().collect::<Vec<_>>(),
+        ["F-0000000000000001", "F-0000000000000002"]
+    );
+    let returned = store.get(&stored.draft_id).unwrap().unwrap();
+    assert_eq!(returned.review_decision, Some(DraftDecision::Returned));
+    assert_eq!(
+        returned.review_note.as_deref(),
+        Some("Accepted without claims 2: reviewer: a non-claim")
+    );
+    assert_eq!(count(&store), 2);
+    // Reviewed now, and its successor taken: not again.
+    assert!(matches!(
+        store.accept_without(&stored.draft_id, 1, &remove, None),
+        Err(DraftStoreError::AlreadyReviewed)
+    ));
+    // A successor is not trimmed in turn.
+    assert!(matches!(
+        store.accept_without(&accepted.draft_id, 1, &BTreeSet::from([1]), None),
+        Err(DraftStoreError::AlreadyReviewed)
+    ));
+}
