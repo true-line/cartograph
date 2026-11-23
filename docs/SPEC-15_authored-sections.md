@@ -291,7 +291,9 @@ committed there.
 
 ## Attested context (ADR-0090, #2463)
 
-Designed, not built. Slices AC-1071 to AC-1083 are listed in ADR-0090.
+Slices AC-1071 to AC-1083 are listed in ADR-0090. Built: the record model,
+its admission, `A-` id and standing (AC-1071, `agents::attested`). Not
+built: storage, projection, printing, capture paths and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting
