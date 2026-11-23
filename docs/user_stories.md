@@ -1180,6 +1180,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1431
 - **AC-1432** Given an @29 finish-patch step, when the patch fails deterministic projection, then it is journaled as an invalid_action refusal carrying the rejection code and the same patch step is offered again with that feedback returned to the model as a tool error, the volatile first candidate and pending correction kept, within the run's invalid_action allowance of 2; a third is settled as before, terminal, reopen validates the patch-mode journal entries, and older roles keep the terminal rejection and their saved bytes (ADR-0085).
 - **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1432
+- **AC-1817** Given a combined-feedback specialist (`domain-analyst@24` and later, including @29 and @30) about to read a source, when the host proves that the continuation after the read still fits the 128 KiB input ceiling, then the `turn_progress.citation_correction` slot is reserved at the contract's exact superset of every citation correction it can project (every source obligation with every action it can take) instead of at the whole-feedback envelope, whenever that superset is no larger at every escape layer; the `completion_metadata.feedback` slot keeps the whole-feedback envelope, the input ceiling is unchanged, and on the analyst@29 source-read fixture the reserve on top of the current prompt falls from about 53 KB to about 36 KB (#1653).
+- **Trace:** H4 · `agents` · ADR-0085 · T-1817
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned
