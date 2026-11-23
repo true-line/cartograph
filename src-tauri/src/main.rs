@@ -1287,9 +1287,10 @@ struct ProducerReads {
     /// Whether the primary capture holds the declared API references and
     /// their config, so their loader reads it (AC-1067).
     api_docs_captured: bool,
-    /// Whether the primary capture holds every file the active plugins
-    /// claim, so they are routed its bytes (AC-1069).
-    plugins_captured: bool,
+    /// The files the active plugins claim, as listed from the checkout with
+    /// its ignore rules, when the primary capture holds them all, so the
+    /// plugins are routed their captured bytes (AC-1069).
+    plugin_paths: Option<Vec<String>>,
     /// What the found ADR/RFC reader read and published (#1847).
     adrs: ingest::coverage::ProducerCount,
     /// Found ADR/RFC files over the size bound, in path order (#1847).
@@ -1320,7 +1321,7 @@ impl Default for ProducerReads {
             toolchain_captured: false,
             documents_captured: false,
             api_docs_captured: false,
-            plugins_captured: false,
+            plugin_paths: None,
             adrs: ingest::coverage::ProducerCount::default(),
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
@@ -2918,19 +2919,15 @@ fn extract_tree_packed(
                 .map_err(|e| e.to_string())?;
             // A capture that holds every claimed file is routed in place of
             // the checkout (AC-1069): a claimed file edited, deleted or
-            // created afterwards changes nothing.
-            let claimed = match primary {
-                Some(capture) if reads.plugins_captured => {
-                    let captured: Vec<String> = capture
-                        .manifest()
-                        .files
-                        .iter()
-                        .map(|entry| entry.path.clone())
-                        .collect();
+            // created afterwards changes nothing. Only the claimed files the
+            // caller listed are routed, so a file another reader retained,
+            // such as an ignored one, is never routed to a plugin.
+            let claimed = match (primary, reads.plugin_paths.as_deref()) {
+                (Some(capture), Some(captured)) => {
                     adapters_plugin_host::route::extract_captured_counted(
                         &host,
                         &loaded,
-                        &captured,
+                        captured,
                         &|rel| {
                             capture
                                 .file(rel)
@@ -6055,7 +6052,7 @@ fn run_ingest<R: tauri::Runtime>(
         toolchain_captured: primary.toolchain_captured,
         documents_captured: primary.documents_captured,
         api_docs_captured: primary.api_doc_paths.is_some(),
-        plugins_captured: primary.plugins_captured,
+        plugin_paths: primary.plugin_paths.clone(),
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6538,7 +6535,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         toolchain_captured: primary.toolchain_captured,
         documents_captured: primary.documents_captured,
         api_docs_captured: primary.api_doc_paths.is_some(),
-        plugins_captured: primary.plugins_captured,
+        plugin_paths: primary.plugin_paths.clone(),
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6889,7 +6886,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             toolchain_captured: primary.toolchain_captured,
             documents_captured: primary.documents_captured,
             api_docs_captured: primary.api_doc_paths.is_some(),
-            plugins_captured: primary.plugins_captured,
+            plugin_paths: primary.plugin_paths.clone(),
             ..ProducerReads::default()
         };
         let (extraction, facts, repo_layers, repo_delta) = {
