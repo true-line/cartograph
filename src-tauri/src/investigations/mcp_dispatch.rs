@@ -245,7 +245,9 @@ pub(crate) fn descriptor(tool: TaskTool) -> Value {
             json!({"type":"object","properties":{"task_id":{"type":"string"},"after":{"type":"integer","minimum":0}},"required":["task_id","after"],"additionalProperties":false})
         }
         TaskTool::ProposeAttested => {
-            let reference = json!({"type":"string","minLength":1,"maxLength":mcp_wire::task_arguments::MAX_ATTESTED_REFERENCE_BYTES});
+            // `maxLength` counts characters and the parser counts UTF-8 bytes, so
+            // advertise the character count no byte-bounded value can exceed.
+            let reference = json!({"type":"string","minLength":1,"maxLength":mcp_wire::task_arguments::MAX_ATTESTED_REFERENCE_BYTES / 4});
             json!({"type":"object","properties":{"task_id":{"type":"string"},"finding_id":reference,"gap_id":reference,"slot":reference},"required":["task_id","finding_id","gap_id","slot"],"additionalProperties":false})
         }
         _ => {
