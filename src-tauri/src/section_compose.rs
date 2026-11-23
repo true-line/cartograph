@@ -1045,13 +1045,13 @@ fn review_claims(
     Ok("reviewed")
 }
 
-/// Check the scope of each rule a claim cites (#2482): `rule-scope@1` says
-/// which of the claim's cited capabilities the claim states the rule for,
-/// asked [`rule_scope::SCOPE_SAMPLES`] times, and a claim a majority reads
-/// as stating a rule beyond the capabilities it is listed under (or under
-/// which an identical rule is listed) is left out as `rule_scope_widened`.
-/// A claim citing no Capability fact, or no rule with a citable
-/// capability, is not checked.
+/// Check the scope of each rule a claim cites (#2482, #2495): `rule-scope@2`
+/// judges, for each claim and cited rule, whether the claim states the
+/// rule beyond the capabilities it is listed under (or under which an
+/// identical rule is listed), asked [`rule_scope::SCOPE_SAMPLES`] times,
+/// and a claim a majority reads as widening any of its rules is left out
+/// as `rule_scope_widened`. A rule none of whose capabilities is a citable
+/// fact is not checked, nor a claim citing no other rule.
 fn check_rule_scope(
     calls: &Calls<'_>,
     prepared: &Prepared,
@@ -1059,52 +1059,45 @@ fn check_rule_scope(
 ) -> Result<&'static str, String> {
     let rules = spec::excerpt_rules(&prepared.text);
     let by_name = capability_ids(&prepared.facts);
-    let capabilities: BTreeSet<&str> = by_name.values().flatten().copied().collect();
-    // The capabilities a rule holds for: those it is listed under, and those
-    // an identical rule is listed under.
-    let holds_for = |rule: &str| -> BTreeSet<&str> {
-        let Some((_, text)) = rules.get(rule) else {
-            return BTreeSet::new();
-        };
-        rules
+    // The capabilities a rule holds for, by name: those it is listed under,
+    // and those an identical rule is listed under. A rule none of whose
+    // capabilities is a citable fact has nothing to hold for.
+    let holds_for = |text: &str| -> Vec<&str> {
+        let names: BTreeSet<&str> = rules
             .values()
             .filter(|(_, other)| other == text)
             .flat_map(|(names, _)| names)
-            .filter_map(|name| by_name.get(name.as_str()))
-            .flatten()
-            .copied()
-            .collect()
+            .map(String::as_str)
+            .collect();
+        if names.iter().any(|name| by_name.contains_key(name)) {
+            names.into_iter().collect()
+        } else {
+            Vec::new()
+        }
     };
     let mut checked = Vec::new();
     let mut claims = Vec::new();
-    let mut in_scope = Vec::new();
     for (at, claim) in composed.finish.claims.iter().enumerate() {
-        let cited = |keep: &dyn Fn(&str) -> bool| -> Vec<&str> {
-            claim
-                .citations
-                .iter()
-                .map(String::as_str)
-                .filter(|id| keep(id))
-                .collect()
-        };
-        // A rule none of whose capabilities is citable has nothing to
-        // compare with, so it is not checked.
-        let scoped: BTreeMap<&str, BTreeSet<&str>> = cited(&|id| rules.contains_key(id))
-            .into_iter()
-            .map(|rule| (rule, holds_for(rule)))
-            .filter(|(_, holds)| !holds.is_empty())
+        let cited: Vec<rule_scope::ScopeRule<'_>> = claim
+            .citations
+            .iter()
+            .filter_map(|id| {
+                let (_, text) = rules.get(id)?;
+                let holds_for = holds_for(text);
+                (!holds_for.is_empty()).then_some(rule_scope::ScopeRule {
+                    id,
+                    text,
+                    holds_for,
+                })
+            })
             .collect();
-        let cited_rules: Vec<&str> = scoped.keys().copied().collect();
-        let cited_capabilities = cited(&|id| capabilities.contains(id));
-        if cited_rules.is_empty() || cited_capabilities.is_empty() {
+        if cited.is_empty() {
             continue;
         }
-        in_scope.push(scoped);
         claims.push(rule_scope::ScopeClaim {
             statement: &claim.statement,
             citations: &claim.citations,
-            rules: cited_rules,
-            capabilities: cited_capabilities,
+            rules: cited,
         });
         checked.push(at);
     }
@@ -1129,7 +1122,7 @@ fn check_rule_scope(
     let samples = calls.samples(&action, rule_scope::SCOPE_SAMPLES, |text| {
         rule_scope::decode(text, &claims)
     })?;
-    let Some(widened) = rule_scope::widened_claims(&samples, &in_scope) else {
+    let Some(widened) = rule_scope::widened_claims(&samples) else {
         return Ok("unavailable");
     };
     let dropped: BTreeSet<usize> = checked

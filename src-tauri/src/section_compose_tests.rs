@@ -710,7 +710,8 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
     );
 }
 
-/// AC-1330 (T-1330, #2482): on a local lane a claim most samples read as
+/// AC-1330 (T-1330, #2482), AC-1331 (T-1331, #2495): on a local lane a
+/// claim most samples read as
 /// stating a cited rule beyond the capabilities it is listed under (or
 /// under which an identical rule is listed) is left out before staging;
 /// a claim citing no rule, or only rules with no citable capability, is not
@@ -722,13 +723,15 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
     let (checkout, refund) = (id("cap:checkout"), id("cap:refund"));
     let (valid, valid_too, window) = (id("rule:valid"), id("rule:valid-too"), id("rule:window"));
     let orphan = id("rule:orphan");
+    let valid_archive = id("rule:valid-archive");
     prepared.text.push_str(&format!(
         "\n### Rules the capabilities enforce (from 1.5)\n\n\
          | Capability | Rule | Citation |\n|---|---|---|\n\
          | Checkout | A card must be valid | {valid} |\n\
          | Refund | A card must be valid | {valid_too} |\n\
          | Refund | Refunds within 30 days | {window} |\n\
-         | Gone | Gift cards expire | {orphan} |\n"
+         | Gone | Gift cards expire | {orphan} |\n\
+         | Archive | A card must be valid | {valid_archive} |\n"
     ));
     let claim = |statement: &str, citations: &[&String]| Claim {
         statement: statement.into(),
@@ -759,11 +762,11 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
     // One provider answers both checks: the review cannot read this reply
     // and keeps every claim; the scope check reads it.
     let checker = Scripted {
-        reply: json!({"scopes": [
-            {"claim": 1, "rule": valid, "applies_to": [checkout]},
-            {"claim": 2, "rule": valid, "applies_to": ["all"]},
-            {"claim": 3, "rule": valid, "applies_to": [checkout, refund]},
-            {"claim": 4, "rule": window, "applies_to": [refund, checkout]},
+        reply: json!({"answers": [
+            {"pair": "1.1", "answer": "within"},
+            {"pair": "2.1", "answer": "widened"},
+            {"pair": "3.1", "answer": "within"},
+            {"pair": "4.1", "answer": "widened"},
         ]})
         .to_string(),
         prompts: Mutex::new(Vec::new()),
@@ -799,11 +802,16 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
     let prompts = checker.prompts.lock().unwrap().clone();
     let scoped: Vec<&String> = prompts
         .iter()
-        .filter(|prompt| prompt.contains("[rules: "))
+        .filter(|prompt| prompt.contains("<pairs>"))
         .collect();
     assert_eq!(scoped.len(), agents::rule_scope::SCOPE_SAMPLES);
     assert!(scoped[0].contains(&format!(
         "{valid}: Rule of capability \"Checkout\": A card must be valid"
+    )));
+    // AC-1331 (T-1331, #2495): one line per claim and rule pair, the rule
+    // holding for its capability and every identical rule's, citable or not.
+    assert!(scoped[0].contains(&format!(
+        "2.1  Claim 2: \"Every payment needs a valid card.\"  |  Rule {valid} of \"Archive\", \"Checkout\", \"Refund\": A card must be valid\n"
     )));
     assert!(!scoped[0].contains("Shoppers check out."));
     // A rule whose capability is not citable is not checked (#2483).

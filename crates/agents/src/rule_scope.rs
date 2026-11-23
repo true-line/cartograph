@@ -1,13 +1,19 @@
-//! The rule-scope check's request and reply, as pure functions (#2482).
+//! The rule-scope check's request and reply, as pure functions (#2482,
+//! #2495).
 //!
-//! `rule-scope@1` reads the claims that cite business rules beside the facts
-//! they cite and says, for each rule a claim cites, which of the claim's
-//! cited capabilities the claim states that rule for, or `all`. It extracts
-//! rather than judges: the host compares each answer with the capabilities
-//! the rule is listed under, and a claim stating a rule wider than them (a
-//! sign-in error of one provider stated for every provider, an API refusal
-//! stated for the dashboard too) is left out. It calls no tool and writes
-//! nothing.
+//! `rule-scope@2` reads, for each business rule a claim cites, the claim
+//! beside that rule and the capabilities the rule holds for, and answers
+//! `widened` when the claim states the rule's condition, message or outcome
+//! for anything beyond them (a sign-in error of one provider stated for
+//! every provider, a custom-alias limit stated for random aliases too), or
+//! `within`. A claim most samples read as widening any of its rules is left
+//! out. It calls no tool and writes nothing.
+//!
+//! `rule-scope@1` asked instead which of the claim's cited capabilities the
+//! claim states each rule for; on a local model its replies listed every
+//! capability of the claim, answered `all` throughout, or named the rule's
+//! own capability whatever the claim said (re-check 11), so it judged the
+//! reply's style rather than the claim.
 
 use crate::claim_review::FACT_TEXT_CHARS;
 use llm::{AnalysisTier, CompletionAction, CompletionPayload};
@@ -16,73 +22,85 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// The role's name and version.
-pub const RULE_SCOPE_ROLE: &str = "rule-scope@1";
+pub const RULE_SCOPE_ROLE: &str = "rule-scope@2";
 
-/// The answer for a rule stated beyond the claim's cited capabilities.
-pub const ALL: &str = "all";
+/// The answer for a claim stating a rule beyond its capabilities.
+pub const WIDENED: &str = "widened";
+
+/// The answer for a claim stating a rule only for its capabilities.
+pub const WITHIN: &str = "within";
 
 /// How many times the same request is asked; a rule is read as widened on a
 /// majority of the readable replies.
 pub const SCOPE_SAMPLES: usize = 3;
 
-const SYSTEM: &str = "You read claims of a product specification beside the facts they \
-cite. Some cited facts are business rules, each listed under the capability it belongs to. \
-For each rule a claim cites, say which of the claim's cited capabilities the claim states \
-that rule for, by their ids: only those the claim says the rule's condition or outcome holds \
-for, not every capability named in the same sentence. Answer \"all\" when the claim states \
-the rule for a whole area, for every provider, form, page or call, or for operations beyond \
-those capabilities. Report only what the claim says, never what the rule says.";
+const SYSTEM: &str = "You read claims of a product specification beside business rules they \
+cite. Each rule holds only for the capabilities it is listed under. For each claim and rule \
+pair, answer \"widened\" when the claim states that rule's condition, message or outcome for \
+anything beyond those capabilities: another provider, form, page, API call, caller group or \
+kind of item, or every one of a kind. Otherwise answer \"within\", including when the claim \
+names other capabilities for other reasons in the same sentence. Judge only what the claim \
+says this rule applies to.";
 
-/// What one claim states each of its rules for: the capability ids (or
-/// [`ALL`]) by rule.
-pub type Scopes = BTreeMap<String, Vec<String>>;
+/// One cited rule: its citation id, the rule in domain terms and the names
+/// of the capabilities it holds for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRule<'a> {
+    /// The rule's citation id.
+    pub id: &'a str,
+    /// The rule in domain terms.
+    pub text: &'a str,
+    /// The capabilities it holds for: those it is listed under, and those
+    /// an identical rule is listed under.
+    pub holds_for: Vec<&'a str>,
+}
 
-/// One claim to check: its statement, every id it cites, the excerpt rules
-/// among them and the Capability facts among them.
+/// One claim to check: its statement, every id it cites and the rules it
+/// cites that have a capability to hold for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeClaim<'a> {
     /// The claim's statement.
     pub statement: &'a str,
     /// Every citation id of the claim.
     pub citations: &'a [String],
-    /// The excerpt rules it cites.
-    pub rules: Vec<&'a str>,
-    /// The Capability facts it cites.
-    pub capabilities: Vec<&'a str>,
+    /// The rules it cites.
+    pub rules: Vec<ScopeRule<'a>>,
 }
 
-/// The response schema: exactly one scope for each rule each claim cites,
-/// a claim's rule and answer drawn from its own citations.
-pub fn response_schema(claims: &[ScopeClaim<'_>]) -> String {
-    let pairs: usize = claims.iter().map(|claim| claim.rules.len()).sum();
-    let branches: Vec<serde_json::Value> = claims
+/// The label of the `rule`th rule (from 1) of the `claim`th claim.
+fn label(claim: usize, rule: usize) -> String {
+    format!("{claim}.{rule}")
+}
+
+fn labels(claims: &[ScopeClaim<'_>]) -> Vec<String> {
+    claims
         .iter()
         .enumerate()
-        .map(|(n, claim)| {
-            let mut answers: Vec<&str> = claim.capabilities.clone();
-            answers.push(ALL);
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["claim", "rule", "applies_to"],
-                "properties": {
-                    "claim": {"enum": [n + 1]},
-                    "rule": {"enum": claim.rules},
-                    "applies_to": {"type": "array", "minItems": 1, "items": {"enum": answers}}
-                }
-            })
-        })
-        .collect();
+        .flat_map(|(n, claim)| (0..claim.rules.len()).map(move |r| label(n + 1, r + 1)))
+        .collect()
+}
+
+/// The response schema: exactly one answer for each claim and rule pair.
+pub fn response_schema(claims: &[ScopeClaim<'_>]) -> String {
+    let pairs = labels(claims);
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["scopes"],
+        "required": ["answers"],
         "properties": {
-            "scopes": {
+            "answers": {
                 "type": "array",
-                "minItems": pairs,
-                "maxItems": pairs,
-                "items": {"anyOf": branches}
+                "minItems": pairs.len(),
+                "maxItems": pairs.len(),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["pair", "answer"],
+                    "properties": {
+                        "pair": {"enum": pairs},
+                        "answer": {"enum": [WITHIN, WIDENED]}
+                    }
+                }
             }
         }
     })
@@ -93,14 +111,14 @@ pub fn response_schema(claims: &[ScopeClaim<'_>]) -> String {
 /// version of its schema.
 pub fn definition_fingerprint() -> String {
     crate::source_basis::domain_hash(
-        b"cartograph:rule-scope-definition:v1\0",
-        format!("{RULE_SCOPE_ROLE}\0{SYSTEM}\0{ALL}").as_bytes(),
+        b"cartograph:rule-scope-definition:v2\0",
+        format!("{RULE_SCOPE_ROLE}\0{SYSTEM}\0{WITHIN}\0{WIDENED}").as_bytes(),
     )
 }
 
 /// The one completion action checking `claims`, with `facts` the text of
 /// each cited fact by citation id, printed once and cut like the
-/// reviewer's.
+/// reviewer's, then one line per claim and rule pair.
 pub fn action(
     claims: &[ScopeClaim<'_>],
     facts: &BTreeMap<String, String>,
@@ -113,22 +131,28 @@ pub fn action(
         let cut: String = text.chars().take(FACT_TEXT_CHARS).collect();
         let _ = writeln!(prompt, "{id}: {}", cut.replace('\n', " "));
     }
-    prompt.push_str("</facts>\n\n<claims>\n");
+    prompt.push_str("</facts>\n\n<pairs>\n");
     for (n, claim) in claims.iter().enumerate() {
-        let _ = writeln!(
-            prompt,
-            "{}. {} [cites: {}] [rules: {}]",
-            n + 1,
-            claim.statement.replace('\n', " "),
-            claim.citations.join(", "),
-            claim.rules.join(", ")
-        );
+        let statement = claim.statement.replace('\n', " ");
+        for (r, rule) in claim.rules.iter().enumerate() {
+            let holds: Vec<String> = rule
+                .holds_for
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect();
+            let _ = writeln!(
+                prompt,
+                "{}  Claim {}: \"{statement}\"  |  Rule {} of {}: {}",
+                label(n + 1, r + 1),
+                n + 1,
+                rule.id,
+                holds.join(", "),
+                rule.text.replace('\n', " ")
+            );
+        }
     }
     let pairs: usize = claims.iter().map(|claim| claim.rules.len()).sum();
-    let _ = write!(
-        prompt,
-        "</claims>\n\nGive one scope for each rule each claim cites: {pairs} in all."
-    );
+    let _ = write!(prompt, "</pairs>\n\nAnswer each pair once: {pairs} in all.");
     CompletionAction {
         action_id,
         tier: AnalysisTier::Agentic,
@@ -144,83 +168,67 @@ pub fn action(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reply {
-    scopes: Vec<ReplyScope>,
+    answers: Vec<ReplyAnswer>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReplyScope {
-    claim: usize,
-    rule: String,
-    applies_to: Vec<String>,
+struct ReplyAnswer {
+    pair: String,
+    answer: String,
 }
 
-/// What each claim states each of its rules for, by claim then rule, or
-/// `None` when the reply is not the schema's object or does not give
-/// exactly one scope, drawn from the claim's own citations, for each rule
-/// each claim cites.
-pub fn decode(text: &str, claims: &[ScopeClaim<'_>]) -> Option<Vec<Scopes>> {
+/// Whether each claim widens each of its rules, by claim then rule, or
+/// `None` when the reply is not the schema's object, misses, repeats or
+/// invents a pair, or answers `widened` for every one of two or more pairs
+/// (a reply that does not tell the pairs apart).
+pub fn decode(text: &str, claims: &[ScopeClaim<'_>]) -> Option<Vec<Vec<bool>>> {
     let reply: Reply = serde_json::from_str(text.trim()).ok()?;
-    let mut scopes = vec![BTreeMap::new(); claims.len()];
-    for given in reply.scopes {
-        let claim = claims.get(given.claim.checked_sub(1)?)?;
-        let fits = claim.rules.contains(&given.rule.as_str())
-            && !given.applies_to.is_empty()
-            && given
-                .applies_to
-                .iter()
-                .all(|id| id == ALL || claim.capabilities.contains(&id.as_str()));
-        let slot = &mut scopes[given.claim - 1];
-        if !fits || slot.insert(given.rule, given.applies_to).is_some() {
+    let expected: BTreeSet<String> = labels(claims).into_iter().collect();
+    let mut given: BTreeMap<String, bool> = BTreeMap::new();
+    for answer in reply.answers {
+        let widened = match answer.answer.as_str() {
+            WIDENED => true,
+            WITHIN => false,
+            _ => return None,
+        };
+        if !expected.contains(&answer.pair) || given.insert(answer.pair, widened).is_some() {
             return None;
         }
     }
-    claims
-        .iter()
-        .zip(&scopes)
-        .all(|(claim, scope)| scope.len() == claim.rules.len())
-        .then_some(scopes)
+    if given.len() != expected.len() || (given.len() > 1 && given.values().all(|w| *w)) {
+        return None;
+    }
+    Some(
+        claims
+            .iter()
+            .enumerate()
+            .map(|(n, claim)| {
+                (0..claim.rules.len())
+                    .map(|r| given[&label(n + 1, r + 1)])
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
-/// Whether `applies_to` states a rule wider than `in_scope`, the
-/// capabilities the rule holds for: `all`, or any capability outside them.
-pub fn widened(applies_to: &[String], in_scope: &BTreeSet<&str>) -> bool {
-    applies_to
-        .iter()
-        .any(|id| id == ALL || !in_scope.contains(id.as_str()))
-}
-
-/// Which claims state a rule wider than it holds, on a majority of the
-/// readable `samples` (at least two): a claim is flagged when any of its
-/// rules is read as widened by more than half of them. `in_scope` gives,
-/// by claim then rule, the capabilities the rule holds for. `None` when
-/// fewer than two samples could be read.
-pub fn widened_claims(
-    samples: &[Option<Vec<Scopes>>],
-    in_scope: &[BTreeMap<&str, BTreeSet<&str>>],
-) -> Option<Vec<bool>> {
-    let readable: Vec<&Vec<Scopes>> = samples
-        .iter()
-        .flatten()
-        .filter(|scopes| scopes.len() == in_scope.len())
-        .collect();
+/// Which claims widen a rule, on a majority of the readable `samples` (at
+/// least two): a claim is flagged when any of its rules is read as widened
+/// by more than half of them. `None` when fewer than two samples could be
+/// read.
+pub fn widened_claims(samples: &[Option<Vec<Vec<bool>>>]) -> Option<Vec<bool>> {
+    let readable: Vec<&Vec<Vec<bool>>> = samples.iter().flatten().collect();
+    let first = readable.first()?;
     if readable.len() < 2 {
         return None;
     }
     Some(
-        in_scope
+        first
             .iter()
             .enumerate()
             .map(|(n, rules)| {
-                rules.iter().any(|(rule, holds_for)| {
-                    let votes = readable
-                        .iter()
-                        .filter(|scopes| {
-                            scopes[n]
-                                .get(*rule)
-                                .is_some_and(|applies| widened(applies, holds_for))
-                        })
-                        .count();
+                (0..rules.len()).any(|r| {
+                    let votes = readable.iter().filter(|sample| sample[n][r]).count();
                     votes * 2 > readable.len()
                 })
             })
