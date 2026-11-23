@@ -180,3 +180,59 @@ fn the_engineer_confirms_an_agents_record_and_withdraws_it_at_the_count_read() {
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].attestation_count(), 3);
 }
+
+// The engineer's answer with the content an agent already stated is
+// appended to that record, once (Codex review of #2528).
+#[test]
+fn the_engineers_answer_to_an_agents_identical_record_is_appended_once() {
+    let (_dir, state) = state();
+    set_engineer(&state, ENGINEER, None).unwrap();
+    let statement = "The identity team owns login.";
+    let recorded_hashes = {
+        let graph = state.graph.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        spec::cited_fact_hashes(&nodes, &edges, &BTreeSet::from([id("cap:login")]))
+    };
+    let agents = {
+        let drafts = state.drafts.lock().unwrap();
+        let store = drafts.attested();
+        let agent = store.agent("gap-filler@1", "local", "fixture").unwrap();
+        store
+            .stage(AttestedRecord {
+                target: AttestedTarget::Gap {
+                    gap_id: "gap:login-owner".into(),
+                    slot: "owner".into(),
+                },
+                statement: statement.into(),
+                supporting: vec![id("cap:login")],
+                recorded_hashes,
+                attestations: vec![Attestation::Agent {
+                    contributor: agent.id,
+                    verb: AgentVerb::Stated,
+                    role: "gap-filler@1".into(),
+                    definition_fingerprint: "definition".into(),
+                    provider: "local".into(),
+                    model: "fixture".into(),
+                    run: "run:1".into(),
+                    directed_by: None,
+                }],
+            })
+            .unwrap()
+    };
+    let answer = || {
+        state_gap_answer(
+            &state,
+            "gap:login-owner",
+            "owner",
+            statement,
+            vec![id("cap:login")],
+            3,
+        )
+        .unwrap()
+    };
+    let stated = answer();
+    assert_eq!(stated.record_id, agents.record_id);
+    assert_eq!(stated.standing, Standing::EngineerBacked);
+    assert_eq!(stated.attestation_count(), 2);
+    assert_eq!(answer().attestation_count(), 2);
+}

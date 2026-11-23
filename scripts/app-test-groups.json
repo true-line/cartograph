@@ -13,6 +13,7 @@
         "agent_pool::",
         "area_briefing::",
         "area_expert::",
+        "attested_capture::",
         "conformance_tests::",
         "context::",
         "curated::",

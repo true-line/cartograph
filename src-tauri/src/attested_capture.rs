@@ -68,6 +68,13 @@ pub(crate) fn state_gap_answer(
     at_ms: i64,
 ) -> Result<StoredAttested, String> {
     let engineer = engineer(state)?;
+    let stated = Attestation::Engineer {
+        contributor: engineer.id,
+        verb: EngineerVerb::Stated,
+        at_ms,
+        source: AttestationSource::GapsRegister,
+        reference: None,
+    };
     let cited: BTreeSet<String> = supporting.iter().cloned().collect();
     let recorded_hashes = {
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
@@ -93,16 +100,33 @@ pub(crate) fn state_gap_answer(
         statement: statement.to_owned(),
         supporting,
         recorded_hashes,
-        attestations: vec![Attestation::Engineer {
-            contributor: engineer.id,
-            verb: EngineerVerb::Stated,
-            at_ms,
-            source: AttestationSource::GapsRegister,
-            reference: None,
-        }],
+        attestations: vec![stated.clone()],
     };
     let drafts = state.drafts.lock().map_err(|e| e.to_string())?;
-    drafts.attested().stage(record).map_err(|e| e.to_string())
+    let store = drafts.attested();
+    let stored = store.stage(record).map_err(|e| e.to_string())?;
+    // The same content may already be stored, stated by an agent or by the
+    // engineer before: `stage` then returns it unchanged, so the engineer's
+    // statement is appended unless it is already the engineer's latest.
+    let latest = stored
+        .record
+        .attestations
+        .iter()
+        .rev()
+        .find(|attestation| attestation.contributor() == stated.contributor());
+    let already_stated = matches!(
+        latest,
+        Some(Attestation::Engineer {
+            verb: EngineerVerb::Stated | EngineerVerb::Confirmed,
+            ..
+        })
+    );
+    if already_stated {
+        return Ok(stored);
+    }
+    store
+        .attest(&stored.record_id, stored.attestation_count(), stated)
+        .map_err(|e| e.to_string())
 }
 
 /// The engineer confirms, disputes or withdraws the stored record
