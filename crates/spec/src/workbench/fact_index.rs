@@ -124,7 +124,36 @@ pub struct FactIndex {
     pub mode: ExportMode,
     /// One row per cited fact, ordered by citation id.
     pub rows: Vec<FactIndexRow>,
+    /// One row per cited attested record, ordered by its `A-` id (ADR-0090
+    /// decision 7). An attested record is not a fact: it has no tier, no
+    /// confidence and no evidence span. Only a `best-effort` export cites
+    /// one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attested: Vec<AttestedIndexRow>,
 }
+
+/// One cited attested record: a statement an engineer or an agent made to
+/// fill a gap the evidence leaves open, never a recovered fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedIndexRow {
+    /// Its `A-` citation id.
+    pub citation_id: String,
+    /// `attested`, or `agent-attested, unconfirmed` when only agents attest
+    /// it.
+    pub label: String,
+    /// The statement.
+    pub statement: String,
+    /// Each contributor and verb, oldest first: an engineer by display name,
+    /// an agent by role and run.
+    pub contributors: String,
+    /// Ids of the artifacts citing it, sorted. Empty in what a producer
+    /// hands over; the index fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cited_by: Vec<SharedText>,
+}
+
+/// The two labels an attested record may be cited with.
+const ATTESTED_LABELS: [&str; 2] = ["attested", "agent-attested, unconfirmed"];
 
 /// One cited fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,9 +387,9 @@ pub enum FactIndexError {
         second: Box<FactKey>,
     },
     /// A `verified-only` export cites an InferredWeak fact, which that mode
-    /// gives no row.
+    /// gives no row, or an attested record, which it never prints.
     Withheld {
-        /// The id of the InferredWeak fact.
+        /// The id of the InferredWeak fact or the attested record.
         citation_id: String,
     },
 }
@@ -392,7 +421,7 @@ impl fmt::Display for FactIndexError {
             ),
             Self::Withheld { citation_id } => write!(
                 f,
-                "a verified-only export cites the InferredWeak fact {citation_id}"
+                "a verified-only export cites {citation_id}, which it withholds"
             ),
         }
     }
@@ -421,6 +450,7 @@ pub fn check_citations<'a>(
         .rows
         .iter()
         .map(|row| row.citation_id.as_str())
+        .chain(index.attested.iter().map(|row| row.citation_id.as_str()))
         .collect();
     match cited.into_iter().find(|id| !rows.contains(id)) {
         Some(id) => Err(FactIndexError::Unresolved {
@@ -479,6 +509,8 @@ pub(super) struct Collector {
     /// Keyed by citation id. Every cited id gets its row here, so these keys
     /// are exactly the ids the export cites.
     rows: BTreeMap<String, FactIndexRow>,
+    /// The cited attested records, keyed by `A-` id.
+    attested: BTreeMap<String, AttestedIndexRow>,
     lower_bound: usize,
     shared: Interner,
 }
@@ -489,6 +521,7 @@ impl Collector {
             mode,
             id,
             rows: BTreeMap::new(),
+            attested: BTreeMap::new(),
             lower_bound: 0,
             shared: Interner::default(),
         }
@@ -584,6 +617,53 @@ impl Collector {
         Ok(())
     }
 
+    /// Record the attested records one artifact cites (ADR-0090 decision
+    /// 7). A `verified-only` export prints none, so a citation there fails
+    /// the export; so does one under any label but the two a document may
+    /// print, or one id cited with two different records.
+    pub(super) fn cite_attested(
+        &mut self,
+        artifact_id: &str,
+        records: &[AttestedIndexRow],
+    ) -> Result<(), FactIndexError> {
+        for record in records {
+            let citation_id = record.citation_id.clone();
+            if self.mode == ExportMode::VerifiedOnly {
+                return Err(FactIndexError::Withheld { citation_id });
+            }
+            if !citation_id.starts_with("A-") || !ATTESTED_LABELS.contains(&record.label.as_str()) {
+                return Err(FactIndexError::Unresolved { citation_id });
+            }
+            let row = match self.attested.entry(citation_id) {
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    let row = entry.into_mut();
+                    if (&row.label, &row.statement, &row.contributors)
+                        != (&record.label, &record.statement, &record.contributors)
+                    {
+                        return Err(FactIndexError::Unresolved {
+                            citation_id: row.citation_id.clone(),
+                        });
+                    }
+                    row
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    self.lower_bound = self.lower_bound.saturating_add(
+                        entry.key().len()
+                            + written(&record.label)
+                            + written(&record.statement)
+                            + written(&record.contributors),
+                    );
+                    entry.insert(AttestedIndexRow {
+                        cited_by: Vec::new(),
+                        ..record.clone()
+                    })
+                }
+            };
+            insert_sorted(&mut row.cited_by, artifact_id, &mut self.shared);
+        }
+        Ok(())
+    }
+
     /// The finished index. Every id the export cites has a row, because each
     /// citation makes one; the `Result` stays for the callers' error path.
     pub(super) fn finish(self) -> Result<FactIndex, FactIndexError> {
@@ -614,6 +694,7 @@ impl Collector {
             schema: FACT_INDEX_SCHEMA.into(),
             mode: self.mode,
             rows,
+            attested: self.attested.into_values().collect(),
         };
         // Every citation made its row, so every cited id resolves.
         Ok(index)
@@ -748,8 +829,16 @@ fn markdown(index: &FactIndex, out: &mut Text) -> fmt::Result {
             .filter(|row| row.provenance_differs)
             .count()
     )?;
+    if !index.attested.is_empty() {
+        writeln!(
+            out,
+            "- Attested records cited (not facts; absent from a `verified-only` export): {}",
+            index.attested.len()
+        )?;
+    }
     if index.rows.is_empty() {
-        return out.push_str("\nNo assertion in this export cites a fact.\n");
+        out.push_str("\nNo assertion in this export cites a fact.\n")?;
+        return attested_markdown(index, out);
     }
     out.push_str(
         "\n| Citation | Fact | Kind | Tier | Confidence | Method | Basis | Extractor | Evidence \
@@ -801,6 +890,33 @@ fn markdown(index: &FactIndex, out: &mut Text) -> fmt::Result {
             }
             out.push_str(" |\n")?;
         }
+    }
+    attested_markdown(index, out)
+}
+
+/// The attested records the export cites, as one table after the facts.
+/// Each is a statement a contributor made, not evidence: it has no tier, no
+/// confidence and no span, and its contributors are named.
+fn attested_markdown(index: &FactIndex, out: &mut Text) -> fmt::Result {
+    if index.attested.is_empty() {
+        return Ok(());
+    }
+    out.push_str(
+        "\n## Attested records\n\nA statement an engineer or an agent made to fill a gap the \
+         evidence leaves open. It is not a recovered fact and carries no tier or confidence. \
+         A record only agents attest is labelled agent-attested, unconfirmed.\n\n\
+         | Citation | Label | Statement | Contributors | Cited by |\n|---|---|---|---|---|\n",
+    )?;
+    for row in &index.attested {
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {} |",
+            Literal(&row.citation_id),
+            Literal(&row.label),
+            Literal(&row.statement),
+            Literal(&row.contributors),
+            Literal(Listed(&row.cited_by)),
+        )?;
     }
     Ok(())
 }

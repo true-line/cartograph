@@ -60,8 +60,8 @@ pub use capabilities::{
     logical_knowledge_story_compile_bound, validate_knowledge_stories,
 };
 pub use fact_index::{
-    FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow, FactRecord,
-    FactSpan, SharedText, check_citations, citation_id,
+    AttestedIndexRow, FACT_INDEX_SCHEMA, FactIndex, FactIndexError, FactIndexFailure, FactIndexRow,
+    FactRecord, FactSpan, SharedText, check_citations, citation_id,
 };
 mod partition;
 mod pipelines;

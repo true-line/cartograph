@@ -9,6 +9,8 @@ pub(super) struct Output {
     pub assertions: Vec<SpecAssertion>,
     /// The fact-key shape of each assertion's subject (ADR-0058).
     pub subjects: Vec<fact_index::Subject>,
+    /// The attested records the content cites (ADR-0090 decision 7).
+    pub attested: Vec<fact_index::AttestedIndexRow>,
 }
 fn finish(mut content: Text, assertions: Assertions) -> Result<Output, RenderLimit> {
     render::inline(&mut content, &assertions.values)?;
@@ -16,6 +18,7 @@ fn finish(mut content: Text, assertions: Assertions) -> Result<Output, RenderLim
         content: content.finish(),
         assertions: assertions.values,
         subjects: assertions.subjects,
+        attested: Vec::new(),
     })
 }
 fn nongap(node: &&Node) -> bool {
@@ -504,6 +507,7 @@ pub(super) fn stories_with_support(
             content: content.finish(),
             assertions: assertions.values,
             subjects: assertions.subjects,
+            attested: Vec::new(),
         })
     } else {
         render::inline_literal(&mut content, &assertions.values)?;
@@ -511,6 +515,7 @@ pub(super) fn stories_with_support(
             content: content.finish(),
             assertions: assertions.values,
             subjects: assertions.subjects,
+            attested: Vec::new(),
         })
     }
 }
