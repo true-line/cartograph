@@ -1,7 +1,7 @@
 # First run: install, set up, first ingest
 
 This page takes you from a downloaded build to a first recovered system. It
-describes version 0.72 on macOS.
+describes version 0.77 on macOS.
 
 You need no model provider to recover a system. The deterministic tier (T0)
 reads the code on this machine and calls no model. The local lane and a cloud
