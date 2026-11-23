@@ -53,6 +53,8 @@ pub(crate) struct PendingLimit {
     pub custom_key: bool,
     /// A `deduct_when` or `exempt_when` keyword: not every request counts.
     pub conditional: bool,
+    /// An `on_breach` callback, whose response replaces the 429 (#2539).
+    pub on_breach: bool,
     pub shared: bool,
     pub evidence: EvidenceRef,
 }
@@ -234,6 +236,7 @@ fn limit_decorator(
     };
     let custom_key = keyword(&["key_func"]);
     let conditional = keyword(&["deduct_when", "exempt_when"]);
+    let on_breach = keyword(&["on_breach"]);
     let arg = match first.kind() {
         "string" => match literal_string(cx, first).filter(|text| parse(text).is_some()) {
             Some(text) => LimitArg::Literal(text),
@@ -252,6 +255,7 @@ fn limit_decorator(
         text: cx.text(&call).chars().take(200).collect(),
         custom_key,
         conditional,
+        on_breach,
         shared,
         evidence: cx.evidence(&decorator),
     })
@@ -329,6 +333,9 @@ fn environment_read(
 /// consumes the limiter definitions.
 pub(crate) fn resolve(out: &mut Extraction, limiters: &HashSet<(String, String)>) {
     let pending = std::mem::take(&mut out.pending_limits);
+    let breach: HashSet<(String, String)> = std::mem::take(&mut out.limiter_breach)
+        .into_iter()
+        .collect();
     if pending.is_empty() {
         out.limit_constants.clear();
         return;
@@ -339,7 +346,10 @@ pub(crate) fn resolve(out: &mut Extraction, limiters: &HashSet<(String, String)>
             .map(|constant| (constant.key.clone(), constant))
             .collect();
     let mut by_handler: HashMap<String, Vec<PendingLimit>> = HashMap::new();
-    for limit in pending {
+    for mut limit in pending {
+        // A limiter constructed with `on_breach` answers every breach of
+        // its limits with the callback's response.
+        limit.on_breach |= breach.contains(&limit.receiver);
         if limiters.contains(&limit.receiver) {
             by_handler
                 .entry(limit.handler.clone())
@@ -419,6 +429,9 @@ fn props(
         if limit.conditional {
             entry["conditional"] = true.into();
         }
+        if limit.on_breach {
+            entry["on_breach"] = true.into();
+        }
         entries.push(entry);
     }
     evidence.sort_by(|a, b| (&a.path, a.byte_start).cmp(&(&b.path, b.byte_start)));
@@ -430,10 +443,14 @@ fn props(
     } else {
         ConfidenceTier::Confirmed
     };
+    let mut out = serde_json::json!({ "entries": entries });
     // flask-limiter refuses a request past a limit with 429 Too Many
     // Requests (`RateLimitExceeded`), so a rule stating the refusal cites
-    // the Endpoint for its status too (#2539).
-    let mut out = serde_json::json!({ "entries": entries, "exceeded_status": 429 });
+    // the Endpoint for its status too (#2539); an `on_breach` callback's
+    // response replaces it, with a status not proven here.
+    if !limits.iter().any(|limit| limit.on_breach) {
+        out["exceeded_status"] = 429.into();
+    }
     if resolved < limits.len() {
         out["partial"] = serde_json::json!(["limit_value_unresolved"]);
     }
