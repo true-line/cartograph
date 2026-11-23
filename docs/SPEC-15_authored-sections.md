@@ -321,8 +321,12 @@ run's agent (role, provider, model and run), directed by the engineer,
 citing the facts of the run's ledger, and only while the graph is the one
 the run read. It is `agent-attested, unconfirmed` until the engineer
 confirms it; a proposed design is refused, and the same content from
-another agent is recorded as that agent agreeing (AC-1079, part 2). Not
-built: MCP staging and surfaces.
+another agent is recorded as that agent agreeing (AC-1079, part 2). An MCP
+session with the task grant stages a finding of a task it owns with
+`cartograph_task_propose_attested` (task, finding, Gap and slot): the same
+checks apply, no engineer is recorded as directing it, and the reply carries
+the record's id and standing, never its contributors. No MCP tool confirms,
+disputes or withdraws (AC-1079, part 3). Not built: surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting
