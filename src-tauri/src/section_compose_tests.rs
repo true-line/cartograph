@@ -1053,3 +1053,20 @@ fn a_reply_losing_claims_to_uncited_figures_is_asked_once_more() {
     let cancelled = || CallDirective::Cancelled;
     assert!(screen_or_retry(&state, &Failing, &prepared, first(2), &cancelled, None).is_err());
 }
+
+/// AC-1606 (#1748): in a gated run by area, a provider failure on one part
+/// is that part's, and the next is drafted; a cancel or lost ownership
+/// still ends the run, which fails whole when nothing was staged.
+#[test]
+fn one_part_failing_does_not_end_a_gated_run() {
+    for staged_any in [false, true] {
+        assert_eq!(
+            after_failure(staged_any, CallDirective::Continue),
+            AfterFailure::Next
+        );
+    }
+    for directive in [CallDirective::Cancelled, CallDirective::OwnershipLost] {
+        assert_eq!(after_failure(false, directive), AfterFailure::Fail);
+        assert_eq!(after_failure(true, directive), AfterFailure::Stop);
+    }
+}

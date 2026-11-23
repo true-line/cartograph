@@ -1482,6 +1482,7 @@ pub(crate) fn compose_gated_by_area(
         if whole { compiled.text.clone() } else { rest },
     ));
     let mut drafts = Vec::new();
+    let mut first_failure = None;
     for (scope, area, text) in parts {
         let address = SectionAddress {
             scope: scope.clone(),
@@ -1493,18 +1494,24 @@ pub(crate) fn compose_gated_by_area(
             Err(reason) if reason == "no_citable_fact" && !whole => continue,
             Err(reason) => Err(reason),
         };
-        match outcome {
-            Ok(outcome) => drafts.push(GatedDraft {
-                scope,
-                area,
-                outcome,
-            }),
+        let error = match outcome {
+            Ok(outcome) => {
+                drafts.push(GatedDraft {
+                    scope,
+                    area,
+                    outcome,
+                });
+                continue;
+            }
+            Err(error) => error,
+        };
+        match after_failure(drafts.iter().any(staged), check()) {
             // Nothing was staged yet: the run failed as a whole.
-            Err(error) if !drafts.iter().any(staged) => return Err(error),
+            AfterFailure::Fail => return Err(error),
             // Drafts of earlier areas are already staged under this job, so
             // the run ends here and reports them, with this part named as
-            // where it stopped (a cancel, a provider failure).
-            Err(_) => {
+            // where it stopped.
+            AfterFailure::Stop => {
                 drafts.push(GatedDraft {
                     scope,
                     area,
@@ -1512,9 +1519,44 @@ pub(crate) fn compose_gated_by_area(
                 });
                 break;
             }
+            // One area's failure is that area's: the next is drafted (#1748).
+            AfterFailure::Next => {
+                first_failure.get_or_insert(error);
+                drafts.push(GatedDraft {
+                    scope,
+                    area,
+                    outcome: ComposeOutcome::none("part_failed"),
+                });
+            }
         }
     }
-    Ok(drafts)
+    match first_failure {
+        // Every part failed or staged nothing: the run failed as a whole.
+        Some(error) if !drafts.iter().any(staged) => Err(error),
+        _ => Ok(drafts),
+    }
+}
+
+/// What a gated run by area does when one part's composition fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterFailure {
+    /// Fail the run: nothing is staged under its job.
+    Fail,
+    /// End the run, reporting the drafts staged so far.
+    Stop,
+    /// Record the part as failed and draft the next.
+    Next,
+}
+
+/// A cancel or lost ownership (`directive`, read after the failure) ends
+/// the run, which fails as a whole when nothing was `staged_any`; any other
+/// failure, such as a provider error, is the failing part's alone (#1748).
+fn after_failure(staged_any: bool, directive: CallDirective) -> AfterFailure {
+    match (directive, staged_any) {
+        (CallDirective::Continue, _) => AfterFailure::Next,
+        (_, false) => AfterFailure::Fail,
+        (_, true) => AfterFailure::Stop,
+    }
 }
 
 fn staged(draft: &GatedDraft) -> bool {

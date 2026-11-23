@@ -205,6 +205,7 @@ export const COMPOSE_REFUSAL: Record<string, string> = {
   area_not_found: 'No current area has that scope. Re-run the knowledge step, then compose again.',
   area_not_in_section: 'The compiled section lists nothing under that area.',
   run_stopped: 'The run stopped here, so this draft and any after it were not staged.',
+  part_failed: 'Drafting this part failed, so it was not staged; the other parts were still drafted.',
 };
 
 /** The exact payload a cloud composition of the address would send. */
