@@ -430,7 +430,7 @@ impl SettingsStore {
              CREATE TABLE IF NOT EXISTS settings_acp_agent (
                  id        INTEGER PRIMARY KEY CHECK (id = 1),
                  program   TEXT CHECK (length(program) BETWEEN 1 AND 1024),
-                 args_json TEXT CHECK (length(args_json) <= 16384)
+                 args_json TEXT CHECK (length(args_json) <= 65536)
              ) STRICT;
              INSERT OR IGNORE INTO settings_acp_agent (id) VALUES (1);
              -- The project's own egress-read-deny/v1 rules, added to the
@@ -911,6 +911,8 @@ impl SettingsStore {
         let (program, args) = match command {
             Some(command) => {
                 command.validate()?;
+                // 32 arguments of 256 characters, each escaped at most 2x
+                // (control characters are refused), fit well under 65536.
                 let args = serde_json::to_string(&command.args)
                     .map_err(|_| SettingsError::InvalidAcpAgent("arguments"))?;
                 (Some(command.program.as_str()), Some(args))
@@ -1175,6 +1177,12 @@ mod tests {
             ));
         }
         assert_eq!(store.acp_agent().unwrap(), Some(command));
+        // The largest accepted arguments, all escaped in JSON, still persist.
+        let widest = AcpAgentCommand {
+            program: program.clone(),
+            args: vec!["\\".repeat(128) + &"\"".repeat(128); AcpAgentCommand::MAX_ARGS],
+        };
+        assert_eq!(store.set_acp_agent(Some(&widest)).unwrap(), Some(widest));
         assert_eq!(store.set_acp_agent(None).unwrap(), None);
     }
 

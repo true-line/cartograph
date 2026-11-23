@@ -1604,8 +1604,13 @@ pub(crate) fn dispatch_packet(
         args: agent.args,
         env: Vec::new(),
     };
+    // The host names branches and worktrees from the hexadecimal digest;
+    // the store keeps the canonical `work-packet-v1:<hex>` id.
+    let digest = packet_id
+        .rsplit_once(':')
+        .map_or(packet_id, |(_, digest)| digest);
     let submission = run(&acp_host::DispatchRequest {
-        packet_id,
+        packet_id: digest,
         prompt: &prompt,
         repo: root,
         base_rev: &base,
@@ -2139,7 +2144,12 @@ mod tests {
         let mut ran = 0;
         let mut agent_run = |request: &acp_host::DispatchRequest<'_>| {
             ran += 1;
-            assert_eq!(request.packet_id, id);
+            // The host refuses any id that is not hexadecimal (AC-1344).
+            assert_eq!(Some(request.packet_id), id.strip_prefix("work-packet-v1:"));
+            assert!(
+                request.packet_id.len() == 64
+                    && request.packet_id.bytes().all(|b| b.is_ascii_hexdigit())
+            );
             assert_eq!(request.base_rev, commit);
             assert_eq!(request.repo, source.root());
             assert_eq!(request.worktree_root, worktrees);
