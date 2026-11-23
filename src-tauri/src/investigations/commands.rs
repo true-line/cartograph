@@ -743,6 +743,16 @@ pub(crate) fn start_completion_for_test(
     completion_start::start(request, app, std::time::Instant::now()).map_err(|e| format!("{e:?}"))
 }
 
+/// Test-only: the public start of a non-completion request, for the manual
+/// pilot harnesses (AC-1083).
+#[cfg(test)]
+pub(crate) fn start_for_test(
+    request: StartInvestigationRequest,
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
+) -> Result<InvestigationSummary, String> {
+    start(request, app, std::time::Instant::now()).map_err(|e| format!("{e:?}"))
+}
+
 pub(crate) fn consent_decision<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     id: &str,
