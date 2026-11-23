@@ -109,7 +109,7 @@ pub(crate) fn validate_start(specialist_id: &str, text: &str) -> Result<(), Stri
     })
 }
 
-pub(super) fn fact_key(fact: &TaskFactKey) -> FactKey {
+pub(crate) fn fact_key(fact: &TaskFactKey) -> FactKey {
     match fact {
         TaskFactKey::Node { id } => FactKey::Node { id: id.clone() },
         TaskFactKey::Edge {
