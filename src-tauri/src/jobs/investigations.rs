@@ -1395,6 +1395,22 @@ impl JobStore {
         })
     }
 
+    /// Refuse unless the MCP client `client` started the task `id`. The
+    /// caller holds that client's grant across the whole operation
+    /// (ADR-0073), so a revocation cannot land between this check and the
+    /// operation's writes.
+    pub fn require_mcp_owner(
+        &self,
+        id: &str,
+        client: &McpClientId,
+    ) -> Result<(), InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        require_request_owner(&tx, id, Some(client))?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Worker counterpart of the family-aware public read, requiring a live owner.
     pub fn investigation_owned_detail(
         &self,

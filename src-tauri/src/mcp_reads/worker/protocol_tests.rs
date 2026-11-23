@@ -256,7 +256,9 @@ fn authenticated_task_tools_share_lifecycle_and_revocation_precedes_store_access
         }
         state.jobs.clear_poison();
         let DispatchAction::Respond(list) = worker
-            .receive(json!({"jsonrpc":"2.0","id":8,"method":"tools/list"}))
+            .receive(
+                json!({"jsonrpc":"2.0","id":3 + mcp_dispatch::TOOLS.len(),"method":"tools/list"}),
+            )
             .await
             .unwrap()
         else {

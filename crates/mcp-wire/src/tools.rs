@@ -31,6 +31,10 @@ pub enum TaskTool {
     Result,
     /// Request durable cancellation.
     Cancel,
+    /// Stage a finding of an owned completed task as its agent's attested
+    /// answer to a Gap, for review in the app (ADR-0090 decision 9). It can
+    /// never confirm.
+    ProposeAttested,
 }
 impl TaskTool {
     /// Stable external name; no arbitrary host method dispatch.
@@ -41,6 +45,7 @@ impl TaskTool {
             Self::Events => "cartograph_task_events",
             Self::Result => "cartograph_task_result",
             Self::Cancel => "cartograph_task_cancel",
+            Self::ProposeAttested => "cartograph_task_propose_attested",
         }
     }
 }
