@@ -325,7 +325,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
             <p className="muted">Recovered graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
             {state.detail?.investigation_id === summary.investigation_id && state.detail.scope_snapshot_id &&
               <p className="muted">Scope snapshot: <code>{state.detail.scope_snapshot_id}</code>
-                {state.detail.scope_snapshot_id === summary.graph_snapshot_id ? ' · the whole recovered graph' : ' · narrower than the recovered graph'}</p>}
+                {state.detail.scope_snapshot_id === summary.graph_snapshot_id ? ' · the whole recovered graph' : ' · narrower than the recovered graph'}
+                {state.detail.scope_size && ` · ${state.detail.scope_size.nodes.toLocaleString('en-US')} node${state.detail.scope_size.nodes === 1 ? '' : 's'}, ${state.detail.scope_size.edges.toLocaleString('en-US')} edge${state.detail.scope_size.edges === 1 ? '' : 's'}`}</p>}
             <div className="investigation-actions">
               {[4, 5, 6, 7].includes(summary.schema_version) && <p>{summary.completion_outcome === 'obligations_unmet' ? 'Completion obligations unmet; no result admitted.' :
                 summary.completion_outcome === 'findings_withheld_after_correction' ? 'Some findings were withheld because their claims could not be verified.' :

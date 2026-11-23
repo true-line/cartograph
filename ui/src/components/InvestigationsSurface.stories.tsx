@@ -113,6 +113,16 @@ export const ScopeIdentity: Story = {
   },
 };
 
+export const ScopeSizeShown: Story = {
+  // #2475: the prepared scope's node and edge counts show beside its snapshot.
+  args: { state: state({ detail: investigationDetail('inv-fixture', {
+    scope_size: { scope_snapshot_id: 'scope:original', nodes: 1312, edges: 1 } }) }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/Scope snapshot:/)).toHaveTextContent('1,312 nodes, 1 edge');
+  },
+};
+
 export const WholeSystemScopeIdentity: Story = {
   args: { state: state({ detail: investigationDetail('inv-fixture', { scope: { type: 'all' },
     scope_snapshot_id: 'snapshot:original' }) }) },
