@@ -34,7 +34,22 @@ pub enum TaskArguments {
         /// Opaque durable ID; ownership is checked by the host.
         task_id: String,
     },
+    /// Stage a finding as its agent's attested answer to a Gap; no verb,
+    /// contributor or confirmation is accepted.
+    ProposeAttested {
+        /// Opaque durable ID; ownership is checked by the host.
+        task_id: String,
+        /// The finding of the task's saved result.
+        finding_id: String,
+        /// The Gap the finding answers; the host checks it is open.
+        gap_id: String,
+        /// The Gap's slot.
+        slot: String,
+    },
 }
+
+/// The byte bound of a finding, Gap or slot identifier.
+pub const MAX_ATTESTED_REFERENCE_BYTES: usize = 512;
 
 /// Invalid envelope; error text never includes caller input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -58,7 +73,11 @@ impl TaskArguments {
                 _ => Err(InvalidTaskArguments),
             };
         }
-        let fields = if tool == TaskTool::Events { 2 } else { 1 };
+        let fields = match tool {
+            TaskTool::Events => 2,
+            TaskTool::ProposeAttested => 4,
+            _ => 1,
+        };
         if arguments.len() != fields {
             return Err(InvalidTaskArguments);
         }
@@ -84,6 +103,24 @@ impl TaskArguments {
                     .and_then(|v| v.as_u64())
                     .ok_or(InvalidTaskArguments)?;
                 Self::Events { task_id, after }
+            }
+            TaskTool::ProposeAttested => {
+                let mut reference = |field| match arguments.remove(field) {
+                    Some(Value::String(value))
+                        if !value.is_empty()
+                            && value.len() <= MAX_ATTESTED_REFERENCE_BYTES
+                            && !value.chars().any(char::is_control) =>
+                    {
+                        Ok(value)
+                    }
+                    _ => Err(InvalidTaskArguments),
+                };
+                Self::ProposeAttested {
+                    task_id,
+                    finding_id: reference("finding_id")?,
+                    gap_id: reference("gap_id")?,
+                    slot: reference("slot")?,
+                }
             }
             TaskTool::Start => unreachable!("start returned before task-id parsing"),
         })

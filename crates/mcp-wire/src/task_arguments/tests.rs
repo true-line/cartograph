@@ -60,10 +60,14 @@ fn task_arguments_reject_missing_extra_and_wrongly_typed_fields() {
         TaskTool::Events,
         TaskTool::Result,
         TaskTool::Cancel,
+        TaskTool::ProposeAttested,
     ] {
         let base = match tool {
             TaskTool::Start => json!({"request":{}}),
             TaskTool::Events => json!({"task_id":"task:1","after":0}),
+            TaskTool::ProposeAttested => {
+                json!({"task_id":"task:1","finding_id":"f","gap_id":"gap:1","slot":"owner"})
+            }
             _ => json!({"task_id":"task:1"}),
         };
         assert_eq!(parse(tool, json!({})), Err(InvalidTaskArguments));
@@ -123,4 +127,57 @@ fn task_argument_id_boundaries_are_exact() {
             Err(InvalidTaskArguments)
         );
     }
+}
+
+// AC-1079 (ADR-0090 decision 9): a proposal names a task, a finding and a
+// Gap slot. No verb, contributor or confirmation is accepted.
+#[test]
+fn an_attested_proposal_names_a_finding_and_a_gap_slot_and_nothing_else() {
+    let base = json!({"task_id":"task:1","finding_id":"finding-1","gap_id":"gap:login-owner","slot":"owner"});
+    assert_eq!(
+        parse(TaskTool::ProposeAttested, base.clone()),
+        Ok(TaskArguments::ProposeAttested {
+            task_id: "task:1".into(),
+            finding_id: "finding-1".into(),
+            gap_id: "gap:login-owner".into(),
+            slot: "owner".into(),
+        })
+    );
+    assert_eq!(
+        TaskTool::ProposeAttested.name(),
+        "cartograph_task_propose_attested"
+    );
+    for field in ["verb", "confirm", "contributor", "engineer", "statement"] {
+        let mut forged = base.clone();
+        forged[field] = json!("confirmed");
+        assert_eq!(
+            parse(TaskTool::ProposeAttested, forged),
+            Err(InvalidTaskArguments)
+        );
+    }
+    for field in ["finding_id", "gap_id", "slot"] {
+        for value in [
+            json!(""),
+            json!(7),
+            Value::Null,
+            json!("line\nbreak"),
+            json!("a".repeat(MAX_ATTESTED_REFERENCE_BYTES + 1)),
+        ] {
+            let mut bad = base.clone();
+            bad[field] = value;
+            assert_eq!(
+                parse(TaskTool::ProposeAttested, bad),
+                Err(InvalidTaskArguments)
+            );
+        }
+        let mut longest = base.clone();
+        longest[field] = json!("a".repeat(MAX_ATTESTED_REFERENCE_BYTES));
+        assert!(parse(TaskTool::ProposeAttested, longest).is_ok());
+    }
+    let mut bad_task = base;
+    bad_task["task_id"] = json!("../task");
+    assert_eq!(
+        parse(TaskTool::ProposeAttested, bad_task),
+        Err(InvalidTaskArguments)
+    );
 }
