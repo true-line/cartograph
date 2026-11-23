@@ -773,3 +773,108 @@ fn a_draft_citing_a_derived_capability_resolves_in_the_fact_index() {
     ));
     check_citations(&index(&bundle), printed_citations(content)).unwrap();
 }
+
+// AC-1602 (T-1602): a draft citing an area this export prints, a concept
+// Subsystem the arrangement kept, is printed in the best-effort document
+// too, and the fact index lists that area. Without the area the same draft
+// is named as citing a fact the export does not list (#2511, #1748).
+#[test]
+fn a_draft_citing_a_printed_area_is_printed() {
+    use crate::workbench::capabilities::{KnowledgeStories, Stories, Story};
+    let mut refunds = node(
+        "capability:refunds",
+        "Capability",
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+    );
+    refunds.props["title"] = "Refunds".into();
+    let mut billing = node(
+        "subsystem:billing",
+        "Subsystem",
+        Tier::Semantic,
+        ConfidenceTier::InferredWeak,
+    );
+    billing.props["name"] = "Billing".into();
+    billing.props["kind"] = "concept".into();
+    let cited = vec![id("subsystem:billing"), id("rule:limit")];
+    let ids: BTreeSet<String> = cited.iter().cloned().collect();
+    let mut hashes = cited_fact_hashes(&nodes(), &[edge()], &ids);
+    hashes.extend(crate::cited_node_hashes([&billing], &ids));
+    let mut accepted = draft(
+        "draft-a",
+        "1.3",
+        "Billing limits refunds per order.",
+        &cited,
+    );
+    accepted.cited_hashes = hashes.clone();
+    let projection = project(&ProjectionInput {
+        nodes: &nodes(),
+        edges: &[],
+        graph_content_hash: "graph-hash-1",
+        proposals: &[],
+        assessments: &BTreeMap::new(),
+        assertion_decisions: &[],
+        current_assertion_hashes: &BTreeSet::new(),
+        drafts: std::slice::from_ref(&accepted),
+        cited_fact_hashes: &hashes,
+        findings: &[],
+        cited_fact_digests: &BTreeMap::new(),
+        attested: &[],
+        policy_version: CURATED_POLICY_VERSION,
+    })
+    .unwrap();
+    assert_eq!(projection.draft_counts.eligible, 1);
+    let story = || Story {
+        node: &refunds,
+        support: Vec::new(),
+    };
+    let arranged = KnowledgeStories(Stories {
+        included: vec![story()],
+        areas: BTreeMap::from([(refunds.id.as_str(), &billing)]),
+        ..Stories::default()
+    });
+    let unarranged = KnowledgeStories(Stories {
+        included: vec![story()],
+        ..Stories::default()
+    });
+    let compiled = |knowledge| {
+        try_compile_spec_supplied(
+            &nodes(),
+            &[edge()],
+            &flows(),
+            ExportMode::BestEffort,
+            &BTreeSet::new(),
+            Supplied {
+                repo_names: &[],
+                knowledge,
+                coverage: &[],
+                stale_coverage: &[],
+                curated: Curated::Computed(&projection),
+                graph_content_hash: None,
+                source_revisions: None,
+            },
+        )
+        .unwrap()
+    };
+
+    let bundle = compiled(Some(&arranged));
+    let content = &d1(&bundle).content;
+    assert!(content.contains("1. Billing limits refunds per order. (implemented;"));
+    let listed = index(&bundle);
+    check_citations(&listed, printed_citations(content)).unwrap();
+    let row = listed
+        .rows
+        .iter()
+        .find(|row| row.citation_id == id("subsystem:billing"))
+        .unwrap();
+    assert!(row.cited_by.iter().any(|by| by == D1_ARTIFACT_ID));
+
+    let bundle = compiled(Some(&unarranged));
+    let content = &d1(&bundle).content;
+    assert!(!content.contains("Billing limits refunds per order."));
+    assert!(content.contains(
+        "- Draft `draft-a` for scope `system` is eligible and is not printed: it cites a fact \
+         this export does not list.\n"
+    ));
+    check_citations(&index(&bundle), printed_citations(content)).unwrap();
+}
