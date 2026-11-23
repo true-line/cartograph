@@ -57,6 +57,11 @@ pub(crate) const MAX_CURATED_ACCEPTED_DRAFT_BYTES: usize =
 /// The same for accepted curated findings (#2040).
 pub(crate) const MAX_CURATED_ACCEPTED_FINDING_BYTES: usize =
     MAX_CURATED_ACCEPTED * agents::finding_curation::MAX_CURATED_FINDING_BYTES;
+/// Most bytes of stored attested records one projection takes, measured as
+/// each record's encoded payload, whatever its standing: every record is
+/// printed or listed. The projection and a read copy them, so the sum
+/// bounds that copy. More fails the read before the set is kept.
+pub(crate) const MAX_CURATED_ATTESTED_BYTES: usize = 16 * 1024 * 1024;
 
 /// The encoded size of an accepted payload, counted against its budget. A
 /// payload that cannot be encoded counts as the whole budget.
@@ -382,9 +387,17 @@ fn reviewed_findings_within(
 /// Every stored attested record of `store` with its standing, oldest
 /// first, each engineer named from the contributor table; the caller holds
 /// the draft store lock. More records than the staged-record bound fail the
-/// read.
+/// read, as do records past [`MAX_CURATED_ATTESTED_BYTES`].
 fn attested_records(
     store: &agents::draft_store::DraftStore,
+) -> Result<Vec<ReviewedAttested>, CuratedFailure> {
+    attested_records_within(store, MAX_CURATED_ATTESTED_BYTES)
+}
+
+/// [`attested_records`] with the records bounded by `budget` bytes.
+fn attested_records_within(
+    store: &agents::draft_store::DraftStore,
+    budget: usize,
 ) -> Result<Vec<ReviewedAttested>, CuratedFailure> {
     use agents::attested_store::{MAX_ATTESTED_PAGE_ITEMS, reviewed_attested};
     let attested = store.attested();
@@ -395,6 +408,7 @@ fn attested_records(
         .map(|engineer| (engineer.id.0, engineer.display_name))
         .collect();
     let mut records = Vec::new();
+    let mut bytes = 0usize;
     let mut before: Option<u64> = None;
     loop {
         let page = attested
@@ -405,11 +419,15 @@ fn attested_records(
                 limit: MAX_CURATED_RECORD_SCAN,
             });
         }
-        records.extend(
-            page.items
-                .iter()
-                .map(|stored| reviewed_attested(stored, &engineers)),
-        );
+        for stored in &page.items {
+            bytes += payload_bytes(&stored.record, budget);
+            if bytes > budget {
+                return Err(CuratedFailure::AcceptedTooLarge {
+                    limit_bytes: budget,
+                });
+            }
+            records.push(reviewed_attested(stored, &engineers));
+        }
         match page.next_before {
             Some(next) => before = Some(next),
             None => break,

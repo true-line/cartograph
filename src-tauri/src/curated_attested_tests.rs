@@ -300,3 +300,36 @@ fn a_withdrawn_record_is_listed_without_its_statement_in_both_modes() {
         assert!(!read.to_string().contains("supervisor"), "{mode:?}");
     }
 }
+
+#[test]
+fn attested_records_are_bounded_by_their_bytes_before_they_are_kept() {
+    let fixture = fixture();
+    let count = 3;
+    let mut one = 0;
+    {
+        let drafts = fixture.drafts();
+        let store = drafts.attested();
+        let agent = store
+            .agent("gap-filler@1", "local", "placeholder-model")
+            .unwrap();
+        for index in 0..count {
+            let mut record = fixture.record(vec![agent_says(&agent, AgentVerb::Stated)]);
+            record.statement = format!("A refund over limit {index} is approved by a supervisor.");
+            one = payload_bytes(&record, MAX_CURATED_ATTESTED_BYTES);
+            store.stage(record).unwrap();
+        }
+    }
+    let review = fixture.reviews.gather();
+    assert_eq!(review.failure, None);
+    assert_eq!(review.attested.len(), count);
+
+    let store = fixture.drafts();
+    // Every record has the same encoded size here.
+    assert!(attested_records_within(&store, one * count).is_ok());
+    assert_eq!(
+        attested_records_within(&store, one * count - 1).map(|read| read.len()),
+        Err(CuratedFailure::AcceptedTooLarge {
+            limit_bytes: one * count - 1
+        })
+    );
+}
