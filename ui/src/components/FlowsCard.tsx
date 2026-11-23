@@ -137,6 +137,28 @@ export function hopKind(hop: FlowHop): string {
   }
 }
 
+/** Trigger kinds the tracer anchors on, in plain words (#2472). */
+const TRIGGER_KIND_LABEL: Record<string, string> = {
+  Screen: 'Screens',
+  ExtensionContext: 'Extension contexts',
+  Command: 'Extension commands',
+  Schedule: 'Scheduled jobs',
+  EntryPoint: 'Process entry points',
+  Endpoint: 'HTTP endpoints',
+};
+
+/** Kinds that start on the client side: a screen, an extension context or
+ *  an extension command (#2472). Selected by kind, never by a substring of
+ *  the route, so `/developer/clients/…` server routes are not "client". */
+export const CLIENT_TRIGGER_KINDS: readonly string[] = ['Screen', 'ExtensionContext', 'Command'];
+const CLIENT_KIND = 'client-side';
+
+export function triggerKindMatches(flow: Pick<Flow, 'trigger_kind'>, kind: string): boolean {
+  if (kind === '') return true;
+  if (kind === CLIENT_KIND) return CLIENT_TRIGGER_KINDS.includes(flow.trigger_kind);
+  return flow.trigger_kind === kind;
+}
+
 /** Header status chip text: gap counts are named, never implied by color. */
 export function statusBadge(flow: Flow): string {
   if (flow.status !== 'Partial') return flow.status.toUpperCase();
@@ -293,12 +315,21 @@ export function FlowsCard({
   );
   const mode = modeProp ?? localMode;
   const [triggerQuery, setTriggerQuery] = useState('');
+  const [triggerKind, setTriggerKind] = useState('');
   const normalizedQuery = triggerQuery.trim().toLowerCase();
   const matchingFlows = flows.filter((flow) =>
+    triggerKindMatches(flow, triggerKind) &&
     [flow.trigger_name, flow.trigger_kind, flow.trigger].some((value) =>
       value.toLowerCase().includes(normalizedQuery),
     ),
   );
+  const kindCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const flow of flows) counts.set(flow.trigger_kind, (counts.get(flow.trigger_kind) ?? 0) + 1);
+    return [...counts].sort(([a], [b]) => a.localeCompare(b));
+  }, [flows]);
+  const clientCount = flows.filter((flow) => CLIENT_TRIGGER_KINDS.includes(flow.trigger_kind)).length;
+  const filtered = triggerQuery !== '' || triggerKind !== '';
   const [zoom, setZoom] = useState(1);
   const [copied, setCopied] = useState(false);
   const rowRef = useRef<HTMLOListElement>(null);
@@ -469,12 +500,32 @@ export function FlowsCard({
               placeholder="Name, kind, or ID"
               onChange={(event) => setTriggerQuery(event.target.value)}
             />
-            <button type="button" disabled={!triggerQuery} onClick={() => setTriggerQuery('')}>
+            <label htmlFor="flow-trigger-kind">Kind</label>
+            <select
+              id="flow-trigger-kind"
+              value={triggerKind}
+              onChange={(event) => setTriggerKind(event.target.value)}
+            >
+              <option value="">All kinds ({flows.length})</option>
+              <option value={CLIENT_KIND}>Client-side ({clientCount})</option>
+              {kindCounts.map(([kind, count]) => (
+                <option key={kind} value={kind}>
+                  {TRIGGER_KIND_LABEL[kind] ?? kind} ({count})
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!filtered}
+              onClick={() => { setTriggerQuery(''); setTriggerKind(''); }}
+            >
               Clear filter
             </button>
             <span role="status" aria-label="Trigger matches" className="muted">
               {matchingFlows.length} of {flows.length} triggers match
-              {matchingFlows.length === 0 && ' — no matching triggers; current flow retained'}
+              {matchingFlows.length === 0 && (triggerKind === CLIENT_KIND && clientCount === 0
+                ? ' — no client-side triggers (screens, extension contexts or commands) were recovered; current flow retained'
+                : ' — no matching triggers; current flow retained')}
             </span>
           </div>
           <div className="flow-inspector-toolbar">
