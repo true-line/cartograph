@@ -127,6 +127,7 @@ export const SuggestionsFromLastRecovery: Story = {
         { key: 'window.API_URL', calls: 15, sites: ['static/js/a.js', 'static/js/b.js', 'static/js/c.js', 'static/js/d.js'] },
         { key: 'VITE_API', calls: 1, sites: ['web/api.ts'] },
       ],
+      computedCalls: 2,
       computedSites: ['static/js/legacy.js'],
     },
   },
@@ -134,7 +135,7 @@ export const SuggestionsFromLastRecovery: Story = {
     const c = within(canvasElement);
     const panel = within(c.getByRole('region', { name: 'Suggested from the last recovery' }));
     await expect(panel.getByText(/15 calls in static\/js\/a\.js, static\/js\/b\.js, static\/js\/c\.js and 1 more files/)).toBeInTheDocument();
-    await expect(panel.getByText(/1 file builds a whole fetch URL at runtime \(static\/js\/legacy\.js\)/)).toBeInTheDocument();
+    await expect(panel.getByText(/2 calls build their whole fetch URL at runtime, in static\/js\/legacy\.js\./)).toBeInTheDocument();
     await userEvent.click(panel.getByRole('button', { name: 'Add window.API_URL' }));
     await expect(c.getByLabelText('Configuration key 1')).toHaveValue('window.API_URL');
     await expect(panel.getByRole('button', { name: 'window.API_URL added' })).toBeDisabled();
@@ -148,7 +149,7 @@ export const SuggestionsFromLastRecovery: Story = {
 };
 
 export const NoSuggestionsWithoutClientGaps: Story = {
-  args: { suggestions: { keys: [], computedSites: [] } },
+  args: { suggestions: { keys: [], computedCalls: 0, computedSites: [] } },
   play: async ({ canvasElement }) => {
     const c = within(canvasElement);
     await expect(c.queryByRole('region', { name: 'Suggested from the last recovery' })).not.toBeInTheDocument();

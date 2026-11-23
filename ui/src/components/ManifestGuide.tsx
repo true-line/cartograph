@@ -65,7 +65,7 @@ export function ManifestGuide({ preview, save, onSaved, suggestions }: ManifestG
     <h3>Create a system manifest</h3>
     <p>Declare the repositories and URLs you know. These declarations help link client calls; unresolved or ambiguous calls remain gaps.</p>
     <p>Relative repository paths are relative to the saved manifest. Configuration keys must match the source exactly, including case and punctuation. No repositories are read while drafting or saving.</p>
-    {suggestions && (suggestions.keys.length > 0 || suggestions.computedSites.length > 0) && (
+    {suggestions && (suggestions.keys.length > 0 || suggestions.computedCalls > 0) && (
       <section aria-label="Suggested from the last recovery">
         <h4>Suggested from the last recovery</h4>
         {suggestions.keys.length > 0 && <>
@@ -82,8 +82,8 @@ export function ManifestGuide({ preview, save, onSaved, suggestions }: ManifestG
             })}
           </ul>
         </>}
-        {suggestions.computedSites.length > 0 && (
-          <p>{suggestions.computedSites.length} {suggestions.computedSites.length === 1 ? 'file builds' : 'files build'} a whole fetch URL at runtime ({suggestions.computedSites.slice(0, 3).join(', ')}{suggestions.computedSites.length > 3 ? ', …' : ''}). No manifest key can name these, so they stay gaps.</p>
+        {suggestions.computedCalls > 0 && (
+          <p>{suggestions.computedCalls} {suggestions.computedCalls === 1 ? 'call builds its' : 'calls build their'} whole fetch URL at runtime, in {suggestions.computedSites.slice(0, 3).join(', ')}{suggestions.computedSites.length > 3 ? ` and ${suggestions.computedSites.length - 3} more files` : ''}. No manifest key can name these, so they stay gaps.</p>
         )}
       </section>
     )}
