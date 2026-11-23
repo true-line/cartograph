@@ -24,6 +24,9 @@ pub struct InvestigationDetailRead {
     /// ADR-0085: the tool-calling runtime the run executed on, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<super::RunRuntime>,
+    /// #2475: the node and edge counts of the prepared scope, if it held one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_size: Option<super::ScopeSize>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +58,7 @@ impl InvestigationDetailRead {
             detail,
             reported_usage_exact,
             runtime: None,
+            scope_size: None,
         };
         let bytes = context_hub::logical::count(&read).ok_or(InvestigationStoreError::Invalid)?;
         if bytes > MAX_RECORD_BYTES {
@@ -68,6 +72,15 @@ impl InvestigationDetailRead {
         self.runtime = runtime;
         if context_hub::logical::count(&self).is_none_or(|bytes| bytes > MAX_RECORD_BYTES) {
             self.runtime = None;
+        }
+        self
+    }
+
+    /// Adds the prepared scope's size when the read stays within its cap.
+    pub fn with_scope_size(mut self, scope_size: Option<super::ScopeSize>) -> Self {
+        self.scope_size = scope_size;
+        if context_hub::logical::count(&self).is_none_or(|bytes| bytes > MAX_RECORD_BYTES) {
+            self.scope_size = None;
         }
         self
     }

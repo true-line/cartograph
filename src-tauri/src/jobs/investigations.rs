@@ -55,6 +55,9 @@ pub use reads::{InvestigationDetailRead, SpecialistActivityPage};
 #[path = "investigations/run_runtimes.rs"]
 mod run_runtimes;
 pub use run_runtimes::RunRuntime;
+#[path = "investigations/scope_sizes.rs"]
+mod scope_sizes;
+pub use scope_sizes::ScopeSize;
 // Internal admission foundation; no historical runtime initializes these tables.
 #[path = "investigations/read_reservations.rs"]
 mod read_reservations;
