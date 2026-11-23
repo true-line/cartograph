@@ -64,6 +64,7 @@ ingest = { workspace = true }
 spec = { workspace = true }
 llm = { workspace = true }
 semantic = { workspace = true }
+acp-host = { workspace = true }
 agents = { workspace = true }
 work-packets = { workspace = true }
 mcp-wire = { path = "../crates/mcp-wire" }

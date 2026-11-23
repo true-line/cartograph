@@ -115,6 +115,7 @@ pub enum SettingsError {
     InvalidContextWindow(u32),
     InvalidLocalPort(i64),
     InvalidReadDenyRules(llm::read_deny::ReadDenyRuleError),
+    InvalidAcpAgent(&'static str),
     InvalidRunLimit {
         field: &'static str,
         value: u64,
@@ -161,6 +162,7 @@ impl std::fmt::Display for SettingsError {
                 write!(f, "Ollama port must be 1..=65535, got {port}")
             }
             Self::InvalidReadDenyRules(error) => write!(f, "{error}"),
+            Self::InvalidAcpAgent(reason) => write!(f, "ACP agent command: {reason}"),
             Self::InvalidRunLimit {
                 field,
                 value,
@@ -295,6 +297,41 @@ impl LocalModelChoice {
     }
 }
 
+/// The ACP agent command reviewed work packets are dispatched to (ADR-0092).
+/// The person sets it; packet and repository text never do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpAgentCommand {
+    /// Absolute path of the agent's ACP adapter program.
+    pub program: String,
+    /// Its arguments, at most [`AcpAgentCommand::MAX_ARGS`].
+    pub args: Vec<String>,
+}
+
+impl AcpAgentCommand {
+    /// Most arguments a command may carry.
+    pub const MAX_ARGS: usize = 32;
+
+    /// Checks the command's shape; whether the program exists is checked
+    /// when it is saved and again when it runs.
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        let text = |value: &str, maximum: usize| {
+            !value.is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+        };
+        if !text(&self.program, 1024) || !Path::new(&self.program).is_absolute() {
+            return Err(SettingsError::InvalidAcpAgent(
+                "the program must be an absolute path of 1..=1024 characters",
+            ));
+        }
+        if self.args.len() > Self::MAX_ARGS || !self.args.iter().all(|arg| text(arg, 256)) {
+            return Err(SettingsError::InvalidAcpAgent(
+                "at most 32 arguments of 1..=256 characters each, without control characters",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// An Ollama model name: `name[:tag]`, optionally namespaced. Syntax only;
 /// whether it is installed is checked against Ollama when it is saved.
 pub fn local_model_name(value: &str) -> bool {
@@ -388,6 +425,14 @@ impl SettingsStore {
                  port INTEGER CHECK (port BETWEEN 1 AND 65535)
              ) STRICT;
              INSERT OR IGNORE INTO settings_local_endpoint (id) VALUES (1);
+             -- The ACP agent command reviewed packets are dispatched to
+             -- (ADR-0092); NULL program means none is configured.
+             CREATE TABLE IF NOT EXISTS settings_acp_agent (
+                 id        INTEGER PRIMARY KEY CHECK (id = 1),
+                 program   TEXT CHECK (length(program) BETWEEN 1 AND 1024),
+                 args_json TEXT CHECK (length(args_json) <= 16384)
+             ) STRICT;
+             INSERT OR IGNORE INTO settings_acp_agent (id) VALUES (1);
              -- The project's own egress-read-deny/v1 rules, added to the
              -- defaults, in order (ADR-0083, #679). A project table.
              CREATE TABLE IF NOT EXISTS settings_read_deny_rules (
@@ -840,6 +885,45 @@ impl SettingsStore {
         self.run_limits()
     }
 
+    /// The configured ACP agent command, if any (ADR-0092). A stored command
+    /// that no longer validates is reported as an error.
+    pub fn acp_agent(&self) -> Result<Option<AcpAgentCommand>, SettingsError> {
+        let (program, args): (Option<String>, Option<String>) = self.conn.query_row(
+            "SELECT program, args_json FROM settings_acp_agent WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let Some(program) = program else {
+            return Ok(None);
+        };
+        let args: Vec<String> = serde_json::from_str(args.as_deref().unwrap_or("[]"))
+            .map_err(|_| SettingsError::InvalidAcpAgent("stored arguments are not a list"))?;
+        let command = AcpAgentCommand { program, args };
+        command.validate()?;
+        Ok(Some(command))
+    }
+
+    /// Saves the ACP agent command, or clears it with `None`.
+    pub fn set_acp_agent(
+        &mut self,
+        command: Option<&AcpAgentCommand>,
+    ) -> Result<Option<AcpAgentCommand>, SettingsError> {
+        let (program, args) = match command {
+            Some(command) => {
+                command.validate()?;
+                let args = serde_json::to_string(&command.args)
+                    .map_err(|_| SettingsError::InvalidAcpAgent("arguments"))?;
+                (Some(command.program.as_str()), Some(args))
+            }
+            None => (None, None),
+        };
+        self.conn.execute(
+            "UPDATE settings_acp_agent SET program = ?1, args_json = ?2 WHERE id = 1",
+            params![program, args],
+        )?;
+        self.acp_agent()
+    }
+
     /// The local completion model for new desktop investigations (#1643).
     /// A stored value that is not a model name is reported as an error.
     pub fn local_model(&self) -> Result<LocalModelChoice, SettingsError> {
@@ -1048,6 +1132,50 @@ mod tests {
             ));
         }
         assert_eq!(store.investigation_choice().unwrap(), chosen);
+    }
+
+    // AC-1348 (ADR-0092): no ACP agent on a fresh profile; a saved command
+    // survives reopen; a relative program, too many or control-character
+    // arguments are refused without writing; clearing removes it.
+    #[test]
+    fn acp_agent_command_persists_validates_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.acp_agent().unwrap(), None);
+        let program = dir.path().join("agent").to_string_lossy().into_owned();
+        let command = AcpAgentCommand {
+            program: program.clone(),
+            args: vec!["--acp".into()],
+        };
+        assert_eq!(
+            store.set_acp_agent(Some(&command)).unwrap(),
+            Some(command.clone())
+        );
+        drop(store);
+        let mut store = SettingsStore::open(&path).unwrap();
+        assert_eq!(store.acp_agent().unwrap(), Some(command.clone()));
+        for bad in [
+            AcpAgentCommand {
+                program: "agent".into(),
+                args: vec![],
+            },
+            AcpAgentCommand {
+                program: program.clone(),
+                args: vec!["a".into(); AcpAgentCommand::MAX_ARGS + 1],
+            },
+            AcpAgentCommand {
+                program: program.clone(),
+                args: vec!["--x\n".into()],
+            },
+        ] {
+            assert!(matches!(
+                store.set_acp_agent(Some(&bad)),
+                Err(SettingsError::InvalidAcpAgent(_))
+            ));
+        }
+        assert_eq!(store.acp_agent().unwrap(), Some(command));
+        assert_eq!(store.set_acp_agent(None).unwrap(), None);
     }
 
     // AC-0564: the local model defaults to the shipped one, persists across
