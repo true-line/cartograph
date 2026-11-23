@@ -627,3 +627,179 @@ fn attested_records_are_drafted_after_the_rule_rows_and_gated_as_rows() {
     assert_eq!(claims[2].citations, vec![a]);
     assert!(claims[2].statement.contains("500"));
 }
+
+/// Two capabilities: one of `first` rule rows, one of `second`, under
+/// one area, the second with an operations line citing `operation`.
+fn two_capabilities(first: usize, second: usize, operation: usize) -> String {
+    let mut text = String::from(
+        "## 1.5 Business rules (P+A)\n\n### Alias\n\n#### Manage alias (API)\n\n\
+         | Where | Rule | Source | Citation |\n|---|---|---|---|\n",
+    );
+    for n in 1..=first {
+        text.push_str(&format!(
+            "| alias | Rule a{n} holds | alias.py | {} |\n",
+            id(n)
+        ));
+    }
+    text.push_str(&format!(
+        "\n#### Manage new custom alias (API)\n\nOperations: POST /api/v2/alias/custom/new ({}).\n\n\
+         | Where | Rule | Source | Citation |\n|---|---|---|---|\n",
+        id(operation)
+    ));
+    for n in 1..=second {
+        let n = 100 + n;
+        text.push_str(&format!(
+            "| custom | Rule c{n} holds | custom.py | {} |\n",
+            id(n)
+        ));
+    }
+    text
+}
+
+// AC-1608 (#2539): a capability whose rows fit one chunk is drafted whole,
+// not cut across chunks to fill the one before it, and each chunk carries
+// its capability's operations line, whose ids are citable context, not rows
+// to cover.
+#[test]
+fn partition_drafts_a_capability_whole_with_its_operations() {
+    let text = two_capabilities(4, 8, 99);
+    let citable: BTreeSet<String> = (1..=4).chain(101..=108).chain([99]).map(id).collect();
+    let chunks = partition(&text, &citable, 10);
+    assert_eq!(
+        chunks.iter().map(|c| c.rows.len()).collect::<Vec<_>>(),
+        [4, 8]
+    );
+    assert!(chunks[0].context.is_empty());
+    assert_eq!(chunks[1].context.len(), 1);
+    assert_eq!(chunks[1].context[0].ids, [id(99)]);
+    assert!(chunks[1].ids().contains(&id(99)));
+    assert!(
+        chunks[1].text.contains(
+            "#### Manage new custom alias (API)\nOperations: POST /api/v2/alias/custom/new"
+        )
+    );
+    // A capability longer than a chunk is cut, and every part keeps the line.
+    let long = partition(&two_capabilities(2, 15, 99), &citable_all(), 10);
+    assert_eq!(
+        long.iter().map(|c| c.rows.len()).collect::<Vec<_>>(),
+        [2, 10, 5]
+    );
+    assert!(long[1..].iter().all(|c| c.context.len() == 1));
+}
+
+fn citable_all() -> BTreeSet<String> {
+    (1..=200).map(id).collect()
+}
+
+// AC-1608 (#2539): a row and the ↳ rows explaining it are one rule: a cut
+// never falls between them, and a passing claim citing any of them covers
+// them all.
+#[test]
+fn a_row_and_its_explaining_rows_are_one_rule() {
+    let mut text = String::from(
+        "## 1.5 Business rules\n\n### Alias\n\n#### Manage new random alias (API)\n\n\
+         | Where | Rule | Source | Citation |\n|---|---|---|---|\n",
+    );
+    for n in 1..=8 {
+        text.push_str(&format!(
+            "| random | Rule r{n} holds | r.py | {} |\n",
+            id(n)
+        ));
+    }
+    text.push_str(&format!(
+        "| random | When the user cannot create a new alias, the request is refused with status 400. | r.py | {} |\n",
+        id(9)
+    ));
+    text.push_str(&format!(
+        "| ↳ | The configured free plan maximum is 5 | MAX | {} |\n",
+        id(10)
+    ));
+    text.push_str(&format!(
+        "| ↳ User.can_create | A user cannot create aliases when the user is disabled. | x | {} |\n",
+        id(11)
+    ));
+    let chunks = partition(&text, &citable_all(), 10);
+    assert_eq!(
+        chunks.iter().map(|c| c.rows.len()).collect::<Vec<_>>(),
+        [8, 3]
+    );
+    let chunk = &chunks[1];
+    let composite = claim(
+        "A user cannot create a new alias beyond the free plan maximum of 5; the request is \
+         refused with status 400.",
+        &[9, 10],
+    );
+    let address = address();
+    let decoded =
+        section_compose::decode(&address, &reply(vec![composite]), &chunk.ids()).expect("decodes");
+    let result = gate(
+        &Workflow::shipped().unwrap().checks,
+        &decoded.finish.claims,
+        Some(decoded.left_out),
+        chunk,
+        &never,
+    );
+    assert!(result.passed, "{:?}", result.prescriptions);
+}
+
+// AC-1608 (#2539): a claim may cite its operation's id from the operations
+// line beside the rule it states.
+#[test]
+fn a_claim_may_cite_its_operation_from_the_operations_line() {
+    let text = two_capabilities(0, 1, 99).replace(
+        "Rule c101 holds",
+        "When the alias exists, the request is refused with status 409",
+    );
+    let chunks = partition(&text, &citable_all(), 10);
+    let chunk = &chunks[0];
+    let address = address();
+    let decoded = section_compose::decode(
+        &address,
+        &reply(vec![claim(
+            "Creating a custom alias is refused with status 409 when the alias already exists.",
+            &[101, 99],
+        )]),
+        &chunk.ids(),
+    )
+    .expect("decodes");
+    let result = gate(
+        &Workflow::shipped().unwrap().checks,
+        &decoded.finish.claims,
+        Some(decoded.left_out),
+        chunk,
+        &never,
+    );
+    assert!(result.passed, "{:?}", result.prescriptions);
+}
+
+// AC-1608 (#2539): the drafter is told to state an operation's rules as
+// requirements, with a row and its ↳ rows as one claim.
+#[test]
+fn the_drafter_reads_the_rules_guidance() {
+    let mut model = Fake::new(vec![reply((1..=3).map(good).collect())]);
+    run_with(&no_audit(), 3, &mut model);
+    assert!(model.prompts[0].contains("<rules_guidance>\nState the rules of each operation"));
+    assert!(model.prompts[0].find("<rules_guidance>") < model.prompts[0].find("<section>"));
+}
+
+// AC-1608 (#2539): two operations sharing one rate limit are two rules: each
+// limit row names its operation, so the repeated-rule check keeps both.
+#[test]
+fn two_operations_sharing_a_limit_are_both_drafted() {
+    let mut text = two_capabilities(0, 0, 99);
+    for (n, route) in [(101, "POST /api/a"), (102, "POST /api/b")] {
+        text.push_str(&format!(
+            "| {route} | {route} accepts at most 10 a minute; requests past it are refused with \
+             429. | rate limit declared on the handler | {} |\n",
+            id(n)
+        ));
+    }
+    let (chunks, skipped) = partition_counted(&text, &citable_all(), 10);
+    assert_eq!(skipped.repeated_rows, 0);
+    let rows: Vec<&str> = chunks
+        .iter()
+        .flat_map(|c| c.rows.iter().map(|r| r.text.as_str()))
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].contains("POST /api/a accepts") && rows[1].contains("POST /api/b accepts"));
+}

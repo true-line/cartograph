@@ -25,7 +25,7 @@
 
 use super::rules::CALL_DEPTH;
 use crate::workbench::capabilities::{Stories, Story, Support};
-use crate::workbench::endpoint_inventory::{INPUTS_KIND, LIMITS_KIND, RESPONSES_KIND};
+use crate::workbench::endpoint_inventory::{INPUTS_KIND, RESPONSES_KIND};
 use crate::workbench::endpoint_inventory::{rate_limits, reads, shape, status_keys, strings};
 use crate::workbench::render::{Assertions, Literal, NodeName, RenderLimit, Text};
 use crate::workbench::{ExportMode, citation_id};
@@ -326,64 +326,101 @@ pub(super) fn operations_per_capability(
     Ok(cited)
 }
 
-/// §1.5: the rate limits on each capability's operations. Returns the
+/// §1.5 under one capability (#2539): the operations it serves, each
+/// with its own Endpoint fact, so a rule can be stated for its operation
+/// and cite it. Written right under the capability's heading; the rate
+/// limits follow its rule tables ([`capability_limits`]). Returns the
 /// number of facts cited.
-pub(super) fn limits_per_capability(
-    knowledge: &Stories<'_>,
+pub(super) fn capability_operations(
+    story: &Story<'_>,
     mode: ExportMode,
     (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
-    let mut rows: Vec<(String, String, String, String)> = Vec::new();
-    let mut cited = 0usize;
-    for story in capabilities(knowledge) {
-        for (endpoint, _) in operations(story) {
-            let Some((text, unresolved, prov)) = rate_limits(endpoint, mode) else {
-                continue;
-            };
-            let citation = cite(
-                (assertions, asserted),
-                format!("rate-limits:{}", endpoint.id),
-                LIMITS_KIND,
-                &format!("Rate limits of {}: {text}", endpoint.id),
-                prov,
-            )?;
-            cited += 1;
-            let mut statement = format!("{text}; requests past it are refused with 429");
+    let (cited, _) = operations_and_limits(story, mode, (assertions, asserted), out, true)?;
+    Ok(cited)
+}
+
+/// §1.5 after one capability's rule tables (#2539, AC-0882): each
+/// operation's flask-limiter rate limit as a rule row citing the
+/// operation's Endpoint, whose recorded `rate_limits` hold the figures.
+pub(super) fn capability_limits(
+    story: &Story<'_>,
+    mode: ExportMode,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    let (_, limits) = operations_and_limits(story, mode, (assertions, asserted), out, false)?;
+    Ok(limits)
+}
+
+/// The operations line (`line`) or the rate-limit table of one
+/// capability; the facts cited and the limit rows written.
+fn operations_and_limits(
+    story: &Story<'_>,
+    mode: ExportMode,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+    line: bool,
+) -> Result<(usize, usize), RenderLimit> {
+    let mut endpoints: Vec<&Node> = operations(story)
+        .into_iter()
+        .map(|(endpoint, _)| endpoint)
+        .collect();
+    endpoints.sort_by_cached_key(|endpoint| (NodeName(endpoint).to_string(), endpoint.id.clone()));
+    endpoints.dedup_by(|a, b| a.id == b.id);
+    if endpoints.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut listed = Vec::with_capacity(endpoints.len());
+    let mut limits = Vec::new();
+    for endpoint in &endpoints {
+        let citation = citation_id(&FactKey::Node {
+            id: endpoint.id.clone(),
+        });
+        if asserted.insert(citation.clone()) {
+            assertions.node(endpoint, None)?;
+        }
+        listed.push(format!("{} ({citation})", Literal(NodeName(endpoint))));
+        if let Some((text, unresolved, _)) = rate_limits(endpoint, mode) {
+            // The rule names its operation: two operations sharing one limit
+            // state two rules, which the drafter's repeated-rule check keeps.
+            let mut rule = format!(
+                "{} accepts {text}; requests past it are refused with 429.",
+                NodeName(endpoint)
+            );
             if unresolved {
-                statement.push_str("; a declared limit's value is not resolved");
+                rule.push_str(" A declared limit's value is not resolved.");
             }
-            rows.push((
-                NodeName(story.node).to_string(),
-                NodeName(endpoint).to_string(),
-                statement,
-                citation,
+            limits.push(format!(
+                "| {} | {} | rate limit declared on the handler | {citation} |",
+                Literal(NodeName(endpoint)),
+                Literal(&rule),
             ));
         }
     }
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    writeln!(
-        out,
-        "\n### Rate limits\n\n\
-         Operations with a recorded flask-limiter rate limit: {}. Each is the limit a decorator \
-         on the operation's handler declares, with its value read from the decorator or from \
-         the configuration constant it names; a configuration default the environment can \
-         replace says so.\n\n\
-         | Capability | Operation | Limit | Citation |\n|---|---|---|---|",
-        rows.len()
-    )?;
-    for (capability, operation, statement, citation) in rows {
+    if line {
+        writeln!(out, "Operations: {}.\n", listed.join("; "))?;
+    } else if !limits.is_empty() {
         writeln!(
             out,
-            "| {} | {} | {} | {citation} |",
-            Literal(capability),
-            Literal(operation),
-            Literal(statement),
+            "Rate limits:\n\n| Where | Rule | Source | Citation |\n|---|---|---|---|"
         )?;
+        for row in &limits {
+            writeln!(out, "{row}")?;
+        }
+        out.push_str("\n")?;
     }
-    Ok(cited)
+    Ok((endpoints.len(), limits.len()))
+}
+
+/// Whether an operation of `story` has a recorded rate limit `mode`
+/// admits: §1.5 then lists the capability even when no other rule of it is
+/// recovered (#2539).
+pub(super) fn has_limits(story: &Story<'_>, mode: ExportMode) -> bool {
+    operations(story)
+        .into_iter()
+        .any(|(endpoint, _)| rate_limits(endpoint, mode).is_some())
 }
 
 /// Logical workspace of [`operations_per_capability`] and
@@ -498,8 +535,15 @@ mod tests {
         )
         .unwrap();
         let mut limits = Text::new(&budget, "").unwrap();
-        limits_per_capability(
-            &knowledge,
+        capability_operations(
+            &knowledge.included[0],
+            mode,
+            (&mut assertions, &mut asserted),
+            &mut limits,
+        )
+        .unwrap();
+        capability_limits(
+            &knowledge.included[0],
             mode,
             (&mut assertions, &mut asserted),
             &mut limits,
@@ -606,19 +650,37 @@ def ping():
         assert!(operations_per_capability_workspace(graph(1, usize::MAX, 1)).is_none());
     }
 
-    // AC-0882: §1.5 lists each operation's rate limit with its value read
-    // through configuration, and says what refuses the requests past it.
+    // AC-0882, AC-1608 (#2539): under its capability, §1.5 lists each
+    // operation with its own Endpoint fact, and each rate limit as a rule
+    // row citing that Endpoint, with its value read through configuration
+    // and what refuses the requests past it.
     #[test]
     fn rate_limits_are_listed_per_capability_with_their_configuration_default() {
         let (_, limits) = render(FILES, ExportMode::BestEffort);
-        assert!(limits.contains("Operations with a recorded flask-limiter rate limit: 1."));
         assert!(
-            limits.contains(
-                "| Manage alias (API) | POST /api/alias/new | at most 100 a day, 5 a minute (the \
-                 default; the environment variable ALIAS\\_LIMIT replaces it); requests past it \
-                 are refused with 429 |"
-            ),
+            limits.starts_with("Operations: GET /api/ping (F-"),
             "{limits}"
+        );
+        // The operations line and the limit row cite the same Endpoint fact.
+        let listed = limits
+            .split("POST /api/alias/new (")
+            .nth(1)
+            .and_then(|rest| rest.get(..18))
+            .expect("the operation is listed with its id");
+        assert!(
+            limits.contains(&format!(
+                "| POST /api/alias/new | POST /api/alias/new accepts at most 100 a day, 5 a minute (the \
+                 default; the environment variable ALIAS\\_LIMIT replaces it); requests past it \
+                 are refused with 429. | rate limit declared on the handler | {listed} |"
+            )),
+            "{limits}"
+        );
+        // An operation with no recorded limit has no limit row.
+        assert_eq!(
+            limits
+                .matches(" | rate limit declared on the handler | ")
+                .count(),
+            1
         );
         // An environment default is InferredStrong, which verified-only keeps.
         let (_, verified) = render(FILES, ExportMode::VerifiedOnly);

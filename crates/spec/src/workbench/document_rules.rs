@@ -39,8 +39,8 @@
 
 use super::statements::Constants;
 use crate::workbench::capabilities::{Stories, Story, Support, area_name};
-use crate::workbench::citation_id;
 use crate::workbench::render::{Assertions, Literal, RenderLimit, Text};
+use crate::workbench::{ExportMode, citation_id};
 use core_graph::rules::{
     BranchPolarity, DefinitionExpressionKind, DefinitionExpressionNode, GuardedExitEvidence,
     LocalExit, SourceExpression,
@@ -1281,13 +1281,34 @@ const RULE_COLUMNS: &str = "The Rule column restates each exit in domain terms w
 pub(super) const NOT_STATED: &str =
     "Not stated in domain terms (Gap): the condition or outcome is outside the rendering rules";
 
-/// The rejection exits each Capability reaches, then the shared ones.
-/// Returns the number of rows printed; prints nothing when no capability
-/// reaches a rejection. Rows are formatted and written one at a time; the
-/// retained workspace is [`rules_per_capability_workspace`].
+/// [`rules_per_capability_in`] as a best-effort export reads it.
+#[cfg(test)]
 pub(super) fn rules_per_capability(
     (nodes, edges): (&[&Node], &[&Edge]),
     knowledge: &Stories<'_>,
+    (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
+    out: &mut Text,
+) -> Result<usize, RenderLimit> {
+    rules_per_capability_in(
+        (nodes, edges),
+        knowledge,
+        ExportMode::BestEffort,
+        (assertions, asserted),
+        out,
+    )
+}
+
+/// The rejection exits each Capability reaches, then the shared ones.
+/// Returns the number of rows printed; prints nothing when no capability
+/// reaches a rejection or serves a rate-limited operation. Under each
+/// capability, the operations it serves come first and their rate limits
+/// after its rules (#2539), read as export `mode` admits them. Rows are
+/// formatted and written one at a time; the retained workspace is
+/// [`rules_per_capability_workspace`].
+pub(super) fn rules_per_capability_in(
+    (nodes, edges): (&[&Node], &[&Edge]),
+    knowledge: &Stories<'_>,
+    mode: ExportMode,
     (assertions, asserted): (&mut Assertions, &mut BTreeSet<String>),
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
@@ -1295,11 +1316,13 @@ pub(super) fn rules_per_capability(
     // A file whose rule capture stopped is stated even when no rule of it
     // was kept (AC-1048).
     let stops = capture_stops(nodes);
-    if index.governs.is_empty() && index.machines.is_empty() && stops.is_empty() {
-        return Ok(0);
-    }
     let listed = knowledge.capabilities();
     let capabilities = || listed.iter().map(|(_, story)| *story);
+    // A rate-limited operation is a rule of its capability (#2539).
+    let limited = capabilities().any(|story| super::operations::has_limits(story, mode));
+    if index.governs.is_empty() && index.machines.is_empty() && stops.is_empty() && !limited {
+        return Ok(0);
+    }
     let mut reach_count: BTreeMap<&str, usize> = BTreeMap::new();
     for story in capabilities() {
         for id in index.reached(story) {
@@ -1330,7 +1353,7 @@ pub(super) fn rules_per_capability(
         changes += index.each_picked(owners.iter().copied(), effect, |_| Ok(()))?;
     }
     let (machines, loose_machines) = index.area_machines(knowledge);
-    if total + changes + index.machines.len() == 0 && stops.is_empty() {
+    if total + changes + index.machines.len() == 0 && stops.is_empty() && !limited {
         return Ok(0);
     }
     writeln!(
@@ -1352,7 +1375,11 @@ pub(super) fn rules_per_capability(
          branch conditions around it (`always` when there are none). Logging calls, builtins \
          and constructors are not listed. Whether a statement runs on a given request, and \
          what a called function then does, are not established. At most {MAX_EFFECT_ROWS} per \
-         capability, nearest callable first.\n"
+         capability, nearest callable first.\n\n\
+         Under each capability, “Operations” lists the operations it serves, each with its \
+         Endpoint fact, and “Rate limits”, after its rules, states each operation's \
+         flask-limiter rate limit, read from the decorator on its handler or the configuration \
+         constant it names, citing that Endpoint (#2539).\n"
     )?;
     if !stops.is_empty() {
         let listed: Vec<String> = stops
@@ -1490,7 +1517,7 @@ pub(super) fn rules_per_capability(
         let reached: Vec<&str> = index.reached(story).into_iter().filter(own).collect();
         let rejections = index.each(reached.iter().copied(), |_| Ok(()))?;
         let changed = index.each_picked(reached.iter().copied(), effect, |_| Ok(()))?;
-        if rejections + changed == 0 {
+        if rejections + changed == 0 && !super::operations::has_limits(story, mode) {
             continue;
         }
         let marks = headings.before(area, out)?;
@@ -1499,6 +1526,8 @@ pub(super) fn rules_per_capability(
             "{marks} {}\n",
             Literal(crate::workbench::render::NodeName(story.node))
         )?;
+        printed +=
+            super::operations::capability_operations(story, mode, (assertions, asserted), out)?;
         let mut followed = BTreeSet::new();
         let mut explained = BTreeSet::new();
         if rejections > 0 {
@@ -1517,6 +1546,7 @@ pub(super) fn rules_per_capability(
             out.push_str("\n")?;
         }
         printed += index.changes(&reached, &mut explained, assertions, asserted, out)?;
+        printed += super::operations::capability_limits(story, mode, (assertions, asserted), out)?;
     }
     if !loose_machines.is_empty() {
         out.push_str("### State machines\n\n")?;
