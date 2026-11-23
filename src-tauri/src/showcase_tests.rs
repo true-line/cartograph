@@ -245,11 +245,11 @@ fn showcase_recover_and_export() {
         for artifact in &bundle.artifacts {
             std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
         }
-        // #1582: keep the complete diagnostic bundle, but avoid whitespace
-        // expansion and a second bundle-sized serialization buffer.
+        // #1582: the complete bundle as the v2 bundle file Export bundle
+        // writes (ADR-0086), streamed without a bundle-sized buffer.
         let mut writer =
             std::io::BufWriter::new(std::fs::File::create(root.join("bundle.json")).unwrap());
-        serde_json::to_writer(&mut writer, &bundle).unwrap();
+        spec::bundle_file::write_bundle_file(&bundle, &mut writer).unwrap();
         writer.flush().unwrap();
         // #2049: the structured views the Workbench draws, for screenshots
         // of the app's diagrams from the same run.
