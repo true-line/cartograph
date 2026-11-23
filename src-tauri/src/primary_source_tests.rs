@@ -4060,6 +4060,180 @@ fn a_documentation_selection_that_does_not_fit_never_costs_the_readers() {
     assert_eq!(paths, ["app.py", "compose.yaml", "source.ts"]);
 }
 
+// AC-1069: the files the active plugins claim join the capture, and with
+// the capture each plugin is routed the retained bytes of exactly those
+// files: a claimed file edited to one the plugin refuses, a claimed file
+// deleted and a claimed file created in the checkout afterwards change no
+// plugin fact and no refusal. Without the flag that says the files were
+// retained, the checkout is routed.
+#[test]
+fn plugin_claimed_files_are_routed_from_the_capture() {
+    // The first byte of a source picks the fixture's behaviour: `M` is a
+    // fact the host refuses.
+    const REFUSING_ADAPTER: &[u8] =
+        include_bytes!("../../crates/adapters-plugin-host/tests/fixtures/refusing-adapter.wat");
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("a.zz"), "fine").unwrap();
+    std::fs::write(root.join("src/b.zz"), "fine too").unwrap();
+    let artifact = dir.path().join("t0.plugin-refusing.wasm");
+    std::fs::write(&artifact, REFUSING_ADAPTER).unwrap();
+    let active = [crate::ActivePlugin {
+        plugin_id: "t0.plugin-refusing".into(),
+        path: artifact,
+        content_hash: core_prov::content_hash(REFUSING_ADAPTER),
+        extensions: vec!["zz".into()],
+        cells: Vec::new(),
+        languages: BTreeMap::new(),
+        gate_key: "gate".into(),
+        limits: adapters_plugin_host::PluginLimits::default(),
+    }];
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let claimed = crate::plugin_claimed_paths(source.root(), &active).unwrap();
+    assert_eq!(claimed, ["a.zz", "src/b.zz"]);
+    assert_eq!(crate::plugin_claimed_paths(source.root(), &[]), None);
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            crate::primary_source::CallerSelections {
+                plugins: Some(&claimed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(input.plugins_captured);
+    let capture = input.capture.as_ref().unwrap();
+
+    // After capture: a refused edit, a deletion and a new claimed file.
+    std::fs::write(root.join("a.zz"), "Malformed").unwrap();
+    std::fs::remove_file(root.join("src/b.zz")).unwrap();
+    std::fs::write(root.join("c.zz"), "fine").unwrap();
+    let pinned = format!(
+        "t0.plugin-refusing@{}",
+        &core_prov::content_hash(REFUSING_ADAPTER)[..12]
+    );
+    let route = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        let mut reads = crate::ProducerReads {
+            plugins_captured: captured,
+            ..crate::ProducerReads::default()
+        };
+        let extraction = extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &active,
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut reads,
+        )
+        .unwrap()
+        .0;
+        let mut routed: Vec<String> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.props["prov"]["extractor_id"] == serde_json::json!(pinned))
+            .map(|node| node.id.trim_start_matches(&source.repo_key).to_string())
+            .collect();
+        routed.sort();
+        let refused: Vec<String> = reads
+            .plugins
+            .iter()
+            .flat_map(|read| read.refused.iter().map(|(path, _)| path.clone()))
+            .collect();
+        (routed, refused)
+    };
+    let (routed, refused) = route(true);
+    assert_eq!(routed, [":a.zz", ":src/b.zz"]);
+    assert!(refused.is_empty(), "{refused:?}");
+    let (routed, refused) = route(false);
+    assert_eq!(routed, [":c.zz"]);
+    assert_eq!(refused, ["a.zz"]);
+}
+
+// AC-1069: the plugins' claimed files are kept before the documentation
+// selection and left out before the readers: when only one of them fits,
+// the documentation walk reads the checkout first, and then the plugins
+// are routed the checkout while the readers keep their capture.
+#[test]
+fn plugin_claimed_files_never_cost_the_readers_their_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "local");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("a.zz"), "fine").unwrap();
+    std::fs::write(root.join("README.md"), "# Local\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let claimed = vec!["a.zz".to_string()];
+    let prepare = |max_files| {
+        let input = state
+            .primary_sources
+            .prepare_at(
+                &source,
+                source.root(),
+                &layers,
+                None,
+                source_capture::CaptureLimits {
+                    max_files,
+                    ..source_capture::CaptureLimits::default()
+                },
+                adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+                crate::primary_source::CallerSelections {
+                    plugins: Some(&claimed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let paths: Vec<String> = input
+            .capture
+            .as_ref()
+            .unwrap()
+            .manifest()
+            .files
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        (input, paths)
+    };
+    let (input, paths) = prepare(3);
+    assert!(input.environments_captured && input.plugins_captured);
+    assert!(!input.documents_captured);
+    assert_eq!(paths, ["a.zz", "compose.yaml", "source.ts"]);
+    drop(input);
+    let (input, paths) = prepare(2);
+    assert!(input.environments_captured);
+    assert!(!input.plugins_captured && !input.documents_captured);
+    assert_eq!(paths, ["compose.yaml", "source.ts"]);
+}
+
 // AC-1067: the declared API references and their config join the capture,
 // and with the capture both recovery's contract read and the relinking
 // pass's documents read the retained bytes: a reference and its config
@@ -4095,6 +4269,7 @@ fn declared_api_references_are_read_from_the_capture() {
             adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
             crate::primary_source::CallerSelections {
                 api_docs: Some(&selection),
+                ..Default::default()
             },
         )
         .unwrap();
