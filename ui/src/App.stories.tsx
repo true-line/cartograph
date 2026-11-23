@@ -1077,6 +1077,9 @@ function installFakeCore(options: {
       case 'area_choices':
         // Ask an area's expert (AC-0932): no knowledge overlay, so no areas.
         return [];
+      case 'list_attested_records':
+        // Attested records (AC-1081): none in the fixture project.
+        return { items: [], next_before: null };
       default:
         throw new Error(`unmocked command: ${cmd}`);
     }
