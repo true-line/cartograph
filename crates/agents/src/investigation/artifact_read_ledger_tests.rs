@@ -10,10 +10,19 @@ fn page_raw(
     total: usize,
 ) -> String {
     let end = offset + content.len();
-    json!({"schema_version":1,"context_id":context_id,"artifact_id":"gap-register-index",
-        "schema":"gap-register-index@1","content_id":content_id,"offset":offset,
-        "next_offset":(end < total).then_some(end),"total_content_bytes":total,"content":content})
-    .to_string()
+    serde_json::to_string(&InvestigationArtifactPage {
+        schema_version: 1,
+        context_id: context_id.into(),
+        artifact_id: "gap-register-index".into(),
+        schema: "gap-register-index@1".into(),
+        content_id: content_id.into(),
+        offset,
+        next_offset: (end < total).then_some(end),
+        total_content_bytes: total,
+        complete_system: false,
+        content: content.into(),
+    })
+    .unwrap()
 }
 
 // AC-1812 (ADR-0089): an artifact page is a v2 ledger manifest charged to the
@@ -110,21 +119,59 @@ fn artifact_reads_are_charged_ledger_manifests_with_their_own_turn() {
     legacy.schema_version = 1;
     legacy.coverage = None;
     assert!(legacy.validate().is_err());
-    // A page cannot become a prompt before its supply lands.
-    assert_eq!(
+    // The retained page follows the coverage bodies; without it, or with a
+    // non-canonical copy, no prompt is built.
+    let prepare = |raws: &[String]| {
         InvestigationInput::prepare_v6(
             "Explain the gaps",
             SpecialistId::DomainAnalystV6,
-            current,
+            current.clone(),
             &[],
             &[],
             &[],
             &InvestigationUsage::default(),
             &basis,
             None,
-            &[],
+            raws,
         )
-        .err(),
-        Some(InvestigationError::InvalidInput)
+    };
+    assert_eq!(prepare(&[]).err(), Some(InvestigationError::InvalidInput));
+    let pretty =
+        serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(&raw).unwrap())
+            .unwrap();
+    assert!(prepare(&[pretty]).is_err());
+    let input = prepare(std::slice::from_ref(&raw)).unwrap();
+    let action = input.action("inv:artifact".into()).unwrap();
+    let prompt: serde_json::Value = serde_json::from_str(&action.payload.prompt).unwrap();
+    assert_eq!(prompt["artifact_pages"][0]["content"], "# Gaps\n");
+    assert_eq!(prompt["turn_progress"]["phase"], "after_artifact_read");
+    // Sealed as a supplied page, not a citation; dropping or forging it fails.
+    let provider = llm::OllamaProvider::new(
+        "http://127.0.0.1:11434",
+        "test",
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let prepared = llm::EgressFirewall::new(llm::EgressPolicy::default())
+        .prepare_bounded(
+            &provider,
+            &action,
+            &llm::bounded::CompletionLimits::default(),
+        )
+        .unwrap();
+    let disclosure = input.seal_disclosure(&prepared).unwrap().unwrap();
+    assert_eq!(disclosure.artifact_pages.len(), 1);
+    assert!(!disclosure.artifact_pages[0].redacted);
+    assert_eq!(
+        disclosure.artifact_pages[0].disclosed_body_hash,
+        manifest.response_hash
     );
+    assert!(disclosure.sources.is_empty());
+    disclosure.validate(&current).unwrap();
+    let mut dropped = disclosure.clone();
+    dropped.artifact_pages.clear();
+    assert!(dropped.validate(&current).is_err());
+    let mut forged = disclosure;
+    forged.artifact_pages[0].disclosed_body_hash = "a".repeat(64);
+    assert!(forged.validate(&current).is_err());
 }

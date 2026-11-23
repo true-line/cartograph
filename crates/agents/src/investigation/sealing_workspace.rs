@@ -146,7 +146,8 @@ fn disclosure_construction(policy: &InvestigationPolicy) -> Option<usize> {
         facts,
         queries.checked_mul(2)?,
         sources.checked_mul(2)?,
-        queries.checked_mul(2)?,
+        queries.checked_mul(2)?, // coverage-detail representation/body hashes
+        queries.checked_mul(2)?, // artifact-page representation/body hashes
         12,
     ])?;
     // Do not use MAX_DISCLOSURE_BYTES here: the final validator enforces it
@@ -158,6 +159,7 @@ fn disclosure_construction(policy: &InvestigationPolicy) -> Option<usize> {
         slots::<DisclosedInvestigationQuery>(queries)?,
         slots::<DisclosedInvestigationSource>(sources)?,
         slots::<DisclosedInvestigationCoverageDetail>(queries)?,
+        slots::<DisclosedInvestigationArtifactPage>(queries)?,
         slots::<String>(queries)?,          // query-history IDs
         MAX_MANIFEST_BYTES.checked_mul(2)?, // citation/key and basis/coverage IDs
         json_bytes(MAX_INPUT_BYTES)?,       // decoded admission state

@@ -107,6 +107,18 @@ pub struct DisclosedInvestigationCoverageDetail {
     pub redacted: bool,
 }
 
+/// One supplied compiled-artifact page (ADR-0089); never a citation.
+/// `disclosed_body_hash` hashes the canonical page as supplied, so an
+/// unredacted page equals the ledger's `response_hash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisclosedInvestigationArtifactPage {
+    pub read_index: usize,
+    pub representation_hash: String,
+    pub disclosed_body_hash: String,
+    pub redacted: bool,
+}
+
 /// Exact mandatory public qualification supplied in a qualified invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,6 +197,8 @@ pub struct InvestigationDisclosure {
     pub coverage: Option<DisclosedInvestigationCoverage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage_details: Vec<DisclosedInvestigationCoverageDetail>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_pages: Vec<DisclosedInvestigationArtifactPage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_contract_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,12 +326,24 @@ impl InvestigationDisclosure {
         {
             return Err(InvestigationError::InvalidInput);
         }
-        // Artifact pages are not disclosed until their supply lands
-        // (ADR-0089 step 2), so a disclosure never omits one silently.
         if self.coverage_details.len() != ledger.coverage_reads.len()
-            || !ledger.artifact_reads.is_empty()
+            || self.artifact_pages.len() != ledger.artifact_reads.len()
         {
             return Err(InvestigationError::InvalidInput);
+        }
+        for (index, (entry, read)) in self
+            .artifact_pages
+            .iter()
+            .zip(&ledger.artifact_reads)
+            .enumerate()
+        {
+            if entry.read_index != index
+                || !crate::source_basis::hash(&entry.representation_hash)
+                || !crate::source_basis::hash(&entry.disclosed_body_hash)
+                || entry.redacted != (entry.disclosed_body_hash != read.response_hash)
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
         }
         for (index, (entry, read)) in self
             .coverage_details

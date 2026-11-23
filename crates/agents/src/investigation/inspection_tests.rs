@@ -68,6 +68,7 @@ pub(in crate::investigation) fn fixture() -> (
         completion_contract_hash: None,
         completion_metadata_hash: None,
         coverage_details: vec![],
+        artifact_pages: vec![],
         coverage: None,
         schema_version: 2,
         policy: COMPACT_DISCLOSURE_POLICY.into(),

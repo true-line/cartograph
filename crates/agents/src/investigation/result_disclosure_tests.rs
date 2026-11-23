@@ -81,6 +81,7 @@ pub(in crate::investigation) fn basis() -> (
         completion_contract_hash: None,
         completion_metadata_hash: None,
         coverage_details: vec![],
+        artifact_pages: vec![],
         coverage: None,
         inspection_requirements_hash: None,
         schema_version: 1,

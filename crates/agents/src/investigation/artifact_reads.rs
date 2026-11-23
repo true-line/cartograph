@@ -97,6 +97,10 @@ impl InvestigationArtifactReadManifest {
         super::strict::preflight(raw, MAX_QUERY_BYTES, 8, 64, 8)?;
         let page: InvestigationArtifactPage =
             serde_json::from_str(raw).map_err(|_| InvestigationError::InvalidInput)?;
+        // The canonical encoding is the identity sealing compares against.
+        if serde_json::to_string(&page).map_err(|_| InvestigationError::InvalidInput)? != raw {
+            return Err(InvestigationError::InvalidInput);
+        }
         let end = page
             .offset
             .checked_add(page.content.len())
@@ -139,6 +143,9 @@ pub struct InvestigationArtifactPage {
     pub next_offset: Option<usize>,
     /// Total artifact content bytes.
     pub total_content_bytes: usize,
+    /// False when the artifact was compiled from a scoped projection (an
+    /// Area or Neighborhood investigation): it describes only the scope.
+    pub complete_system: bool,
     /// The page's UTF-8 content.
     pub content: String,
 }
