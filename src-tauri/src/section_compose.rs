@@ -81,7 +81,8 @@ pub(crate) struct ComposeOutcome {
     pub(crate) gated: Option<GatedStats>,
     /// Whether the claims were reviewed before staging (#2419):
     /// `reviewed`, `review_unavailable` (the reply was not the schema's),
-    /// `review_too_large` (the request was over the input ceiling) or
+    /// `review_too_large` (one claim alone was over the input ceiling; more
+    /// claims than one request holds are reviewed in batches, #1748) or
     /// `not_reviewed_cloud` (a cloud consent covers one payload).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) review: Option<&'static str>,
@@ -1005,32 +1006,85 @@ impl Calls<'_> {
     }
 }
 
+/// Cut `0..claims` into contiguous batches that each `fit`, halving a batch
+/// that does not (#1748). `None` when one claim alone does not fit.
+fn review_batches(
+    claims: usize,
+    fit: &dyn Fn(std::ops::Range<usize>) -> bool,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut pending: Vec<std::ops::Range<usize>> = std::iter::once(0..claims).collect();
+    let mut batches = Vec::new();
+    while let Some(batch) = pending.pop() {
+        if fit(batch.clone()) {
+            batches.push(batch);
+        } else if batch.len() <= 1 {
+            return None;
+        } else {
+            let middle = batch.start + batch.len() / 2;
+            // Popped last first, so the batches come out in order.
+            pending.push(middle..batch.end);
+            pending.push(batch.start..middle);
+        }
+    }
+    Some(batches)
+}
+
 /// Ask the reviewer [`claim_review::REVIEW_SAMPLES`] times and leave out
-/// each claim a majority judges an overreach.
+/// each claim a majority judges an overreach. Claims too many for one
+/// request under the input ceiling are reviewed in contiguous batches that
+/// each fit, every batch asked the same way (#1748); only a claim that does
+/// not fit alone leaves the review undone (`review_too_large`), and a batch
+/// with fewer than two readable replies leaves every claim as it is.
 fn review_claims(
     calls: &Calls<'_>,
     prepared: &Prepared,
     composed: &mut Composed,
 ) -> Result<&'static str, String> {
-    let action = review_action(prepared, &composed.finish.claims);
-    // A request over the input ceiling is not sent: the claims stay as the
-    // staging checks left them.
-    if payload_bytes(&action) > calls.ceiling {
-        return Ok("review_too_large");
-    }
-    // One sample's verdicts vary between identical calls, so the review is
-    // asked several times and a claim left out on a majority (#2458).
-    let claims = composed.finish.claims.len();
-    let samples: Vec<_> = calls
-        .samples(&action, claim_review::REVIEW_SAMPLES, |text| {
-            claim_review::decode(text, claims)
-        })?
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect();
-    let Some(overreaching) = claim_review::overreaching(&samples, claims) else {
-        return Ok("review_unavailable");
+    let claims = &composed.finish.claims;
+    let action_of = |batch: &std::ops::Range<usize>, batched: bool| {
+        let mut action = review_action(prepared, &claims[batch.clone()]);
+        if batched {
+            action.action_id = format!(
+                "{}:claims-{}-{}",
+                action.action_id,
+                batch.start + 1,
+                batch.end
+            );
+        }
+        action
     };
+    let whole = 0..claims.len();
+    let batches = if payload_bytes(&action_of(&whole, false)) <= calls.ceiling {
+        vec![whole]
+    } else {
+        // A request over the input ceiling is not sent.
+        let fit = |batch: std::ops::Range<usize>| {
+            payload_bytes(&action_of(&batch, true)) <= calls.ceiling
+        };
+        match review_batches(claims.len(), &fit) {
+            Some(batches) => batches,
+            None => return Ok("review_too_large"),
+        }
+    };
+    let batched = batches.len() > 1;
+    let mut overreaching = Vec::with_capacity(claims.len());
+    for batch in &batches {
+        let action = action_of(batch, batched);
+        // One sample's verdicts vary between identical calls, so the review
+        // is asked several times and a claim left out on a majority (#2458).
+        let size = batch.len();
+        let samples: Vec<_> = calls
+            .samples(&action, claim_review::REVIEW_SAMPLES, |text| {
+                claim_review::decode(text, size)
+            })?
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect();
+        let Some(verdicts) = claim_review::overreaching(&samples, size) else {
+            return Ok("review_unavailable");
+        };
+        overreaching.extend(verdicts);
+    }
     let mut overreaching = overreaching.into_iter();
     let before = composed.finish.claims.len();
     composed
