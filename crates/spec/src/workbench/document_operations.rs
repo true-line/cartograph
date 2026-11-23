@@ -387,20 +387,20 @@ fn operations_and_limits(
             // state two rules, which the drafter's repeated-rule check keeps.
             // The refusal is the recorded status; a breach callback's
             // response replaces it, and its status is not recorded. A graph
-            // recovered before the status was recorded marks neither, and
-            // flask-limiter's own refusal is 429.
+            // recovered before either was recorded proves neither, so its
+            // row states the limit alone.
             let recorded = &endpoint.props["rate_limits"];
             let on_breach = recorded["entries"]
                 .as_array()
                 .is_some_and(|entries| entries.iter().any(|entry| entry["on_breach"] == true));
             let refusal = match recorded["exceeded_status"].as_u64() {
-                Some(status) => format!("requests past it are refused with {status}"),
+                Some(status) => format!("; requests past it are refused with {status}"),
                 None if on_breach => {
-                    "requests past it get the response of a breach callback".to_owned()
+                    "; requests past it get the response of a breach callback".to_owned()
                 }
-                None => "requests past it are refused with 429".to_owned(),
+                None => String::new(),
             };
-            let mut rule = format!("{} accepts {text}; {refusal}.", NodeName(endpoint));
+            let mut rule = format!("{} accepts {text}{refusal}.", NodeName(endpoint));
             if unresolved {
                 rule.push_str(" A declared limit's value is not resolved.");
             }
@@ -705,8 +705,9 @@ def ping():
                 .count(),
             1
         );
-        // A graph recovered before the status was recorded still reads
-        // flask-limiter's 429; a breach callback's response is named.
+        // A graph recovered before the status was recorded proves no
+        // refusal, so its row states the limit alone; a breach callback's
+        // response is named.
         let strip = |nodes: &mut Vec<Node>, on_breach: bool| {
             for node in nodes.iter_mut().filter(|node| node.label == "Endpoint") {
                 let limits = &mut node.props["rate_limits"];
@@ -720,7 +721,8 @@ def ping():
         };
         let (_, older) = render_with(FILES, ExportMode::BestEffort, |nodes| strip(nodes, false));
         assert!(
-            older.contains("requests past it are refused with 429."),
+            older.contains("replaces it). | rate limit declared on the handler")
+                && !older.contains("429"),
             "{older}"
         );
         let (_, breach) = render_with(FILES, ExportMode::BestEffort, |nodes| strip(nodes, true));
