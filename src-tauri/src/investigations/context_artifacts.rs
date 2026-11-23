@@ -27,22 +27,13 @@ pub(super) const ARTIFACT_COMPILE_LIMITS: spec::SelectedCompileLimits =
         },
     };
 
-/// Artifacts compiled from the graph alone. The MCP-readable catalogue minus
-/// those that need inputs an investigation does not freeze: the curated
-/// review, the knowledge overlay, coverage inventories or bundle metadata.
+/// Artifacts compiled from the graph alone: the agent core's closed list
+/// (AC-1815), each of which must be in the MCP-readable catalogue.
 pub(crate) fn investigation_readable(id: &str) -> bool {
-    !matches!(
-        id,
-        crate::mcp_reads::curated_read::ARTIFACT_ID
-            | crate::mcp_reads::curated_read::JSON_ARTIFACT_ID
-            | "d1-product-specification"
-            | "bundle-manifest"
-            | "coverage"
-            | "coverage-index"
-            | "user-stories"
-    ) && crate::mcp_reads::artifacts::readable_catalog()
-        .iter()
-        .any(|artifact| artifact.id == id)
+    agents::investigation::INVESTIGATION_ARTIFACT_IDS.contains(&id)
+        && crate::mcp_reads::artifacts::readable_catalog()
+            .iter()
+            .any(|artifact| artifact.id == id)
 }
 
 /// Compile one graph-only artifact from these facts.
@@ -126,7 +117,9 @@ pub(super) fn page(
 
 impl FrozenContext {
     /// Acquire one artifact page and publish it after the coverage bodies.
-    /// Its content is untrusted compiled text, never a citation.
+    /// Its content is untrusted compiled text, never a citation. The worker
+    /// publishes through metadata admission instead; tests drive this.
+    #[cfg(test)]
     pub(super) fn read_artifact(
         &mut self,
         state: &AppState,
@@ -141,7 +134,7 @@ impl FrozenContext {
 
     /// Prepare one artifact page against the frozen basis without publishing
     /// it or mutating the acquisition state.
-    pub(super) fn prepare_artifact_with_diagnostic(
+    pub(in crate::investigations) fn prepare_artifact_with_diagnostic(
         &self,
         state: &AppState,
         request: InvestigationArtifactRead,

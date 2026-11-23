@@ -22,7 +22,7 @@ export interface InvestigationFollowUpContext {
   saved_provider_id: string;
   saved_model: string;
 }
-export type InvestigationTool = 'query_context' | 'read_evidence' | 'read_coverage_inventory';
+export type InvestigationTool = 'query_context' | 'read_evidence' | 'read_coverage_inventory' | 'read_artifact';
 
 export interface InvestigationSpecialist {
   id: SpecialistId;

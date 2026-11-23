@@ -165,6 +165,7 @@ pub(super) fn derive(
             .ok_or(InvestigationStoreError::Invalid)?
         || !ledger.queries.starts_with(&prior.queries)
         || !ledger.coverage_reads.starts_with(&prior.coverage_reads)
+        || !ledger.artifact_reads.starts_with(&prior.artifact_reads)
     {
         return Err(InvestigationStoreError::Invalid);
     }
@@ -190,7 +191,8 @@ pub(super) fn derive(
                 ..
             }),
         ) if ledger.queries.len() == prior.queries.len() + 1
-            && ledger.coverage_reads == prior.coverage_reads =>
+            && ledger.coverage_reads == prior.coverage_reads
+            && ledger.artifact_reads == prior.artifact_reads =>
         {
             let last = ledger
                 .queries
@@ -213,7 +215,8 @@ pub(super) fn derive(
                 QualifiedInvestigationAction::ReadCoverageInventory(request),
             ),
         ) if ledger.coverage_reads.len() == prior.coverage_reads.len() + 1
-            && ledger.queries == prior.queries =>
+            && ledger.queries == prior.queries
+            && ledger.artifact_reads == prior.artifact_reads =>
         {
             let last = ledger
                 .coverage_reads
@@ -234,6 +237,32 @@ pub(super) fn derive(
                 &last.response_hash,
                 last.response_bytes,
                 maximum,
+            )
+        }
+        // ADR-0089: a page is context, never an attempt toward an obligation.
+        (
+            ContextPreviewKind::Artifact,
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::ReadArtifact(
+                request,
+            )),
+        ) if task.detail.summary.specialist_id.uses_artifact_reads()
+            && ledger.artifact_reads.len() == prior.artifact_reads.len() + 1
+            && ledger.queries == prior.queries
+            && ledger.coverage_reads == prior.coverage_reads =>
+        {
+            let last = ledger
+                .artifact_reads
+                .last()
+                .ok_or(InvestigationStoreError::Invalid)?;
+            if last.request != request {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            (
+                InvestigationTool::ReadArtifact,
+                None,
+                &last.response_hash,
+                last.response_bytes,
+                request.max_bytes,
             )
         }
         _ => return Err(InvestigationStoreError::Invalid),

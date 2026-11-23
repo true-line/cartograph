@@ -625,9 +625,22 @@ fn validate_publication_response(
                 max_bytes: read.max_bytes,
             })?
         }
-        // No host executes artifact reads yet (ADR-0089 step 2), so no
-        // stored publication can carry one.
-        InvestigationTool::ReadArtifact => return Err(InvestigationStoreError::Invalid),
+        InvestigationTool::ReadArtifact => {
+            if !task.detail.summary.specialist_id.uses_artifact_reads() {
+                return Err(InvestigationStoreError::Invalid);
+            }
+            let read = &after
+                .artifact_reads
+                .get(before.artifact_reads.len())
+                .ok_or(InvestigationStoreError::Invalid)?
+                .request;
+            core_prov::content_hash(&encode(
+                &serde_json::json!({"type":"read_artifact","context_id":read.context_id,
+                    "artifact_id":read.artifact_id,"expected_content_id":read.expected_content_id,
+                    "offset":read.offset,"max_bytes":read.max_bytes}),
+                MAX_ACTION_BYTES,
+            )?)
+        }
         InvestigationTool::QueryContext => {
             let query = &after
                 .queries
@@ -968,7 +981,13 @@ fn validate_proposal(
     if proposal.get("schema_version").is_some()
         || !matches!(
             proposal.get("type").and_then(Value::as_str),
-            Some("query_context" | "replay_query" | "read_evidence" | "read_coverage_inventory")
+            Some(
+                "query_context"
+                    | "replay_query"
+                    | "read_evidence"
+                    | "read_coverage_inventory"
+                    | "read_artifact"
+            )
         )
     {
         return Err(InvestigationStoreError::Invalid);

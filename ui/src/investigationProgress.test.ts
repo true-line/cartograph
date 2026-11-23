@@ -34,6 +34,11 @@ describe('investigationProgress (#1631)', () => {
     expect(at('action_refused')).toBe('The model’s proposal was refused (not executed) — continuing');
     expect(eventStage('created')).toBeNull();
   });
+  it('names an artifact read in the current step (AC-1815)', () => {
+    const started = { ...events[4], sequence: 99, kind: 'tool_started' as const, tool: 'read_artifact' as const };
+    expect(investigationProgress('running', false, [...events.slice(0, 5), started], now)?.headline)
+      .toBe('Running: reading a compiled document');
+  });
   it('formats durations', () => {
     expect(formatDuration(14_900)).toBe('14 s');
     expect(formatDuration(125_000)).toBe('2 min 5 s');

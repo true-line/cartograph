@@ -534,6 +534,7 @@ mod tests {
             SpecialistId::DomainAnalystV27,
             SpecialistId::DomainAnalystV28,
             SpecialistId::DomainAnalystV29,
+            SpecialistId::DomainAnalystV30,
         ] {
             task.detail.summary.specialist_id = role;
             for phase in [

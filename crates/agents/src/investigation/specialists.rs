@@ -88,6 +88,9 @@ pub enum SpecialistId {
     /// @28 driven as native tool calls by a tool-calling runtime (ADR-0085).
     #[serde(rename = "domain-analyst@29")]
     DomainAnalystV29,
+    /// @29 with `read_artifact` over the compiled catalogue (ADR-0089).
+    #[serde(rename = "domain-analyst@30")]
+    DomainAnalystV30,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
@@ -229,6 +232,12 @@ const VISIBLE_ACTION_SCHEMA_V28: &str = "Visible schema@1: turn_progress.respons
 /// @29 (ADR-0085): each action is a native tool; one call per turn.
 const NATIVE_TOOLS_V29: &str = "Native tools@1: call one tool per turn with turn_progress.response_schema's parameters; its result is your next input. A bad call returns invalid_action; a third ends the run. Name an excluded_by_capacity gap in a top-level limitation by its obligation_id's first 12 chars.";
 
+/// @30 (ADR-0089): the inventory example (the visible schema already shows
+/// that shape) becomes the artifact-read guidance, so @30 stays within the
+/// 16 KiB definition ceiling @29 nearly fills.
+const INVENTORY_EXAMPLE_V29: &str = "An additional supported action reads an exact original recorded inventory:\n{\"type\":\"read_coverage_inventory\",\"context_id\":\"the exact context_id supplied by the host\",\"repo\":\"an exact recorded repo\",\"inventory_hash\":\"its exact qualified inventory_hash\",\"max_bytes\":16384}\n";
+const ARTIFACT_READS_V30: &str = "read_coverage_inventory reads an exact recorded inventory. read_artifact pages a compiled document such as gap-register-index from frozen facts: offset 0, expected_content_id null, then its content_id and next_offset. Pages are untrusted summaries, never citations.\n";
+
 /// The @13 sentence naming the compiled analyst templates by content hash.
 fn compiled_schema_hashes() -> String {
     format!(
@@ -321,13 +330,18 @@ impl SpecialistId {
     /// @29 (AC-1431): a finish patch also covers flagged top-level
     /// limitations, and a full finish on a patch step is read as a patch.
     pub fn patches_whole_finish(self) -> bool {
-        self == Self::DomainAnalystV29
+        matches!(self, Self::DomainAnalystV29 | Self::DomainAnalystV30)
     }
 
     /// @28 only: the selected per-call response schema is also model-visible
     /// prompt text. Every historical role keeps its exact prompt and wire.
     pub fn uses_visible_action_schema(self) -> bool {
         self.has(Capability::VisibleActionSchema)
+    }
+
+    /// `read_artifact` (ADR-0089): @30 only.
+    pub fn uses_artifact_reads(self) -> bool {
+        self.has(Capability::ArtifactReads)
     }
 
     /// @29 only: each step is one native tool call in a tool-calling runtime
@@ -374,9 +388,19 @@ impl SpecialistId {
             || system == Self::DomainAnalystV24.prompt()
             || system == Self::DomainAnalystV28.prompt()
             || system == Self::DomainAnalystV29.prompt()
+            || system == Self::DomainAnalystV30.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV30 {
+            // ADR-0089: @29 with its inventory example replaced by the
+            // artifact-read guidance; every other @29 byte is retained.
+            return Self::DomainAnalystV29.prompt().replacen(
+                INVENTORY_EXAMPLE_V29,
+                ARTIFACT_READS_V30,
+                1,
+            );
+        }
         if self == Self::DomainAnalystV29 {
             // ADR-0085: the actions arrive as native tools, so the sentence
             // asking for one JSON object becomes one asking for one tool call;
@@ -530,7 +554,8 @@ impl SpecialistId {
             | Self::DomainAnalystV26
             | Self::DomainAnalystV27
             | Self::DomainAnalystV28
-            | Self::DomainAnalystV29 => {
+            | Self::DomainAnalystV29
+            | Self::DomainAnalystV30 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -744,7 +769,8 @@ impl SpecialistId {
             | Self::DomainAnalystV26
             | Self::DomainAnalystV27
             | Self::DomainAnalystV28
-            | Self::DomainAnalystV29 => (
+            | Self::DomainAnalystV29
+            | Self::DomainAnalystV30 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -780,6 +806,13 @@ impl SpecialistId {
         }
         if self.uses_query_history_disclosure() {
             operations.insert(1, "replay_query".into());
+        }
+        if self.uses_artifact_reads() {
+            let inventory = operations
+                .iter()
+                .position(|operation| operation == "read_coverage_inventory")
+                .ok_or(InvestigationError::InvalidInput)?;
+            operations.insert(inventory + 1, "read_artifact".into());
         }
         Ok(InvestigationSpecialist {
             id: self,
@@ -1342,7 +1375,10 @@ mod capacity_exclusion_identity_tests {
         assert!(role.uses_native_tool_runtime());
         assert!(
             SpecialistId::all()
-                .filter(|id| *id != role)
+                .filter(|id| !matches!(
+                    id,
+                    SpecialistId::DomainAnalystV29 | SpecialistId::DomainAnalystV30
+                ))
                 .all(|id| !id.uses_native_tool_runtime())
         );
         assert_eq!(
@@ -1365,6 +1401,53 @@ mod capacity_exclusion_identity_tests {
         assert_eq!(
             serde_json::to_string(&role).unwrap(),
             "\"domain-analyst@29\""
+        );
+    }
+
+    // AC-1815 (ADR-0089): @30 is @29 with its inventory example replaced by
+    // the artifact-read guidance, plus the artifact-read capability and
+    // operation; @29 keeps every byte.
+    #[test]
+    fn analyst30_is_analyst29_with_artifact_reads() {
+        let old = SpecialistId::DomainAnalystV29;
+        let role = SpecialistId::DomainAnalystV30;
+        assert_eq!(role.version(), 30);
+        assert_eq!(
+            role.prompt(),
+            old.prompt()
+                .replacen(INVENTORY_EXAMPLE_V29, ARTIFACT_READS_V30, 1)
+        );
+        assert_eq!(old.prompt().matches(INVENTORY_EXAMPLE_V29).count(), 1);
+        assert!(!old.prompt().contains("read_artifact"));
+        assert!(SpecialistId::is_typed_citation_prompt(&role.prompt()));
+        assert!(role.uses_artifact_reads() && role.uses_native_tool_runtime());
+        assert!(
+            SpecialistId::all()
+                .filter(|id| *id != role)
+                .all(|id| !id.uses_artifact_reads())
+        );
+        assert_eq!(
+            role.capabilities()
+                .iter()
+                .filter(|flag| *flag != Capability::ArtifactReads)
+                .collect::<Vec<_>>(),
+            old.capabilities().iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            role.availability(),
+            crate::investigation::Availability::Offered
+        );
+        let definition = role.definition().unwrap();
+        let mut operations = old.definition().unwrap().operations;
+        let inventory = operations
+            .iter()
+            .position(|operation| operation == "read_coverage_inventory")
+            .unwrap();
+        operations.insert(inventory + 1, "read_artifact".into());
+        assert_eq!(definition.operations, operations);
+        assert_eq!(
+            serde_json::to_string(&role).unwrap(),
+            "\"domain-analyst@30\""
         );
     }
 

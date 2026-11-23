@@ -784,6 +784,7 @@ impl InvestigationResult {
                     | SpecialistId::DomainAnalystV27
                     | SpecialistId::DomainAnalystV28
                     | SpecialistId::DomainAnalystV29
+                    | SpecialistId::DomainAnalystV30
             )
         {
             return Err(InvestigationError::InvalidInput);

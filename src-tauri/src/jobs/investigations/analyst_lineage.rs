@@ -43,6 +43,12 @@ mod tests {
                 rule(SpecialistId::DomainAnalystV28),
                 "{name}"
             );
+            // AC-1815: @30 takes every @29 host lifecycle rule.
+            assert_eq!(
+                rule(SpecialistId::DomainAnalystV30),
+                rule(SpecialistId::DomainAnalystV29),
+                "{name}"
+            );
         }
         assert!(uses_local_finish_generation(SpecialistId::DomainAnalystV26));
         assert!(!uses_local_finish_generation(

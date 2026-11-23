@@ -17,12 +17,15 @@ use staged_refusal::{CompletionCallMode, ProtectedCompletionMetadata};
 pub enum ContextPreviewKind {
     Query,
     Inventory,
+    /// A compiled-artifact page (ADR-0089).
+    Artifact,
 }
 impl ContextPreviewKind {
     fn tool(self) -> InvestigationTool {
         match self {
             Self::Query => InvestigationTool::QueryContext,
             Self::Inventory => InvestigationTool::ReadCoverageInventory,
+            Self::Artifact => InvestigationTool::ReadArtifact,
         }
     }
 }
@@ -266,6 +269,26 @@ fn validate_response(
                 manifest.request.max_bytes,
             )
         }
+        ContextPreviewKind::Artifact => {
+            let manifest = candidate
+                .ledger
+                .artifact_reads
+                .last()
+                .ok_or(InvestigationError::InvalidInput)?;
+            manifest.admit_response(
+                candidate
+                    .ledger
+                    .coverage
+                    .as_ref()
+                    .ok_or(InvestigationError::InvalidInput)?,
+                raw,
+            )?;
+            (
+                &manifest.response_hash,
+                manifest.response_bytes,
+                manifest.request.max_bytes,
+            )
+        }
     };
     if raw.len() != bytes || raw.len() > cap || content_hash(raw.as_bytes()) != *hash {
         return Err(InvestigationError::InvalidInput);
@@ -345,7 +368,8 @@ fn validate_metadata_delta(
     let mut expected = before.clone();
     expected.completed_attempt_ids = after.completed_attempt_ids.clone();
     let additional = match kind {
-        ContextPreviewKind::Query => 0,
+        // Neither a query nor an artifact page discharges an obligation.
+        ContextPreviewKind::Query | ContextPreviewKind::Artifact => 0,
         ContextPreviewKind::Inventory => {
             let read = &ledger
                 .coverage_reads
@@ -392,8 +416,12 @@ fn validate_prompt_delta(
                 | "turn_progress"
                 | "completion_metadata"
                 | "coverage_details"
+                | "artifact_pages"
         )
     };
+    // Supplied artifact-page text follows every other supplied string.
+    let pages = |prompt: &Value| prompt["artifact_pages"].as_array().map_or(0, Vec::len);
+    let old_pages = pages(current);
     let current_fields = current
         .as_object()
         .ok_or(InvestigationError::InvalidInput)?;
@@ -411,6 +439,7 @@ fn validate_prompt_delta(
     match kind {
         ContextPreviewKind::Query => {
             if current["coverage_details"] != next["coverage_details"]
+                || current.get("artifact_pages") != next.get("artifact_pages")
                 || base.supplied_strings != candidate.supplied_strings
             {
                 return Err(InvestigationError::InvalidInput);
@@ -427,15 +456,50 @@ fn validate_prompt_delta(
                 .as_array()
                 .ok_or(InvestigationError::InvalidInput)?;
             let added = new_details.last().ok_or(InvestigationError::InvalidInput)?;
+            // The inventory text is supplied before any artifact page.
+            let split = base
+                .supplied_strings
+                .len()
+                .checked_sub(old_pages)
+                .ok_or(InvestigationError::InvalidInput)?;
+            let mut expected = base.supplied_strings.clone();
+            expected.insert(
+                split,
+                added["inventory_json"]
+                    .as_str()
+                    .ok_or(InvestigationError::InvalidInput)?
+                    .to_owned(),
+            );
             if old_context != next["compact_context"]
                 || current["citations"] != next["citations"]
+                || current.get("artifact_pages") != next.get("artifact_pages")
                 || new_details.len() != old_details.len() + 1
                 || !new_details.starts_with(old_details)
+                || candidate.supplied_strings != expected
+            {
+                return Err(InvestigationError::InvalidInput);
+            }
+        }
+        ContextPreviewKind::Artifact => {
+            let mut old_context = current["compact_context"].clone();
+            old_context["query_history"]["registry_hash"] =
+                next["compact_context"]["query_history"]["registry_hash"].clone();
+            let empty = Vec::new();
+            let old_pages = current["artifact_pages"].as_array().unwrap_or(&empty);
+            let new_pages = next["artifact_pages"]
+                .as_array()
+                .ok_or(InvestigationError::InvalidInput)?;
+            let added = new_pages.last().ok_or(InvestigationError::InvalidInput)?;
+            if old_context != next["compact_context"]
+                || current["citations"] != next["citations"]
+                || current["coverage_details"] != next["coverage_details"]
+                || new_pages.len() != old_pages.len() + 1
+                || !new_pages.starts_with(old_pages)
                 || !candidate
                     .supplied_strings
                     .starts_with(&base.supplied_strings)
                 || candidate.supplied_strings.len() != base.supplied_strings.len() + 1
-                || added["inventory_json"].as_str()
+                || added["content"].as_str()
                     != candidate.supplied_strings.last().map(String::as_str)
             {
                 return Err(InvestigationError::InvalidInput);

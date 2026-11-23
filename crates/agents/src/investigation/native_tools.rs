@@ -19,6 +19,8 @@ pub enum AgentTool {
     QueryContext,
     /// Bounded page of one repository's coverage inventory.
     ReadCoverageInventory,
+    /// Bounded page of one compiled artifact (ADR-0089), @30 only.
+    ReadArtifact,
     /// Exact source bytes of one admitted fact's evidence option.
     ReadEvidence,
     /// Re-run a saved query by reference.
@@ -32,9 +34,10 @@ pub enum AgentTool {
 
 impl AgentTool {
     /// Every tool, in vocabulary order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::QueryContext,
         Self::ReadCoverageInventory,
+        Self::ReadArtifact,
         Self::ReadEvidence,
         Self::ReplayQuery,
         Self::Finish,
@@ -46,6 +49,7 @@ impl AgentTool {
         match self {
             Self::QueryContext => "query_context",
             Self::ReadCoverageInventory => "read_coverage_inventory",
+            Self::ReadArtifact => "read_artifact",
             Self::ReadEvidence => "read_evidence",
             Self::ReplayQuery => "replay_query",
             Self::Finish => "finish",
@@ -65,6 +69,9 @@ impl AgentTool {
             }
             Self::ReadCoverageInventory => {
                 "Read a bounded page of one repository's coverage inventory named by the coverage qualification."
+            }
+            Self::ReadArtifact => {
+                "Read a bounded page of one compiled Cartograph document (for example gap-register-index or topology) built from this run's frozen facts. Start at offset 0 with expected_content_id null; continue with the returned content_id and next_offset. The page is context, not a citation; complete_system false means it covers only this scope."
             }
             Self::ReadEvidence => {
                 "Acquire the exact source bytes of one evidence option of an already admitted fact, by its original role and index. Its citation names bytes actually supplied."
@@ -514,6 +521,11 @@ pub fn action_from_tool_call(
         action.insert("context_id".into(), Value::String(context_id.into()));
     }
     action.extend(arguments);
+    // A first artifact read may leave out the null continuation; the bounded
+    // decoder still requires the canonical field.
+    if name == AgentTool::ReadArtifact.name() {
+        action.entry("expected_content_id").or_insert(Value::Null);
+    }
     let action = Value::Object(action);
     let value = if name == AgentTool::Finish.name() {
         let outcome = match action["knowledge_completeness"].as_str() {

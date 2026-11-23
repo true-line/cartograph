@@ -218,6 +218,15 @@ impl CompletionInvestigationAction {
         raw: &str,
         context_id: &str,
     ) -> Result<Self, ActionDecodeFailure> {
+        Self::decode_detailed_surface(raw, context_id, QualifiedReadSurface::default())
+    }
+    /// [`Self::decode_detailed`] with the reads `surface` offers beyond the
+    /// closed legacy protocol (ADR-0089).
+    pub(super) fn decode_detailed_surface(
+        raw: &str,
+        context_id: &str,
+        surface: QualifiedReadSurface,
+    ) -> Result<Self, ActionDecodeFailure> {
         use ActionDecodeStage as Stage;
         strict::preflight(raw, MAX_ACTION_BYTES, 32, 4096, 32)
             .map_err(|error| Stage::Preflight.failure(error))?;
@@ -226,7 +235,7 @@ impl CompletionInvestigationAction {
         if value.get("schema_version").is_some() {
             return super::staged_finish::StagedFinish::decode_detailed(raw).map(Self::Finish);
         }
-        match QualifiedInvestigationAction::decode_detailed(raw, context_id)? {
+        match QualifiedInvestigationAction::decode_surface(raw, context_id, surface)? {
             QualifiedInvestigationAction::SourceOrFinish(InvestigationAction::Finish {
                 ..
             }) => Err(Stage::BareFinish.invalid()),

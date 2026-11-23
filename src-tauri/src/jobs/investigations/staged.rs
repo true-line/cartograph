@@ -1046,6 +1046,7 @@ pub(super) fn append_for_task_with_merge(
                 | "domain-analyst@27"
                 | "domain-analyst@28"
                 | "domain-analyst@29"
+                | "domain-analyst@30"
         )
     {
         return Err(InvestigationStoreError::Invalid);

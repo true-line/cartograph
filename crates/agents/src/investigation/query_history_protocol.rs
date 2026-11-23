@@ -179,7 +179,13 @@ impl ProgressiveInvestigationAction {
             ));
         }
         if value["type"] != "replay_query" {
-            return CompletionInvestigationAction::decode_detailed(raw, context_id);
+            return CompletionInvestigationAction::decode_detailed_surface(
+                raw,
+                context_id,
+                QualifiedReadSurface {
+                    artifact_reads: role.uses_artifact_reads(),
+                },
+            );
         }
         let action: ReplayAction =
             serde_json::from_str(raw).map_err(|_| Stage::TypedReplay.invalid())?;

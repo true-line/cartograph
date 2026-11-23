@@ -23,7 +23,7 @@ export function eventStage(kind: InvestigationEvent['kind']): InvestigationEvent
 
 const TOOL_LABELS: Record<InvestigationTool, string> = {
   query_context: 'searching the code graph', read_evidence: 'reading source evidence',
-  read_coverage_inventory: 'reading the coverage list',
+  read_coverage_inventory: 'reading the coverage list', read_artifact: 'reading a compiled document',
 };
 
 const ACTIVE: readonly InvestigationStatus[] = ['queued', 'preparing', 'running', 'awaiting_consent'];
