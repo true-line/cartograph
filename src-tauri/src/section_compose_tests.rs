@@ -1399,3 +1399,76 @@ fn a_withdrawn_attested_record_is_not_offered_to_a_composition() {
     assert!(!prepared.citable.contains(&attested));
     assert!(!prepared.action.payload.prompt.contains("attested_records"));
 }
+
+/// AC-1610 (#1748): parts of a gated run by area are drafted up to the
+/// configured number at once and reported in part order; one worker drafts
+/// them in order.
+#[test]
+fn gated_parts_are_drafted_in_parallel_and_reported_in_order() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let running = AtomicUsize::new(0);
+    let most = AtomicUsize::new(0);
+    let continue_ = || CallDirective::Continue;
+    for workers in [1, 3] {
+        running.store(0, Ordering::SeqCst);
+        most.store(0, Ordering::SeqCst);
+        let draft = |index: usize| {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            running.fetch_sub(1, Ordering::SeqCst);
+            // A failed model call is the part's own: drafting goes on.
+            PartResult::Failed {
+                error: index.to_string(),
+                failed_class: Some("deadline_exceeded".into()),
+            }
+        };
+        let results = draft_parts(6, workers, &draft, &continue_);
+        let errors: Vec<String> = results
+            .iter()
+            .map(|result| match result {
+                PartResult::Failed { error, .. } => error.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(errors, ["0", "1", "2", "3", "4", "5"]);
+        assert_eq!(most.load(Ordering::SeqCst), workers);
+    }
+    assert_eq!(parts_parallel_from(None), 1);
+    assert_eq!(parts_parallel_from(Some(" 4 ")), 4);
+    assert_eq!(parts_parallel_from(Some("0")), 1);
+    assert_eq!(parts_parallel_from(Some("64")), MAX_PARTS_PARALLEL);
+    assert_eq!(parts_parallel_from(Some("many")), 1);
+}
+
+/// AC-1610 (#1748): a host failure, or any failure once the job is
+/// cancelled, stops new parts from starting.
+#[test]
+fn a_run_ending_failure_starts_no_further_part() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let continue_ = || CallDirective::Continue;
+    let cancelled = || CallDirective::Cancelled;
+    for (failed_class, check) in [
+        (None, &continue_ as &(dyn Fn() -> CallDirective + Sync)),
+        (Some("deadline_exceeded".to_owned()), &cancelled),
+    ] {
+        let calls = AtomicUsize::new(0);
+        let draft = |index: usize| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if index == 1 {
+                PartResult::Failed {
+                    error: "stopped".into(),
+                    failed_class: failed_class.clone(),
+                }
+            } else {
+                PartResult::Skipped
+            }
+        };
+        let results = draft_parts(4, 1, &draft, check);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(results[0], PartResult::Skipped);
+        assert!(matches!(results[1], PartResult::Failed { .. }));
+        assert_eq!(results[2], PartResult::NotStarted);
+        assert_eq!(results[3], PartResult::NotStarted);
+    }
+}

@@ -1657,7 +1657,7 @@ pub(crate) fn compose_gated_by_area(
     state: &AppState,
     provider: &dyn LlmProvider,
     address: (&str, &str, &str),
-    check: &dyn Fn() -> CallDirective,
+    check: &(dyn Fn() -> CallDirective + Sync),
     job_id: i64,
 ) -> Result<Vec<GatedDraft>, String> {
     let (catalogue_version, document, section) = address;
@@ -1693,22 +1693,42 @@ pub(crate) fn compose_gated_by_area(
         None,
         if whole { compiled.text.clone() } else { rest },
     ));
-    let mut drafts = Vec::new();
-    let mut first_failure = None;
-    for (scope, area, text) in parts {
+    // Parts are drafted up to `CARTOGRAPH_COMPOSE_PARTS_PARALLEL` at once
+    // and reported in part order (#1748, [`draft_parts`]).
+    let draft_part = |index: usize| {
+        let (scope, area, text) = &parts[index];
         let address = SectionAddress {
             scope: scope.clone(),
             ..compiled.address.clone()
         };
         let watched = Watched::new(provider);
-        let outcome = match prepared(&compiled, address, area.clone(), &text, true) {
+        let outcome = match prepared(&compiled, address, area.clone(), text, true) {
             Ok(prepared) => compose_gated(state, &watched, &prepared, check, job_id),
             // The rest of an arranged section may print no fact at all.
-            Err(reason) if reason == "no_citable_fact" && !whole => continue,
+            Err(reason) if reason == "no_citable_fact" && !whole => return PartResult::Skipped,
             Err(reason) => Err(reason),
         };
-        let error = match outcome {
-            Ok(outcome) => {
+        match outcome {
+            Ok(outcome) => PartResult::Composed(outcome),
+            Err(error) => PartResult::Failed {
+                error,
+                failed_class: watched.last_failure_class(),
+            },
+        }
+    };
+    let results = draft_parts(parts.len(), parts_parallel(), &draft_part, check);
+    // Parts staged by any worker are durable under this job, so the run
+    // reports them whatever stopped it.
+    let staged_any = results
+        .iter()
+        .any(|result| matches!(result, PartResult::Composed(outcome) if matches!(outcome.outcome, DraftingOutcome::Staged { .. })));
+    let mut drafts = Vec::new();
+    let mut first_failure = None;
+    let mut ended = false;
+    for ((scope, area, _), result) in parts.into_iter().zip(results) {
+        let (error, failed_class) = match result {
+            PartResult::NotStarted | PartResult::Skipped => continue,
+            PartResult::Composed(outcome) => {
                 drafts.push(GatedDraft {
                     scope,
                     area,
@@ -1717,14 +1737,17 @@ pub(crate) fn compose_gated_by_area(
                 });
                 continue;
             }
-            Err(error) => error,
+            PartResult::Failed { .. } if ended => continue,
+            PartResult::Failed {
+                error,
+                failed_class,
+            } => (error, failed_class),
         };
-        let failed_class = watched.last_failure_class();
         let provider_failed = failed_class.is_some();
-        match after_failure(drafts.iter().any(staged), provider_failed, check()) {
-            // Nothing was staged yet: the run failed as a whole.
+        match after_failure(staged_any, provider_failed, check()) {
+            // Nothing was staged: the run failed as a whole.
             AfterFailure::Fail => return Err(error),
-            // Drafts of earlier areas are already staged under this job, so
+            // Drafts of other parts are already staged under this job, so
             // the run ends here and reports them, with this part named as
             // where it stopped.
             AfterFailure::Stop => {
@@ -1734,7 +1757,7 @@ pub(crate) fn compose_gated_by_area(
                     outcome: ComposeOutcome::none("run_stopped"),
                     failure: None,
                 });
-                break;
+                ended = true;
             }
             // One area's failure is that area's: the next is drafted (#1748).
             // Its cause stays on its row, whatever the other parts did.
@@ -1756,6 +1779,90 @@ pub(crate) fn compose_gated_by_area(
         _ => Ok(drafts),
     }
 }
+
+/// Draft `count` parts with up to `workers` at once, each part whole on one
+/// worker, and return their results in part order (#1748). One worker
+/// drafts them in order. A failure that ends the run (a host failure, or
+/// any failure once the job is cancelled or its ownership lost) stops new
+/// parts from starting; parts already started finish.
+fn draft_parts(
+    count: usize,
+    workers: usize,
+    draft: &(dyn Fn(usize) -> PartResult + Sync),
+    check: &(dyn Fn() -> CallDirective + Sync),
+) -> Vec<PartResult> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let stopped = AtomicBool::new(false);
+    let results: Vec<std::sync::Mutex<PartResult>> = (0..count)
+        .map(|_| std::sync::Mutex::new(PartResult::NotStarted))
+        .collect();
+    let work = || {
+        while !stopped.load(Ordering::SeqCst) {
+            let index = next.fetch_add(1, Ordering::SeqCst);
+            if index >= count {
+                break;
+            }
+            let result = draft(index);
+            if let PartResult::Failed { failed_class, .. } = &result
+                && (failed_class.is_none() || check() != CallDirective::Continue)
+            {
+                stopped.store(true, Ordering::SeqCst);
+            }
+            *results[index].lock().unwrap_or_else(|e| e.into_inner()) = result;
+        }
+    };
+    let workers = workers.clamp(1, count.max(1));
+    if workers == 1 {
+        work();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(work);
+            }
+        });
+    }
+    results
+        .into_iter()
+        .map(|result| result.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect()
+}
+
+/// One part's result in a gated run by area.
+#[derive(Debug, PartialEq)]
+enum PartResult {
+    /// No worker started it: the run ended first.
+    NotStarted,
+    /// The rest of an arranged section prints no fact.
+    Skipped,
+    Composed(ComposeOutcome),
+    Failed {
+        error: String,
+        /// The failed model call's class; none for a host failure.
+        failed_class: Option<String>,
+    },
+}
+
+/// The most parts of a gated run by area drafted at once (#1748):
+/// `CARTOGRAPH_COMPOSE_PARTS_PARALLEL`, from 1 (the default) to
+/// [`MAX_PARTS_PARALLEL`]. A server that batches requests (vLLM) drafts that
+/// many areas in the time of one; a single-slot local server would only
+/// queue them.
+fn parts_parallel() -> usize {
+    parts_parallel_from(
+        std::env::var("CARTOGRAPH_COMPOSE_PARTS_PARALLEL")
+            .ok()
+            .as_deref(),
+    )
+}
+fn parts_parallel_from(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map_or(1, |n| n.clamp(1, MAX_PARTS_PARALLEL))
+}
+
+/// The ceiling on [`parts_parallel`].
+pub(crate) const MAX_PARTS_PARALLEL: usize = 8;
 
 /// What a gated run by area does when one part's composition fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
