@@ -451,7 +451,8 @@ fn analyst20_worker_eight_obligations_offer_acquisition_then_finish() {
 }
 
 // AC-1433: rule-bearing suggestions name captured callables that own recovered
-// guarded exits, at most two per file, and each resolves as a source obligation.
+// guarded exits, spread at most two per file while other files have owners,
+// and each resolves as a source obligation.
 #[test]
 fn rule_bearing_sources_name_resolvable_rule_owners_capped_per_file() {
     let provider = NextProvider::new(false);
@@ -459,7 +460,19 @@ fn rule_bearing_sources_name_resolvable_rule_owners_capped_per_file() {
     let state = base.base.app.state::<AppState>();
     let sources =
         crate::investigations::rule_sources::rule_bearing_sources(&state, None, None, 7).unwrap();
-    assert_eq!(sources.len(), 2, "one file contributes at most two owners");
+    // AC-1442: the cap spreads suggestions across files, and this fixture has
+    // one file, so its further owners fill the slots the cap left empty,
+    // after the two the cap admitted.
+    let capped =
+        crate::investigations::rule_sources::rule_bearing_sources(&state, None, None, 2).unwrap();
+    assert_eq!(capped.len(), 2);
+    assert!(sources.len() > capped.len(), "{sources:?}");
+    for (first, same) in capped.iter().zip(&sources) {
+        assert_eq!(first.fact, same.fact);
+    }
+    let distinct: std::collections::BTreeSet<_> =
+        sources.iter().map(|source| &source.fact).collect();
+    assert_eq!(distinct.len(), sources.len(), "no owner is offered twice");
     for source in &sources {
         assert!(source.owner.guarded_exits >= 1);
         let agents::TaskFactKey::Node { id } = &source.fact else {
