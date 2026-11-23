@@ -41,6 +41,7 @@ export type SpecialistId =
   | 'domain-analyst@28'
   | 'domain-analyst@29'
   | 'domain-analyst@30'
+  | 'domain-analyst@31'
   | 'evidence-auditor@11'
   | 'evidence-auditor@12'
   | 'evidence-auditor@13'
@@ -83,7 +84,8 @@ export type SpecialistCapability =
   | 'finding_withholding'
   | 'local_finish_generation'
   | 'native_tool_runtime'
-  | 'artifact_reads';
+  | 'artifact_reads'
+  | 'unacquired_citation_drop';
 
 export interface SpecialistTableRow {
   readonly role: SpecialistRole;
@@ -133,6 +135,7 @@ export const SPECIALIST_TABLE: Readonly<Record<SpecialistId, SpecialistTableRow>
   'domain-analyst@28': { role: 'domain-analyst', version: 28, availability: 'current', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission', 'combined_finish_feedback', 'finish_patch', 'visible_action_schema', 'exact_source_reservation', 'acquisition_choices', 'exact_node_queries', 'capacity_exclusions', 'finish_feedback_witness', 'typed_citation_correction', 'finding_withholding', 'local_finish_generation'] },
   'domain-analyst@29': { role: 'domain-analyst', version: 29, availability: 'offered', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission', 'combined_finish_feedback', 'finish_patch', 'visible_action_schema', 'exact_source_reservation', 'acquisition_choices', 'exact_node_queries', 'capacity_exclusions', 'finish_feedback_witness', 'typed_citation_correction', 'finding_withholding', 'local_finish_generation', 'native_tool_runtime'] },
   'domain-analyst@30': { role: 'domain-analyst', version: 30, availability: 'offered', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission', 'combined_finish_feedback', 'finish_patch', 'visible_action_schema', 'exact_source_reservation', 'acquisition_choices', 'exact_node_queries', 'capacity_exclusions', 'finish_feedback_witness', 'typed_citation_correction', 'finding_withholding', 'local_finish_generation', 'native_tool_runtime', 'artifact_reads'] },
+  'domain-analyst@31': { role: 'domain-analyst', version: 31, availability: 'offered', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission', 'combined_finish_feedback', 'finish_patch', 'visible_action_schema', 'exact_source_reservation', 'acquisition_choices', 'exact_node_queries', 'capacity_exclusions', 'finish_feedback_witness', 'typed_citation_correction', 'finding_withholding', 'local_finish_generation', 'native_tool_runtime', 'artifact_reads', 'unacquired_citation_drop'] },
   'evidence-auditor@11': { role: 'evidence-auditor', version: 11, availability: 'retired', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission'] },
   'evidence-auditor@12': { role: 'evidence-auditor', version: 12, availability: 'retired', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission', 'query_budget_refusals', 'acquisition_choices', 'exact_node_queries'] },
   'evidence-auditor@13': { role: 'evidence-auditor', version: 13, availability: 'retired', capabilities: ['compact_disclosure', 'turn_progress', 'coverage_qualification', 'completion_obligations', 'policy_selection', 'query_history_disclosure', 'next_prompt_admission', 'query_budget_refusals', 'acquisition_choices', 'exact_node_queries', 'finish_feedback_witness', 'typed_citation_correction'] },
