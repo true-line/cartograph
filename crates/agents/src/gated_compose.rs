@@ -1184,6 +1184,7 @@ pub fn run(
             section: &chunk.text,
             facts: &facts,
             groups: &[],
+            attested: &[],
         };
         let base = section_compose::action(&compose, String::new());
         let base_prompt = section_compose::prompt_with(&compose, workflow.max_claims);

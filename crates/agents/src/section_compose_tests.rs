@@ -41,6 +41,7 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
             section: "## 1.5 Business rules (P+A)\n\nrows\n",
             facts: &facts,
             groups: &groups,
+            attested: &[],
         },
         "compose:1".into(),
     );
@@ -203,6 +204,7 @@ fn an_unlisted_schema_drops_the_id_list_and_decode_still_checks_ids() {
         section: "## 1.5 Business rules (P+A)\n\nrows\n",
         facts: &facts,
         groups: &[],
+        attested: &[],
     };
     let listed = action(&input, "compose:1".into());
     let unlisted = action_unlisted(&input, "compose:1".into());
@@ -296,6 +298,7 @@ fn a_corrected_request_is_the_same_request_and_the_correction() {
             section: "## 1.5 Business rules (P+A)\n\nrows\n",
             facts: &facts,
             groups: &[],
+            attested: &[],
         },
         "compose:D1:1.3".into(),
     );
@@ -314,4 +317,52 @@ fn a_corrected_request_is_the_same_request_and_the_correction() {
         CORRECTION.contains("domain terms")
             && CORRECTION.contains("only when a fact you cite shows it")
     );
+}
+
+// AC-1077 (T-1077, ADR-0090 decision 6): a composition is handed the
+// attested records in its scope, apart from the facts, with their label and
+// no contributor, and may cite them.
+#[test]
+fn attested_records_are_listed_apart_from_facts_and_are_citable() {
+    let address = address();
+    let facts: Vec<ComposeFact> = (1..=2).map(fact).collect();
+    let attested = [ComposeAttested {
+        citation_id: "A-00000000000000a1".into(),
+        label: "agent-attested, unconfirmed".into(),
+        statement: "A refund over the limit is approved by a supervisor.".into(),
+    }];
+    let input = ComposeInput {
+        address: &address,
+        title: "Business rules",
+        section: "## 1.5 Business rules (P+A)\n\nrows\n",
+        facts: &facts,
+        groups: &[],
+        attested: &attested,
+    };
+    let action = action(&input, "compose:1".into());
+    let prompt = &action.payload.prompt;
+    let block = &prompt[prompt.find("<attested_records>").unwrap()..];
+    assert!(block.contains(ATTESTED_INTRO));
+    assert!(block.contains(
+        "A-00000000000000a1 | agent-attested, unconfirmed | A refund over the limit is \
+         approved by a supervisor.\n"
+    ));
+    assert!(prompt.find("</citable_facts>").unwrap() < prompt.find("<attested_records>").unwrap());
+    assert!(
+        action
+            .payload
+            .response_schema
+            .as_deref()
+            .unwrap()
+            .contains("A-00000000000000a1")
+    );
+    // With none, the prompt has no such block.
+    let none = super::action(
+        &ComposeInput {
+            attested: &[],
+            ..input.clone()
+        },
+        "compose:1".into(),
+    );
+    assert!(!none.payload.prompt.contains("attested_records"));
 }

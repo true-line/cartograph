@@ -352,3 +352,16 @@ fn a_printed_record_names_each_contributor_and_its_verb() {
     let withdrawn = run(&[attested("a1", AttestedStanding::Withdrawn)], &[]);
     assert_eq!(withdrawn.attested[0].printed_label(), None);
 }
+
+// Two records whose `A-` ids collide fail the projection: a draft citing
+// that id could name either (Codex review of #2521).
+#[test]
+fn two_records_sharing_one_citation_id_fail_the_projection() {
+    let first = attested("a1", AttestedStanding::EngineerBacked);
+    let mut second = attested("a2", AttestedStanding::AgentAttestedUnconfirmed);
+    second.citation_id = first.citation_id.clone();
+    assert_eq!(
+        run_with(&[first, second], &[gap("gap:login")], &current()),
+        Err(ProjectionError::DuplicateRecord)
+    );
+}
