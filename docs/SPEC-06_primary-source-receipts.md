@@ -362,6 +362,22 @@ because they hold secrets (AC-0097): their key names and allowlisted values
 (AC-1021) are read from the checkout. Preflight's detection still reads the
 checkout, and toolchain facts carry no receipt.
 
+## Captured documentation reads (AC-1065, #385)
+
+The documentation walk's selection (`spec::is_documentation_file`: Markdown
+and plain-text files outside the directories the walk skips) is tried with
+the reader selections beside the lanes and dropped first when the whole set
+does not fit, and the capture records whether it was retained
+(`documents_captured`). When it was, recovery's documentation read and the
+found-ADR relinking after publication read the retained bytes, listing only
+the capture's own paths; the bytes are copied out of the capture before its
+retention guard is released, so the relinking reads what recovery captured.
+Otherwise, and with no capture, both read the checkout. Repositories another
+source published are relinked from their checkout, declared API references
+are read from their loader's validated contents, and documentation drift
+compares paths against the checkout's tree. Documentation facts carry no
+receipt.
+
 ## Directory-built lane facts (AC-1037, #385)
 
 The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each
