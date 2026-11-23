@@ -1236,11 +1236,61 @@ fn one_part_failing_does_not_end_a_gated_run() {
         }
     }
     let watched = Watched::new(&Quiet);
-    assert!(!watched.last_call_failed());
-    assert!(watched.noted::<(), ()>(Err(())).is_err());
-    assert!(watched.last_call_failed());
-    assert!(watched.noted::<(), ()>(Ok(())).is_ok());
-    assert!(!watched.last_call_failed());
+    assert_eq!(watched.last_failure_class(), None);
+    let timed_out = llm::bounded::BoundedCallError {
+        code: llm::bounded::FailureCode::DeadlineExceeded,
+        outcome: llm::bounded::InvocationOutcome::Unknown,
+    };
+    assert!(watched.noted::<(), _>(Err(timed_out)).is_err());
+    assert_eq!(
+        watched.last_failure_class().as_deref(),
+        Some("deadline_exceeded")
+    );
+    assert!(
+        watched
+            .noted::<(), _>(Err(ProviderError::EmptyCompletion))
+            .is_err()
+    );
+    assert_eq!(
+        watched.last_failure_class().as_deref(),
+        Some("empty_completion")
+    );
+    assert!(watched.noted::<(), ProviderError>(Ok(())).is_ok());
+    assert_eq!(watched.last_failure_class(), None);
+}
+
+/// AC-1606 (#1748): a `part_failed` row keeps its own cause, the failed
+/// call's class and the part's error cut to a bound, even when another part
+/// staged; other rows carry none.
+#[test]
+fn a_failed_part_keeps_its_cause() {
+    let error = format!(
+        "bounded provider call: DeadlineExceeded (Unknown) {}",
+        "x".repeat(600)
+    );
+    let failed = GatedDraft {
+        scope: "area:a".to_owned(),
+        area: Some("Alias".to_owned()),
+        outcome: ComposeOutcome::none("part_failed"),
+        failure: Some(PartFailure::new("deadline_exceeded".to_owned(), &error)),
+    };
+    let row = serde_json::to_value(&failed).unwrap();
+    assert_eq!(row["reason"], "part_failed");
+    assert_eq!(row["failure"]["class"], "deadline_exceeded");
+    let message = row["failure"]["message"].as_str().unwrap();
+    assert!(message.starts_with("bounded provider call: DeadlineExceeded"));
+    assert_eq!(message.chars().count(), PART_FAILURE_MESSAGE_CHARS);
+    let staged = GatedDraft {
+        failure: None,
+        outcome: ComposeOutcome::none("run_stopped"),
+        ..failed
+    };
+    assert!(
+        serde_json::to_value(&staged)
+            .unwrap()
+            .get("failure")
+            .is_none()
+    );
 }
 
 /// An attested record for §1.3 of the system resting on `cap:checkout`, as
