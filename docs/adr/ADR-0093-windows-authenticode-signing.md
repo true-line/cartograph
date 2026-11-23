@@ -1,7 +1,9 @@
 # ADR-0093 — Fail-closed Windows Authenticode signing through Azure Artifact Signing
 
-- **Status:** Proposed (first slice implemented: the credential-set check in
-  `scripts/signing-secrets.mjs`)
+- **Status:** Proposed (implemented: the credential-set check in
+  `scripts/signing-secrets.mjs`, the signing installer workflow
+  `windows-installer.yml`, and `release.yml` attaching only a signed
+  installer; Accepted once a signed release verifies)
 - **Date:** 2026-11-23
 - **Deciders:** Cartograph owner (delegated); Claude implements
 - **Related:** #227; ADR-0016 (fail-closed macOS Developer ID), ADR-0018

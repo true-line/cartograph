@@ -181,6 +181,27 @@ jobs:
       APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
+  # ADR-0093 (#227): the Windows installer from the same tag. It builds
+  # beside the macOS package, so a Windows failure never holds the macOS
+  # release, and only a signed installer is ever attached.
+  windows:
+    name: Build Windows installer
+    needs: validate
+    # id-token for the GitHub OIDC exchange with Azure Artifact Signing.
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      ref: ${{ needs.validate.outputs.tag }}
+    # Pass only the signing secrets windows-installer.yml declares.
+    secrets:
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+      ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+      ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+
   publish:
     name: Publish GitHub Release
     needs:
@@ -304,3 +325,55 @@ jobs:
               --title "$RELEASE_TITLE" \
               --notes-file release-notes.md
           fi
+
+  # Attach the Windows installer to the release the macOS job published, but
+  # only when it is signed: an unsigned-dev installer stays an Actions
+  # artifact (ADR-0093).
+  publish-windows:
+    name: Attach signed Windows installer
+    needs:
+      - validate
+      - windows
+      - publish
+    if: needs.windows.outputs.signing_mode == 'signed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    env:
+      TAG: ${{ needs.validate.outputs.tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Download this run's signed Windows installer
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.windows.outputs.artifact_name }}
+          path: windows
+
+      - name: Name the installer for the release
+        run: |
+          set -euo pipefail
+          mapfile -t found < <(find windows -maxdepth 1 -type f -name '*-setup.exe')
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::Expected one signed NSIS installer; found ${#found[@]}."
+            exit 1
+          fi
+          mkdir dist
+          mv "${found[0]}" "dist/Cartograph_${VERSION}_x64_signed-setup.exe"
+
+      - name: Require chores-dumb credentials
+        run: test "${{ secrets.CHORES_DUMB_CLIENT_ID != '' && secrets.CHORES_DUMB_PRIVATE_KEY != '' }}" = true
+
+      - name: Mint the chores-dumb token
+        id: chores
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CHORES_DUMB_CLIENT_ID }}
+          private-key: ${{ secrets.CHORES_DUMB_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Upload the signed installer
+        env:
+          GH_TOKEN: ${{ steps.chores.outputs.token }}
+        run: gh release upload "$TAG" "dist/Cartograph_${VERSION}_x64_signed-setup.exe" --clobber --repo "$GITHUB_REPOSITORY"
