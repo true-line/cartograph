@@ -23,7 +23,7 @@ fn table_rows_follow_enum_order_and_ids() {
 #[test]
 fn every_capability_matches_the_legacy_predicates() {
     for id in SpecialistId::all() {
-        let legacy: [(Capability, bool); 24] = [
+        let legacy: [(Capability, bool); 25] = [
             (C::CompactDisclosure, legacy_uses_compact_disclosure(id)),
             (C::TurnProgress, legacy_uses_turn_progress(id)),
             (
@@ -102,6 +102,11 @@ fn every_capability_matches_the_legacy_predicates() {
             // #2478: new with @31.
             (
                 C::UnacquiredCitationDrop,
+                id == SpecialistId::DomainAnalystV31,
+            ),
+            // #2522: new with @31.
+            (
+                C::RunCapacityExclusions,
                 id == SpecialistId::DomainAnalystV31,
             ),
         ];

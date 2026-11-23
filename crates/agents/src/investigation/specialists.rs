@@ -356,6 +356,11 @@ impl SpecialistId {
         self.has(Capability::UnacquiredCitationDrop)
     }
 
+    /// #2522 (AC-1437): capacity exclusions survive later input revisions.
+    pub fn uses_run_capacity_exclusions(self) -> bool {
+        self.has(Capability::RunCapacityExclusions)
+    }
+
     /// `read_artifact` (ADR-0089): @30 and @31.
     pub fn uses_artifact_reads(self) -> bool {
         self.has(Capability::ArtifactReads)
@@ -1508,12 +1513,17 @@ mod capacity_exclusion_identity_tests {
         assert!(
             SpecialistId::all()
                 .filter(|id| *id != role)
-                .all(|id| !id.uses_unacquired_citation_drop())
+                .all(|id| !id.uses_unacquired_citation_drop() && !id.uses_run_capacity_exclusions())
         );
         assert_eq!(
             role.capabilities()
                 .iter()
-                .filter(|flag| *flag != Capability::UnacquiredCitationDrop)
+                .filter(|flag| {
+                    !matches!(
+                        flag,
+                        Capability::UnacquiredCitationDrop | Capability::RunCapacityExclusions
+                    )
+                })
                 .collect::<Vec<_>>(),
             old.capabilities().iter().collect::<Vec<_>>()
         );
