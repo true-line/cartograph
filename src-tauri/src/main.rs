@@ -56,6 +56,7 @@ mod projects;
 mod proposals;
 mod provider_checks;
 use app_store::provider_credentials;
+mod attested_capture;
 #[cfg(test)]
 mod registered_source_tests;
 #[cfg(all(test, not(app_test_group = "acceptance")))]
@@ -9108,6 +9109,10 @@ pub fn run() {
             section_compose::run_section_compose_gated,
             section_review::section_document,
             section_review::review_section_draft,
+            attested_capture::set_attested_engineer,
+            attested_capture::state_attested_gap_answer,
+            attested_capture::review_attested_record,
+            attested_capture::list_attested_records,
             investigations::commands::list_investigations,
             investigations::commands::list_specialist_task_activity,
             investigations::commands::check_local_ollama,
