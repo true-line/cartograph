@@ -779,6 +779,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@27"
                     | "domain-analyst@28"
                     | "domain-analyst@29"
+                    | "domain-analyst@30"
             ) && consistency.is_some() =>
         {
             match input.validate_correction_prose(finish, model.as_deref()) {
@@ -869,6 +870,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@27"
                     | "domain-analyst@28"
                     | "domain-analyst@29"
+                    | "domain-analyst@30"
             ) =>
         {
             citation_correction = input.typed_citation_correction(
@@ -902,6 +904,7 @@ pub(super) fn admit_finish_with_locator(
                         | "domain-analyst@27"
                         | "domain-analyst@28"
                         | "domain-analyst@29"
+                        | "domain-analyst@30"
                 ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
@@ -960,6 +963,7 @@ pub(super) fn admit_finish_with_locator(
             | "domain-analyst@27"
             | "domain-analyst@28"
             | "domain-analyst@29"
+            | "domain-analyst@30"
     ) && consistency.is_some()
         && citation_correction.is_none()
         && let Some(feedback) = RefusalFeedback::collect_input_corrections_with_policy(
@@ -978,8 +982,10 @@ pub(super) fn admit_finish_with_locator(
     // Refusals keep the derived assessment so replay re-derives them exactly;
     // only an accepted @29 candidate carries disclosed capacity exclusions.
     let mut accepted = assessment.clone();
-    if request.specialist_id == "domain-analyst@29"
-        && finish.outcome == CompletionOutcome::Supported
+    if matches!(
+        request.specialist_id.as_str(),
+        "domain-analyst@29" | "domain-analyst@30"
+    ) && finish.outcome == CompletionOutcome::Supported
         && let Some(result) = &admitted
     {
         disclose_capacity(&mut accepted, &result.limitations, consistency);
