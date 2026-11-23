@@ -163,5 +163,11 @@ fn an_mcp_task_stages_its_finding_as_an_agent_attested_unconfirmed_gap_answer() 
             .unwrap_err(),
             "graph_changed"
         );
+        // A revoked session stages nothing.
+        grant.revoke();
+        assert_eq!(
+            propose(&dispatcher, &finding, &gap),
+            Err(ReadError::InvalidRequest)
+        );
     });
 }

@@ -150,28 +150,33 @@ impl TaskDispatcher {
                 finding_id,
                 gap_id,
                 slot,
-            } => {
-                // Admit this session to the task before anything is read
-                // or staged; a task it does not own reads as unknown.
-                state
-                    .jobs
-                    .lock()
-                    .map_err(|_| ReadError::Storage)?
-                    .investigation_access(&task_id, Some(&self.session))
+            } => self
+                .session
+                // The grant is held across the whole staging, so a
+                // revocation either refuses it or waits for it (ADR-0073).
+                .with_grant(|client, _| {
+                    // Admit this session to the task before anything is read
+                    // or staged; a task it does not own reads as unknown.
+                    state
+                        .jobs
+                        .lock()
+                        .map_err(|_| ReadError::Storage)?
+                        .require_mcp_owner(&task_id, client)
+                        .map_err(|_| ReadError::InvalidRequest)?;
+                    // Staged for review in the app, never directed by or
+                    // confirmed for the engineer (ADR-0090 decision 9).
+                    let stored = crate::attested_capture::propose_from_finding(
+                        &state,
+                        &task_id,
+                        &finding_id,
+                        &gap_id,
+                        &slot,
+                        false,
+                    )
                     .map_err(|_| ReadError::InvalidRequest)?;
-                // Staged for review in the app, never directed by or
-                // confirmed for the engineer (ADR-0090 decision 9).
-                let stored = crate::attested_capture::propose_from_finding(
-                    &state,
-                    &task_id,
-                    &finding_id,
-                    &gap_id,
-                    &slot,
-                    false,
-                )
-                .map_err(|_| ReadError::InvalidRequest)?;
-                response(id, &ProposedReply::from(&stored), cap)
-            }
+                    response(id, &ProposedReply::from(&stored), cap)
+                })
+                .map_err(|_| ReadError::InvalidRequest)?,
         }
     }
 }
@@ -245,9 +250,10 @@ pub(crate) fn descriptor(tool: TaskTool) -> Value {
             json!({"type":"object","properties":{"task_id":{"type":"string"},"after":{"type":"integer","minimum":0}},"required":["task_id","after"],"additionalProperties":false})
         }
         TaskTool::ProposeAttested => {
-            // `maxLength` counts characters and the parser counts UTF-8 bytes, so
-            // advertise the character count no byte-bounded value can exceed.
-            let reference = json!({"type":"string","minLength":1,"maxLength":mcp_wire::task_arguments::MAX_ATTESTED_REFERENCE_BYTES / 4});
+            // The parser bounds UTF-8 bytes, which no JSON Schema keyword
+            // states, so the bound is described rather than advertised as
+            // a character count that would be too wide or too narrow.
+            let reference = json!({"type":"string","minLength":1,"description":format!("At most {} UTF-8 bytes, no control characters.", mcp_wire::task_arguments::MAX_ATTESTED_REFERENCE_BYTES)});
             json!({"type":"object","properties":{"task_id":{"type":"string"},"finding_id":reference,"gap_id":reference,"slot":reference},"required":["task_id","finding_id","gap_id","slot"],"additionalProperties":false})
         }
         _ => {
