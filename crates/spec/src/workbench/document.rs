@@ -50,10 +50,11 @@ use super::catalogue::{
     catalogue_sections,
 };
 use super::curated::Curated;
+use super::fact_index::AttestedIndexRow;
 use super::producers::Output;
 use super::render::{Assertions, Budget, Literal, NodeName, RenderLimit, Text};
 use super::{ExportMode, citation_id, provenance};
-use context_hub::curated::{CuratedDraft, DraftState, DraftStateReason};
+use context_hub::curated::{CuratedAttested, CuratedDraft, DraftState, DraftStateReason};
 use core_graph::{Edge, FactKey, Node};
 use core_prov::ConfidenceTier;
 use flowtracer::Flow;
@@ -520,24 +521,39 @@ fn stale_sections(drafts: &BTreeMap<&str, Vec<&CuratedDraft>>) -> String {
 
 struct Drafted<'a, 'b> {
     facts: &'b BTreeMap<String, Fact<'a>>,
+    /// The attested records a printed claim may cite, by `A-` id: those
+    /// `eligible` or `agent-attested, unconfirmed` (ADR-0090 decision 6).
+    citable: BTreeMap<&'b str, &'b CuratedAttested>,
     /// Citation ids already asserted by this artifact.
     asserted: BTreeSet<String>,
+    /// The attested records printed claims cite, by `A-` id: the rows the
+    /// fact index gains (ADR-0090 decision 7).
+    attested: BTreeMap<String, AttestedIndexRow>,
     /// Claims printed in the document.
     printed: usize,
+    /// Printed claims that cite an attested record.
+    printed_attested: usize,
+}
+
+/// Whether `claim` cites an attested record.
+fn cites_attested(claim: &context_hub::curated::DraftClaim) -> bool {
+    claim.citations.iter().any(|id| id.starts_with("A-"))
 }
 
 impl Drafted<'_, '_> {
     /// The drafts of one section. Returns the number of claims a
-    /// `verified-only` export left out.
+    /// `verified-only` export left out, and how many of those cite an
+    /// attested record.
     fn section(
         &mut self,
         drafts: &[&CuratedDraft],
         mode: ExportMode,
         assertions: &mut Assertions,
         out: &mut Text,
-    ) -> Result<usize, RenderLimit> {
+    ) -> Result<(usize, usize), RenderLimit> {
         let mut shown = false;
         let mut omitted = 0usize;
+        let mut omitted_attested = 0usize;
         let mut notes: Vec<String> = Vec::new();
         for draft in drafts {
             let stale = draft.state == DraftState::Stale;
@@ -573,6 +589,7 @@ impl Drafted<'_, '_> {
             }
             if mode == ExportMode::VerifiedOnly {
                 omitted += draft.claims.len();
+                omitted_attested += draft.claims.iter().filter(|c| cites_attested(c)).count();
                 shown = true;
                 if stale {
                     notes.push(format!(
@@ -589,7 +606,7 @@ impl Drafted<'_, '_> {
                 .claims
                 .iter()
                 .flat_map(|claim| &claim.citations)
-                .all(|id| self.facts.contains_key(id));
+                .all(|id| self.facts.contains_key(id) || self.citable.contains_key(id.as_str()));
             if !resolves {
                 notes.push(format!(
                     "- Draft `{}` for scope `{}` is {} and is not printed: it cites a \
@@ -622,11 +639,16 @@ impl Drafted<'_, '_> {
                     Literal(&claim.kind),
                     Literal(&draft.role)
                 )?;
+                let mut vouched = Vec::new();
                 for (position, id) in claim.citations.iter().enumerate() {
                     if position > 0 {
                         out.push_str(", ")?;
                     }
                     out.push_str(id)?;
+                    if let Some(record) = self.citable.get(id.as_str()) {
+                        vouched.push(*record);
+                        continue;
+                    }
                     if self.asserted.insert(id.clone()) {
                         match self.facts[id] {
                             Fact::Node(node) => assertions.node(node, None)?,
@@ -637,8 +659,30 @@ impl Drafted<'_, '_> {
                 if stale && claim.citations.iter().any(|id| draft.changed.contains(id)) {
                     out.push_str("; cites a changed fact")?;
                 }
+                // An attested record is named with its label and who
+                // stands behind it, never as evidence (ADR-0090 decision 7).
+                for record in &vouched {
+                    let label = record.printed_label().expect("a citable record prints");
+                    let contributors = record.contributors();
+                    write!(
+                        out,
+                        "; {} is {label}: {}",
+                        record.citation_id,
+                        Literal(&contributors)
+                    )?;
+                    self.attested
+                        .entry(record.citation_id.clone())
+                        .or_insert_with(|| AttestedIndexRow {
+                            citation_id: record.citation_id.clone(),
+                            label: label.to_owned(),
+                            statement: record.statement.clone(),
+                            contributors,
+                            cited_by: Vec::new(),
+                        });
+                }
                 out.push_str(")\n")?;
                 self.printed += 1;
+                self.printed_attested += usize::from(!vouched.is_empty());
             }
         }
         if !shown {
@@ -651,7 +695,7 @@ impl Drafted<'_, '_> {
         for note in &notes {
             writeln!(out, "{note}")?;
         }
-        Ok(omitted)
+        Ok((omitted, omitted_attested))
     }
 }
 
@@ -1063,10 +1107,23 @@ pub(super) fn d1(
         // No claim is printed, so no cited fact is looked for.
         ExportMode::VerifiedOnly => BTreeMap::new(),
     };
+    let citable = match (mode, curated.projection()) {
+        (ExportMode::BestEffort, Some(projection)) => projection
+            .attested
+            .iter()
+            .filter(|record| record.printed_label().is_some())
+            .map(|record| (record.citation_id.as_str(), record))
+            .collect(),
+        // No claim is printed, so no attested record is either.
+        _ => BTreeMap::new(),
+    };
     let mut drafted = Drafted {
         facts: &facts,
+        citable,
         asserted: BTreeSet::new(),
+        attested: BTreeMap::new(),
         printed: 0,
+        printed_attested: 0,
     };
     let mut cited = 0usize;
     for section in catalogue_sections("D1") {
@@ -1229,12 +1286,17 @@ pub(super) fn d1(
         }
         if section.kind.drafted() {
             let listed = drafts.get(section.number).map_or(&[][..], Vec::as_slice);
-            let omitted = drafted.section(listed, mode, &mut assertions, &mut content)?;
+            let (omitted, attested) =
+                drafted.section(listed, mode, &mut assertions, &mut content)?;
             if mode == ExportMode::VerifiedOnly {
-                writeln!(
+                write!(
                     content,
                     "Drafted claims left out of this `verified-only` export: {omitted}."
                 )?;
+                if attested > 0 {
+                    write!(content, " Of these, {attested} cite an attested record.")?;
+                }
+                content.push_str("\n")?;
             }
         }
     }
@@ -1244,6 +1306,14 @@ pub(super) fn d1(
          Cited facts printed in the frames above: {cited}. Drafted claims printed: {}.",
         drafted.printed
     )?;
+    if drafted.printed_attested > 0 {
+        writeln!(
+            content,
+            "Of the drafted claims, {} cite an attested record: a statement a contributor \
+             made, not a recovered fact.",
+            drafted.printed_attested
+        )?;
+    }
     // Counted by tier, as the catalogue asks of every document.
     let mut tiers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for assertion in &assertions.values {
@@ -1259,6 +1329,7 @@ pub(super) fn d1(
         content: content.finish(),
         assertions: assertions.values,
         subjects: assertions.subjects,
+        attested: drafted.attested.into_values().collect(),
     })
 }
 
@@ -1287,6 +1358,10 @@ mod tests;
 #[cfg(test)]
 #[path = "document_draft_tests.rs"]
 mod draft_tests;
+
+#[cfg(test)]
+#[path = "document_attested_tests.rs"]
+mod attested_tests;
 
 #[cfg(test)]
 #[path = "document_area_tests.rs"]
