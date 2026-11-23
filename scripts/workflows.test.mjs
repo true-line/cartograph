@@ -432,11 +432,11 @@ test('app unit tests run in required shards that jointly cover the binary (#1924
   // calls `app::run()` (#1227, ADR-0088).
   const manifest = readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8');
   assert.match(manifest, /^name = "app"$/mu);
-  assert.match(manifest, /^\[lib\]\npath = "src\/main\.rs"\ndoctest = false\n\n\[\[bin\]\]\nname = "app"\npath = "src\/bin\/app\.rs"$/mu);
+  assert.match(manifest, /^\[lib\]\npath = "src\/lib\.rs"\ndoctest = false\n\n\[\[bin\]\]\nname = "app"\npath = "src\/bin\/app\.rs"$/mu);
   assert.equal(manifest.match(/^\[\[bin\]\]/gmu).length, 1);
   assert.doesNotMatch(manifest, /^\[\[(?:test|example|bench)\]\]/mu);
   assert.deepEqual(readdirSync(path.join(root, 'src-tauri')).filter((entry) => ['tests', 'examples', 'benches'].includes(entry)), []);
-  assert.equal(existsSync(path.join(root, 'src-tauri/src/lib.rs')), false);
+  assert.equal(existsSync(path.join(root, 'src-tauri/src/main.rs')), false);
   assert.deepEqual(readdirSync(path.join(root, 'src-tauri/src/bin')), ['app.rs']);
   const executable = readFileSync(path.join(root, 'src-tauri/src/bin/app.rs'), 'utf8');
   assert.match(executable, /^fn main\(\) \{\n    app::run\(\);\n\}$/mu);

@@ -40,6 +40,7 @@ executable consumes the application rather than being it.
   entry point.
 - This does not extract an engine crate, add a headless mode or change any
   runtime behavior.
-- The library root keeps the name `main.rs` until the rename lands, so open
-  branches that edit it are unaffected now.
+- The library root kept the name `main.rs` until the rename landed, so open
+  branches that edited it were unaffected at first; it is now
+  `src-tauri/src/lib.rs`, a rename only.
 - Historical references to `main.rs` in accepted ADRs are left as written.
