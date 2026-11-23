@@ -741,7 +741,8 @@ pub(super) fn callers_frame(
     guards: &mut BTreeSet<String>,
     out: &mut Text,
 ) -> Result<usize, RenderLimit> {
-    let mut by_caller: BTreeMap<Caller, Vec<String>> = BTreeMap::new();
+    // Each operation by its printed name and citation id.
+    let mut by_caller: BTreeMap<Caller, Vec<(String, String)>> = BTreeMap::new();
     let mut confidence: BTreeMap<Caller, BTreeSet<String>> = BTreeMap::new();
     let mut cited = 0;
     for endpoint in nodes.iter().filter(|n| n.label == "Endpoint") {
@@ -757,7 +758,7 @@ pub(super) fn callers_frame(
             let id = citation_id(&FactKey::Node {
                 id: endpoint.id.clone(),
             });
-            if asserted.insert(id) {
+            if asserted.insert(id.clone()) {
                 assertions.node(endpoint, None)?;
                 cited += 1;
             }
@@ -768,7 +769,7 @@ pub(super) fn callers_frame(
             by_caller
                 .entry(caller)
                 .or_default()
-                .push(NodeName(endpoint).to_string());
+                .push((NodeName(endpoint).to_string(), id));
         }
     }
     if by_caller.is_empty() {
@@ -790,10 +791,13 @@ pub(super) fn callers_frame(
          caller under its capability.\n",
         by_caller.len() - usize::from(unguarded > 0)
     )?;
+    // The examples' citations, so a drafted claim about a caller can cite
+    // the operations it is read from (#1748).
     out.push_str(
-        "| Caller | Guard | Reading confidence | Operations | Examples |\n|---|---|---|---|---|\n",
+        "| Caller | Guard | Reading confidence | Operations | Examples | Citation |\n\
+         |---|---|---|---|---|---|\n",
     )?;
-    let mut rows: Vec<(&Caller, &Vec<String>)> = by_caller.iter().collect();
+    let mut rows: Vec<(&Caller, &Vec<(String, String)>)> = by_caller.iter().collect();
     // Most operations first; any caller last.
     rows.sort_by_key(|(caller, ops)| (**caller == Caller::Unguarded, std::cmp::Reverse(ops.len())));
     for (caller, operations) in rows {
@@ -809,11 +813,20 @@ pub(super) fn callers_frame(
         };
         let mut operations = operations.clone();
         operations.sort();
-        let shown: Vec<&str> = operations.iter().take(3).map(String::as_str).collect();
+        let shown: Vec<&str> = operations
+            .iter()
+            .take(3)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let ids: Vec<&str> = operations
+            .iter()
+            .take(3)
+            .map(|(_, id)| id.as_str())
+            .collect();
         let more = operations.len() - shown.len();
         writeln!(
             out,
-            "| {} | {} | {} | {} | {}{} |",
+            "| {} | {} | {} | {} | {}{} | {} |",
             Literal(&who),
             Literal(&guards),
             confidence[caller]
@@ -827,7 +840,8 @@ pub(super) fn callers_frame(
                 format!("; and {more} more")
             } else {
                 String::new()
-            }
+            },
+            ids.join(", "),
         )?;
     }
     Ok(cited)
