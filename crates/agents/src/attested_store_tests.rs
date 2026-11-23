@@ -16,13 +16,24 @@ fn agent_says(
     verb: AgentVerb,
     directed_by: Option<&Contributor>,
 ) -> Attestation {
+    // The role, provider and model it was registered for, from its
+    // display name `role (provider/model)`; placeholders for a contributor
+    // that is not a registered agent.
+    let (role, provider, model) = agent
+        .display_name
+        .split_once(" (")
+        .and_then(|(role, rest)| {
+            let (provider, model) = rest.trim_end_matches(')').split_once('/')?;
+            Some((role, provider, model))
+        })
+        .unwrap_or(("section-writer@1", "local", "placeholder-model"));
     Attestation::Agent {
         contributor: agent.id.clone(),
         verb,
-        role: "section-writer@1".into(),
+        role: role.into(),
         definition_fingerprint: "fp-1".into(),
-        provider: "local".into(),
-        model: "placeholder-model".into(),
+        provider: provider.into(),
+        model: model.into(),
         run: "run-1".into(),
         directed_by: directed_by.map(|engineer| engineer.id.clone()),
     }
@@ -350,4 +361,66 @@ fn records_are_listed_newest_first_in_bounded_pages() {
         store.list(MAX_ATTESTED_PAGE_ITEMS + 1, None),
         Err(AttestedStoreError::InvalidLimit)
     ));
+}
+
+#[test]
+fn an_agent_attestation_must_match_the_role_provider_and_model_of_its_id() {
+    let (_dir, mut store) = store();
+    let writer = store.agent("section-writer@1", "local", "model-a").unwrap();
+    // The id registered for model-a, claiming another model.
+    let mut claimed = agent_says(&writer, AgentVerb::Stated, None);
+    if let Attestation::Agent { model, .. } = &mut claimed {
+        *model = "model-b".into();
+    }
+    assert!(matches!(
+        store.stage(record("A statement.", vec![claimed])),
+        Err(AttestedStoreError::AgentMismatch { attestation: 0 })
+    ));
+}
+
+#[test]
+fn a_stored_record_becomes_projection_input_with_ids_and_standing() {
+    let (_dir, mut store) = store();
+    let engineer = store.set_engineer(ENGINEER, None).unwrap();
+    let writer = store
+        .agent("section-writer@1", "local", "placeholder-model")
+        .unwrap();
+    let staged = store
+        .stage(record(
+            "The login handler is registered at runtime.",
+            vec![agent_says(&writer, AgentVerb::Stated, Some(&engineer))],
+        ))
+        .unwrap();
+    let input = reviewed_attested(&staged);
+    assert_eq!(input.standing, AttestedStanding::AgentAttestedUnconfirmed);
+    assert_eq!(input.citation_id, staged.citation_id);
+    assert_eq!(
+        input.answer,
+        AttestedAnswer::Gap {
+            gap_id: "gap:handler:login".into(),
+            slot: "calls".into()
+        }
+    );
+    let confirmed = store
+        .attest(
+            &staged.record_id,
+            1,
+            engineer_says(&engineer, EngineerVerb::Confirmed),
+        )
+        .unwrap();
+    let input = reviewed_attested(&confirmed);
+    assert_eq!(input.standing, AttestedStanding::EngineerBacked);
+    assert_eq!(
+        input
+            .attestations
+            .iter()
+            .map(|a| (a.engineer, a.verb.as_str(), a.role.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (false, "stated", Some("section-writer@1")),
+            (true, "confirmed", None)
+        ]
+    );
+    let json = serde_json::to_string(&input).unwrap();
+    assert!(!json.contains(ENGINEER), "{json}");
 }
