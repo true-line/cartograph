@@ -33,6 +33,14 @@ fn git(dir: &Path, args: &[&str]) -> (bool, String) {
     )
 }
 
+/// Removes the dispatch's worktree and branch from the person's checkout.
+fn clean_up(repo: &Path, worktree: &Path, branch: &str) {
+    let worktree = worktree.to_string_lossy().into_owned();
+    git(repo, &["worktree", "remove", "--force", &worktree]);
+    git(repo, &["worktree", "prune"]);
+    git(repo, &["branch", "-D", branch]);
+}
+
 fn env_path(name: &str) -> PathBuf {
     let value = std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
     let path = PathBuf::from(value);
@@ -66,7 +74,18 @@ fn a_real_acp_agent_returns_a_committed_branch_confined_to_its_worktree() {
         .unwrap()
         .as_nanos();
     let packet = format!("{nanos:016x}");
+    let keep = std::env::var_os("ACP_SMOKE_KEEP").is_some();
+    // With ACP_SMOKE_KEEP the worktree must outlive the test, so the root is
+    // kept rather than deleted when the TempDir drops.
     let roots = tempfile::tempdir().unwrap();
+    let root = if keep {
+        roots.keep()
+    } else {
+        roots.path().to_owned()
+    };
+    // The host's own naming (ADR-0092 decision 2), for cleanup when it fails.
+    let expected_branch = format!("cartograph/packet-{}", &packet[..12]);
+    let expected_worktree = root.join(format!("packet-{}", &packet[..12]));
     let agent = AgentCommand {
         program,
         args,
@@ -86,11 +105,17 @@ fn a_real_acp_agent_returns_a_committed_branch_confined_to_its_worktree() {
         prompt: &prompt,
         repo: &repo,
         base_rev: &base,
-        worktree_root: roots.path(),
+        worktree_root: &root,
         agent: &agent,
         limits,
-    })
-    .expect("dispatch starts");
+    });
+    let submission = match submission {
+        Ok(submission) => submission,
+        Err(error) => {
+            clean_up(&repo, &expected_worktree, &expected_branch);
+            panic!("dispatch failed: {error:?}");
+        }
+    };
 
     println!("branch: {}", submission.branch);
     println!("stop: {:?}", submission.stop);
@@ -110,10 +135,14 @@ fn a_real_acp_agent_returns_a_committed_branch_confined_to_its_worktree() {
     }
 
     let (_, after) = git(&repo, &["status", "--porcelain"]);
-    if std::env::var_os("ACP_SMOKE_KEEP").is_none() {
-        let worktree = submission.worktree.to_string_lossy().into_owned();
-        git(&repo, &["worktree", "remove", "--force", &worktree]);
-        git(&repo, &["branch", "-D", &submission.branch]);
+    if keep {
+        println!(
+            "kept: {} at {}",
+            submission.branch,
+            submission.worktree.display()
+        );
+    } else {
+        clean_up(&repo, &submission.worktree, &submission.branch);
     }
 
     assert!(after.is_empty(), "the person's checkout changed: {after}");
