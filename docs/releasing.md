@@ -129,37 +129,41 @@ downloads the WebView2 bootstrapper on systems that lack WebView2; Windows 10
 only the macOS app stages it (AC-1424).
 
 The installer is not Authenticode signed yet, so SmartScreen warns on first
-run. ADR-0093 sets the signing posture: Azure Artifact Signing, reached
-through GitHub OIDC so that no key or password is stored, timestamped and
-fail-closed like ADR-0016. `node scripts/signing-secrets.mjs windows` already
-classifies the credential set:
+run. ADR-0093 sets the signing posture: the organization's existing Azure
+Artifact Signing account, reached by a service principal, timestamped and
+fail-closed like ADR-0016. The account coordinates are not secret and are
+committed in `windows-installer.yml`: endpoint
+`https://eus.codesigning.azure.net/`, account `zts1`, certificate profile
+`overlook`, the same account the organization's other signed apps use.
+`node scripts/signing-secrets.mjs windows` classifies the credential set:
 
 | Secret | Value |
 |---|---|
 | `AZURE_TENANT_ID` | Tenant of the Artifact Signing account |
-| `AZURE_CLIENT_ID` | App registration with a federated credential for this repository's release workflow and the Artifact Signing Certificate Profile Signer role |
-| `ARTIFACT_SIGNING_ENDPOINT` | The account's regional endpoint, such as `https://eus.codesigning.azure.net` |
-| `ARTIFACT_SIGNING_ACCOUNT` | Artifact Signing account name |
-| `ARTIFACT_SIGNING_PROFILE` | Public-trust certificate profile name |
+| `AZURE_CLIENT_ID` | Service principal (app registration) with the Artifact Signing Certificate Profile Signer role on the profile |
+| `AZURE_CLIENT_SECRET` | That service principal's client secret |
 
-With none of them the build is `unsigned-dev`, with all five it is `signed`,
+These are repository Actions secrets with the same names and values as the
+organization's other signed apps. With none of them the build is
+`unsigned-dev`, with all three it is `signed`,
 and a partial set fails closed. `.github/workflows/windows-installer.yml`
 holds the installer job. It compiles with no signing input in the
 environment (#480), then on the signed path fetches the pinned
 `Microsoft.ArtifactSigning.Client` package (sha256-checked), signs in to Azure
-with the GitHub OIDC token, signs both sidecars with `scripts/windows-sign.ps1`,
+through the service principal (`EnvironmentCredential`, the only credential
+the signing metadata allows), signs both sidecars with `scripts/windows-sign.ps1`,
 and lets `tauri bundle` sign the app and the installer through the same
-script. Every shipped binary must then report a valid, timestamped
+script. The service principal reaches only those two signing steps. Every shipped binary must then report a valid, timestamped
 Authenticode signature or nothing is uploaded. `windows.yml` calls it without
 secrets, so pull requests and main stay `unsigned-dev` (#631).
 
 `release.yml` is the one signing caller. Its `windows` job builds the
 installer from the release tag beside the macOS package, passing exactly the
-five secrets and granting `id-token: write`. When the build is `signed`,
+three secrets. When the build is `signed`,
 `publish-windows` attaches it to the release the macOS job published as
 `Cartograph_<version>_x64_signed-setup.exe`. An `unsigned-dev` Windows build
 is never published, and a Windows failure never holds the macOS release.
-Until the Artifact Signing account and its secrets exist, releases therefore
+Until the three secrets are added to this repository, releases therefore
 carry macOS assets only.
 
 ## Required GitHub secrets

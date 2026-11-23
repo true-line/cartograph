@@ -32,17 +32,21 @@ is left as the only practical choice.
    signs through `signtool` with Microsoft's signing dlib and timestamps
    through Microsoft's RFC 3161 service, using SHA-256 for both the file
    digest and the timestamp digest.
-2. **No long-lived secret.** The runner signs in to Azure through GitHub OIDC
-   federation (`id-token: write` on the signing job only). The complete
-   credential set is five repository Actions secrets: `AZURE_TENANT_ID`,
-   `AZURE_CLIENT_ID`, `ARTIFACT_SIGNING_ENDPOINT`,
-   `ARTIFACT_SIGNING_ACCOUNT` and `ARTIFACT_SIGNING_PROFILE`. None of them is a
-   private key or password. They are secrets so that forks and logs do not
-   learn the account.
+2. **The organization's existing account and service principal.** The owner
+   already runs an Artifact Signing account for the organization's other
+   signed apps. Cartograph signs with the same account, certificate profile
+   and service principal, so it needs no new identity validation. The
+   non-secret coordinates are committed in `windows-installer.yml` (endpoint
+   `https://eus.codesigning.azure.net/`, account `zts1`, profile
+   `overlook`). The credential set is three repository Actions secrets with
+   the same names as the other apps: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
+   `AZURE_CLIENT_SECRET`. The signing dlib authenticates only through
+   `EnvironmentCredential`; every other Azure credential is excluded. The
+   secrets reach only the two steps that sign.
 3. **Fail closed, as ADR-0016 does.** `node scripts/signing-secrets.mjs
    windows` classifies the set before any build:
    - no credential → `unsigned-dev`;
-   - all five → `signed`;
+   - all three → `signed`;
    - any partial set → the job fails, naming only the missing secret names.
    An `unsigned-dev` installer keeps that word in its artifact name and is
    never attached to a release.
@@ -55,7 +59,7 @@ is left as the only practical choice.
    must report `Valid` with a timestamp for the installer, the installed app
    executable and both sidecars. Otherwise the job fails.
 6. **Release.** `release.yml` attaches the Windows installer only when its
-   mode is `signed`. Until the five secrets exist, releases stay macOS-only,
+   mode is `signed`. Until the three secrets exist, releases stay macOS-only,
    which is today's behaviour.
 
 ## Consequences
@@ -63,11 +67,11 @@ is left as the only practical choice.
 - A configured release ships a Windows installer that SmartScreen and
   enterprise policy can attribute to a verified publisher. A timestamped
   signature stays valid after the short-lived certificate expires.
-- Nobody stores or rotates a key. Revoking the federated credential in Azure
-  stops signing at once.
-- The account needs Microsoft's identity validation and an Azure
-  subscription, which only the owner can provision. Until then the path stays
-  `unsigned-dev`, visibly.
+- No private key is stored. The client secret is rotated in Azure and in the
+  repository secret together; revoking it stops signing at once.
+- The account, its identity validation and the service principal already
+  exist. Only the three repository secrets have to be added; until then the
+  path stays `unsigned-dev`, visibly.
 - Microsoft Store distribution, MSIX packaging and WebView2 offline installers
   are out of scope.
 
@@ -78,6 +82,11 @@ is left as the only practical choice.
   machine and token, and EV no longer grants immediate SmartScreen reputation.
 - **Third-party cloud HSM (DigiCert KeyLocker, SSL.com eSigner).** Workable,
   but each needs a long-lived API credential as a secret. Artifact Signing
-  uses OIDC with no stored credential.
+  already has a provisioned, validated account and service principal.
+- **GitHub OIDC federation instead of a client secret.** It stores no
+  credential, but needs a new federated credential on the service principal
+  in Azure, which only the owner can add. Matching the existing client-secret
+  setup ships signing now; OIDC can replace it later without changing the
+  fail-closed check.
 - **Ship unsigned.** Rejected: SmartScreen blocks by default, and an unsigned
   binary cannot be attributed to its publisher.

@@ -9,14 +9,13 @@ export const SIGNING_SECRET_NAMES = Object.freeze([
   'APPLE_API_ISSUER',
 ]);
 
-// The Windows Authenticode set: Azure Artifact Signing reached through
-// GitHub OIDC, so none of these is a key or a password (ADR-0093, #227).
+// The Windows Authenticode set: the Azure service principal that holds the
+// Artifact Signing Certificate Profile Signer role (ADR-0093, #227). The
+// account coordinates are not secret and live in windows-installer.yml.
 export const WINDOWS_SIGNING_SECRET_NAMES = Object.freeze([
   'AZURE_TENANT_ID',
   'AZURE_CLIENT_ID',
-  'ARTIFACT_SIGNING_ENDPOINT',
-  'ARTIFACT_SIGNING_ACCOUNT',
-  'ARTIFACT_SIGNING_PROFILE',
+  'AZURE_CLIENT_SECRET',
 ]);
 
 const PLATFORMS = Object.freeze({

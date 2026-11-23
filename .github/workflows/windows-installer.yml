@@ -1,10 +1,9 @@
 # Reusable Windows NSIS installer with both sidecars (#227, ADR-0093).
-# The five Artifact Signing secrets produce an installer whose every binary is
-# Authenticode signed, timestamped and verified. No secrets produce a visibly
-# labeled unsigned-dev installer; any partial set fails closed. windows.yml
-# calls it on pull requests and main without secrets (#631: no pull-request
-# run ever reads one); a caller that signs passes the five secrets and grants
-# id-token: write for the GitHub OIDC exchange with Azure.
+# The three Azure service-principal secrets produce an installer whose every
+# binary is Authenticode signed, timestamped and verified. No secrets produce a
+# visibly labeled unsigned-dev installer; any partial set fails closed.
+# windows.yml calls it on pull requests and main without secrets (#631: no
+# pull-request run ever reads one); release.yml passes the three secrets.
 name: Windows installer
 
 on:
@@ -20,11 +19,7 @@ on:
         required: false
       AZURE_CLIENT_ID:
         required: false
-      ARTIFACT_SIGNING_ENDPOINT:
-        required: false
-      ARTIFACT_SIGNING_ACCOUNT:
-        required: false
-      ARTIFACT_SIGNING_PROFILE:
+      AZURE_CLIENT_SECRET:
         required: false
     outputs:
       signing_mode:
@@ -42,11 +37,8 @@ jobs:
     name: Windows installer
     runs-on: windows-latest
     timeout-minutes: 90
-    # id-token mints the GitHub OIDC token only the signed path exchanges with
-    # Azure; a caller must grant it. Without secrets no step requests a token.
     permissions:
       contents: read
-      id-token: write
     outputs:
       signing_mode: ${{ steps.installer.outputs.mode }}
       artifact_name: ${{ steps.installer.outputs.name }}
@@ -113,16 +105,14 @@ jobs:
           retry-delay-seconds: '5'
 
       # Fail closed before anything is built (ADR-0093): no secret is
-      # unsigned-dev, all five are signed, a partial set stops the job.
+      # unsigned-dev, all three are signed, a partial set stops the job.
       - name: Classify Windows signing credentials
         id: signing
         shell: pwsh
         env:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
-          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
-          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: |
           node scripts/signing-secrets.mjs windows >> $env:GITHUB_OUTPUT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -142,14 +132,16 @@ jobs:
 
       # The signing client is pinned by version and sha256; signtool comes
       # from the runner's Windows SDK. Its dlib needs the .NET 10 runtime.
+      # The account coordinates are not secret and are shared with the
+      # organization's other signed apps.
       - name: Fetch Artifact Signing client
         if: steps.signing.outputs.mode == 'signed'
         id: client
         shell: pwsh
         env:
-          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
-          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
-          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          ARTIFACT_SIGNING_ENDPOINT: https://eus.codesigning.azure.net/
+          ARTIFACT_SIGNING_ACCOUNT: zts1
+          ARTIFACT_SIGNING_PROFILE: overlook
         run: |
           $version = '1.0.151'
           $sha256 = '35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a'
@@ -164,15 +156,17 @@ jobs:
           if (-not (dotnet --list-runtimes | Select-String '^Microsoft\.NETCore\.App 10\.')) { throw 'The Artifact Signing dlib needs the .NET 10 runtime' }
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
           if (-not $signtool) { throw 'No x64 signtool.exe in the Windows SDK' }
-          # Only the Azure CLI session from the next step may authenticate.
+          # Only the service principal in the signing steps' environment may
+          # authenticate (EnvironmentCredential).
           $metadata = Join-Path $root 'metadata.json'
           @{
             Endpoint = $env:ARTIFACT_SIGNING_ENDPOINT
             CodeSigningAccountName = $env:ARTIFACT_SIGNING_ACCOUNT
             CertificateProfileName = $env:ARTIFACT_SIGNING_PROFILE
-            ExcludeCredentials = @('EnvironmentCredential', 'ManagedIdentityCredential', 'WorkloadIdentityCredential',
+            ExcludeCredentials = @('ManagedIdentityCredential', 'WorkloadIdentityCredential',
               'SharedTokenCacheCredential', 'VisualStudioCredential', 'VisualStudioCodeCredential',
-              'AzurePowerShellCredential', 'AzureDeveloperCliCredential', 'InteractiveBrowserCredential')
+              'AzureCliCredential', 'AzurePowerShellCredential', 'AzureDeveloperCliCredential',
+              'InteractiveBrowserCredential')
           } | ConvertTo-Json | Set-Content -Encoding utf8 $metadata
           # Tauri reads signCommand from config. The object form passes each
           # argument as is; the string form splits on spaces and keeps quotes.
@@ -185,24 +179,14 @@ jobs:
           "metadata=$metadata" >> $env:GITHUB_OUTPUT
           "config=$config" >> $env:GITHUB_OUTPUT
 
-      # GitHub OIDC to Azure, with no stored credential (ADR-0093).
-      - name: Sign in to Azure through OIDC
-        if: steps.signing.outputs.mode == 'signed'
-        shell: pwsh
-        env:
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL) { throw 'The signing caller must grant id-token: write' }
-          $request = "$env:ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange"
-          $token = (Invoke-RestMethod -Uri $request -Headers @{ Authorization = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" }).value
-          az login --service-principal --username $env:AZURE_CLIENT_ID --tenant $env:AZURE_TENANT_ID --federated-token $token --allow-no-subscriptions --output none
-          if ($LASTEXITCODE -ne 0) { throw 'Azure OIDC sign-in failed' }
-
       - name: Sign sidecars
         if: steps.signing.outputs.mode == 'signed'
         shell: pwsh
+        # The service principal reaches only the two signing steps (#480).
         env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ARTIFACT_SIGNING_SIGNTOOL: ${{ steps.client.outputs.signtool }}
           ARTIFACT_SIGNING_DLIB: ${{ steps.client.outputs.dlib }}
           ARTIFACT_SIGNING_METADATA: ${{ steps.client.outputs.metadata }}
@@ -220,7 +204,11 @@ jobs:
       # path its signCommand signs the app executable and the installer.
       - name: Bundle installer
         shell: pwsh
+        # The service principal reaches only the two signing steps (#480).
         env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ARTIFACT_SIGNING_SIGNTOOL: ${{ steps.client.outputs.signtool }}
           ARTIFACT_SIGNING_DLIB: ${{ steps.client.outputs.dlib }}
           ARTIFACT_SIGNING_METADATA: ${{ steps.client.outputs.metadata }}

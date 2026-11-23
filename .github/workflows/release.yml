@@ -187,10 +187,8 @@ jobs:
   windows:
     name: Build Windows installer
     needs: validate
-    # id-token for the GitHub OIDC exchange with Azure Artifact Signing.
     permissions:
       contents: read
-      id-token: write
     uses: ./.github/workflows/windows-installer.yml
     with:
       ref: ${{ needs.validate.outputs.tag }}
@@ -198,9 +196,7 @@ jobs:
     secrets:
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
-      ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
-      ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
   publish:
     name: Publish GitHub Release
