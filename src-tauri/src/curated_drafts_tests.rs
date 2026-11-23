@@ -434,6 +434,7 @@ fn a_draft_citing_an_overlay_capability_resolves_against_the_overlay() {
             decision: Some(DraftReview::Accepted),
         }],
         findings: Vec::new(),
+        attested: Vec::new(),
         assessments: BTreeMap::new(),
         settled: Arc::default(),
     };
