@@ -25,6 +25,7 @@ use crate::{AppState, JobExecution};
 use agents::claim_review;
 use agents::draft_store::{DraftOrigin, DraftStoreError};
 use agents::gated_compose::{self, GatedInput, GatedStats, StageModel, Workflow};
+use agents::rule_scope;
 use agents::section_compose::{
     self, ComposeFact, ComposeGroup, ComposeInput, Composed, SECTION_COMPOSER_ROLE,
 };
@@ -88,6 +89,11 @@ pub(crate) struct ComposeOutcome {
     /// `kept_retry`, the screened reply that kept more claims.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) retry: Option<&'static str>,
+    /// Whether the claims citing rules had their rules' scope checked
+    /// (#2482): `checked`, `none_cite_rules`, `unavailable` (fewer than two
+    /// readable replies) or `too_large` (over the input ceiling).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rule_scope: Option<&'static str>,
 }
 
 impl ComposeOutcome {
@@ -100,6 +106,7 @@ impl ComposeOutcome {
             gated: None,
             review: None,
             retry: None,
+            rule_scope: None,
         }
     }
 }
@@ -813,6 +820,7 @@ fn stage_as(
             gated: None,
             review: None,
             retry: None,
+            rule_scope: None,
         }),
         Err(DraftStoreError::Storage(error)) => Err(error.to_string()),
         Err(_) => Ok(ComposeOutcome {
@@ -886,7 +894,7 @@ fn run_blocking(
                     ..ComposeOutcome::none(reason)
                 });
             }
-            let (composed, review) = review(
+            let (composed, review, rule_scope) = review(
                 state,
                 provider,
                 &prepared,
@@ -906,6 +914,7 @@ fn run_blocking(
             Ok(ComposeOutcome {
                 review: Some(review),
                 retry,
+                rule_scope,
                 ..outcome
             })
         }
@@ -920,7 +929,8 @@ fn run_blocking(
 /// (#2458). A cloud provider is not called again, since its consent covers
 /// the composition's payload alone; fewer than two readable replies, or a
 /// request over the input ceiling, leave the claims as they are. Returns
-/// the claims kept and how the review went.
+/// the claims kept, how the review went and, on a local provider, how the
+/// rule-scope check went ([`check_rule_scope`]).
 pub(crate) fn review(
     state: &AppState,
     provider: &dyn LlmProvider,
@@ -928,39 +938,98 @@ pub(crate) fn review(
     mut composed: Composed,
     check: &dyn Fn() -> CallDirective,
     job_id: Option<i64>,
-) -> Result<(Composed, &'static str), String> {
+) -> Result<(Composed, &'static str, Option<&'static str>), String> {
     if provider.locality() != Locality::Local {
-        return Ok((composed, "not_reviewed_cloud"));
+        return Ok((composed, "not_reviewed_cloud", None));
     }
     if composed.finish.claims.is_empty() {
-        return Ok((composed, "reviewed"));
+        return Ok((composed, "reviewed", None));
     }
-    let action = review_action(prepared, &composed.finish.claims);
-    // A request over the input ceiling is not sent: the claims stay as the
-    // staging checks left them.
     let ceiling = limits()?
         .values()
         .input_bytes
         .saturating_sub(INPUT_MARGIN_BYTES);
-    if payload_bytes(&action) > ceiling {
-        return Ok((composed, "review_too_large"));
+    let calls = Calls {
+        state,
+        provider,
+        check,
+        job_id,
+        ceiling,
+    };
+    let status = review_claims(&calls, prepared, &mut composed)?;
+    let scope = if composed.finish.claims.is_empty() {
+        None
+    } else {
+        Some(check_rule_scope(&calls, prepared, &mut composed)?)
+    };
+    Ok((composed, status, scope))
+}
+
+/// What a check after composing calls the provider with.
+struct Calls<'a> {
+    state: &'a AppState,
+    provider: &'a dyn LlmProvider,
+    check: &'a dyn Fn() -> CallDirective,
+    job_id: Option<i64>,
+    /// The input ceiling a request must keep under to be sent.
+    ceiling: u64,
+}
+
+impl Calls<'_> {
+    /// Ask `action` `times` times, decoding each reply; a failed call is an
+    /// unreadable sample, unless the job was cancelled or lost.
+    fn samples<T>(
+        &self,
+        action: &CompletionAction,
+        times: usize,
+        decode: impl Fn(&str) -> Option<T>,
+    ) -> Result<Vec<Option<T>>, String> {
+        let mut samples = Vec::with_capacity(times);
+        for _ in 0..times {
+            samples.push(
+                match complete(
+                    self.state,
+                    self.provider,
+                    action,
+                    None,
+                    self.check,
+                    self.job_id,
+                ) {
+                    Ok(completion) => decode(&completion.text),
+                    Err(error) if (self.check)() != CallDirective::Continue => return Err(error),
+                    Err(_) => None,
+                },
+            );
+        }
+        Ok(samples)
+    }
+}
+
+/// Ask the reviewer [`claim_review::REVIEW_SAMPLES`] times and leave out
+/// each claim a majority judges an overreach.
+fn review_claims(
+    calls: &Calls<'_>,
+    prepared: &Prepared,
+    composed: &mut Composed,
+) -> Result<&'static str, String> {
+    let action = review_action(prepared, &composed.finish.claims);
+    // A request over the input ceiling is not sent: the claims stay as the
+    // staging checks left them.
+    if payload_bytes(&action) > calls.ceiling {
+        return Ok("review_too_large");
     }
     // One sample's verdicts vary between identical calls, so the review is
     // asked several times and a claim left out on a majority (#2458).
     let claims = composed.finish.claims.len();
-    let mut samples = Vec::with_capacity(claim_review::REVIEW_SAMPLES);
-    for _ in 0..claim_review::REVIEW_SAMPLES {
-        // A failed call is an unreadable sample, unless the job was
-        // cancelled or lost.
-        let sample = match complete(state, provider, &action, None, check, job_id) {
-            Ok(completion) => claim_review::decode(&completion.text, claims),
-            Err(error) if check() != CallDirective::Continue => return Err(error),
-            Err(_) => None,
-        };
-        samples.push(sample.unwrap_or_default());
-    }
+    let samples: Vec<_> = calls
+        .samples(&action, claim_review::REVIEW_SAMPLES, |text| {
+            claim_review::decode(text, claims)
+        })?
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
     let Some(overreaching) = claim_review::overreaching(&samples, claims) else {
-        return Ok((composed, "review_unavailable"));
+        return Ok("review_unavailable");
     };
     let mut overreaching = overreaching.into_iter();
     let before = composed.finish.claims.len();
@@ -973,7 +1042,108 @@ pub(crate) fn review(
         composed.left_out += dropped;
         *composed.reasons.entry("claim_overreaches").or_default() += dropped;
     }
-    Ok((composed, "reviewed"))
+    Ok("reviewed")
+}
+
+/// Check the scope of each rule a claim cites (#2482): `rule-scope@1` says
+/// which of the claim's cited capabilities the claim states the rule for,
+/// asked [`rule_scope::SCOPE_SAMPLES`] times, and a claim a majority reads
+/// as stating a rule beyond the capabilities it is listed under (or under
+/// which an identical rule is listed) is left out as `rule_scope_widened`.
+/// A claim citing no rule or no Capability fact is not checked.
+fn check_rule_scope(
+    calls: &Calls<'_>,
+    prepared: &Prepared,
+    composed: &mut Composed,
+) -> Result<&'static str, String> {
+    let rules = spec::excerpt_rules(&prepared.text);
+    let by_name = capability_ids(&prepared.facts);
+    let capabilities: BTreeSet<&str> = by_name.values().flatten().copied().collect();
+    // The capabilities a rule holds for: those it is listed under, and those
+    // an identical rule is listed under.
+    let holds_for = |rule: &str| -> BTreeSet<&str> {
+        let Some((_, text)) = rules.get(rule) else {
+            return BTreeSet::new();
+        };
+        rules
+            .values()
+            .filter(|(_, other)| other == text)
+            .flat_map(|(names, _)| names)
+            .filter_map(|name| by_name.get(name.as_str()))
+            .flatten()
+            .copied()
+            .collect()
+    };
+    let mut checked = Vec::new();
+    let mut claims = Vec::new();
+    let mut in_scope = Vec::new();
+    for (at, claim) in composed.finish.claims.iter().enumerate() {
+        let cited = |keep: &dyn Fn(&str) -> bool| -> Vec<&str> {
+            claim
+                .citations
+                .iter()
+                .map(String::as_str)
+                .filter(|id| keep(id))
+                .collect()
+        };
+        let cited_rules = cited(&|id| rules.contains_key(id));
+        let cited_capabilities = cited(&|id| capabilities.contains(id));
+        if cited_rules.is_empty() || cited_capabilities.is_empty() {
+            continue;
+        }
+        in_scope.push(
+            cited_rules
+                .iter()
+                .map(|rule| (*rule, holds_for(rule)))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        claims.push(rule_scope::ScopeClaim {
+            statement: &claim.statement,
+            citations: &claim.citations,
+            rules: cited_rules,
+            capabilities: cited_capabilities,
+        });
+        checked.push(at);
+    }
+    if claims.is_empty() {
+        return Ok("none_cite_rules");
+    }
+    let cited: BTreeSet<String> = claims
+        .iter()
+        .flat_map(|claim| claim.citations.iter().cloned())
+        .collect();
+    let action = rule_scope::action(
+        &claims,
+        &cited_facts(prepared, &cited),
+        format!(
+            "rule-scope:{}:{}:{}",
+            prepared.address.document, prepared.address.section, prepared.address.scope
+        ),
+    );
+    if payload_bytes(&action) > calls.ceiling {
+        return Ok("too_large");
+    }
+    let samples = calls.samples(&action, rule_scope::SCOPE_SAMPLES, |text| {
+        rule_scope::decode(text, &claims)
+    })?;
+    let Some(widened) = rule_scope::widened_claims(&samples, &in_scope) else {
+        return Ok("unavailable");
+    };
+    let dropped: BTreeSet<usize> = checked
+        .into_iter()
+        .zip(widened)
+        .filter_map(|(at, widened)| widened.then_some(at))
+        .collect();
+    if !dropped.is_empty() {
+        let mut at = 0;
+        composed.finish.claims.retain(|_| {
+            at += 1;
+            !dropped.contains(&(at - 1))
+        });
+        composed.left_out += dropped.len();
+        *composed.reasons.entry("rule_scope_widened").or_default() += dropped.len();
+    }
+    Ok("checked")
 }
 
 /// The reviewer's action for `claims` of `prepared`: each cited fact's
@@ -984,24 +1154,7 @@ fn review_action(prepared: &Prepared, claims: &[Claim]) -> CompletionAction {
         .iter()
         .flat_map(|claim| claim.citations.iter().cloned())
         .collect();
-    let shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, &cited);
-    let rules = spec::excerpt_rules(&prepared.text);
-    let facts = cited
-        .iter()
-        .map(|id| {
-            let text = match rules.get(id) {
-                Some((capabilities, rule)) => {
-                    let capabilities: Vec<String> = capabilities
-                        .iter()
-                        .map(|name| format!("\"{name}\""))
-                        .collect();
-                    format!("Rule of capability {}: {rule}", capabilities.join(", "))
-                }
-                None => shown.text(id).unwrap_or_default().to_owned(),
-            };
-            (id.clone(), text)
-        })
-        .collect();
+    let facts = cited_facts(prepared, &cited);
     let review: Vec<claim_review::ReviewClaim<'_>> = claims
         .iter()
         .map(|claim| claim_review::ReviewClaim {
@@ -1017,6 +1170,30 @@ fn review_action(prepared: &Prepared, claims: &[Claim]) -> CompletionAction {
             prepared.address.document, prepared.address.section, prepared.address.scope
         ),
     )
+}
+
+/// The text of each `cited` fact of `prepared` by citation id: its indexed
+/// text, and for a rule of the excerpt the capability it is listed under
+/// and the rule in domain terms (#2419).
+fn cited_facts(prepared: &Prepared, cited: &BTreeSet<String>) -> BTreeMap<String, String> {
+    let shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, cited);
+    let rules = spec::excerpt_rules(&prepared.text);
+    cited
+        .iter()
+        .map(|id| {
+            let text = match rules.get(id) {
+                Some((capabilities, rule)) => {
+                    let capabilities: Vec<String> = capabilities
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect();
+                    format!("Rule of capability {}: {rule}", capabilities.join(", "))
+                }
+                None => shown.text(id).unwrap_or_default().to_owned(),
+            };
+            (id.clone(), text)
+        })
+        .collect()
 }
 
 /// Compose one section as a durable job and stage the draft for review. A
@@ -1170,7 +1347,8 @@ pub(crate) fn compose_gated(
             ..ComposeOutcome::none(reason)
         });
     }
-    let (composed, review) = review(state, provider, prepared, composed, check, Some(job_id))?;
+    let (composed, review, rule_scope) =
+        review(state, provider, prepared, composed, check, Some(job_id))?;
     let staged = if composed.finish.claims.is_empty() {
         ComposeOutcome {
             left_out: composed.left_out,
@@ -1192,6 +1370,7 @@ pub(crate) fn compose_gated(
     Ok(ComposeOutcome {
         gated: Some(stats),
         review: Some(review),
+        rule_scope,
         ..staged
     })
 }

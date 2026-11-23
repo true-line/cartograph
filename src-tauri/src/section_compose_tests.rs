@@ -1,6 +1,7 @@
 //! AC-0862 (T-0862): a section is composed in one bounded call from the
 //! section D1 compiles and the facts it cites, and staged for review.
 use super::*;
+use agents::section_draft::ClaimKind;
 use core_graph::{FactKey, GraphStore};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use llm::bounded::{
@@ -625,7 +626,7 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
         .to_string(),
         prompts: Mutex::new(Vec::new()),
     };
-    let (kept, how) = review(
+    let (kept, how, _) = review(
         &state,
         &reviewer,
         &prepared,
@@ -655,7 +656,7 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
         reply: "not a review".into(),
         prompts: Mutex::new(Vec::new()),
     };
-    let (kept, how) = review(
+    let (kept, how, _) = review(
         &state,
         &unreadable,
         &prepared,
@@ -686,7 +687,7 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
             Err(ProviderError::Unsupported("fixture"))
         }
     }
-    let (kept, how) = review(
+    let (kept, how, _) = review(
         &state,
         &Failing,
         &prepared,
@@ -707,6 +708,114 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
         )
         .is_err()
     );
+}
+
+/// AC-1330 (T-1330, #2482): on a local lane a claim most samples read as
+/// stating a cited rule beyond the capabilities it is listed under (or
+/// under which an identical rule is listed) is left out before staging;
+/// a claim citing no rule is not checked, and no readable reply keeps all.
+#[test]
+fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
+    let (_dir, state) = state();
+    let mut prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let (checkout, refund) = (id("cap:checkout"), id("cap:refund"));
+    let (valid, valid_too, window) = (id("rule:valid"), id("rule:valid-too"), id("rule:window"));
+    prepared.text.push_str(&format!(
+        "\n### Rules the capabilities enforce (from 1.5)\n\n\
+         | Capability | Rule | Citation |\n|---|---|---|\n\
+         | Checkout | A card must be valid | {valid} |\n\
+         | Refund | A card must be valid | {valid_too} |\n\
+         | Refund | Refunds within 30 days | {window} |\n"
+    ));
+    let claim = |statement: &str, citations: &[&String]| Claim {
+        statement: statement.into(),
+        kind: ClaimKind::Implemented,
+        citations: citations.iter().map(|id| (*id).clone()).collect(),
+    };
+    let composed = || Composed {
+        finish: SectionDraftFinish {
+            address: prepared.address.clone(),
+            claims: vec![
+                claim("Checkout needs a valid card.", &[&valid, &checkout]),
+                claim("Every payment needs a valid card.", &[&valid, &checkout]),
+                claim(
+                    "Refunds need a valid card too.",
+                    &[&valid, &checkout, &refund],
+                ),
+                claim(
+                    "Checkout refunds within 30 days.",
+                    &[&window, &refund, &checkout],
+                ),
+                claim("Shoppers check out.", &[&checkout]),
+            ],
+        },
+        left_out: 0,
+        reasons: BTreeMap::new(),
+    };
+    // One provider answers both checks: the review cannot read this reply
+    // and keeps every claim; the scope check reads it.
+    let checker = Scripted {
+        reply: json!({"scopes": [
+            {"claim": 1, "rule": valid, "applies_to": [checkout]},
+            {"claim": 2, "rule": valid, "applies_to": ["all"]},
+            {"claim": 3, "rule": valid, "applies_to": [checkout, refund]},
+            {"claim": 4, "rule": window, "applies_to": [refund, checkout]},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let (kept, how, scope) = review(
+        &state,
+        &checker,
+        &prepared,
+        composed(),
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap();
+    assert_eq!((how, scope), ("review_unavailable", Some("checked")));
+    let statements: Vec<&str> = kept
+        .finish
+        .claims
+        .iter()
+        .map(|claim| claim.statement.as_str())
+        .collect();
+    assert_eq!(
+        statements,
+        [
+            "Checkout needs a valid card.",
+            "Refunds need a valid card too.",
+            "Shoppers check out."
+        ]
+    );
+    assert_eq!((kept.left_out, kept.reasons["rule_scope_widened"]), (2, 2));
+    // The scope check is asked three times, with the rule under its
+    // capability and only the claims citing a rule.
+    let prompts = checker.prompts.lock().unwrap().clone();
+    let scoped: Vec<&String> = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("[rules: "))
+        .collect();
+    assert_eq!(scoped.len(), agents::rule_scope::SCOPE_SAMPLES);
+    assert!(scoped[0].contains(&format!(
+        "{valid}: Rule of capability \"Checkout\": A card must be valid"
+    )));
+    assert!(!scoped[0].contains("Shoppers check out."));
+    // A reply that is not the schema's keeps every claim.
+    let unreadable = Scripted {
+        reply: "not a scope".into(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let (kept, _, scope) = review(
+        &state,
+        &unreadable,
+        &prepared,
+        composed(),
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap();
+    assert_eq!((scope, kept.finish.claims.len()), (Some("unavailable"), 5));
 }
 
 /// AC-1328 (T-1328, #2449): a local composition whose reply lost two claims
