@@ -1,13 +1,18 @@
 //! The rule-scope check's request and reply, as pure functions (#2482,
 //! #2495).
 //!
-//! `rule-scope@2` reads, for each business rule a claim cites, the claim
+//! `rule-scope@2` and `@3` read, for each business rule a claim cites, the claim
 //! beside that rule and the capabilities the rule holds for, and answers
 //! `widened` when the claim states the rule's condition, message or outcome
 //! for anything beyond them (a sign-in error of one provider stated for
 //! every provider, a custom-alias limit stated for random aliases too), or
 //! `within`. A claim most samples read as widening any of its rules is left
 //! out. It calls no tool and writes nothing.
+//!
+//! `rule-scope@3` adds that wording a rule differently or less exactly is
+//! not widening it: on re-check 12 (#1752) two of three samples read
+//! "redirects" for a rule that "runs flash" as widened, which is a question
+//! of accuracy for the reviewer, not of scope.
 //!
 //! `rule-scope@1` asked instead which of the claim's cited capabilities the
 //! claim states each rule for; on a local model its replies listed every
@@ -22,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// The role's name and version.
-pub const RULE_SCOPE_ROLE: &str = "rule-scope@2";
+pub const RULE_SCOPE_ROLE: &str = "rule-scope@3";
 
 /// The answer for a claim stating a rule beyond its capabilities.
 pub const WIDENED: &str = "widened";
@@ -39,8 +44,9 @@ cite. Each rule holds only for the capabilities it is listed under. For each cla
 pair, answer \"widened\" when the claim states that rule's condition, message or outcome for \
 anything beyond those capabilities: another provider, form, page, API call, caller group or \
 kind of item, or every one of a kind. Otherwise answer \"within\", including when the claim \
-names other capabilities for other reasons in the same sentence. Judge only what the claim \
-says this rule applies to.";
+names other capabilities for other reasons in the same sentence, and when the claim words the \
+rule's condition or outcome differently or less exactly but only for those capabilities. Judge \
+only what the claim says this rule applies to, not whether it states the rule accurately.";
 
 /// One cited rule: its citation id, the rule in domain terms and the names
 /// of the capabilities it holds for.

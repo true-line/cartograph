@@ -928,6 +928,93 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
     assert_eq!((scope, kept.finish.claims.len()), (Some("unavailable"), 6));
 }
 
+/// AC-1338 (T-1338, #1752 re-check 12): identical rules a claim cites are
+/// one pair, and a claim citing every citable copy of an identical rule and
+/// no capability beyond those it holds for is not asked about that rule.
+#[test]
+fn a_claim_citing_every_copy_of_an_identical_rule_is_not_asked() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:other", "Other"))
+        .unwrap();
+    let mut prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let (checkout, refund) = (id("cap:checkout"), id("cap:refund"));
+    let (valid, valid_too) = (id("rule:valid"), id("rule:valid-too"));
+    prepared.text.push_str(&format!(
+        "\n### Rules the capabilities enforce (from 1.5)\n\n\
+         | Capability | Rule | Citation |\n|---|---|---|\n\
+         | Checkout | A card must be valid | {valid} |\n\
+         | Refund | A card must be valid | {valid_too} |\n"
+    ));
+    let other = id("cap:other");
+    let claim = |statement: &str, citations: &[&String]| Claim {
+        statement: statement.into(),
+        kind: ClaimKind::Implemented,
+        citations: citations.iter().map(|id| (*id).clone()).collect(),
+    };
+    let composed = |claims: Vec<Claim>| Composed {
+        finish: SectionDraftFinish {
+            address: prepared.address.clone(),
+            claims,
+        },
+        left_out: 0,
+        reasons: BTreeMap::new(),
+    };
+    let asked = |claims: Vec<Claim>, reply: serde_json::Value| {
+        let checker = Scripted {
+            reply: reply.to_string(),
+            prompts: Mutex::new(Vec::new()),
+        };
+        let (kept, _, scope) = review(
+            &state,
+            &checker,
+            &prepared,
+            composed(claims),
+            &|| CallDirective::Continue,
+            None,
+        )
+        .unwrap();
+        let prompts = checker.prompts.lock().unwrap().clone();
+        let scoped = prompts
+            .iter()
+            .find(|prompt| prompt.contains("<pairs>"))
+            .cloned();
+        (kept.finish.claims.len(), scope, scoped)
+    };
+    // Both copies and only their capabilities: settled without asking.
+    let (kept, scope, scoped) = asked(
+        vec![claim(
+            "Checkout and refunds need a valid card.",
+            &[&valid, &valid_too, &checkout, &refund],
+        )],
+        json!({"answers": [{"pair": "1.1", "answer": "widened"}]}),
+    );
+    assert_eq!((kept, scope, scoped), (1, Some("settled"), None));
+    // One copy only: asked, as one pair.
+    let (kept, scope, scoped) = asked(
+        vec![claim("Checkout needs a valid card.", &[&valid, &checkout])],
+        json!({"answers": [{"pair": "1.1", "answer": "widened"}]}),
+    );
+    assert_eq!((kept, scope), (0, Some("checked")));
+    assert!(scoped.unwrap().contains("Answer each pair once: 1 in all."));
+    // Both copies but a capability beyond them: asked, both copies as one
+    // pair.
+    let (kept, scope, scoped) = asked(
+        vec![claim(
+            "Checkout, refunds and others need a valid card.",
+            &[&valid, &valid_too, &checkout, &other],
+        )],
+        json!({"answers": [{"pair": "1.1", "answer": "widened"}]}),
+    );
+    assert_eq!((kept, scope), (0, Some("checked")));
+    let scoped = scoped.unwrap();
+    assert!(scoped.contains("Answer each pair once: 1 in all."));
+    assert!(scoped.contains(&format!("1.1  Claim 1: \"Checkout, refunds and others need a valid card.\"  |  Rule {valid} of \"Checkout\", \"Refund\"")));
+}
+
 /// AC-1328 (T-1328, #2449): a local composition whose reply lost two claims
 /// to uncited routes, numbers or endpoints is asked once more with the
 /// correction, and the screened reply keeping more claims goes on; one such
