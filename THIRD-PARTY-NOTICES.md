@@ -3261,7 +3261,7 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- cookie 0.18.1 — https://github.com/SergioBenitez/cookie-rs
+- cookie 0.18.3 — https://github.com/SergioBenitez/cookie-rs
 
 ```
                               Apache License
