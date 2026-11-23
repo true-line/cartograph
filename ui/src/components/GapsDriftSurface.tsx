@@ -12,6 +12,7 @@ import {
 import { HelpTip } from './HelpTip';
 import { TierBadge } from './TierBadge';
 import { ProposalHistory, type ProposalHistoryProps } from './ProposalHistory';
+import { AttestedRecords, type AttestedRecordsProps } from './AttestedRecords';
 import type {
   StagedProposal,
   ClassEscalationOutcome,
@@ -50,9 +51,12 @@ export interface GapsDriftSurfaceProps {
    *  honest "not broker-executable" — the register never invites a click
    *  the broker is known to decline. */
   allowedEdgeLabels?: string[] | null;
+  /** Attested answers to Gaps (ADR-0090, AC-1081). A Gap they answer stays
+   *  listed and counted in the lanes. */
+  attested?: AttestedRecordsProps;
 }
 
-type Tab = 'lanes' | 'tiers' | 'drift' | 'proposals';
+type Tab = 'lanes' | 'tiers' | 'drift' | 'proposals' | 'attested';
 
 /** Stable presentational gap ids (G-01…) over the register's sorted order. */
 function gapId(index: number): string {
@@ -319,6 +323,7 @@ export function GapsDriftSurface({
   onEscalateClass,
   onDecideProposal,
   allowedEdgeLabels = null,
+  attested,
 }: GapsDriftSurfaceProps) {
   const [tab, setTab] = useState<Tab>('lanes');
   // Reconcile with findings_summary's own definition (#241): a gap edge
@@ -381,6 +386,7 @@ export function GapsDriftSurface({
             ['tiers', 'By escalation tier'],
             ['drift', 'Drift'],
             ...(proposalHistory ? [['proposals', 'Proposal history']] : []),
+            ...(attested ? [['attested', `Attested answers · ${attested.records.length}`]] : []),
           ] as [Tab, string][]
         ).map(([id, label]) => (
           <button
@@ -397,6 +403,20 @@ export function GapsDriftSurface({
       </div>
 
       {tab === 'proposals' && proposalHistory && <ProposalHistory {...proposalHistory} />}
+
+      {tab === 'attested' && attested && (
+        <div className="register-lanes">
+          <p className="muted">
+            Stated by the engineer or by agents, not recovered from the system. An answered Gap
+            stays open and counted; agent-only answers stay unconfirmed until you confirm them.
+          </p>
+          <AttestedRecords
+            {...attested}
+            records={attested.records.filter((view) => view.target.kind === 'gap')}
+            empty="No attested answers yet."
+          />
+        </div>
+      )}
 
       {tab === 'lanes' && (
         <div className="register-lanes">

@@ -326,7 +326,11 @@ session with the task grant stages a finding of a task it owns with
 `cartograph_task_propose_attested` (task, finding, Gap and slot): the same
 checks apply, no engineer is recorded as directing it, and the reply carries
 the record's id and standing, never its contributors. No MCP tool confirms,
-disputes or withdraws (AC-1079, part 3). Not built: surfaces.
+disputes or withdraws (AC-1079, part 3). The Gaps register (an
+"Attested answers" tab) and the Spec Workbench list each record apart from
+recovered content, with its own label and every contributor by name and
+verb, and offer the engineer confirm, dispute and withdraw at the count
+read; a Gap an answer targets stays listed and counted (AC-1081).
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting

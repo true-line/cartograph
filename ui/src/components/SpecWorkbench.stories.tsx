@@ -467,6 +467,41 @@ export const CuratedSectionUnreadStatesNothing: Story = {
   },
 };
 
+// AC-1081 (T-1081): attested records sit apart from recovered content, with
+// their own label (no tier badge), contributors and the engineer's review.
+export const AttestedRecordsAreApartAndReviewable: Story = {
+  args: {
+    attested: {
+      records: [
+        {
+          record_id: 'attested-v1:a2',
+          citation_id: 'A-00000000000000a2',
+          target: {
+            kind: 'section',
+            address: { catalogue_version: 'v1', document: 'D1', section: '1.3', scope: 'system' },
+          },
+          statement: 'Orders over the limit need a second approval.',
+          standing: 'engineer_backed',
+          label: 'attested',
+          attestation_count: 1,
+          contributors: [{ display_name: 'Placeholder Engineer', kind: 'engineer', verb: 'stated', run: null }],
+        },
+      ],
+      onReview: fn(),
+    },
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Attested · 1')).toBeInTheDocument();
+    const row = within(canvas.getByTestId('attested-row'));
+    await expect(row.getByTestId('attested-label')).toHaveTextContent('attested');
+    await expect(row.getByText('D1 §1.3')).toBeInTheDocument();
+    await expect(row.getByTestId('attested-contributors')).toHaveTextContent('Placeholder Engineer stated');
+    await userEvent.click(row.getByRole('button', { name: 'Withdraw' }));
+    await expect(args.attested?.onReview).toHaveBeenCalled();
+  },
+};
+
 export const VerifiedOnlyExport: Story = {
   args: {
     bundle: { ...BUNDLE, mode: 'verified-only' },

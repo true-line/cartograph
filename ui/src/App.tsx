@@ -49,6 +49,7 @@ import {
 import { EgressConsentDialog, type EgressPreview } from './components/EgressConsentDialog';
 import type { SectionAddress, StoredSectionDraft } from './sectionDocument';
 import { useAreaExpert } from './areaExpert';
+import { useAttested, type AttestedState } from './attested';
 import { useSpecialistActivityStore } from './specialistActivityStore';
 import { InvestigationQuickDispatch } from './components/InvestigationQuickDispatch';
 import { AgentPoolPanel } from './components/AgentPoolPanel';
@@ -662,6 +663,17 @@ export default function App() {
 
   // Ask an area's expert (#2057, AC-0932): the same one-action consent.
   const areaExpert = useAreaExpert(view === 'spec' && backend === 'up');
+  // ADR-0090 (AC-1081): attested records, reviewed from the surface showing them.
+  const workbenchAttested = useAttested(view === 'spec' && backend === 'up', 'workbench');
+  const registerAttested = useAttested(view === 'gaps' && backend === 'up', 'gaps_register');
+  const attestedProps = (state: AttestedState) => ({
+    records: state.records,
+    busy: state.busy,
+    error: state.error,
+    needsEngineer: state.needsEngineer,
+    onSetEngineer: state.setEngineer,
+    onReview: backend === 'up' ? state.review : undefined,
+  });
 
   // ⌘K / Ctrl+K toggles the palette; ⌘1–⌘8 jump straight to a surface;
   // '?' or F1 opens Help on the current surface's topic (#154).
@@ -984,6 +996,7 @@ export default function App() {
                 onSelect: areaExpert.select,
                 onAsk: areaExpert.ask,
               }}
+              attested={attestedProps(workbenchAttested)}
               mode={specMode}
               decisions={curation}
               busy={specBusy}
@@ -1022,6 +1035,7 @@ export default function App() {
             drift={registerArtifact('drift_register.md')}
             registerFindings={registerFindings}
             allowedEdgeLabels={escalationEdgeLabels}
+            attested={attestedProps(registerAttested)}
             proposalHistory={{
               proposals: stagedProposals,
               recordStates: curatedStates,
