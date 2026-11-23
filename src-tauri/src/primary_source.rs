@@ -2050,6 +2050,7 @@ impl PrimarySourceStore {
                 environments_captured: false,
                 starts_captured: false,
                 toolchain_captured: false,
+                documents_captured: false,
                 _guard: None,
             });
         }
@@ -2124,8 +2125,6 @@ impl PrimarySourceStore {
         // selection, are tried with the lanes first. When the whole set
         // cannot be retained, the lanes are retained without them and the
         // readers read the checkout, so they never cost a lane its capture.
-        // Shipped JVM class files (AC-1215) are tried with them first, and
-        // are the first left out.
         let environments = ingest::environments::environment_paths(root).ok();
         let starts = ingest::schedules::schedule_paths(root)
             .and_then(|mut paths| {
@@ -2141,17 +2140,33 @@ impl PrimarySourceStore {
             .flatten()
             .cloned()
             .collect();
+        // Droppable groups, in the order they are kept: shipped JVM class
+        // files (AC-1215), then the documentation walk's selection
+        // (AC-1065). Each is tried with the readers and everything before
+        // it, and the last is the first left out, so documents never cost a
+        // class file, a reader or a lane its capture.
         let classes = if wants_lanes {
             adapters_artifact_jvm::class_paths(root).unwrap_or_default()
         } else {
             Vec::new()
         };
+        let documents = spec::documentation_paths(root).ok();
+        let groups = [(!classes.is_empty()).then_some(classes), documents];
         let mut capture = None;
-        if !classes.is_empty() {
+        let mut kept = 0;
+        for count in (1..=groups.len()).rev() {
+            if groups[count - 1].is_none() {
+                continue;
+            }
             let mut extra = readers.clone();
-            extra.extend_from_slice(&classes);
-            capture = capture_paths(&with(&extra)).ok();
+            extra.extend(groups[..count].iter().flatten().flatten().cloned());
+            if let Ok(held) = capture_paths(&with(&extra)) {
+                capture = Some(held);
+                kept = count;
+                break;
+            }
         }
+        let documents_captured = kept == groups.len();
         if capture.is_none() && (environments.is_some() || starts.is_some() || toolchain.is_some())
         {
             capture = capture_paths(&with(&readers)).ok();
@@ -2175,6 +2190,7 @@ impl PrimarySourceStore {
             environments_captured,
             starts_captured,
             toolchain_captured,
+            documents_captured,
             _guard: Some(guard),
         })
     }
@@ -2326,6 +2342,10 @@ pub struct PrimaryInput {
     /// Whether the capture holds the toolchain reader's whole selection
     /// (AC-1063); when it does not, that reader reads the checkout.
     pub toolchain_captured: bool,
+    /// Whether the capture holds the documentation walk's whole selection
+    /// (AC-1065); when it does not, documents and found ADRs are read from
+    /// the checkout.
+    pub documents_captured: bool,
     _guard: Option<RetentionGuard>,
 }
 
