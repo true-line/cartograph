@@ -761,6 +761,8 @@ export default function App() {
       ? { kind: 'layer', label: `Atlas · ${atlasLayer}` }
       : view === 'investigations' && investigations.detail?.scope.type === 'neighborhood'
         ? { kind: 'trail', label: `Investigation · ${investigations.detail.scope.hops} hop(s)` }
+      : view === 'investigations' && investigations.detail?.scope.type === 'area'
+        ? { kind: 'trail', label: 'Investigation · Area' }
       : { kind: 'system', label: 'Whole system' };
   // Atlas names repositories as Workspace does, not by `local/src_<hash>` keys (#1601).
   const atlasRepoLabel = useMemo(() => createRepositoryLabeler(systemContents), [systemContents]);

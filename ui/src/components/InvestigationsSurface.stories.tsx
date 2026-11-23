@@ -85,6 +85,25 @@ export const AreaScopedQuestion: Story = {
   },
 };
 
+export const AreaChoicesReloadOnRefresh: Story = {
+  // #2477: areas recovered after the first read appear on refresh.
+  beforeEach: () => {
+    let published = false;
+    mockIPC((command) => {
+      if (command === 'area_choices') { const reply = published ? areaChoices : []; published = true; return reply; }
+      return null;
+    });
+    return () => clearMocks();
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.selectOptions(canvas.getByLabelText('Scope'), 'area');
+    await waitFor(() => expect(canvas.getByRole('option', { name: 'No areas recovered' })).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: 'Refresh investigations' }));
+    await waitFor(() => expect(canvas.getByRole('option', { name: 'Aliases · 4 files' })).toBeInTheDocument());
+  },
+};
+
 export const AreaScopeDetail: Story = {
   // #2477: a saved area task names its area, not an anchor and hop count.
   beforeEach: () => {

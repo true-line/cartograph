@@ -45,7 +45,11 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const chooseSpecialist = (id: SpecialistId) => state.updateComposer({ specialistId: id, limitProfile: profileFor(state.catalog, id) });
   const setProviderMode = (providerMode: InvestigationProviderMode) => state.updateComposer({ providerMode });
   const setQuestion = (question: string) => state.updateComposer({ question });
-  const setScopeType = (scopeType: InvestigationScopeType) => state.updateComposer({ scopeType });
+  const setScopeType = (scopeType: InvestigationScopeType) => {
+    // An empty earlier read is retried when Area is chosen again.
+    if (scopeType === 'area' && areas?.length === 0) setAreas(null);
+    state.updateComposer({ scopeType });
+  };
   const setAnchor = (anchor: string) => state.updateComposer({ anchor });
   const setHops = (hops: number) => state.updateComposer({ hops });
   const setArea = (area: string) => state.updateComposer({ area });
@@ -130,7 +134,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
     questionBytes <= 2048 && investigationScopeValid(scope) &&
     (completionVersion ? completionBound && requirements.length === 0 :
       state.draftObligations.length === 0 && (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0)) && requestBytes <= requestLimit;
-  const refresh = () => { void state.loadCatalog(); void state.loadHistory(); onRefreshActivity?.(); };
+  // Areas can appear after ingest or overlay publication, so a refresh reads them again.
+  const refresh = () => { void state.loadCatalog(); void state.loadHistory(); onRefreshActivity?.(); setAreas(null); };
 
   return <section className="investigations-surface" aria-label="Investigations">
     <header className="investigation-heading"><div><h2>Investigations</h2>
