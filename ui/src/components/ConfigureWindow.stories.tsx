@@ -19,6 +19,7 @@ const defaultModel: LocalModelChoice = { model: 'qwen3:8b', default_model: 'qwen
 let model = defaultModel;
 let contextWindow: number | null = null;
 let ollamaPort: number | null = null;
+let acpAgent: { program: string; args: string[] } | null = null;
 let modelFailure: string | null = null;
 let installed: Array<{ name: string; digest: string }> | string = [
   { name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
@@ -27,7 +28,7 @@ const meta = {
   title: 'Surfaces/ConfigureWindow', component: ConfigureWindow, args: { api: tauriRunLimitsApi },
   beforeEach: () => {
     calls = []; stored = shipped; loadFailure = null; model = defaultModel; modelFailure = null; contextWindow = null;
-    ollamaPort = null;
+    ollamaPort = null; acpAgent = null;
     installed = [{ name: 'qwen3:8b', digest: '500a1f067a9f0000' }, { name: 'qwen3:30b-a3b', digest: 'ad815644918f0000' }];
     mockIPC((command, args) => {
       calls.push([command, args]);
@@ -53,6 +54,13 @@ const meta = {
         const port = (args as { port: number | null }).port;
         ollamaPort = port === 11434 ? null : port;
         return ollamaPort;
+      }
+      if (command === 'get_acp_agent') return acpAgent;
+      if (command === 'set_acp_agent') {
+        const command = (args as { command: { program: string; args: string[] } | null }).command;
+        if (command && !command.program.startsWith('/')) throw new Error('ACP agent command: the program must be an absolute path of 1..=1024 characters');
+        acpAgent = command;
+        return acpAgent;
       }
       if (command === 'set_local_context_window') { contextWindow = (args as { tokens: number | null }).tokens; return contextWindow; }
       throw new Error(`unexpected command ${command}`);
@@ -234,5 +242,29 @@ export const ChooseOllamaPortThenDefault: Story = {
     await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('127.0.0.1:11434'));
     await expect(input).toHaveValue(11434);
     await expect(calls).toContainEqual(['set_local_ollama_port', { port: null }]);
+  },
+};
+
+export const SetThenClearAcpAgent: Story = {
+  // AC-1350: the ACP agent is an absolute program with one argument per line; a host refusal is shown; it can be cleared.
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement);
+    const section = within(await c.findByRole('region', { name: 'ACP agent' }));
+    const program = await section.findByLabelText(/^Program/);
+    await expect(section.getByRole('button', { name: 'Use this agent' })).toBeDisabled();
+    await expect(section.getByRole('button', { name: 'Clear agent' })).toBeDisabled();
+    await userEvent.type(program, 'agent');
+    await userEvent.click(section.getByRole('button', { name: 'Use this agent' }));
+    await waitFor(() => expect(section.getByRole('alert')).toHaveTextContent('absolute path'));
+    await userEvent.clear(program);
+    await userEvent.type(program, '/opt/agent/bin/acp');
+    await userEvent.type(section.getByLabelText(/^Arguments/), '--acp{enter}{enter}  --model x  ');
+    await userEvent.click(section.getByRole('button', { name: 'Use this agent' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('dispatched to /opt/agent/bin/acp'));
+    await expect(calls).toContainEqual(['set_acp_agent', { command: { program: '/opt/agent/bin/acp', args: ['--acp', '--model x'] } }]);
+    await userEvent.click(section.getByRole('button', { name: 'Clear agent' }));
+    await waitFor(() => expect(section.getByRole('status')).toHaveTextContent('Cleared'));
+    await expect(calls).toContainEqual(['set_acp_agent', { command: null }]);
+    await expect(program).toHaveValue('');
   },
 };
