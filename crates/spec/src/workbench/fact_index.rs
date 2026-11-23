@@ -29,9 +29,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
 /// Artifact id of `fact-index.md`.
-pub(super) const MARKDOWN_ID: &str = "fact-index";
+pub(crate) const MARKDOWN_ID: &str = "fact-index";
 /// Artifact id of `fact-index.json`.
-pub(super) const JSON_ID: &str = "fact-index-json";
+pub(crate) const JSON_ID: &str = "fact-index-json";
 
 /// Schema of the `fact-index.json` body.
 pub const FACT_INDEX_SCHEMA: &str = "cartograph.fact-index/v1";
@@ -822,6 +822,15 @@ pub(super) fn render(
     Ok(content.finish())
 }
 
+/// `fact-index.md` rendered from the content of `fact-index.json`: the
+/// JSON is the [`FactIndex`] itself, so this is the Markdown the export
+/// compiled from it, byte for byte. `None` when `json` is not an index.
+/// The bundle file carries the Markdown only as this rendering (ADR-0086).
+pub(crate) fn markdown_from_json(json: &str) -> Option<String> {
+    let index: FactIndex = serde_json::from_str(json).ok()?;
+    render(&index, true, None).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,6 +1197,45 @@ mod tests {
             )
             .expect_err("withheld by the mode");
         assert_eq!(error.failure(), FactIndexFailure::Withheld);
+    }
+
+    // ADR-0086 amendment (#1582): the bundle file carries `fact-index.md`
+    // as a rendering of `fact-index.json`, and the reader's rendering is the
+    // exported Markdown byte for byte, in both modes. A changed index no
+    // longer renders the Markdown its identity was taken over, so the file
+    // is refused.
+    #[test]
+    fn the_bundle_file_renders_the_markdown_index_byte_for_byte() {
+        use crate::bundle_file::{BundleFileError, read_bundle_file, write_bundle_file};
+        let (nodes, edges) = graph();
+        for mode in [ExportMode::VerifiedOnly, ExportMode::BestEffort] {
+            let bundle = export(&nodes, &edges, mode);
+            let markdown = content(&bundle, MARKDOWN_ID).to_string();
+            assert!(markdown.contains("| "), "{markdown}");
+            assert_eq!(
+                markdown_from_json(content(&bundle, JSON_ID)).as_deref(),
+                Some(markdown.as_str())
+            );
+            let mut file = Vec::new();
+            write_bundle_file(&bundle, &mut file).unwrap();
+            let file = String::from_utf8(file).unwrap();
+            assert!(
+                file.contains("\n\"fact-index.md\":{\"rendered_from\":\"fact-index.json\"},\n"),
+                "the Markdown is not carried as content"
+            );
+            assert!(!file.contains("# Fact and evidence index"));
+            let read = read_bundle_file(&file).unwrap();
+            assert_eq!(read, bundle);
+            assert_eq!(content(&read, MARKDOWN_ID), markdown);
+
+            let row = &index(&bundle).rows[0].citation_id;
+            let tampered = file.replacen(row.as_str(), "fact:tampered", 1);
+            assert_ne!(tampered, file);
+            assert!(matches!(
+                read_bundle_file(&tampered),
+                Err(BundleFileError::Rendering(name)) if name == "fact-index.md"
+            ));
+        }
     }
 
     // AC-0595: the same graph yields the same bytes.
