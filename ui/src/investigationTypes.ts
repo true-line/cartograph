@@ -263,6 +263,11 @@ export interface ReportedTaskUsage {
   input_tokens: string | null; output_tokens: string | null; cache_read_tokens: string | null;
 }
 
+/** #2475: the node and edge counts of one prepared scope snapshot. */
+export interface ScopeSize {
+  scope_snapshot_id: string; nodes: number; edges: number;
+}
+
 /** ADR-0085: the tool-calling runtime a run executed on (app-only read). */
 export interface RunRuntime {
   lane: 'pi' | 'claude'; runtime: string; version: string; runner: string;
@@ -284,6 +289,8 @@ export interface InvestigationDetail extends InvestigationSummary {
   advisory_audit?: AdvisoryAudit;
   reported_usage_exact?: ReportedTaskUsage;
   runtime?: RunRuntime;
+  /** #2475: the prepared scope's node and edge counts (app-only read), when it held one. */
+  scope_size?: ScopeSize;
   completion?: InvestigationCompletionDetail;
   coverage_context?: InvestigationCoverageContext;
   context_owner: string;

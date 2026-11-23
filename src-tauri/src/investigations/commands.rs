@@ -639,7 +639,10 @@ pub(crate) async fn get_investigation(
         let runtime = jobs
             .investigation_runtime(&investigation_id)
             .map_err(|e| e.to_string())?;
-        Ok(read.with_runtime(runtime))
+        let scope_size = jobs
+            .investigation_scope_size(&investigation_id)
+            .map_err(|e| e.to_string())?;
+        Ok(read.with_runtime(runtime).with_scope_size(scope_size))
     })
     .await
 }

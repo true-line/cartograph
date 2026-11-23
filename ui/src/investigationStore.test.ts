@@ -4,7 +4,7 @@ import { clearMocks, mockIPC as mockTauriIPC } from '@tauri-apps/api/mocks';
 import backendInspection from './fixtures/investigation-inspection-backend.json';
 import queryHistoryWire from './fixtures/completion-v9-supported.json';
 import backendQualified from './fixtures/investigation-coverage-backend.json';
-import { desktopDefaultComposer, mergeInvestigationEvents, restoredComposer, useInvestigationStore } from './investigationStore';
+import { desktopDefaultComposer, mergeInvestigationEvents, restoredComposer, useInvestigationStore, validScopeSize } from './investigationStore';
 import { qualifiedCoverageContext, qualifiedDetail, qualifiedResult, inspectionAssessment, inspectionDetail, inspectionTarget, investigationCitations, investigationConsent, investigationDetail, investigationEvents, investigationResult, legacyInvestigationDetail, legacyInvestigationResult } from './investigationFixtures';
 import type { InvestigationCapturedLocation, InvestigationChat, InvestigationCitationRead, InvestigationDetail, InvestigationEvent, InvestigationInspectionTarget, InvestigationResult, StartInvestigationRequest } from './investigationTypes';
 
@@ -58,6 +58,35 @@ afterEach(() => {
   clearMocks();
   vi.unstubAllGlobals();
   useInvestigationStore.setState(useInvestigationStore.getInitialState(), true);
+});
+
+describe('prepared scope size (#2475)', () => {
+  it('accepts only a size bound to the detail scope snapshot', () => {
+    const size = { scope_snapshot_id: 'scope:original', nodes: 312, edges: 540 };
+    expect(validScopeSize(size, 'scope:original')).toBe(true);
+    expect(validScopeSize(size, 'scope:other')).toBe(false);
+    expect(validScopeSize(size, null)).toBe(false);
+    expect(validScopeSize({ ...size, nodes: -1 }, 'scope:original')).toBe(false);
+    expect(validScopeSize({ ...size, nodes: 1.5 }, 'scope:original')).toBe(false);
+    expect(validScopeSize({ ...size, extra: 1 }, 'scope:original')).toBe(false);
+  });
+
+  it('rejects a detail read whose scope size describes another snapshot', async () => {
+    mockIPC((command, args) => command === 'get_investigation'
+      ? { ...investigationDetail('same'), scope_size: { scope_snapshot_id: 'scope:other', nodes: 1, edges: 0 } }
+      : response(command, args));
+    await useInvestigationStore.getState().open('same');
+    expect(useInvestigationStore.getState().detail).toBeNull();
+    expect(useInvestigationStore.getState().error).toContain('could not be refreshed consistently');
+  });
+
+  it('keeps a matching scope size on the detail', async () => {
+    const scope_size = { scope_snapshot_id: 'scope:original', nodes: 312, edges: 540 };
+    mockIPC((command, args) => command === 'get_investigation'
+      ? { ...investigationDetail('same'), scope_size } : response(command, args));
+    await useInvestigationStore.getState().open('same');
+    expect(useInvestigationStore.getState().detail?.scope_size).toEqual(scope_size);
+  });
 });
 
 describe('durable investigation observations (AC-0190)', () => {

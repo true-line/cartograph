@@ -138,6 +138,15 @@ export function validRunRuntime(value: unknown): boolean {
   return (lane === 'pi' || lane === 'claude') && field(runtime) && field(version) && field(runner);
 }
 
+/** #2475: a prepared scope's size, bound to the detail's own scope snapshot. */
+export function validScopeSize(value: unknown, scopeSnapshotId: string | null): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'edges,nodes,scope_snapshot_id') return false;
+  const { scope_snapshot_id, nodes, edges } = value as Record<string, unknown>;
+  const count = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+  return scope_snapshot_id === scopeSnapshotId && count(nodes) && count(edges);
+}
+
 const HEX_HASH = /^[0-9a-f]{64}(?![\s\S])/;
 const CONTEXT_ID = /^context-v2:[0-9a-f]{64}(?![\s\S])/;
 const COVERAGE_ID = /^coverage-context-v1:[0-9a-f]{64}(?![\s\S])/;
@@ -1179,6 +1188,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           throw new Error('Invalid exact usage projection.');
         }
         if ('runtime' in detail && !validRunRuntime(detail.runtime)) throw new Error('Invalid runtime projection.');
+        if ('scope_size' in detail && !validScopeSize(detail.scope_size, detail.scope_snapshot_id)) throw new Error('Invalid scope size projection.');
         if (get().conversationId && detail.conversation_id !== get().conversationId) {
           ++conversationRequest;
           conversationRefreshPending = null;

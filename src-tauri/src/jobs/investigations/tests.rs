@@ -22,6 +22,9 @@ mod held_recovery_tests;
 #[path = "run_runtimes_tests.rs"]
 mod run_runtimes_tests;
 
+#[path = "scope_sizes_tests.rs"]
+mod scope_sizes_tests;
+
 struct Fixture {
     store: JobStore,
     locks: JobExecutionLocks,
