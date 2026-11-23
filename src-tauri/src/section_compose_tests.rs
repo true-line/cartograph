@@ -723,13 +723,15 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
     let (checkout, refund) = (id("cap:checkout"), id("cap:refund"));
     let (valid, valid_too, window) = (id("rule:valid"), id("rule:valid-too"), id("rule:window"));
     let orphan = id("rule:orphan");
+    let valid_archive = id("rule:valid-archive");
     prepared.text.push_str(&format!(
         "\n### Rules the capabilities enforce (from 1.5)\n\n\
          | Capability | Rule | Citation |\n|---|---|---|\n\
          | Checkout | A card must be valid | {valid} |\n\
          | Refund | A card must be valid | {valid_too} |\n\
          | Refund | Refunds within 30 days | {window} |\n\
-         | Gone | Gift cards expire | {orphan} |\n"
+         | Gone | Gift cards expire | {orphan} |\n\
+         | Archive | A card must be valid | {valid_archive} |\n"
     ));
     let claim = |statement: &str, citations: &[&String]| Claim {
         statement: statement.into(),
@@ -807,9 +809,9 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
         "{valid}: Rule of capability \"Checkout\": A card must be valid"
     )));
     // AC-1331 (T-1331, #2495): one line per claim and rule pair, the rule
-    // holding for its capability and an identical rule's.
+    // holding for its capability and every identical rule's, citable or not.
     assert!(scoped[0].contains(&format!(
-        "2.1  Claim 2: \"Every payment needs a valid card.\"  |  Rule {valid} of \"Checkout\", \"Refund\": A card must be valid\n"
+        "2.1  Claim 2: \"Every payment needs a valid card.\"  |  Rule {valid} of \"Archive\", \"Checkout\", \"Refund\": A card must be valid\n"
     )));
     assert!(!scoped[0].contains("Shoppers check out."));
     // A rule whose capability is not citable is not checked (#2483).

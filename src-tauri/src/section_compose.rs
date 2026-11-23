@@ -1059,18 +1059,21 @@ fn check_rule_scope(
 ) -> Result<&'static str, String> {
     let rules = spec::excerpt_rules(&prepared.text);
     let by_name = capability_ids(&prepared.facts);
-    // The citable capabilities a rule holds for, by name: those it is
-    // listed under, and those an identical rule is listed under.
+    // The capabilities a rule holds for, by name: those it is listed under,
+    // and those an identical rule is listed under. A rule none of whose
+    // capabilities is a citable fact has nothing to hold for.
     let holds_for = |text: &str| -> Vec<&str> {
-        rules
+        let names: BTreeSet<&str> = rules
             .values()
             .filter(|(_, other)| other == text)
             .flat_map(|(names, _)| names)
             .map(String::as_str)
-            .filter(|name| by_name.contains_key(name))
-            .collect::<BTreeSet<&str>>()
-            .into_iter()
-            .collect()
+            .collect();
+        if names.iter().any(|name| by_name.contains_key(name)) {
+            names.into_iter().collect()
+        } else {
+            Vec::new()
+        }
     };
     let mut checked = Vec::new();
     let mut claims = Vec::new();
