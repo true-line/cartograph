@@ -951,29 +951,25 @@ describe('durable investigation observations (AC-0190)', () => {
     expect(useInvestigationStore.getState().error).toBeNull();
   });
 
-  it('keeps the caller abort ownership for the trailing refresh (#2476)', async () => {
+  it('leaves a chat dock read to its dock instead of trailing it (#2476)', async () => {
     const held = deferred<InvestigationDetail>();
-    const stalled = deferred<InvestigationDetail>();
     let reads = 0;
     mockIPC((command, args) => {
       if (command === 'get_investigation') {
         reads += 1;
         if (reads === 2) return held.promise;
-        if (reads === 3) return stalled.promise;
       }
       return response(command, args);
     });
     await useInvestigationStore.getState().open('same');
     const owner = new AbortController();
-    const first = useInvestigationStore.getState().refreshSelected({ loadingSignal: owner.signal });
+    const docked = useInvestigationStore.getState().refreshSelected({ awaitChat: true, loadingSignal: owner.signal });
     useInvestigationStore.getState().invalidate({ investigation_id: 'same', revision: 10, last_event_sequence: 10 });
     held.resolve(investigationDetail('same'));
-    await first;
-    await vi.waitFor(() => expect(reads).toBe(3));
-    expect(useInvestigationStore.getState().loading).toBe(true);
-    owner.abort();
+    await docked;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(2);
     expect(useInvestigationStore.getState().loading).toBe(false);
-    stalled.resolve(investigationDetail('same'));
   });
 
   it('rejects a result that is newer than the detail it was read with', async () => {

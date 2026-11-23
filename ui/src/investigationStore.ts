@@ -1315,12 +1315,12 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
         options?.loadingSignal?.removeEventListener('abort', releaseLoading);
         // Set by `invalidate` while this read awaited; flow analysis can't see that.
         const pending = detailRefreshPending as DetailRefreshPending | null;
-        if (pending && request === detailRequest && !get().loading &&
+        // A chat dock read (awaitChat) is one serialized physical transcript read
+        // that its dock replaces or re-reads itself, so it never trails one.
+        if (pending && !options?.awaitChat && request === detailRequest && !get().loading &&
             get().selectedId === pending.id && get().selectionGeneration === pending.generation) {
           detailRefreshPending = null;
-          // Keep the caller's abort ownership for the trailing read.
-          const loadingSignal = options?.loadingSignal?.aborted ? undefined : options?.loadingSignal;
-          void get().refreshSelected(loadingSignal ? { loadingSignal } : undefined);
+          void get().refreshSelected();
         }
       }
     },
