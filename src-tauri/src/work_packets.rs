@@ -1417,6 +1417,27 @@ fn draft_adapter_packets_with<R: tauri::Runtime>(
     state: &crate::AppState,
     before_sampling: &mut dyn FnMut(),
 ) -> Result<Vec<DraftAdapterPacket>, PacketHostError> {
+    adapter_packet_bodies(repo, app, state, before_sampling)?
+        .into_iter()
+        .map(|body| {
+            let language = packet_language(&body);
+            let (content_id, markdown) = ingest::adapter_packet::export_adapter_packet(&body)?;
+            Ok(DraftAdapterPacket {
+                language,
+                content_id,
+                markdown,
+            })
+        })
+        .collect()
+}
+
+/// The adapter packet bodies [`draft_adapter_packets`] exports.
+fn adapter_packet_bodies<R: tauri::Runtime>(
+    repo: &str,
+    app: &tauri::AppHandle<R>,
+    state: &crate::AppState,
+    before_sampling: &mut dyn FnMut(),
+) -> Result<Vec<packets::PacketBody>, PacketHostError> {
     if repo.is_empty() || repo.len() > 256 {
         return Err(PacketHostError::code("unavailable_evidence"));
     }
@@ -1492,18 +1513,150 @@ fn draft_adapter_packets_with<R: tauri::Runtime>(
     if checkout.ensure_unchanged(root).is_err() {
         return Err(PacketHostError::code("selection_conflict"));
     }
-    bodies
+    Ok(bodies)
+}
+
+/// Saves one drafted adapter packet, named by its content id, so it can be
+/// reviewed and then dispatched (ADR-0092). The body is drafted again from
+/// the current recovery; a content id it no longer yields fails closed.
+pub(crate) fn save_adapter_packet<R: tauri::Runtime>(
+    repo: &str,
+    content_id: &str,
+    app: &tauri::AppHandle<R>,
+    state: &crate::AppState,
+) -> Result<packets::PacketDetail, PacketHostError> {
+    let body = adapter_packet_bodies(repo, app, state, &mut || {})?
         .into_iter()
-        .map(|body| {
-            let language = packet_language(&body);
-            let (content_id, markdown) = ingest::adapter_packet::export_adapter_packet(&body)?;
-            Ok(DraftAdapterPacket {
-                language,
-                content_id,
-                markdown,
-            })
+        .find(|body| body.content_id().ok().as_deref() == Some(content_id))
+        .ok_or_else(|| PacketHostError::code("selection_conflict"))?;
+    state
+        .work_packets
+        .store
+        .lock()
+        .map_err(|_| PacketHostError::storage())?
+        .put(body, &[], &timestamp()?)
+        .map_err(Into::into)
+}
+
+/// Runs the agent for one dispatch: [`acp_host::dispatch`] in the app, a
+/// scripted stand-in in tests.
+pub(crate) type RunAgent<'a> = dyn FnMut(&acp_host::DispatchRequest<'_>) -> Result<acp_host::Submission, acp_host::DispatchError>
+    + 'a;
+
+/// Dispatches a reviewed packet over ACP (ADR-0092): the agent command comes
+/// from settings, the checkout from the packet's single source registration
+/// at its pinned revision, and the agent works in its own worktree under
+/// `worktree_root`. The returned branch is recorded on the packet; nothing
+/// is pushed or merged.
+pub(crate) fn dispatch_packet(
+    state: &crate::AppState,
+    packet_id: &str,
+    worktree_root: &std::path::Path,
+    run: &mut RunAgent<'_>,
+) -> Result<packets::PacketDetail, PacketHostError> {
+    let detail = state
+        .work_packets
+        .store
+        .lock()
+        .map_err(|_| PacketHostError::storage())?
+        .get(packet_id)?;
+    if detail.review.status != packets::ReviewStatus::Reviewed {
+        return Err(PacketHostError::code("not_reviewed"));
+    }
+    let [source] = detail.body.identity.sources.as_slice() else {
+        return Err(PacketHostError::code("unpinned_revision"));
+    };
+    let base = source
+        .revision
+        .value()
+        .filter(|revision| {
+            (7..=64).contains(&revision.len()) && revision.bytes().all(|b| b.is_ascii_hexdigit())
         })
-        .collect()
+        .ok_or_else(|| PacketHostError::code("unpinned_revision"))?
+        .clone();
+    let agent = state
+        .settings
+        .lock()
+        .map_err(|_| PacketHostError::storage())?
+        .acp_agent()
+        .map_err(|_| PacketHostError::code("agent_not_configured"))?
+        .ok_or_else(|| PacketHostError::code("agent_not_configured"))?;
+    let registered = {
+        let sources = state
+            .sources
+            .lock()
+            .map_err(|_| PacketHostError::storage())?;
+        sources
+            .get_by_repo(&source.repo_key)
+            .map_err(|_| PacketHostError::storage())?
+    }
+    .filter(|registered| registered.source_id == source.registration_id && registered.is_ready())
+    .ok_or_else(|| PacketHostError::code("unavailable_evidence"))?;
+    let operation = crate::SourceOperation::acquire(&state.sources, [(registered.clone(), false)])
+        .map_err(|_| PacketHostError::code("unavailable_evidence"))?;
+    let root = operation
+        .root(&registered.repo_key)
+        .map_err(|_| PacketHostError::code("unavailable_evidence"))?;
+    let prompt = ::work_packets::export_markdown(&detail)?;
+    std::fs::create_dir_all(worktree_root).map_err(|_| PacketHostError::storage())?;
+    let command = acp_host::AgentCommand {
+        program: agent.program.into(),
+        args: agent.args,
+        env: Vec::new(),
+    };
+    let submission = run(&acp_host::DispatchRequest {
+        packet_id,
+        prompt: &prompt,
+        repo: root,
+        base_rev: &base,
+        worktree_root,
+        agent: &command,
+        limits: acp_host::Limits::default(),
+    })
+    .map_err(|error| match error {
+        acp_host::DispatchError::Worktree(acp_host::WorktreeError::Exists(_)) => {
+            PacketHostError::code("already_dispatched")
+        }
+        acp_host::DispatchError::Spawn(_) => PacketHostError::code("agent_unavailable"),
+        _ => PacketHostError::code("dispatch_failed"),
+    })?;
+    drop(operation);
+    let mut changed_paths = submission.changed_paths;
+    let omitted = changed_paths
+        .len()
+        .saturating_sub(packets::MAX_DISPATCH_PATHS);
+    changed_paths.truncate(packets::MAX_DISPATCH_PATHS);
+    let record = packets::DispatchRecord {
+        reviewed_revision: detail.review.revision,
+        branch: submission.branch,
+        base_revision: submission.base_rev,
+        head_revision: submission.head_rev,
+        stop: stop_label(&submission.stop).into(),
+        changed_paths,
+        changed_paths_omitted: u32::try_from(omitted).unwrap_or(u32::MAX),
+        refused_requests: u32::try_from(submission.refused.len()).unwrap_or(u32::MAX),
+    };
+    state
+        .work_packets
+        .store
+        .lock()
+        .map_err(|_| PacketHostError::storage())?
+        .record_dispatch(packet_id, &record, &timestamp()?)
+        .map_err(Into::into)
+}
+
+fn stop_label(stop: &acp_host::StopReason) -> &'static str {
+    use acp_host::StopReason::*;
+    match stop {
+        EndTurn => "end_turn",
+        MaxTokens => "max_tokens",
+        MaxTurnRequests => "max_turn_requests",
+        Refusal => "refusal",
+        Cancelled => "cancelled",
+        TimedOut => "timed_out",
+        AgentExited => "agent_exited",
+        ProtocolError(_) => "protocol_error",
+    }
 }
 
 #[tauri::command]
@@ -1514,6 +1667,40 @@ pub(crate) async fn draft_adapter_work_packets(
     packet_worker(move || {
         let state = app.state::<crate::AppState>();
         draft_adapter_packets(&repo, &app, &state)
+    })
+    .await
+}
+
+/// Saves a drafted adapter packet for review (ADR-0092).
+#[tauri::command]
+pub(crate) async fn save_adapter_work_packet(
+    repo: String,
+    content_id: String,
+    app: tauri::AppHandle,
+) -> Result<packets::PacketDetail, PacketHostError> {
+    packet_worker(move || {
+        let state = app.state::<crate::AppState>();
+        save_adapter_packet(&repo, &content_id, &app, &state)
+    })
+    .await
+}
+
+/// Dispatches a reviewed packet to the configured ACP agent in its own
+/// worktree under the app data directory, and records the branch it
+/// returns (ADR-0092). Runs until the agent's turn ends or its limit passes.
+#[tauri::command]
+pub(crate) async fn dispatch_work_packet(
+    packet_id: String,
+    app: tauri::AppHandle,
+) -> Result<packets::PacketDetail, PacketHostError> {
+    packet_worker(move || {
+        let state = app.state::<crate::AppState>();
+        let worktree_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| PacketHostError::storage())?
+            .join("acp-worktrees");
+        dispatch_packet(&state, &packet_id, &worktree_root, &mut acp_host::dispatch)
     })
     .await
 }
@@ -1875,5 +2062,135 @@ mod tests {
                 std::fs::write(&file, "class User\nend\n").unwrap();
             });
         assert_eq!(result.unwrap_err().code, "selection_conflict");
+    }
+
+    #[test]
+    fn a_saved_adapter_packet_dispatches_only_when_reviewed_and_records_its_branch() {
+        // AC-1348 (ADR-0092, #998).
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("app");
+        std::fs::create_dir_all(&data).unwrap();
+        let project = directory.path().join("ruby");
+        let commit = crate::local_commit::tests::init_clean_repo(
+            &project,
+            &[(
+                "lib/user.rb",
+                b"class User\n  def name\n    'u'\n  end\nend\n",
+            )],
+        );
+        let state = crate::registered_source_tests::app_state(&data);
+        let app = crate::test_app::TestApp::new(
+            tauri::test::mock_builder()
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app"),
+        );
+        app.manage(crate::PreflightRuns::default());
+        let handle = app.handle();
+        let source = recovered(&state, handle, &project);
+        let drafted = draft_adapter_packets(&source.repo_key, handle, &state).unwrap();
+        assert_eq!(
+            save_adapter_packet(&source.repo_key, "not-a-drafted-id", handle, &state)
+                .unwrap_err()
+                .code,
+            "selection_conflict"
+        );
+        let saved =
+            save_adapter_packet(&source.repo_key, &drafted[0].content_id, handle, &state).unwrap();
+        assert_eq!(saved.packet_id, drafted[0].content_id);
+        assert_eq!(saved.execution, packets::ExecutionState::Unoffered);
+        let id = saved.packet_id;
+        let worktrees = directory.path().join("worktrees");
+        let mut never = |_: &acp_host::DispatchRequest<'_>| -> Result<
+            acp_host::Submission,
+            acp_host::DispatchError,
+        > { panic!("the agent ran") };
+
+        assert_eq!(
+            dispatch_packet(&state, &id, &worktrees, &mut never)
+                .unwrap_err()
+                .code,
+            "not_reviewed"
+        );
+        state
+            .work_packets
+            .store
+            .lock()
+            .unwrap()
+            .review(&id, 0, packets::ReviewDecision::Reviewed, None, "reviewed")
+            .unwrap();
+        assert_eq!(
+            dispatch_packet(&state, &id, &worktrees, &mut never)
+                .unwrap_err()
+                .code,
+            "agent_not_configured"
+        );
+        let agent = crate::settings::AcpAgentCommand {
+            program: "/opt/agent/bin/acp".into(),
+            args: vec!["--acp".into()],
+        };
+        state
+            .settings
+            .lock()
+            .unwrap()
+            .set_acp_agent(Some(&agent))
+            .unwrap();
+
+        let head = "c".repeat(40);
+        let mut ran = 0;
+        let mut agent_run = |request: &acp_host::DispatchRequest<'_>| {
+            ran += 1;
+            assert_eq!(request.packet_id, id);
+            assert_eq!(request.base_rev, commit);
+            assert_eq!(request.repo, source.root());
+            assert_eq!(request.worktree_root, worktrees);
+            assert_eq!(
+                request.agent.program,
+                std::path::Path::new("/opt/agent/bin/acp")
+            );
+            assert_eq!(request.agent.args, ["--acp"]);
+            assert!(
+                request.prompt.contains(&id),
+                "the prompt is the packet export"
+            );
+            Ok(acp_host::Submission {
+                packet_id: id.clone(),
+                branch: "cartograph/packet-0123456789ab".into(),
+                worktree: worktrees.join("packet-0123456789ab"),
+                base_rev: commit.clone(),
+                head_rev: Some(head.clone()),
+                changed_paths: (0..205).map(|n| format!("src/{n}.rb")).collect(),
+                stop: acp_host::StopReason::EndTurn,
+                transcript: Vec::new(),
+                transcript_truncated: false,
+                refused: vec![acp_host::Refusal {
+                    method: "terminal/create".into(),
+                    detail: "not offered".into(),
+                }],
+            })
+        };
+        let dispatched = dispatch_packet(&state, &id, &worktrees, &mut agent_run).unwrap();
+        assert_eq!(ran, 1);
+        assert_eq!(dispatched.execution, packets::ExecutionState::Submitted);
+        let record = dispatched.dispatch.unwrap();
+        assert_eq!(record.reviewed_revision, 1);
+        assert_eq!(record.head_revision.as_deref(), Some(head.as_str()));
+        assert_eq!(record.stop, "end_turn");
+        assert_eq!(record.changed_paths.len(), packets::MAX_DISPATCH_PATHS);
+        assert_eq!(record.changed_paths_omitted, 5);
+        assert_eq!(record.refused_requests, 1);
+
+        let mut exists = |_: &acp_host::DispatchRequest<'_>| {
+            Err(acp_host::DispatchError::Worktree(
+                acp_host::WorktreeError::Exists(worktrees.join("packet-0123456789ab")),
+            ))
+        };
+        assert_eq!(
+            dispatch_packet(&state, &id, &worktrees, &mut exists)
+                .unwrap_err()
+                .code,
+            "already_dispatched"
+        );
+        let reopened = state.work_packets.store.lock().unwrap().get(&id).unwrap();
+        assert_eq!(reopened.execution, packets::ExecutionState::Submitted);
     }
 }
