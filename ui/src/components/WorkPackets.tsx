@@ -50,7 +50,7 @@ export function WorkPackets({ state, repositories }: Props & { repositories?: st
     <header className="packet-heading"><div><h2>Agent work packets</h2>
       <p>Prepare an evidence-grounded request for an agent. Save and review the immutable body locally.</p></div>
       <button type="button" disabled={state.busy} onClick={() => void state.load()}>Refresh saved packets</button></header>
-    <p className="muted">Requested intent remains a user claim. Curated context is unavailable. Execution: <strong>unoffered</strong>. Capability and egress requests confer no authority.</p>
+    <p className="muted">Requested intent remains a user claim. Curated context is unavailable. A packet runs only when a reviewed one is dispatched, and each packet shows its own execution state. Capability and egress requests confer no authority.</p>
     {state.error && <p role="alert" className="error">{state.error}</p>}
     {state.notice && <p role="status">{state.notice}</p>}
     <div className="packet-layout"><nav aria-label="Saved work packets"><h3>Saved packets</h3>

@@ -55,5 +55,6 @@ export const SubmittedDispatch: Story = {
     await expect(canvas.getByTestId('packet-dispatch-head')).toHaveTextContent('b'.repeat(40));
     await expect(dispatch).toHaveTextContent('1 changed path · 2 agent requests refused. Not pushed or merged');
     await expect(dispatch).toHaveTextContent('src/adapter.rs');
+    await expect(canvas.queryByText('unoffered')).toBeNull();
   },
 };

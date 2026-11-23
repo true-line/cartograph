@@ -10,8 +10,24 @@ use std::io::Write;
 pub fn export_markdown(detail: &PacketDetail) -> PacketResult<String> {
     validate_detail(detail)?;
     let mut output = BoundedBytes::new(4 * 1024 * 1024);
-    output.write_all(b"# Local work packet\n\nExecution: unoffered. Capability requests confer no authority.\n\n").map_err(limit)?;
+    let execution = match detail.execution {
+        crate::ExecutionState::Unoffered => "unoffered",
+        crate::ExecutionState::Dispatched => "dispatched",
+        crate::ExecutionState::Submitted => "submitted",
+    };
+    write!(
+        output,
+        "# Local work packet\n\nExecution: {execution}. Capability requests confer no authority.\n\n"
+    )
+    .map_err(limit)?;
     section(&mut output, "Packet identity", &detail.packet_id)?;
+    if let Some(dispatch) = &detail.dispatch {
+        section(
+            &mut output,
+            "Dispatch (local branch; not pushed or merged)",
+            dispatch,
+        )?;
+    }
     section(
         &mut output,
         "Body schema version",

@@ -1232,6 +1232,10 @@ fn only_a_reviewed_packet_records_a_dispatch_and_the_latest_sets_execution() {
         store.list(50).unwrap()[0].execution,
         ExecutionState::Submitted
     );
+    let exported = export_markdown(&reopened).unwrap();
+    assert!(exported.contains("Execution: submitted."));
+    assert!(exported.contains("## Dispatch (local branch; not pushed or merged)"));
+    assert!(exported.contains("cartograph/packet-0123456789ab"));
 }
 
 #[test]
