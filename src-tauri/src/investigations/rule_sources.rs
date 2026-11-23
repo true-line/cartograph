@@ -111,8 +111,8 @@ pub(crate) struct RuleBearingSource {
     pub owner: RuleBearingOwner,
     pub graph_snapshot_id: String,
     pub receipt_id: String,
-    /// The first captured range of the owner, as `inventory_index` for
-    /// `resolve_investigation_source_obligation`.
+    /// The owner's first captured range short enough to inspect, as
+    /// `inventory_index` for `resolve_investigation_source_obligation`.
     pub range_index: usize,
 }
 
@@ -144,7 +144,13 @@ pub(crate) fn rule_bearing_sources(
         else {
             continue;
         };
-        let Some(range) = description.ranges.first() else {
+        // The first range one inspection target can name; an owner whose
+        // every range is longer (a whole large method) cannot be inspected
+        // and is skipped, so every suggestion still resolves (#2523).
+        let Some(range) = description.ranges.iter().find(|range| {
+            range.byte_end.saturating_sub(range.byte_start)
+                <= agents::investigation::MAX_INSPECTION_RANGE_BYTES
+        }) else {
             continue;
         };
         sources.push(RuleBearingSource {

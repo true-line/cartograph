@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Existing complete inspection-target wire ceiling, shared with host admission.
 pub const MAX_INSPECTION_TARGET_BYTES: usize = 8 * 1024;
+/// Largest captured range one inspection target may name (#2523): a longer
+/// range, such as a whole large method, cannot be inspected as one target.
+pub const MAX_INSPECTION_RANGE_BYTES: u64 = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,7 +86,7 @@ impl InvestigationInspectionTarget {
             || self.index >= 1024
             || self.receipt_inventory_index >= 1024
             || self.source.byte_start >= self.source.byte_end
-            || self.source.byte_end - self.source.byte_start > 8192
+            || self.source.byte_end - self.source.byte_start > MAX_INSPECTION_RANGE_BYTES
             || self.captured.byte_start != self.source.byte_start
             || self.captured.byte_end != self.source.byte_end
             || file.source_id != self.registered_source_id
