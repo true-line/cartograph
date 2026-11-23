@@ -11,6 +11,9 @@ export const SIGNING_INPUTS = [
   'APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_API_KEY',
   'APPLE_API_KEY_PATH', 'APPLE_API_ISSUER', 'APPLE_SIGNING_IDENTITY',
   'CSC_LINK', 'CSC_KEY_PASSWORD',
+  // ADR-0093: the Windows Artifact Signing inputs.
+  'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'ARTIFACT_SIGNING_ENDPOINT',
+  'ARTIFACT_SIGNING_ACCOUNT', 'ARTIFACT_SIGNING_PROFILE',
 ];
 export function buildRelay({ root = ROOT, platform = process.platform, env = process.env,
   run = (command, args, options) => execFileSync(command, args, options) } = {}) {

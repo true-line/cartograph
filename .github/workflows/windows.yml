@@ -8,9 +8,9 @@
 #
 # They run on every push to main, on demand, and on a pull request that
 # changes this workflow or the Windows packaging inputs. The per-PR Windows
-# gate stays ci.yml's Windows job ownership. The installer is unsigned:
-# Authenticode signing and its fail-closed release posture are tracked on
-# #227.
+# gate stays ci.yml's Windows job ownership. The installer built here is
+# unsigned-dev: signing needs secrets, which no pull-request run reads
+# (windows-installer.yml, ADR-0093).
 name: Windows
 
 on:
@@ -23,6 +23,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/windows.yml
+      - .github/workflows/windows-installer.yml
+      - scripts/windows-sign.ps1
+      - scripts/signing-secrets.mjs
       - scripts/build-agent-runtime.mjs
       - scripts/build-mcp-relay.mjs
       - scripts/agent-runtime-node.json
@@ -166,107 +169,15 @@ jobs:
         # FILTER, when set, is the libtest name filter for the lane.
         run: cargo test --locked --no-fail-fast $PACKAGES -- $FILTER
 
-  # An unsigned NSIS installer with both sidecars, as an artifact for manual
-  # testing. It is never published: release.yml ships macOS only until the
-  # Windows signing posture exists (#227).
+  # The installer lives in windows-installer.yml. No secret is passed here,
+  # so pull requests and main build the visibly unsigned-dev installer; a
+  # signing caller has no pull-request trigger (#631, ADR-0093). A called
+  # job cannot exceed its caller's permissions, so this grants the id-token
+  # the reusable job declares; with no secret passed, nothing requests one.
   installer:
-    name: Windows unsigned installer
+    name: Windows installer
     needs: policy
-    runs-on: windows-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout exact validation commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Read pinned Rust toolchain
-        id: toolchain
-        shell: pwsh
-        run: |
-          $configuration = Get-Content rust-toolchain.toml -Raw
-          $channel = [regex]::Match($configuration, '(?m)^channel\s*=\s*"(\d+\.\d+\.\d+)"\s*$')
-          if (-not $channel.Success) { throw 'Expected a pinned Rust release in rust-toolchain.toml' }
-          "channel=$($channel.Groups[1].Value)" >> $env:GITHUB_OUTPUT
-
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            ui/package-lock.json
-
-      - name: Install pinned Rust toolchain
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
-        with:
-          task: Install pinned Windows Rust toolchain
-          executable: rustup.exe
-          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--target","x86_64-pc-windows-msvc"]'
-          timeout-seconds: '300'
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: windows-installer
-          cache-bin: "false"
-
-      # npm is a .cmd script on Windows, which only a shell can start, so the
-      # bounded command runs it through pwsh.
-      - name: Install locked root dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
-        with:
-          task: Install locked root dependencies
-          executable: pwsh.exe
-          arguments-json: '["-NoProfile","-Command","npm ci"]'
-          timeout-seconds: '600'
-          attempts: '2'
-          retry-delay-seconds: '5'
-
-      - name: Install locked UI dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
-        with:
-          task: Install locked UI dependencies
-          executable: pwsh.exe
-          arguments-json: '["-NoProfile","-Command","npm ci"]'
-          working-directory: ui
-          timeout-seconds: '600'
-          attempts: '2'
-          retry-delay-seconds: '5'
-
-      # No signing input exists in this workflow; the build scripts refuse to
-      # run if one is set.
-      - name: Build unsigned installer
-        run: npm run package:windows
-
-      - name: Verify installer and sidecars
-        id: installer
-        shell: pwsh
-        run: |
-          $bundle = 'target/x86_64-pc-windows-msvc/release/bundle/nsis'
-          $setup = @(Get-ChildItem -Path $bundle -Filter '*-setup.exe')
-          if ($setup.Count -ne 1) { throw "Expected one NSIS installer in $bundle, found $($setup.Count)" }
-          $relay = 'target/x86_64-pc-windows-msvc/release/cartograph-mcp.exe'
-          $agent = 'target/x86_64-pc-windows-msvc/release/cartograph-agent.exe'
-          foreach ($sidecar in @($relay, $agent)) {
-            if (-not (Test-Path $sidecar)) { throw "Missing sidecar $sidecar" }
-          }
-          # AC-1427: the agent runtime starts and announces itself.
-          $ready = '' | & $agent | Select-Object -First 1
-          "agent runtime: $ready"
-          if ($ready -notmatch '"type":"ready"') { throw 'The agent runtime did not print its ready line' }
-          $signature = Get-AuthenticodeSignature $setup[0].FullName
-          "installer signature: $($signature.Status)"
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          "name=Cartograph_${version}_x64_unsigned-dev" >> $env:GITHUB_OUTPUT
-          "path=$($setup[0].FullName)" >> $env:GITHUB_OUTPUT
-
-      - name: Upload unsigned installer
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ steps.installer.outputs.name }}
-          path: ${{ steps.installer.outputs.path }}
-          if-no-files-found: error
-          retention-days: 14
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/windows-installer.yml
