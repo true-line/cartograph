@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 
+// The macOS Developer ID set (ADR-0016).
 export const SIGNING_SECRET_NAMES = Object.freeze([
   'CSC_LINK',
   'CSC_KEY_PASSWORD',
@@ -8,16 +9,37 @@ export const SIGNING_SECRET_NAMES = Object.freeze([
   'APPLE_API_ISSUER',
 ]);
 
-export function signingMode(env = process.env) {
-  const present = SIGNING_SECRET_NAMES.filter((name) => String(env[name] ?? '').length > 0);
+// The Windows Authenticode set: Azure Artifact Signing reached through
+// GitHub OIDC, so none of these is a key or a password (ADR-0093, #227).
+export const WINDOWS_SIGNING_SECRET_NAMES = Object.freeze([
+  'AZURE_TENANT_ID',
+  'AZURE_CLIENT_ID',
+  'ARTIFACT_SIGNING_ENDPOINT',
+  'ARTIFACT_SIGNING_ACCOUNT',
+  'ARTIFACT_SIGNING_PROFILE',
+]);
+
+const PLATFORMS = Object.freeze({
+  macos: { names: SIGNING_SECRET_NAMES, label: 'Apple' },
+  windows: { names: WINDOWS_SIGNING_SECRET_NAMES, label: 'Windows Authenticode' },
+});
+
+// No credential is `unsigned-dev`, the whole set is `signed`, and any part of
+// it fails closed naming only what is missing, never a value.
+export function signingMode(env = process.env, platform = 'macos') {
+  const set = PLATFORMS[platform];
+  if (!set) {
+    throw new Error(`unknown signing platform: ${platform}`);
+  }
+  const present = set.names.filter((name) => String(env[name] ?? '').length > 0);
 
   if (present.length === 0) {
     return { mode: 'unsigned-dev', signed: false };
   }
 
-  if (present.length !== SIGNING_SECRET_NAMES.length) {
-    const missing = SIGNING_SECRET_NAMES.filter((name) => !present.includes(name));
-    throw new Error(`partial Apple signing credential set; missing: ${missing.join(', ')}`);
+  if (present.length !== set.names.length) {
+    const missing = set.names.filter((name) => !present.includes(name));
+    throw new Error(`partial ${set.label} signing credential set; missing: ${missing.join(', ')}`);
   }
 
   return { mode: 'signed', signed: true };
@@ -25,7 +47,7 @@ export function signingMode(env = process.env) {
 
 function main() {
   try {
-    const result = signingMode();
+    const result = signingMode(process.env, process.argv[2] ?? 'macos');
     process.stdout.write(`mode=${result.mode}\nsigned=${result.signed}\n`);
   } catch (error) {
     process.stderr.write(`::error::${error.message}\n`);
