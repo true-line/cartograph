@@ -431,3 +431,31 @@ fn versioned_parent_history_bound_and_canonical_replay() {
         );
     }
 }
+
+#[test]
+fn a_child_resumes_with_the_history_bytes_its_ledger_hashed() {
+    // AC-1336 (#598, Codex P2 on #2501): a child saved before the reading
+    // keeps its parent's earlier bytes; any other child gets the current ones.
+    let policy = &INVESTIGATION_V2_POLICY;
+    let history = |text: &str| NextParentHistory {
+        history: vec![text.to_owned()],
+    };
+    let hash = |text: &str| {
+        core_prov::content_hash(
+            &encode(&vec![text.to_owned()], policy.supplied_history_bytes()).unwrap(),
+        )
+    };
+    let pick = |saved: Option<String>, before: Option<&str>| {
+        resume_history(history("current"), saved.as_deref(), policy, || {
+            Ok(before.map(history))
+        })
+        .unwrap()
+        .into_history()
+    };
+    assert_eq!(pick(None, Some("before")), ["current"]);
+    assert_eq!(pick(Some(hash("current")), Some("before")), ["current"]);
+    assert_eq!(pick(Some(hash("before")), Some("before")), ["before"]);
+    // Neither matches: the current history, which preparation then refuses.
+    assert_eq!(pick(Some(hash("other")), Some("before")), ["current"]);
+    assert_eq!(pick(Some(hash("before")), None), ["current"]);
+}
