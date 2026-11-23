@@ -285,7 +285,7 @@ fn a_malformed_record_is_refused_with_a_closed_code() {
     assert_eq!(
         refuse(&|r| r
             .attestations
-            .push(agent(1, AgentVerb::Agreed, Some(agent_id(2))))),
+            .push(agent(1, AgentVerb::Agreed, Some(agent_id(1))))),
         R::DirectorNotEngineer { attestation: 1 }
     );
     assert_eq!(

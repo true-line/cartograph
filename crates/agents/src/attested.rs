@@ -276,8 +276,10 @@ pub enum AttestationRefusal {
         /// Zero-based position of the attestation.
         attestation: usize,
     },
-    /// An agent names a directing contributor that is not an engineer of
-    /// this record, or itself.
+    /// An agent names itself or another agent of this record as its
+    /// directing engineer. That the director is an engineer of the project
+    /// is checked by the store (AC-1073), since the engineer may confirm
+    /// only after the agent stated.
     DirectorNotEngineer {
         /// Zero-based position of the attestation.
         attestation: usize,
@@ -418,7 +420,7 @@ pub fn admit(record: AttestedRecord) -> Result<AttestedRecord, AttestationRefusa
                     return Err(R::AgentFieldInvalid { attestation });
                 }
                 if let Some(director) = directed_by
-                    && (director == contributor || !engineers.contains(director))
+                    && (director == contributor || agents.contains(director))
                 {
                     return Err(R::DirectorNotEngineer { attestation });
                 }
