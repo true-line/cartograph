@@ -328,11 +328,16 @@ pub(super) fn project_attested<'a>(
     nodes: &[Node],
     current: &BTreeMap<String, String>,
 ) -> Result<AttestedProjection<'a>, ProjectionError> {
+    // One identity, one record; and one `A-` id, one record. The id keeps
+    // 64 bits of the identity and is never lengthened, so two records whose
+    // ids collide make every citation of that id ambiguous and fail the
+    // projection rather than one being chosen (ADR-0058 decision 5).
     let mut identities = HashSet::with_capacity(records.len());
-    if !records
-        .iter()
-        .all(|record| identities.insert(record.record_id.as_str()))
-    {
+    let mut citations = HashSet::with_capacity(records.len());
+    if !records.iter().all(|record| {
+        identities.insert(record.record_id.as_str())
+            && citations.insert(record.citation_id.as_str())
+    }) {
         return Err(ProjectionError::DuplicateRecord);
     }
     let mut sorted: Vec<&ReviewedAttested> = records.iter().collect();

@@ -304,8 +304,12 @@ claim in `best-effort` with "`A-…` is attested: stated by …, confirmed by
 …" (or *agent-attested, unconfirmed* with the agents alone), counts it per
 section in `verified-only`, and the fact index lists each printed `A-` id
 in its own attested table; a `verified-only` index refuses one (AC-1077,
-part 2). Not built: admitting attested records to a drafting run, capture
-paths and surfaces.
+part 2). A composition is handed the eligible and agent-attested,
+unconfirmed records that answer its section and scope, or a Gap among its
+citable facts, with their label and statement and no contributor, and a
+claim citing one records the record's identity as the id's hash. Two
+records sharing one `A-` id fail the projection (AC-1077, part 3). Not
+built: capture paths and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting

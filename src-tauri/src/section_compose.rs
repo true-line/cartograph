@@ -27,7 +27,7 @@ use agents::draft_store::{DraftOrigin, DraftStoreError};
 use agents::gated_compose::{self, GatedInput, GatedStats, StageModel, Workflow};
 use agents::rule_scope;
 use agents::section_compose::{
-    self, ComposeFact, ComposeGroup, ComposeInput, Composed, SECTION_COMPOSER_ROLE,
+    self, ComposeAttested, ComposeFact, ComposeGroup, ComposeInput, Composed, SECTION_COMPOSER_ROLE,
 };
 use agents::section_draft::{Claim, SectionAddress, SectionDraftFinish, admit};
 use core_graph::{Edge, Node};
@@ -60,6 +60,18 @@ pub(crate) struct Prepared {
     title: &'static str,
     text: String,
     facts: Vec<ComposeFact>,
+    /// The attested records the composer was handed, by `A-` id (ADR-0090
+    /// decision 6).
+    attested: BTreeMap<String, HandedAttested>,
+}
+
+/// An attested record a composition was handed.
+#[derive(Debug, Clone)]
+struct HandedAttested {
+    /// Its identity: the hash a draft citing it records.
+    identity: String,
+    /// Its statement: what a claim citing it is checked against.
+    statement: String,
 }
 
 /// What a composition produced.
@@ -282,6 +294,9 @@ struct Compiled {
     /// Each named Subsystem as (scope, name): its citation id and its name,
     /// in id order, each name once.
     areas: Vec<(String, String)>,
+    /// The attested records the projection may print: `eligible` or
+    /// `agent-attested, unconfirmed` (ADR-0090 decision 6).
+    attested: Vec<context_hub::curated::CuratedAttested>,
 }
 
 fn compile(
@@ -341,11 +356,18 @@ fn compile(
             })
             .collect(),
     );
-    let artifact = crate::compile_spec_artifact(
-        read.inputs(Some(&review)),
-        spec::ExportMode::BestEffort,
-        D1_ARTIFACT_ID,
-    )?;
+    let inputs = read.inputs(Some(&review));
+    let attested = match &inputs.curated {
+        crate::CuratedInput::Computed(projection) => projection
+            .attested
+            .iter()
+            .filter(|record| record.printed_label().is_some())
+            .cloned()
+            .collect(),
+        crate::CuratedInput::NotRead | crate::CuratedInput::NotComputed(_) => Vec::new(),
+    };
+    let artifact =
+        crate::compile_spec_artifact(inputs, spec::ExportMode::BestEffort, D1_ARTIFACT_ID)?;
     // An overview section is read up to its per-capability detail (#1991);
     // a summary section reads the sections it summarises (#2319).
     let text = spec::composition_source(&artifact.content, &address.section)
@@ -378,7 +400,48 @@ fn compile(
         derived,
         overlay,
         areas,
+        attested,
     })
+}
+
+/// The attested records of `compiled` a composition at `address` may cite:
+/// those answering this section for this scope, and those answering a Gap
+/// among `citable`, the facts the composition is handed.
+fn attested_in_scope<'a>(
+    compiled: &'a Compiled,
+    address: &SectionAddress,
+    citable: &BTreeSet<String>,
+) -> Vec<&'a context_hub::curated::CuratedAttested> {
+    use context_hub::curated::AttestedAnswer;
+    compiled
+        .attested
+        .iter()
+        .filter(|record| match &record.answer {
+            AttestedAnswer::Section {
+                catalogue_version,
+                document,
+                section,
+                scope,
+            } => {
+                (
+                    catalogue_version.as_str(),
+                    document.as_str(),
+                    section.as_str(),
+                    scope.as_str(),
+                ) == (
+                    address.catalogue_version.as_str(),
+                    address.document.as_str(),
+                    address.section.as_str(),
+                    address.scope.as_str(),
+                )
+            }
+            AttestedAnswer::Gap { gap_id, .. } => {
+                citable.contains(&spec::citation_id(&core_graph::FactKey::Node {
+                    id: gap_id.clone(),
+                }))
+            }
+        })
+        .collect()
 }
 
 /// An area's part of a section as a composition reads it: the section's
@@ -430,12 +493,25 @@ fn prepared(
             rests_on: group.rests_on.clone(),
         })
         .collect();
+    let mut citable = picked.citable();
+    let in_scope = attested_in_scope(compiled, &address, &citable);
+    let attested: Vec<ComposeAttested> = in_scope
+        .iter()
+        .filter_map(|record| {
+            Some(ComposeAttested {
+                citation_id: record.citation_id.clone(),
+                label: record.printed_label()?.to_owned(),
+                statement: record.statement.clone(),
+            })
+        })
+        .collect();
     let input = ComposeInput {
         address: &address,
         title: compiled.title,
         section: text,
         facts: &facts,
         groups: &groups,
+        attested: &attested,
     };
     let action_id = format!(
         "section-compose:{}:{}:{}",
@@ -446,10 +522,21 @@ fn prepared(
     } else {
         section_compose::action_unlisted(&input, action_id)
     };
+    let attested: BTreeMap<String, HandedAttested> = in_scope
+        .iter()
+        .map(|record| {
+            let handed = HandedAttested {
+                identity: record.record_id.clone(),
+                statement: record.statement.clone(),
+            };
+            (record.citation_id.clone(), handed)
+        })
+        .collect();
+    citable.extend(attested.keys().cloned());
     Ok(Prepared {
         address,
         action,
-        citable: picked.citable(),
+        citable,
         nodes: Arc::clone(nodes),
         edges: Arc::clone(edges),
         overlay: Arc::clone(&compiled.overlay),
@@ -457,6 +544,7 @@ fn prepared(
         title: compiled.title,
         text: text.to_owned(),
         facts,
+        attested,
     })
 }
 
@@ -620,7 +708,7 @@ fn screen(prepared: &Prepared, composed: &mut Composed) -> Option<&'static str> 
     // A route a statement spells out must be shown by a fact it cites
     // (#2328), not taken from the section text around it; so must a figure
     // or version, and a claim about endpoints cites one (#2349).
-    let shown = spec::CitedText::of(nodes, edges, &prepared.overlay, &cited);
+    let shown = cited_text(prepared, &cited);
     // A rule from the excerpt is stated for the capability it is listed
     // under, so a claim citing it cites that capability too (#2416).
     let rule_capability = spec::excerpt_rule_capabilities(&prepared.text);
@@ -789,6 +877,14 @@ fn stage_as(
     if prepared.area.is_some() || address.scope == spec::SYSTEM_SCOPE {
         for (id, hash) in spec::cited_node_hashes(prepared.overlay.iter(), &derived) {
             citation_set.entry(id).or_insert(hash);
+        }
+    }
+    // An attested record the composer was handed is cited by its `A-` id,
+    // with its identity as the hash the projection compares (ADR-0090
+    // decision 6).
+    for id in &cited {
+        if let Some(handed) = prepared.attested.get(id) {
+            citation_set.insert(id.clone(), handed.identity.clone());
         }
     }
     let draft = match admit(&address, &citation_set, finish) {
@@ -1222,11 +1318,23 @@ fn review_action(prepared: &Prepared, claims: &[Claim]) -> CompletionAction {
     )
 }
 
+/// What each `cited` fact of `prepared` shows, and each cited attested
+/// record its statement (ADR-0090 decision 6).
+fn cited_text(prepared: &Prepared, cited: &BTreeSet<String>) -> spec::CitedText {
+    let mut shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, cited);
+    for (id, handed) in &prepared.attested {
+        if cited.contains(id) {
+            shown.insert_attested(id, &handed.statement);
+        }
+    }
+    shown
+}
+
 /// The text of each `cited` fact of `prepared` by citation id: its indexed
 /// text, and for a rule of the excerpt the capability it is listed under
 /// and the rule in domain terms (#2419).
 fn cited_facts(prepared: &Prepared, cited: &BTreeSet<String>) -> BTreeMap<String, String> {
-    let shown = spec::CitedText::of(&prepared.nodes, &prepared.edges, &prepared.overlay, cited);
+    let shown = cited_text(prepared, cited);
     let rules = spec::excerpt_rules(&prepared.text);
     cited
         .iter()

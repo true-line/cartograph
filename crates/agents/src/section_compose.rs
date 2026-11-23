@@ -156,6 +156,26 @@ pub struct ComposeGroup {
     pub rests_on: Vec<String>,
 }
 
+/// An attested record a composition may cite (ADR-0090 decision 6): a
+/// statement an engineer or an agent made to fill a gap the evidence leaves
+/// open. Its contributors are not sent: they are project data, and the
+/// document names them when it prints the claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeAttested {
+    /// Its `A-` citation id.
+    pub citation_id: String,
+    /// `attested`, or `agent-attested, unconfirmed`.
+    pub label: String,
+    /// The statement.
+    pub statement: String,
+}
+
+/// What the composer is told about the attested records it is handed.
+pub const ATTESTED_INTRO: &str = "These are statements an engineer or an agent made to fill a gap \
+     the evidence leaves open. They are not recovered facts. Cite one only for what it states, \
+     beside the facts it rests on; a claim citing one is printed as attested, with the label \
+     shown here.";
+
 /// Everything one composition is written from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposeInput<'a> {
@@ -169,6 +189,8 @@ pub struct ComposeInput<'a> {
     pub facts: &'a [ComposeFact],
     /// The derived facts the section prints.
     pub groups: &'a [ComposeGroup],
+    /// The attested records in the section's scope.
+    pub attested: &'a [ComposeAttested],
 }
 
 /// The fingerprint of this role's definition: its instructions, its
@@ -180,7 +202,7 @@ pub fn definition_fingerprint() -> String {
     crate::source_basis::domain_hash(
         b"cartograph:section-composer-definition:v1\0",
         format!(
-            "{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{CORRECTION}\0{schema}\0{unlisted}"
+            "{SECTION_COMPOSER_ROLE}\0{SYSTEM}\0{GUIDANCE:?}\0{CORRECTION}\0{schema}\0{unlisted}\0{ATTESTED_INTRO}"
         )
         .as_bytes(),
     )
@@ -281,6 +303,20 @@ pub(crate) fn prompt_with(input: &ComposeInput<'_>, max_claims: usize) -> String
         }
         out.push_str("</derived_facts>\n");
     }
+    if !input.attested.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n<attested_records>\n{ATTESTED_INTRO}\ncitation_id | label | statement"
+        );
+        for record in input.attested {
+            let _ = writeln!(
+                out,
+                "{} | {} | {}",
+                record.citation_id, record.label, record.statement
+            );
+        }
+        out.push_str("</attested_records>\n");
+    }
     out
 }
 
@@ -309,6 +345,12 @@ pub fn action(input: &ComposeInput<'_>, action_id: String) -> CompletionAction {
         .facts
         .iter()
         .map(|fact| fact.citation_id.clone())
+        .chain(
+            input
+                .attested
+                .iter()
+                .map(|record| record.citation_id.clone()),
+        )
         .collect();
     action_with_schema(input, action_id, response_schema(&citable))
 }
