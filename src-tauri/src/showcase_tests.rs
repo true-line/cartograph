@@ -515,7 +515,8 @@ fn showcase_compose_rules_gated() {
             );
         }
         written.push(serde_json::json!({
-            "area": draft.area, "scope": draft.scope, "outcome": draft.outcome, "claims": claims,
+            "area": draft.area, "scope": draft.scope, "outcome": draft.outcome,
+            "failure": draft.failure, "claims": claims,
         }));
     }
     std::fs::write(

@@ -238,8 +238,13 @@ export async function runSectionCompose(
 }
 
 /** One draft of a gated run: its scope, the area it is of (none for the
- *  system draft) and its outcome. */
-export type GatedDraft = ComposeOutcome & { scope: string; area: string | null };
+ *  system draft), its outcome and, on a `part_failed` part, why it failed:
+ *  the failed model call's class and the part's error (#1748). */
+export type GatedDraft = ComposeOutcome & {
+  scope: string;
+  area: string | null;
+  failure?: { class: string; message: string };
+};
 
 /** Draft §1.5 through the gated workflow on the configured local model
  *  (#2083, AC-0980). Nothing leaves the machine, so there is no consent.

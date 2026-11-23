@@ -1620,6 +1620,32 @@ pub(crate) struct GatedDraft {
     pub(crate) area: Option<String>,
     #[serde(flatten)]
     pub(crate) outcome: ComposeOutcome,
+    /// Why a `part_failed` part failed: the failed model call's closed
+    /// class and the error the part's composition returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure: Option<PartFailure>,
+}
+
+/// Why one part of a gated run by area failed (#1748).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PartFailure {
+    /// The failed model call's class, such as `deadline_exceeded`.
+    pub(crate) class: String,
+    /// The error the part's composition returned, at most
+    /// [`PART_FAILURE_MESSAGE_CHARS`] characters.
+    pub(crate) message: String,
+}
+
+/// The longest part failure message kept on the run's report.
+pub(crate) const PART_FAILURE_MESSAGE_CHARS: usize = 500;
+
+impl PartFailure {
+    fn new(class: String, error: &str) -> Self {
+        Self {
+            class,
+            message: error.chars().take(PART_FAILURE_MESSAGE_CHARS).collect(),
+        }
+    }
 }
 
 /// Compose one section through `draft-rules@1` at the system scope, area by
@@ -1687,12 +1713,14 @@ pub(crate) fn compose_gated_by_area(
                     scope,
                     area,
                     outcome,
+                    failure: None,
                 });
                 continue;
             }
             Err(error) => error,
         };
-        let provider_failed = watched.last_call_failed();
+        let failed_class = watched.last_failure_class();
+        let provider_failed = failed_class.is_some();
         match after_failure(drafts.iter().any(staged), provider_failed, check()) {
             // Nothing was staged yet: the run failed as a whole.
             AfterFailure::Fail => return Err(error),
@@ -1704,16 +1732,20 @@ pub(crate) fn compose_gated_by_area(
                     scope,
                     area,
                     outcome: ComposeOutcome::none("run_stopped"),
+                    failure: None,
                 });
                 break;
             }
             // One area's failure is that area's: the next is drafted (#1748).
+            // Its cause stays on its row, whatever the other parts did.
             AfterFailure::Next => {
+                let failure = failed_class.map(|class| PartFailure::new(class, &error));
                 first_failure.get_or_insert(error);
                 drafts.push(GatedDraft {
                     scope,
                     area,
                     outcome: ComposeOutcome::none("part_failed"),
+                    failure,
                 });
             }
         }
@@ -1753,28 +1785,72 @@ fn after_failure(
     }
 }
 
-/// A provider that remembers whether its last model call failed, so a gated
-/// run by area tells a model failure from a host one (#1748).
+/// A provider that remembers whether its last model call failed, and its
+/// class, so a gated run by area tells a model failure from a host one and
+/// reports why a part failed (#1748).
 struct Watched<'a> {
     inner: &'a dyn LlmProvider,
-    last_failed: std::sync::atomic::AtomicBool,
+    last_failure: std::sync::Mutex<Option<String>>,
+}
+
+/// The closed class of a failed model call.
+trait FailureClass {
+    fn failure_class(&self) -> String;
+}
+
+impl FailureClass for llm::bounded::BoundedCallError {
+    fn failure_class(&self) -> String {
+        serde_json::to_value(self.code)
+            .ok()
+            .and_then(|code| code.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "bounded_call".to_owned())
+    }
+}
+
+impl FailureClass for llm::ProviderError {
+    fn failure_class(&self) -> String {
+        use llm::ProviderError as E;
+        match self {
+            E::InvalidUrl(_) => "invalid_url",
+            E::NonLoopback(_) => "non_loopback",
+            E::Request(_) => "transport",
+            E::Payload(_) => "invalid_payload",
+            E::InvalidEmbeddings(_) => "invalid_embeddings",
+            E::Unsupported(_) => "unsupported",
+            E::EgressDenied { .. } => "egress_denied",
+            E::ConsentRequired(_) => "consent_required",
+            E::ConsentMismatch => "consent_mismatch",
+            E::EmptyCompletion => "empty_completion",
+            E::InvalidResponse(_) => "invalid_response",
+            E::Refused { .. } => "refused",
+            E::EgressUnrecorded { .. } => "egress_unrecorded",
+        }
+        .to_owned()
+    }
 }
 
 impl<'a> Watched<'a> {
     fn new(inner: &'a dyn LlmProvider) -> Self {
         Self {
             inner,
-            last_failed: std::sync::atomic::AtomicBool::new(false),
+            last_failure: std::sync::Mutex::new(None),
         }
     }
 
-    fn last_call_failed(&self) -> bool {
-        self.last_failed.load(std::sync::atomic::Ordering::SeqCst)
+    /// The class of the last model call's failure; none when it succeeded.
+    fn last_failure_class(&self) -> Option<String> {
+        self.last_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
-    fn noted<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
-        self.last_failed
-            .store(result.is_err(), std::sync::atomic::Ordering::SeqCst);
+    fn noted<T, E: FailureClass>(&self, result: Result<T, E>) -> Result<T, E> {
+        *self
+            .last_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            result.as_ref().err().map(FailureClass::failure_class);
         result
     }
 }
@@ -1874,6 +1950,7 @@ pub(crate) async fn run_section_compose_gated(
             scope,
             area: prepared.area.clone(),
             outcome,
+            failure: None,
         }])
     })
     .await;
