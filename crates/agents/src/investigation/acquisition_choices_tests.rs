@@ -936,6 +936,45 @@ fn citation_correction_projects_exact_query_then_source_read() {
     }
 }
 
+// #1653 (AC-1817): the citation-correction slot reserve is the contract's exact
+// superset. Every real projection, in either acquisition phase, stays within it
+// at each string-embedding layer, and it is smaller than the whole-feedback
+// envelope that the slot reserved before.
+#[test]
+fn citation_projection_reserve_dominates_real_projections_at_every_layer() {
+    use crate::investigation::staged_finish::RefusalFeedback;
+    let f = Fixture::new();
+    let upper = citation_projection_upper(&f.contract, &f.ledger, POLICY).unwrap();
+    let bound = embedded_lengths(&upper).unwrap();
+    let envelope = serde_json::to_value(
+        RefusalFeedback::sizing_combined_contract_envelope(&f.contract, &f.ledger, POLICY).unwrap(),
+    )
+    .unwrap();
+    let old = embedded_lengths(&envelope).unwrap();
+    assert!(
+        bound.iter().zip(old).all(|(new, old)| *new < old),
+        "{bound:?} vs {old:?}"
+    );
+    let empty = f.empty();
+    let ids = vec![f.target.target_id.clone()];
+    for ledger in [&empty, &f.ledger] {
+        let choices = f.derive(ledger, &[]).unwrap();
+        let real = serde_json::to_value(
+            choices
+                .citation_correction(&ids, &f.contract, &f.metadata, ledger, POLICY)
+                .unwrap(),
+        )
+        .unwrap();
+        let actual = embedded_lengths(&real).unwrap();
+        assert!(
+            actual.iter().zip(bound).all(|(a, b)| *a <= b),
+            "{actual:?} > {bound:?}"
+        );
+        // No projection at all serializes as null, which is smaller still.
+        assert!(embedded_lengths(&serde_json::Value::Null).unwrap()[2] <= bound[2]);
+    }
+}
+
 #[test]
 fn citation_correction_decoding_does_not_authorize_forged_mapping() {
     let f = Fixture::new();

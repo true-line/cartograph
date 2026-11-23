@@ -355,9 +355,29 @@ impl InvestigationInput {
             )
             .map_err(|_| InvestigationError::InvalidInput)?;
             // Both the immutable historical mapping and the current-action
-            // projection may coexist; reserve each at the unchanged ceiling.
-            reserved["completion_metadata"]["feedback"] = upper.clone();
-            reserved["turn_progress"]["citation_correction"] = upper;
+            // projection may coexist. The mapping keeps the whole-feedback
+            // ceiling. The projection holds only a citation correction, so a
+            // combined-feedback role reserves the contract's exact superset of
+            // it instead (#1653), whenever that is no larger at every escape
+            // layer. Either value alone bounds every real projection.
+            let projection = if self.frozen_specialist()?.uses_combined_finish_feedback()
+                && self.frozen_specialist()? != SpecialistId::EvidenceAuditorV14
+            {
+                let exact = acquisition_choices::citation_projection_upper(
+                    &contract,
+                    &self.ledger,
+                    policy,
+                )?;
+                let tighter = acquisition_choices::embedded_lengths(&exact)?
+                    .iter()
+                    .zip(acquisition_choices::embedded_lengths(&upper)?)
+                    .all(|(exact, upper)| *exact <= upper);
+                if tighter { exact } else { upper.clone() }
+            } else {
+                upper.clone()
+            };
+            reserved["completion_metadata"]["feedback"] = upper;
+            reserved["turn_progress"]["citation_correction"] = projection;
         }
         // Numeric width, not invented usage authority. The actual usage DTO
         // admits optional token counters which may become present without

@@ -951,4 +951,6 @@ mod tests;
 
 #[path = "acquisition_feedback_bound.rs"]
 mod feedback_bound;
-pub(super) use feedback_bound::feedback_encoded_bound;
+pub(super) use feedback_bound::{
+    citation_projection_upper, embedded_lengths, feedback_encoded_bound,
+};
