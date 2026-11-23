@@ -327,6 +327,7 @@ fn analyst20_contract_feedback_bound_covers_query_and_read_corrections() {
             .unwrap()
             .unwrap();
         let feedback = staged_finish::RefusalFeedback {
+            citation_drop: None,
             prose_correction: None,
             schema_version: 2,
             citation_correction: Some(correction.clone()),
@@ -459,6 +460,7 @@ fn analyst20_contract_bound_covers_largest_actions_for_all_targets() {
                     );
                 }
                 let feedback = staged_finish::RefusalFeedback {
+                    citation_drop: None,
                     prose_correction: None,
                     schema_version: 2,
                     citation_correction: Some(correction),

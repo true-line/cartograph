@@ -185,6 +185,7 @@ fn finish_patch_indices_come_only_from_complete_finding_feedback() {
         refusal_count: 1,
         assessment: vec![],
         feedback: RefusalFeedback {
+            citation_drop: None,
             schema_version: 6,
             citation_correction: None,
             unmet: vec![],
@@ -275,6 +276,7 @@ fn limitation_refusal(first: &StagedFinish) -> RefusalRecord {
         refusal_count: 1,
         assessment: vec![],
         feedback: RefusalFeedback {
+            citation_drop: None,
             schema_version: 6,
             citation_correction: None,
             unmet: vec![],
