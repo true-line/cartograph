@@ -2056,6 +2056,7 @@ impl PrimarySourceStore {
                 toolchain_captured: false,
                 documents_captured: false,
                 api_doc_paths: None,
+                plugins_captured: false,
                 _guard: None,
             });
         }
@@ -2149,17 +2150,19 @@ impl PrimarySourceStore {
             .cloned()
             .collect();
         // Droppable groups, in the order they are kept: shipped JVM class
-        // files (AC-1215), then the documentation walk's selection
-        // (AC-1065). Each is tried with the readers and everything before
-        // it, and the last is the first left out, so documents never cost a
-        // class file, a reader or a lane its capture.
+        // files (AC-1215), the files the active plugins claim (AC-1069),
+        // then the documentation walk's selection (AC-1065). Each is tried
+        // with the readers and everything before it, and the last is the
+        // first left out, so a later group never costs an earlier one, a
+        // reader or a lane its capture.
         let classes = if wants_lanes {
             adapters_artifact_jvm::class_paths(root).unwrap_or_default()
         } else {
             Vec::new()
         };
         let documents = spec::documentation_paths(root).ok();
-        let groups = [(!classes.is_empty()).then_some(classes), documents];
+        let plugins = callers.plugins.map(<[String]>::to_vec);
+        let groups = [(!classes.is_empty()).then_some(classes), plugins, documents];
         let mut capture = None;
         let mut kept = 0;
         for count in (1..=groups.len()).rev() {
@@ -2174,6 +2177,7 @@ impl PrimarySourceStore {
                 break;
             }
         }
+        let plugins_captured = kept >= 2 && groups[1].is_some();
         let documents_captured = kept == groups.len();
         if capture.is_none()
             && (environments.is_some()
@@ -2207,6 +2211,7 @@ impl PrimarySourceStore {
             toolchain_captured,
             documents_captured,
             api_doc_paths,
+            plugins_captured,
             _guard: Some(guard),
         })
     }
@@ -2354,6 +2359,9 @@ pub struct CallerSelections<'a> {
     /// repository config and the system manifest; `None` when their load
     /// names a gap.
     pub api_docs: Option<&'a [String]>,
+    /// The files the active plugins claim (AC-1069), in path order; `None`
+    /// when no plugin is active or they could not be listed.
+    pub plugins: Option<&'a [String]>,
 }
 
 pub struct PrimaryInput {
@@ -2377,6 +2385,9 @@ pub struct PrimaryInput {
     /// (AC-1067); `None` when it does not hold them, and their loader reads
     /// the checkout.
     pub api_doc_paths: Option<Vec<String>>,
+    /// Whether the capture holds every file the active plugins claim
+    /// (AC-1069); when it does not, plugins are routed the checkout's files.
+    pub plugins_captured: bool,
     _guard: Option<RetentionGuard>,
 }
 

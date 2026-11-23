@@ -1287,6 +1287,9 @@ struct ProducerReads {
     /// Whether the primary capture holds the declared API references and
     /// their config, so their loader reads it (AC-1067).
     api_docs_captured: bool,
+    /// Whether the primary capture holds every file the active plugins
+    /// claim, so they are routed its bytes (AC-1069).
+    plugins_captured: bool,
     /// What the found ADR/RFC reader read and published (#1847).
     adrs: ingest::coverage::ProducerCount,
     /// Found ADR/RFC files over the size bound, in path order (#1847).
@@ -1317,6 +1320,7 @@ impl Default for ProducerReads {
             toolchain_captured: false,
             documents_captured: false,
             api_docs_captured: false,
+            plugins_captured: false,
             adrs: ingest::coverage::ProducerCount::default(),
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
@@ -2912,14 +2916,43 @@ fn extract_tree_packed(
             let loaded = host
                 .load(&wasm_bytes, &plugin.plugin_id)
                 .map_err(|e| e.to_string())?;
-            let claimed = adapters_plugin_host::route::extract_claimed_counted(
-                &host,
-                &loaded,
-                root,
-                &plugin.extensions,
-                &plugin_source,
-                plugin.limits,
-            )
+            // A capture that holds every claimed file is routed in place of
+            // the checkout (AC-1069): a claimed file edited, deleted or
+            // created afterwards changes nothing.
+            let claimed = match primary {
+                Some(capture) if reads.plugins_captured => {
+                    let captured: Vec<String> = capture
+                        .manifest()
+                        .files
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect();
+                    adapters_plugin_host::route::extract_captured_counted(
+                        &host,
+                        &loaded,
+                        &captured,
+                        &|rel| {
+                            capture
+                                .file(rel)
+                                .map(|file| file.bytes().to_vec())
+                                .map_err(|_| {
+                                    std::io::Error::other("captured plugin file is unavailable")
+                                })
+                        },
+                        &plugin.extensions,
+                        &plugin_source,
+                        plugin.limits,
+                    )
+                }
+                _ => adapters_plugin_host::route::extract_claimed_counted(
+                    &host,
+                    &loaded,
+                    root,
+                    &plugin.extensions,
+                    &plugin_source,
+                    plugin.limits,
+                ),
+            }
             .map_err(|e| e.to_string())?;
             let plugin_facts = claimed.facts;
             reads.plugins.push(ingest::coverage::PluginRead {
@@ -4648,6 +4681,23 @@ fn preflight_blocking<R: tauri::Runtime>(
     })
 }
 
+/// The files the active `plugins` claim under `root` (AC-1069), in path
+/// order, so a source capture retains them; `None` when no plugin is active
+/// or the files could not be listed.
+fn plugin_claimed_paths(root: &std::path::Path, plugins: &[ActivePlugin]) -> Option<Vec<String>> {
+    if plugins.is_empty() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for plugin in plugins {
+        let claimed = adapters_plugin_host::route::claimed_files(root, &plugin.extensions).ok()?;
+        paths.extend(claimed.iter().map(|rel| rel.to_string_lossy().into_owned()));
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
 fn plugin_coverage(plugins: &[ActivePlugin]) -> Vec<ingest::preflight::PluginCoverage> {
     plugins
         .iter()
@@ -5981,6 +6031,7 @@ fn run_ingest<R: tauri::Runtime>(
     let registries = event_registries_for(app).map_err(&fail)?;
     let mut on_file = detail_throttle(app, job_id);
     let api_docs = ingest::api_docs::api_doc_paths(root, &[], limits.api_docs);
+    let plugin_paths = plugin_claimed_paths(root, &active_plugins);
     let primary = state
         .primary_sources
         .prepare_at(
@@ -5992,6 +6043,7 @@ fn run_ingest<R: tauri::Runtime>(
             selection_visited_entries(state).map_err(&fail)?,
             primary_source::CallerSelections {
                 api_docs: api_docs.as_deref(),
+                plugins: plugin_paths.as_deref(),
             },
         )
         .map_err(&fail)?;
@@ -6003,6 +6055,7 @@ fn run_ingest<R: tauri::Runtime>(
         toolchain_captured: primary.toolchain_captured,
         documents_captured: primary.documents_captured,
         api_docs_captured: primary.api_doc_paths.is_some(),
+        plugins_captured: primary.plugins_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6461,6 +6514,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
     let mut on_file = detail_throttle(&app, job_id);
     // A managed clone is captured from its cloned commit's Git objects (AC-1022).
     let api_docs = ingest::api_docs::api_doc_paths(root, &[], limits.api_docs);
+    let plugin_paths = plugin_claimed_paths(root, &active_plugins);
     let primary = state
         .primary_sources
         .prepare_at(
@@ -6472,6 +6526,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
             selection_visited_entries(&state).map_err(&fail)?,
             primary_source::CallerSelections {
                 api_docs: api_docs.as_deref(),
+                plugins: plugin_paths.as_deref(),
             },
         )
         .map_err(&fail)?;
@@ -6483,6 +6538,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         toolchain_captured: primary.toolchain_captured,
         documents_captured: primary.documents_captured,
         api_docs_captured: primary.api_doc_paths.is_some(),
+        plugins_captured: primary.plugins_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6809,6 +6865,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         // A managed clone is captured from its cloned commit's Git objects
         // (AC-1022); a local entry keeps a working-tree capture.
         let api_docs = ingest::api_docs::api_doc_paths(root, &entry.api_docs, limits.api_docs);
+        let plugin_paths = plugin_claimed_paths(root, &active_plugins);
         let primary = state
             .primary_sources
             .prepare_at(
@@ -6820,6 +6877,7 @@ fn add_system_blocking<R: tauri::Runtime>(
                 selection_visited_entries(&state).map_err(&fail)?,
                 primary_source::CallerSelections {
                     api_docs: api_docs.as_deref(),
+                    plugins: plugin_paths.as_deref(),
                 },
             )
             .map_err(&fail)?;
@@ -6831,6 +6889,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             toolchain_captured: primary.toolchain_captured,
             documents_captured: primary.documents_captured,
             api_docs_captured: primary.api_doc_paths.is_some(),
+            plugins_captured: primary.plugins_captured,
             ..ProducerReads::default()
         };
         let (extraction, facts, repo_layers, repo_delta) = {

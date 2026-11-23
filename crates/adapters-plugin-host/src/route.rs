@@ -82,6 +82,19 @@ pub fn claimed_files(root: &Path, extensions: &[String]) -> std::io::Result<Vec<
     )
 }
 
+/// True when a plugin claiming `extensions` is routed `rel`: its extension
+/// is claimed and no directory on its path is one routing never enters, the
+/// same files [`claimed_files`] lists. A source capture retains them
+/// (AC-1069).
+pub fn claims(rel: &str, extensions: &[String]) -> bool {
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    let name = parts.pop().unwrap_or(rel);
+    !parts.iter().any(|part| SKIP_DIRS.contains(part))
+        && Path::new(name)
+            .extension()
+            .is_some_and(|extension| extensions.contains(&extension.to_string_lossy().into_owned()))
+}
+
 /// One claimed file the host refused for this plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefusedFile {
@@ -115,7 +128,16 @@ pub fn extract_claimed(
     source_id: &SourceId,
     limits: PluginLimits,
 ) -> Result<PluginExtraction, RouteError> {
-    route(host, plugin, root, extensions, source_id, limits, false).map(|claimed| claimed.facts)
+    let files = claimed_paths(root, extensions)?;
+    let read = |rel: &str| std::fs::read(root.join(rel));
+    route(host, plugin, &files, &read, source_id, limits, false).map(|claimed| claimed.facts)
+}
+
+fn claimed_paths(root: &Path, extensions: &[String]) -> std::io::Result<Vec<String>> {
+    Ok(claimed_files(root, extensions)?
+        .into_iter()
+        .map(|rel| rel.to_string_lossy().into_owned())
+        .collect())
 }
 
 /// Run one gated plugin over every file it claims under `root`, refusing
@@ -131,22 +153,48 @@ pub fn extract_claimed_counted(
     source_id: &SourceId,
     limits: PluginLimits,
 ) -> Result<ClaimedExtraction, RouteError> {
-    route(host, plugin, root, extensions, source_id, limits, true)
+    let files = claimed_paths(root, extensions)?;
+    let read = |rel: &str| std::fs::read(root.join(rel));
+    route(host, plugin, &files, &read, source_id, limits, true)
+}
+
+/// [`extract_claimed_counted`] over a source capture (AC-1069, #385):
+/// `captured` is the capture's own paths and `read` their bytes. The plugin
+/// is routed only the captured files it [`claims`], so a claimed file
+/// edited, deleted or created in the checkout after capture changes
+/// nothing.
+pub fn extract_captured_counted(
+    host: &PluginHost,
+    plugin: &LoadedPlugin,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    extensions: &[String],
+    source_id: &SourceId,
+    limits: PluginLimits,
+) -> Result<ClaimedExtraction, RouteError> {
+    let mut files: Vec<String> = captured
+        .iter()
+        .filter(|rel| claims(rel, extensions))
+        .cloned()
+        .collect();
+    files.sort();
+    files.dedup();
+    route(host, plugin, &files, read, source_id, limits, true)
 }
 
 fn route(
     host: &PluginHost,
     plugin: &LoadedPlugin,
-    root: &Path,
-    extensions: &[String],
+    files: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
     source_id: &SourceId,
     limits: PluginLimits,
     refuse_files: bool,
 ) -> Result<ClaimedExtraction, RouteError> {
     let mut claimed = ClaimedExtraction::default();
-    for rel in claimed_files(root, extensions)? {
-        let source = std::fs::read(root.join(&rel))?;
-        let rel = rel.to_string_lossy().into_owned();
+    for rel in files {
+        let source = read(rel)?;
+        let rel = rel.clone();
         match host.call_extract(plugin, &source, &rel, source_id, limits) {
             Ok(extraction) => {
                 claimed.facts.nodes.extend(extraction.nodes);
