@@ -359,7 +359,8 @@ export default function App() {
       setFollowUpContext({
         parent_id: detail.investigation_id, conversation_id: detail.conversation_id,
         specialist_id: detail.specialist.id,
-        scope: detail.scope.type === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor: detail.scope.anchor, hops: detail.scope.hops },
+        scope: detail.scope.type === 'all' ? { type: 'all' } : detail.scope.type === 'area' ? { type: 'area', id: detail.scope.id }
+          : { type: 'neighborhood', anchor: detail.scope.anchor, hops: detail.scope.hops },
         provider_mode: detail.provider.mode, saved_provider_id: chat.producer.provider_id, saved_model: chat.producer.model,
       });
       activeFollowUpParentRef.current = taskId;
@@ -760,6 +761,8 @@ export default function App() {
       ? { kind: 'layer', label: `Atlas · ${atlasLayer}` }
       : view === 'investigations' && investigations.detail?.scope.type === 'neighborhood'
         ? { kind: 'trail', label: `Investigation · ${investigations.detail.scope.hops} hop(s)` }
+      : view === 'investigations' && investigations.detail?.scope.type === 'area'
+        ? { kind: 'trail', label: 'Investigation · Area' }
       : { kind: 'system', label: 'Whole system' };
   // Atlas names repositories as Workspace does, not by `local/src_<hash>` keys (#1601).
   const atlasRepoLabel = useMemo(() => createRepositoryLabeler(systemContents), [systemContents]);

@@ -39,12 +39,16 @@ function normalizedScope(scope: InvestigationScope): InvestigationScope | null {
       Number.isSafeInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3) {
     return { type: 'neighborhood', anchor: scope.anchor, hops: scope.hops };
   }
+  if (scope.type === 'area' && typeof scope.id === 'string' && scope.id.trim().length > 0 && scope.id.length <= 1024) {
+    return { type: 'area', id: scope.id };
+  }
   return null;
 }
 
 function sameScope(left: InvestigationScope, right: InvestigationScope): boolean {
-  return left.type === right.type && (left.type === 'all' ||
-    (right.type === 'neighborhood' && left.anchor === right.anchor && left.hops === right.hops));
+  if (left.type === 'all' || right.type === 'all') return left.type === right.type;
+  if (left.type === 'area' || right.type === 'area') return left.type === 'area' && right.type === 'area' && left.id === right.id;
+  return left.anchor === right.anchor && left.hops === right.hops;
 }
 
 /** Capture only a settled coordinator observation; cached immutable identity survives reopen. */

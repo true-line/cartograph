@@ -11,7 +11,31 @@ import type { SpecialistId } from './generated/specialistTable';
 export type InvestigationProviderMode = 'local' | 'cloud';
 /** The existing context-hub QueryScope wire shape, not a filesystem scope. */
 export type InvestigationScope = { type: 'all' } |
-  { type: 'neighborhood'; anchor: string; hops: number };
+  { type: 'neighborhood'; anchor: string; hops: number } |
+  /** One overlay Subsystem's files and what they define (#2044, #2477). */
+  { type: 'area'; id: string };
+export type InvestigationScopeType = InvestigationScope['type'];
+
+/** One task scope as people read it; `areaName` is the Subsystem's name when known. */
+export function investigationScopeLabel(scope: InvestigationScope, areaName?: string): string {
+  if (scope.type === 'all') return 'Recovered system';
+  if (scope.type === 'area') return `Area · ${areaName ?? scope.id}`;
+  return `Fact neighborhood · ${scope.anchor} · ${scope.hops} hop${scope.hops === 1 ? '' : 's'}`;
+}
+
+/** The scope a composer describes. */
+export function composerScope(composer: { scopeType: InvestigationScopeType; anchor: string; hops: number; area: string }): InvestigationScope {
+  if (composer.scopeType === 'all') return { type: 'all' };
+  if (composer.scopeType === 'area') return { type: 'area', id: composer.area };
+  return { type: 'neighborhood', anchor: composer.anchor, hops: composer.hops };
+}
+
+/** Whether a scope can be sent: a named area, or an anchor with one to three hops. */
+export function investigationScopeValid(scope: InvestigationScope): boolean {
+  if (scope.type === 'all') return true;
+  if (scope.type === 'area') return scope.id.trim().length > 0 && scope.id.length <= 1024;
+  return scope.anchor.trim().length > 0 && Number.isInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3;
+}
 /** Immutable UI context captured from one validated saved parent before follow-up dispatch. */
 export interface InvestigationFollowUpContext {
   parent_id: string;
