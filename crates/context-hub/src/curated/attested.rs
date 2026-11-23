@@ -213,6 +213,50 @@ pub struct CuratedAttested {
     pub missing: Vec<String>,
 }
 
+impl CuratedAttested {
+    /// The label a document or read prints the record with, when it may be
+    /// printed at all: `attested` when an engineer stated or confirmed it,
+    /// `agent-attested, unconfirmed` when only agents attest it, and `None`
+    /// in every other state (ADR-0090 decision 7).
+    pub fn printed_label(&self) -> Option<&'static str> {
+        match self.state {
+            AttestedState::Eligible => Some("attested"),
+            AttestedState::AgentAttestedUnconfirmed => Some(self.state.label()),
+            _ => None,
+        }
+    }
+
+    /// Who stands behind the record, oldest first, as a document prints it:
+    /// `stated by section-writer@1 (run run-1), confirmed by <engineer>`.
+    /// An engineer is named by display name, an agent by role and run.
+    pub fn contributors(&self) -> String {
+        let mut text = String::new();
+        for (position, contribution) in self.attestations.iter().enumerate() {
+            if position > 0 {
+                text.push_str(", ");
+            }
+            text.push_str(&contribution.verb);
+            text.push_str(" by ");
+            if contribution.engineer {
+                text.push_str(
+                    contribution
+                        .display_name
+                        .as_deref()
+                        .unwrap_or("the project's engineer"),
+                );
+            } else {
+                text.push_str(contribution.role.as_deref().unwrap_or("an agent"));
+                if let Some(run) = &contribution.run {
+                    text.push_str(" (run ");
+                    text.push_str(run);
+                    text.push(')');
+                }
+            }
+        }
+        text
+    }
+}
+
 /// Attested totals. `projected` is the sum of every state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedCounts {

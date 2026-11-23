@@ -261,3 +261,94 @@ fn the_attested_projection_is_order_independent_moves_the_revision_and_fails_on_
         Err(ProjectionError::DuplicateRecord)
     );
 }
+
+/// An accepted D1 draft citing `F-1` and the attested record `a1` by its
+/// `A-` id, with the record's identity recorded as that id's hash.
+fn draft_citing(record: &ReviewedAttested) -> ReviewedDraft {
+    ReviewedDraft {
+        draft_id: "d1".into(),
+        address: DraftAddress {
+            catalogue_version: "1.0".into(),
+            document: "D1".into(),
+            section: "1.3".into(),
+            scope: "system".into(),
+        },
+        role: "section-writer@1".into(),
+        claims: vec![DraftClaim {
+            statement: "A login is checked at runtime.".into(),
+            kind: "implemented".into(),
+            citations: vec!["F-1".into(), record.citation_id.clone()],
+        }],
+        cited_hashes: BTreeMap::from([
+            ("F-1".to_owned(), "hash-1".to_owned()),
+            (record.citation_id.clone(), record.record_id.clone()),
+        ]),
+        replaces: None,
+        decision: Some(DraftReview::Accepted),
+    }
+}
+
+// AC-1077 (T-1077): a draft may cite a printable attested record beside
+// facts; any other state of the record leaves the draft unresolvable.
+#[test]
+fn a_draft_citing_an_attested_record_resolves_only_while_the_record_may_be_printed() {
+    let nodes = [gap("gap:login")];
+    let state_of = |standing| {
+        let record = attested("a1", standing);
+        let draft = draft_citing(&record);
+        let projection = project(&ProjectionInput {
+            nodes: &nodes,
+            edges: &[],
+            graph_content_hash: GRAPH_HASH,
+            proposals: &[],
+            assessments: &BTreeMap::new(),
+            assertion_decisions: &[],
+            current_assertion_hashes: &BTreeSet::new(),
+            drafts: std::slice::from_ref(&draft),
+            cited_fact_hashes: &current(),
+            findings: &[],
+            cited_fact_digests: &BTreeMap::new(),
+            attested: std::slice::from_ref(&record),
+            policy_version: CURATED_POLICY_VERSION,
+        })
+        .unwrap();
+        let draft = &projection.drafts[0];
+        (draft.state, draft.missing.clone())
+    };
+    for standing in [
+        AttestedStanding::EngineerBacked,
+        AttestedStanding::AgentAttestedUnconfirmed,
+    ] {
+        assert_eq!(state_of(standing), (DraftState::Eligible, vec![]));
+    }
+    for standing in [AttestedStanding::Withdrawn, AttestedStanding::Disputed] {
+        assert_eq!(
+            state_of(standing),
+            (DraftState::Unresolvable, vec![format!("A-{:0>16}", "a1")])
+        );
+    }
+}
+
+#[test]
+fn a_printed_record_names_each_contributor_and_its_verb() {
+    let projection = run(
+        &[attested("a1", AttestedStanding::EngineerBacked)],
+        &[gap("gap:login")],
+    );
+    let record = &projection.attested[0];
+    assert_eq!(record.printed_label(), Some("attested"));
+    assert_eq!(
+        record.contributors(),
+        "stated by section-writer@1 (run run-1), confirmed by Placeholder Engineer"
+    );
+    let agents = run(
+        &[attested("a1", AttestedStanding::AgentAttestedUnconfirmed)],
+        &[gap("gap:login")],
+    );
+    assert_eq!(
+        agents.attested[0].printed_label(),
+        Some("agent-attested, unconfirmed")
+    );
+    let withdrawn = run(&[attested("a1", AttestedStanding::Withdrawn)], &[]);
+    assert_eq!(withdrawn.attested[0].printed_label(), None);
+}
