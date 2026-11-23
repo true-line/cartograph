@@ -13,6 +13,7 @@ pub mod debug_log;
 pub mod openai;
 pub mod openai_compatible;
 pub mod read_deny;
+pub mod typed_decision;
 
 use reqwest::Url;
 use reqwest::blocking::{Client, ClientBuilder};
