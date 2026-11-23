@@ -5,13 +5,87 @@ use agents::{TaskFactKey, investigation::*};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in super::super) struct Selection {
     pub fact: TaskFactKey,
     pub graph_snapshot_id: String,
     pub receipt_id: String,
     pub ordinal: usize,
+}
+
+/// AC-1436 (#2524): two selections naming the same fact would stage the same
+/// source obligation twice and silently shrink the distinct read set.
+fn repeats_a_fact(selections: &[Selection]) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    selections
+        .iter()
+        .any(|selection| !seen.insert(&selection.fact))
+}
+
+/// AC-1436 (#2524): #1728 selection rule v3 in full. The rule-bearing owners
+/// come first, in their ranking order; any shortfall below `max` is filled from
+/// `fill` (rule v2 order), skipping a fact already taken, by fact identity
+/// rather than serialized bytes.
+pub(in super::super) fn complete_rule_v3(
+    owners: Vec<Selection>,
+    fill: Vec<Selection>,
+    max: usize,
+) -> Vec<Selection> {
+    let mut taken = std::collections::BTreeSet::new();
+    let mut selections = Vec::new();
+    for selection in owners.into_iter().chain(fill) {
+        if selections.len() == max {
+            break;
+        }
+        if taken.insert(selection.fact.clone()) {
+            selections.push(selection);
+        }
+    }
+    selections
+}
+
+#[test]
+fn rule_v3_fill_skips_taken_facts_and_staging_refuses_repeats() {
+    let selection = |id: &str, ordinal: usize| Selection {
+        fact: TaskFactKey::Node { id: id.into() },
+        graph_snapshot_id: "context-v1:g".into(),
+        receipt_id: format!("receipt-{id}"),
+        ordinal,
+    };
+    let owners = vec![selection("a", 0), selection("b", 0)];
+    // The fill repeats both owners (one at another ordinal) and itself.
+    let fill = vec![
+        selection("b", 0),
+        selection("c", 0),
+        selection("a", 1),
+        selection("c", 0),
+        selection("d", 0),
+        selection("e", 0),
+    ];
+    let complete = complete_rule_v3(owners.clone(), fill.clone(), 4);
+    let ids: Vec<_> = complete
+        .iter()
+        .map(|s| match &s.fact {
+            TaskFactKey::Node { id } => id.as_str(),
+            TaskFactKey::Edge { .. } => unreachable!(),
+        })
+        .collect();
+    assert_eq!(ids, ["a", "b", "c", "d"]);
+    assert!(!repeats_a_fact(&complete));
+    // Owners alone already at the cap take nothing from the fill.
+    assert_eq!(complete_rule_v3(owners.clone(), fill, 2), owners);
+    // The canonical field order is the struct order, whatever the input order.
+    let reordered: Selection = serde_json::from_str(
+        r#"{"ordinal":0,"receipt_id":"receipt-a","graph_snapshot_id":"context-v1:g","fact":{"id":"a","kind":"node"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&reordered).unwrap(),
+        r#"{"fact":{"kind":"node","id":"a"},"graph_snapshot_id":"context-v1:g","receipt_id":"receipt-a","ordinal":0}"#
+    );
+    assert!(repeats_a_fact(&[selection("a", 0), selection("a", 1)]));
+    assert!(!repeats_a_fact(&[selection("a", 0), selection("b", 0)]));
 }
 /// Supplied independently by the caller, never recovered as expected authority
 /// from the adjacent frozen output. The preparation SHA256 binds the complete
@@ -200,6 +274,7 @@ fn validate_bound<'a>(
     if read(definition_path)? != definition
         || expected.selections.is_empty()
         || expected.selections.len() > 64
+        || repeats_a_fact(&expected.selections)
         || !expected.provider.available
         || (expected.provider.mode == InvestigationProviderMode::Cloud
             && super::cloud_run::pinned(&expected.provider).is_err())

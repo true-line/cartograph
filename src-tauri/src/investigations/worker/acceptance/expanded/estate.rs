@@ -63,7 +63,10 @@ fn estate_captured_local_analyst() {
 /// profile's data directory (opening it runs the normal store migrations) and
 /// CARTOGRAPH_ESTATE_CLOSURE at a JSON list of the question's closure paths;
 /// CARTOGRAPH_ESTATE_REPO, when set, names the registered repository those
-/// paths belong to. Rule v3 fills any shortfall in rule v2 order outside this test.
+/// paths belong to. CARTOGRAPH_ESTATE_V2_FILL, when set, points at a JSON
+/// list of selections in rule v2 order; a shortfall below seven is filled from
+/// it, skipping facts already taken (AC-1436, #2524). `selections` is then the
+/// complete rule v3 list in canonical selection order, ready to stage.
 #[test]
 #[ignore = "manual #1728 rule v3 selection; reads a copied profile, no provider"]
 fn estate_rule_bearing_selections() {
@@ -80,17 +83,19 @@ fn estate_rule_bearing_selections() {
         7,
     )
     .unwrap();
-    let selections: Vec<_> = sources
+    let owners: Vec<_> = sources
         .iter()
-        .map(|source| {
-            serde_json::json!({
-                "fact": source.fact,
-                "graph_snapshot_id": source.graph_snapshot_id,
-                "receipt_id": source.receipt_id,
-                "ordinal": source.range_index,
-            })
+        .map(|source| vendure_prepare::Selection {
+            fact: source.fact.clone(),
+            graph_snapshot_id: source.graph_snapshot_id.clone(),
+            receipt_id: source.receipt_id.clone(),
+            ordinal: source.range_index,
         })
         .collect();
+    let fill: Vec<vendure_prepare::Selection> = std::env::var_os("CARTOGRAPH_ESTATE_V2_FILL")
+        .map(|fill| serde_json::from_slice(&std::fs::read(fill).unwrap()).unwrap())
+        .unwrap_or_default();
+    let selections = vendure_prepare::complete_rule_v3(owners, fill, 7);
     let ranking: Vec<_> = sources.iter().map(|source| &source.owner).collect();
     println!(
         "{}",
@@ -100,4 +105,42 @@ fn estate_rule_bearing_selections() {
         }))
         .unwrap()
     );
+}
+
+/// #2523 diagnostic: resolve each selection of a definition against a copied
+/// profile and print the typed inspection outcome per selection, so a staging
+/// refusal ("Captured inspection target changed or is unavailable") names its
+/// cause. Point CARTOGRAPH_ESTATE_PROFILE_DATA at a copy of the profile's data
+/// directory and CARTOGRAPH_ESTATE_SELECTIONS at a JSON list of selections.
+#[test]
+#[ignore = "manual #2523 diagnostic; reads a copied profile, no provider"]
+fn estate_resolve_selections() {
+    let data = path("CARTOGRAPH_ESTATE_PROFILE_DATA");
+    let selections: Vec<vendure_prepare::Selection> =
+        serde_json::from_slice(&std::fs::read(path("CARTOGRAPH_ESTATE_SELECTIONS")).unwrap())
+            .unwrap();
+    let state = crate::registered_source_tests::app_state(&data);
+    for selection in &selections {
+        let outcome = crate::investigations::inspection::resolve_typed(
+            &state,
+            &selection.fact,
+            &selection.graph_snapshot_id,
+            &selection.receipt_id,
+            selection.ordinal,
+        );
+        println!(
+            "{}",
+            serde_json::json!({
+                "fact": selection.fact,
+                "ordinal": selection.ordinal,
+                "outcome": match outcome {
+                    Ok((target, _)) => format!(
+                        "ok {}:{}..{}",
+                        target.source.path, target.source.byte_start, target.source.byte_end
+                    ),
+                    Err(error) => format!("{error:?}"),
+                },
+            })
+        );
+    }
 }
