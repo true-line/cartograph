@@ -15,7 +15,8 @@ use tauri::Manager;
 
 /// Most suggestions one call returns.
 pub(crate) const MAX_RULE_SOURCES: usize = 64;
-/// Most suggestions taken from one file, so one large class cannot fill the list.
+/// Most suggestions taken from one file while another file still has an
+/// owner to offer, so one large class cannot crowd the others out.
 pub(crate) const MAX_PER_FILE: usize = 2;
 
 /// One callable and the recovered rules it owns.
@@ -116,8 +117,10 @@ pub(crate) struct RuleBearingSource {
     pub range_index: usize,
 }
 
-/// The ranked owners that have a captured source, at most `limit`. An owner
-/// without a bound capture receipt is skipped, so every entry resolves.
+/// The ranked owners that have a captured source, at most `limit`: first at
+/// most [`MAX_PER_FILE`] per file in ranking order, then the owners that cap
+/// passed over, also in ranking order. An owner without a bound capture
+/// receipt is skipped, so every entry resolves.
 pub(crate) fn rule_bearing_sources(
     state: &AppState,
     repo: Option<&str>,
@@ -131,11 +134,14 @@ pub(crate) fn rule_bearing_sources(
         .map_err(|_| "Graph store is unavailable.".to_owned())?
         .nodes_with_label("BusinessRule")
         .map_err(|error| error.to_string())?;
+    let ranked = rank_owners(&rules, repo, files, usize::MAX);
     let mut sources = Vec::new();
     // The per-file cap counts only owners that yield a suggestion, so an
     // owner skipped below does not crowd out an inspectable one (#2523).
     let mut taken: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for owner in rank_owners(&rules, repo, files, usize::MAX) {
+    // Owners the cap passed over, in ranking order (AC-1442).
+    let mut passed_over = Vec::new();
+    for owner in ranked {
         if sources.len() >= limit {
             break;
         }
@@ -143,37 +149,52 @@ pub(crate) fn rule_bearing_sources(
             .get(&(owner.repo.clone(), owner.path.clone()))
             .is_some_and(|count| *count >= MAX_PER_FILE)
         {
+            passed_over.push(owner);
             continue;
         }
-        let fact = TaskFactKey::Node {
-            id: owner.owner_id.clone(),
-        };
-        let Ok(description) =
-            crate::primary_source::describe(state, &crate::task_evidence::graph_fact(&fact))
-        else {
-            continue;
-        };
-        // The first range one inspection target can name; an owner whose
-        // every range is longer (a whole large method) cannot be inspected
-        // and is skipped, so every suggestion still resolves (#2523).
-        let Some(range) = description.ranges.iter().find(|range| {
-            range.byte_end.saturating_sub(range.byte_start)
-                <= agents::investigation::MAX_INSPECTION_RANGE_BYTES
-        }) else {
+        let Some(source) = inspectable(state, owner) else {
             continue;
         };
         *taken
-            .entry((owner.repo.clone(), owner.path.clone()))
+            .entry((source.owner.repo.clone(), source.owner.path.clone()))
             .or_default() += 1;
-        sources.push(RuleBearingSource {
-            fact,
-            owner,
-            graph_snapshot_id: description.graph_snapshot_id,
-            receipt_id: description.receipt_id,
-            range_index: range.index,
-        });
+        sources.push(source);
+    }
+    // AC-1442 (#1728): the cap spreads suggestions across files; it never
+    // leaves a slot empty while a rule owner remains. A closure whose rules
+    // sit in few files is filled from those files' further owners, so the
+    // caller does not pad the list with code that holds no rule.
+    for owner in passed_over {
+        if sources.len() >= limit {
+            break;
+        }
+        sources.extend(inspectable(state, owner));
     }
     Ok(sources)
+}
+
+/// `owner` with its captured identity, or `None` when it has no bound capture
+/// receipt or no range short enough to inspect.
+fn inspectable(state: &AppState, owner: RuleBearingOwner) -> Option<RuleBearingSource> {
+    let fact = TaskFactKey::Node {
+        id: owner.owner_id.clone(),
+    };
+    let description =
+        crate::primary_source::describe(state, &crate::task_evidence::graph_fact(&fact)).ok()?;
+    // The first range one inspection target can name; an owner whose
+    // every range is longer (a whole large method) cannot be inspected
+    // and is skipped, so every suggestion still resolves (#2523).
+    let range = description.ranges.iter().find(|range| {
+        range.byte_end.saturating_sub(range.byte_start)
+            <= agents::investigation::MAX_INSPECTION_RANGE_BYTES
+    })?;
+    Some(RuleBearingSource {
+        fact,
+        owner,
+        graph_snapshot_id: description.graph_snapshot_id,
+        receipt_id: description.receipt_id,
+        range_index: range.index,
+    })
 }
 
 #[tauri::command]
