@@ -2129,8 +2129,14 @@ mod tests {
                 .code,
             "agent_not_configured"
         );
+        // Settings require an absolute program path, which differs by OS.
+        let program = if cfg!(windows) {
+            r"C:\agent\bin\acp.exe"
+        } else {
+            "/opt/agent/bin/acp"
+        };
         let agent = crate::settings::AcpAgentCommand {
-            program: "/opt/agent/bin/acp".into(),
+            program: program.into(),
             args: vec!["--acp".into()],
         };
         state
@@ -2153,10 +2159,7 @@ mod tests {
             assert_eq!(request.base_rev, commit);
             assert_eq!(request.repo, source.root());
             assert_eq!(request.worktree_root, worktrees);
-            assert_eq!(
-                request.agent.program,
-                std::path::Path::new("/opt/agent/bin/acp")
-            );
+            assert_eq!(request.agent.program, std::path::Path::new(program));
             assert_eq!(request.agent.args, ["--acp"]);
             assert!(
                 request.prompt.contains(&id),
