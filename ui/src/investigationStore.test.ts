@@ -919,6 +919,59 @@ describe('durable investigation observations (AC-0190)', () => {
     expect(useInvestigationStore.getState().error).toContain('could not be refreshed consistently');
   });
 
+  it('refreshes again when the task changes while a refresh is loading (#2476)', async () => {
+    // A failed run's terminal notification can land during an in-flight read
+    // that still observes the running task. It must not be dropped.
+    const running = investigationDetail('same', { status: 'running', has_result: false, revision: 5,
+      last_event_sequence: 5, actions: { can_cancel: true, can_follow_up: false } });
+    const held = deferred<InvestigationDetail>();
+    let reads = 0;
+    let terminal = false;
+    mockIPC((command, args) => {
+      if (command === 'get_investigation') {
+        reads += 1;
+        if (reads === 2) return held.promise;
+        return terminal ? investigationDetail('same') : running;
+      }
+      if (command === 'investigation_result') return terminal ? investigationResult('same') : null;
+      return response(command, args);
+    });
+    await useInvestigationStore.getState().open('same');
+    expect(useInvestigationStore.getState().detail?.status).toBe('running');
+    const stale = useInvestigationStore.getState().refreshSelected();
+    expect(useInvestigationStore.getState().loading).toBe(true);
+    terminal = true;
+    useInvestigationStore.getState().invalidate({ investigation_id: 'same', revision: 9, last_event_sequence: 9 });
+    expect(reads).toBe(2);
+    held.resolve(running);
+    await stale;
+    await vi.waitFor(() => expect(useInvestigationStore.getState().detail?.status).toBe('completed'));
+    expect(reads).toBe(3);
+    expect(useInvestigationStore.getState().loading).toBe(false);
+    expect(useInvestigationStore.getState().error).toBeNull();
+  });
+
+  it('leaves a chat dock read to its dock instead of trailing it (#2476)', async () => {
+    const held = deferred<InvestigationDetail>();
+    let reads = 0;
+    mockIPC((command, args) => {
+      if (command === 'get_investigation') {
+        reads += 1;
+        if (reads === 2) return held.promise;
+      }
+      return response(command, args);
+    });
+    await useInvestigationStore.getState().open('same');
+    const owner = new AbortController();
+    const docked = useInvestigationStore.getState().refreshSelected({ awaitChat: true, loadingSignal: owner.signal });
+    useInvestigationStore.getState().invalidate({ investigation_id: 'same', revision: 10, last_event_sequence: 10 });
+    held.resolve(investigationDetail('same'));
+    await docked;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(2);
+    expect(useInvestigationStore.getState().loading).toBe(false);
+  });
+
   it('rejects a result that is newer than the detail it was read with', async () => {
     // AC-0204: a result paired with a pre-commit detail is an inconsistent observation, not a running task with findings.
     mockIPC((command, args) => command === 'get_investigation'

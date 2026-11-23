@@ -415,6 +415,10 @@ let conversationRefreshPending: number | null = null;
 let conversationRefreshFirstPagePending = false;
 let conversationDirtyInFlight: { conversationId: string; cursor: string; request: number } | null = null;
 let detailRequest = 0;
+// A newer task notification seen while a detail read is loading. That read may
+// predate it (#2476), so one trailing refresh runs when the read settles.
+type DetailRefreshPending = { id: string; generation: number };
+let detailRefreshPending: DetailRefreshPending | null = null;
 let citationRequest = 0;
 let citationOwnerCleanup: (() => void) | undefined;
 let actionRequest = 0;
@@ -1138,6 +1142,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
       const { selectedId: id, selectionGeneration, events: previousEvents } = get();
       if (!id) return;
       const request = ++detailRequest;
+      // This read starts after any notification already seen, so it covers it.
+      detailRefreshPending = null;
       const ownsSelection = () => get().selectedId === id && get().selectionGeneration === selectionGeneration && request === detailRequest;
       const current = () => ownsSelection() && !options?.loadingSignal?.aborted;
       const releaseLoading = () => {
@@ -1307,14 +1313,28 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           if (current()) set({ loading: false });
         }
         options?.loadingSignal?.removeEventListener('abort', releaseLoading);
+        // Set by `invalidate` while this read awaited; flow analysis can't see that.
+        const pending = detailRefreshPending as DetailRefreshPending | null;
+        // A chat dock read (awaitChat) is one serialized physical transcript read
+        // that its dock replaces or re-reads itself, so it never trails one.
+        if (pending && !options?.awaitChat && request === detailRequest && !get().loading &&
+            get().selectedId === pending.id && get().selectionGeneration === pending.generation) {
+          detailRefreshPending = null;
+          void get().refreshSelected();
+        }
       }
     },
 
     invalidate: (message) => {
       const state = get();
-      if (message.investigation_id === state.selectedId && !state.loading &&
+      if (message.investigation_id === state.selectedId &&
           (message.revision > (state.detail?.revision ?? -1) ||
-            message.last_event_sequence > (state.events.at(-1)?.sequence ?? 0))) void state.refreshSelected();
+            message.last_event_sequence > (state.events.at(-1)?.sequence ?? 0))) {
+        // A notification during a load (for example the terminal transition of
+        // a failed run) must not be dropped, or the pane keeps the older state.
+        if (state.loading) detailRefreshPending = { id: message.investigation_id, generation: state.selectionGeneration };
+        else void state.refreshSelected();
+      }
       if (state.historyActiveOnly) {
         // Membership depends on mutable status. Restart the current selection
         // even when this task was not in the loaded page or a request is pending.
