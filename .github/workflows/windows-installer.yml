@@ -34,13 +34,19 @@ on:
         description: Uploaded Windows installer artifact name
         value: ${{ jobs.installer.outputs.artifact_name }}
 
-# No permissions block: the job runs with what the caller grants, which is
-# contents: read from windows.yml and adds id-token: write from a signer.
+permissions:
+  contents: read
+
 jobs:
   installer:
     name: Windows installer
     runs-on: windows-latest
     timeout-minutes: 90
+    # id-token mints the GitHub OIDC token only the signed path exchanges with
+    # Azure; a caller must grant it. Without secrets no step requests a token.
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       signing_mode: ${{ steps.installer.outputs.mode }}
       artifact_name: ${{ steps.installer.outputs.name }}

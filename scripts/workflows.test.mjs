@@ -960,7 +960,8 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   // Pull requests and main call the installer with no secret (#631).
   assert.match(caller, /uses: \.\/\.github\/workflows\/windows-installer\.yml\n(?! +secrets:)/u);
   assert.doesNotMatch(triggers(installer), /pull_request|workflow_dispatch/u);
-  assert.doesNotMatch(installer, /^permissions:/mu);
+  assert.match(installer, /^permissions:\n  contents: read\n/mu);
+  assert.match(installer, /    permissions:\n      contents: read\n      id-token: write\n/u);
   // Classify before compiling; compile with no signing input in scope.
   const classify = installer.indexOf('node scripts/signing-secrets.mjs windows');
   const compile = installer.indexOf('--no-bundle');
