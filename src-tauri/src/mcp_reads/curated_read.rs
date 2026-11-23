@@ -21,6 +21,14 @@
 //! `findings_listed` (every other accepted finding, without its statement)
 //! and `finding_counts`, the split the Workbench reads.
 //!
+//! Attested records (ADR-0090, AC-1077) are read the same way:
+//! `curated-json` carries `attested` (the eligible and the agent-attested,
+//! unconfirmed ones, each with its label and its contributors, in
+//! `best-effort` only), `attested_omitted`, `attested_listed` (every other
+//! record, without its statement) and `attested_counts`. An engineer is
+//! named by the display name the project's contributor table holds, an
+//! agent by role and run.
+//!
 //! A projection that was not computed is stated with its reason in both
 //! forms. Nothing here writes a fact or changes a tier (R-INT-1, R-INT-3).
 
@@ -127,6 +135,7 @@ impl CuratedRead {
                     items_omitted: projection.items.len() - shown.len(),
                     listed: &projection.listed,
                     findings: crate::curated_workbench::FindingsRead::of(projection, mode),
+                    attested: crate::curated_workbench::AttestedRead::of(projection, mode),
                     assertion_decisions: &projection.assertion_decisions,
                     counts: projection.counts,
                 })
@@ -187,6 +196,10 @@ struct Computed<'a> {
     /// `finding_counts` (ADR-0074 decision 11).
     #[serde(flatten)]
     findings: crate::curated_workbench::FindingsRead,
+    /// `attested`, `attested_omitted`, `attested_listed` and
+    /// `attested_counts` (ADR-0090 decisions 7 and 8).
+    #[serde(flatten)]
+    attested: crate::curated_workbench::AttestedRead,
     assertion_decisions: &'a AssertionDecisionSummary,
     counts: CuratedCounts,
 }

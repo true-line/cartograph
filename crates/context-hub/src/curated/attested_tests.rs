@@ -36,6 +36,7 @@ fn contribution(engineer: bool, verb: &str) -> AttestedContribution {
         } else {
             "C-00000000000000a1".into()
         },
+        display_name: engineer.then(|| "Placeholder Engineer".into()),
         engineer,
         verb: verb.into(),
         role: (!engineer).then(|| "section-writer@1".into()),
@@ -245,6 +246,14 @@ fn the_attested_projection_is_order_independent_moves_the_revision_and_fails_on_
     promoted.standing = confirmed;
     assert_ne!(
         run(&[first.clone(), promoted], &nodes).revision,
+        forward.revision
+    );
+    // A new attestation that leaves the state as it was still does: a read
+    // prints it.
+    let mut agreed = second.clone();
+    agreed.attestations.push(contribution(false, "agreed"));
+    assert_ne!(
+        run(&[first.clone(), agreed], &nodes).revision,
         forward.revision
     );
     assert_eq!(

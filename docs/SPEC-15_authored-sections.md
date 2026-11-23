@@ -295,7 +295,11 @@ Slices AC-1071 to AC-1083 are listed in ADR-0090. Built: the record model,
 its admission, `A-` id and standing (AC-1071, `agents::attested`), and the
 store with append-only attestations and the contributor table
 (AC-1073, `agents::attested_store`), and the curated projection's fourth
-kind (AC-1075, `context_hub::curated::attested`). Not built: printing,
+kind (AC-1075, `context_hub::curated::attested`). The tables live in the
+section draft store's file beside the finding curation reviews, and the
+export and the MCP curated read take every stored record into the
+projection, each engineer named from the contributor table at read time
+(AC-1077, part 1). Not built: drafts citing `A-` ids and their printing,
 capture paths and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section

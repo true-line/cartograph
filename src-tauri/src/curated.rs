@@ -23,7 +23,8 @@ use agents::ProposalDecision;
 use agents::staging::{MAX_STAGED_PAGE_ITEMS, MAX_STAGED_REFERENCE_SCAN};
 use context_hub::curated::{
     self as core, BasisAssessment, BasisDimensions, CuratedProjection, EvidenceAvailability,
-    EvidenceStatus, ProjectionInput, ReviewedDraft, ReviewedFinding, ReviewedProposal,
+    EvidenceStatus, ProjectionInput, ReviewedAttested, ReviewedDraft, ReviewedFinding,
+    ReviewedProposal,
 };
 use core_graph::{Edge, Node, SqliteGraphStore, StoreRevision};
 use core_prov::{ConfidenceTier, Provenance, Tier};
@@ -56,6 +57,11 @@ pub(crate) const MAX_CURATED_ACCEPTED_DRAFT_BYTES: usize =
 /// The same for accepted curated findings (#2040).
 pub(crate) const MAX_CURATED_ACCEPTED_FINDING_BYTES: usize =
     MAX_CURATED_ACCEPTED * agents::finding_curation::MAX_CURATED_FINDING_BYTES;
+/// Most bytes of stored attested records one projection takes, measured as
+/// each record's encoded payload, whatever its standing: every record is
+/// printed or listed. The projection and a read copy them, so the sum
+/// bounds that copy. More fails the read before the set is kept.
+pub(crate) const MAX_CURATED_ATTESTED_BYTES: usize = 16 * 1024 * 1024;
 
 /// The encoded size of an accepted payload, counted against its budget. A
 /// payload that cannot be encoded counts as the whole budget.
@@ -80,6 +86,10 @@ pub(crate) struct CuratedReview {
     /// Every finding with a curation review (ADR-0074), from the section
     /// draft store's file.
     findings: Vec<ReviewedFinding>,
+    /// Every stored attested record (ADR-0090), from the same file, each
+    /// engineer named from the contributor table. Its attestations are its
+    /// review, so none is left out.
+    attested: Vec<ReviewedAttested>,
     /// By record identity, with the store revision the assessment's graph
     /// read observed (`None` when that read failed).
     assessments: BTreeMap<String, (BasisAssessment, Option<StoreRevision>)>,
@@ -374,12 +384,78 @@ fn reviewed_findings_within(
     Ok(read.items.iter().map(reviewed_finding).collect())
 }
 
-/// The reviewed drafts and the reviewed findings of `store`, read under
-/// the one lock its caller holds.
+/// Every stored attested record of `store` with its standing, oldest
+/// first, each engineer named from the contributor table; the caller holds
+/// the draft store lock. More records than the staged-record bound fail the
+/// read, as do records past [`MAX_CURATED_ATTESTED_BYTES`].
+fn attested_records(
+    store: &agents::draft_store::DraftStore,
+) -> Result<Vec<ReviewedAttested>, CuratedFailure> {
+    attested_records_within(store, MAX_CURATED_ATTESTED_BYTES)
+}
+
+/// [`attested_records`] with the records bounded by `budget` bytes.
+fn attested_records_within(
+    store: &agents::draft_store::DraftStore,
+    budget: usize,
+) -> Result<Vec<ReviewedAttested>, CuratedFailure> {
+    use agents::attested_store::{MAX_ATTESTED_PAGE_ITEMS, reviewed_attested};
+    let attested = store.attested();
+    let engineers: BTreeMap<String, String> = attested
+        .engineer()
+        .map_err(|_| CuratedFailure::ReviewsUnavailable)?
+        .into_iter()
+        .map(|engineer| (engineer.id.0, engineer.display_name))
+        .collect();
+    let mut records = Vec::new();
+    let mut bytes = 0usize;
+    let mut before: Option<u64> = None;
+    loop {
+        let page = attested
+            .list(MAX_ATTESTED_PAGE_ITEMS, before)
+            .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+        if records.len() + page.items.len() > MAX_CURATED_RECORD_SCAN {
+            return Err(CuratedFailure::TooManyRecords {
+                limit: MAX_CURATED_RECORD_SCAN,
+            });
+        }
+        for stored in &page.items {
+            bytes += payload_bytes(&stored.record, budget);
+            if bytes > budget {
+                return Err(CuratedFailure::AcceptedTooLarge {
+                    limit_bytes: budget,
+                });
+            }
+            records.push(reviewed_attested(stored, &engineers));
+        }
+        match page.next_before {
+            Some(next) => before = Some(next),
+            None => break,
+        }
+    }
+    records.reverse();
+    Ok(records)
+}
+
+/// What one read of the section draft store's file finds, under the one
+/// lock its caller holds.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DraftStoreReviews {
+    drafts: Vec<ReviewedDraft>,
+    findings: Vec<ReviewedFinding>,
+    attested: Vec<ReviewedAttested>,
+}
+
+/// The reviewed drafts, the reviewed findings and the attested records of
+/// `store`, read under the one lock its caller holds.
 fn reviewed_in_draft_store(
     store: &agents::draft_store::DraftStore,
-) -> Result<(Vec<ReviewedDraft>, Vec<ReviewedFinding>), CuratedFailure> {
-    Ok((reviewed_drafts(store)?, reviewed_findings(store)?))
+) -> Result<DraftStoreReviews, CuratedFailure> {
+    Ok(DraftStoreReviews {
+        drafts: reviewed_drafts(store)?,
+        findings: reviewed_findings(store)?,
+        attested: attested_records(store)?,
+    })
 }
 
 impl CuratedReview {
@@ -400,9 +476,10 @@ pub(crate) fn read_records_and_drafts(
     drafts: &agents::draft_store::DraftStore,
 ) -> CuratedReview {
     match reviewed_in_draft_store(drafts) {
-        Ok((drafts, findings)) => CuratedReview {
-            drafts,
-            findings,
+        Ok(read) => CuratedReview {
+            drafts: read.drafts,
+            findings: read.findings,
+            attested: read.attested,
             ..read_records(store)
         },
         Err(failure) => CuratedReview::failed(failure),
@@ -435,17 +512,16 @@ impl CuratedReview {
 }
 
 impl CuratedReview {
-    /// Whether `records`, `drafts` and `findings`, read later, are the ones
-    /// this review read. A review that failed read none, so nothing is
-    /// compared for it.
+    /// Whether `records` and the draft store's reviews, read later, are
+    /// the ones this review read. A review that failed read none, so
+    /// nothing is compared for it.
     #[cfg_attr(not(unix), allow(dead_code))]
-    fn same_records(
-        &self,
-        records: &[ReviewedProposal],
-        (drafts, findings): (&[ReviewedDraft], &[ReviewedFinding]),
-    ) -> bool {
+    fn same_records(&self, records: &[ReviewedProposal], later: &DraftStoreReviews) -> bool {
         self.failure.is_some()
-            || (self.proposals == records && self.drafts == drafts && self.findings == findings)
+            || (self.proposals == records
+                && self.drafts == later.drafts
+                && self.findings == later.findings
+                && self.attested == later.attested)
     }
 }
 
@@ -476,14 +552,14 @@ impl ReviewSource for AppState {
                 .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
             reviewed_records(&store)?
         };
-        let (drafts, findings) = {
+        let later = {
             let store = self
                 .drafts
                 .lock()
                 .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
             reviewed_in_draft_store(&store)?
         };
-        Ok(review.same_records(&records, (&drafts, &findings)))
+        Ok(review.same_records(&records, &later))
     }
 }
 
@@ -532,7 +608,7 @@ impl ReviewSource for std::sync::Mutex<agents::ProposalStore> {
         let store = self
             .lock()
             .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-        Ok(review.same_records(&reviewed_records(&store)?, (&[], &[])))
+        Ok(review.same_records(&reviewed_records(&store)?, &DraftStoreReviews::default()))
     }
 }
 
@@ -561,8 +637,8 @@ impl ReviewSource for StoredReviews {
             .drafts
             .lock()
             .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-        let (drafts, findings) = reviewed_in_draft_store(&drafts)?;
-        Ok(review.same_records(&reviewed_records(&proposals)?, (&drafts, &findings)))
+        let later = reviewed_in_draft_store(&drafts)?;
+        Ok(review.same_records(&reviewed_records(&proposals)?, &later))
     }
 }
 
@@ -592,7 +668,7 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         .lock()
         .map_err(|_| CuratedFailure::ReviewsUnavailable)
         .and_then(|store| reviewed_in_draft_store(&store));
-    let (drafts, findings) = match read {
+    let read = match read {
         Ok(read) => read,
         Err(failure) => return CuratedReview::failed(failure),
     };
@@ -610,8 +686,9 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
     CuratedReview {
         failure: None,
         proposals,
-        drafts,
-        findings,
+        drafts: read.drafts,
+        findings: read.findings,
+        attested: read.attested,
         assessments,
         settled: Arc::clone(&state.curated_settled),
     }
@@ -781,6 +858,13 @@ pub(crate) fn project(
         .iter()
         .filter(|draft| draft.decision == Some(core::DraftReview::Accepted))
         .flat_map(|draft| draft.cited_hashes.keys().cloned())
+        // And each fact an attested record rests on (ADR-0090 decision 8).
+        .chain(
+            review
+                .attested
+                .iter()
+                .flat_map(|record| record.recorded_hashes.keys().cloned()),
+        )
         .collect();
     let mut cited_hashes = spec::cited_fact_hashes(snapshot.nodes, snapshot.edges, &cited);
     for (id, hash) in spec::cited_node_hashes(snapshot.overlay.iter().copied(), &cited) {
@@ -808,7 +892,7 @@ pub(crate) fn project(
         cited_fact_hashes: &cited_hashes,
         findings: &review.findings,
         cited_fact_digests: &cited_digests,
-        attested: &[],
+        attested: &review.attested,
         policy_version: core::CURATED_POLICY_VERSION,
     })
     .map_err(|error| match error {
@@ -900,3 +984,7 @@ mod findings_tests;
 #[cfg(all(test, not(app_test_group = "acceptance")))]
 #[path = "curated_finding_reads_tests.rs"]
 mod finding_reads_tests;
+
+#[cfg(all(test, not(app_test_group = "acceptance")))]
+#[path = "curated_attested_tests.rs"]
+mod attested_tests;

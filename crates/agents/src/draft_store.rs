@@ -404,6 +404,7 @@ impl DraftStore {
              BEGIN SELECT RAISE(ABORT, 'section draft content is immutable'); END;",
         )?;
         crate::finding_curation::create_schema(&conn)?;
+        crate::attested_store::create_schema(&conn)?;
         Ok(Self { conn })
     }
 
