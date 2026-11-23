@@ -719,8 +719,20 @@ pub(super) fn capacity_exclusion_candidates(
         {
             return Err(InvestigationStoreError::Invalid);
         }
+        // AC-1437 (#2522): the prompt only grows within a run, so a read
+        // refused for capacity cannot fit at a later revision either. @31
+        // keeps it withdrawn after other reads; a replay query's hash is bound
+        // to its own revision and stays revision-local.
+        let same_revision = entry.call.input_revision == ledger.revision;
+        let later_revision = entry.call.input_revision < ledger.revision
+            && task
+                .detail
+                .summary
+                .specialist_id
+                .uses_run_capacity_exclusions()
+            && entry.proposal["type"] != "replay_query";
         if entry.call.invocation_ordinal < cutoff
-            && entry.call.input_revision == ledger.revision
+            && (same_revision || later_revision)
             && entry.reason == RefusalReason::Capacity(CapacityRefusalReason::PromptCapacity)
         {
             hashes.insert(capacity_exclusion_hash(
