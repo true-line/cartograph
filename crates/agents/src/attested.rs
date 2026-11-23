@@ -31,6 +31,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_ATTESTATIONS: usize = 64;
 /// Most UTF-8 bytes in one free-text attestation field (role, model, run…).
 pub const MAX_FIELD_BYTES: usize = 256;
+/// Most bytes in one recorded content hash (a BLAKE3 hex digest is 64).
+pub const MAX_HASH_BYTES: usize = 128;
 /// Prefix of an attested citation id.
 pub const CITATION_PREFIX: &str = "A-";
 /// Prefix of a contributor id.
@@ -250,7 +252,8 @@ pub enum AttestationRefusal {
     CitationMalformed,
     /// The recorded hashes are not exactly the supporting ids.
     RecordedHashesMismatch,
-    /// A recorded hash is not 64 lowercase hex characters (BLAKE3).
+    /// A recorded hash is empty, longer than [`MAX_HASH_BYTES`] or not
+    /// printable ASCII without spaces.
     RecordedHashMalformed,
     /// No attestation.
     NoAttestation,
@@ -516,8 +519,10 @@ fn fact_id_well_formed(id: &str) -> bool {
         .is_some_and(|hex| hex.len() == HEX && hex.bytes().all(is_lower_hex))
 }
 
+/// A recorded hash is copied from the fact's provenance as an opaque
+/// token: bounded, never parsed.
 fn content_hash_shaped(hash: &str) -> bool {
-    hash.len() == 64 && hash.bytes().all(is_lower_hex)
+    !hash.is_empty() && hash.len() <= MAX_HASH_BYTES && hash.bytes().all(|b| b.is_ascii_graphic())
 }
 
 fn field_admissible(field: &str) -> bool {

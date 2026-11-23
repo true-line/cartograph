@@ -227,7 +227,7 @@ fn a_malformed_record_is_refused_with_a_closed_code() {
         refuse(&|r| r.recorded_hashes.clear()),
         R::RecordedHashesMismatch
     );
-    for bad in ["", "h1", &"A".repeat(64), &"1".repeat(65)] {
+    for bad in ["", "h 1", "h\u{7}", &"1".repeat(MAX_HASH_BYTES + 1)] {
         assert_eq!(
             refuse(&|r| {
                 r.recorded_hashes
