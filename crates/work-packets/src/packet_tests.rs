@@ -1173,3 +1173,86 @@ fn ac0301_already_open_v1_writer_is_fenced_after_migration() {
         2
     );
 }
+
+fn dispatch_record(reviewed_revision: u64, head: Option<&str>) -> DispatchRecord {
+    DispatchRecord {
+        reviewed_revision,
+        branch: "cartograph/packet-0123456789ab".into(),
+        base_revision: "a".repeat(40),
+        head_revision: head.map(Into::into),
+        stop: if head.is_some() {
+            "end_turn"
+        } else {
+            "timed_out"
+        }
+        .into(),
+        changed_paths: head.map_or_else(Vec::new, |_| vec!["src/adapter.rs".into()]),
+        changed_paths_omitted: 0,
+        refused_requests: 2,
+    }
+}
+
+#[test]
+fn only_a_reviewed_packet_records_a_dispatch_and_the_latest_sets_execution() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("packets.sqlite");
+    let mut store = PacketStore::open(&path).unwrap();
+    let id = store.put(body(), &[], "generated").unwrap().packet_id;
+    assert!(matches!(
+        store.record_dispatch(&id, &dispatch_record(0, None), "dispatched"),
+        Err(PacketError::InvalidInput(_))
+    ));
+    store
+        .review(&id, 0, ReviewDecision::Reviewed, None, "reviewed")
+        .unwrap();
+    let first = store
+        .record_dispatch(&id, &dispatch_record(1, None), "first")
+        .unwrap();
+    assert_eq!(first.execution, ExecutionState::Dispatched);
+    let head = "b".repeat(40);
+    let second = store
+        .record_dispatch(&id, &dispatch_record(1, Some(&head)), "second")
+        .unwrap();
+    assert_eq!(second.execution, ExecutionState::Submitted);
+    assert_eq!(second.dispatch, Some(dispatch_record(1, Some(&head))));
+    // A later review keeps the dispatch that already ran, and the body is unchanged.
+    let changes = store
+        .review(&id, 1, ReviewDecision::ChangesRequested, None, "later")
+        .unwrap();
+    assert_eq!(changes.execution, ExecutionState::Submitted);
+    assert!(matches!(
+        store.record_dispatch(&id, &dispatch_record(2, None), "again"),
+        Err(PacketError::InvalidInput(_))
+    ));
+    drop(store);
+    let store = PacketStore::open(path).unwrap();
+    let reopened = store.get(&id).unwrap();
+    assert_eq!(reopened.dispatch, second.dispatch);
+    assert_eq!(
+        store.list(50).unwrap()[0].execution,
+        ExecutionState::Submitted
+    );
+    let exported = export_markdown(&reopened).unwrap();
+    assert!(exported.contains("Execution: submitted."));
+    assert!(exported.contains("## Dispatch (local branch; not pushed or merged)"));
+    assert!(exported.contains("cartograph/packet-0123456789ab"));
+}
+
+#[test]
+fn a_dispatch_record_with_control_text_or_too_many_paths_is_refused() {
+    let mut store = PacketStore::in_memory().unwrap();
+    let id = store.put(body(), &[], "generated").unwrap().packet_id;
+    store
+        .review(&id, 0, ReviewDecision::Reviewed, None, "reviewed")
+        .unwrap();
+    let mut control = dispatch_record(1, None);
+    control.branch = "main\n".into();
+    assert!(store.record_dispatch(&id, &control, "at").is_err());
+    let mut many = dispatch_record(1, None);
+    many.changed_paths = vec!["a".into(); MAX_DISPATCH_PATHS + 1];
+    assert!(matches!(
+        store.record_dispatch(&id, &many, "at"),
+        Err(PacketError::LimitExceeded(_))
+    ));
+    assert_eq!(store.get(&id).unwrap().execution, ExecutionState::Unoffered);
+}

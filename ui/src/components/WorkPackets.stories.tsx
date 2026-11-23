@@ -38,3 +38,23 @@ export const RemovableSelectionTray: Story = {
     await expect(args.state.clearTray).toHaveBeenCalledTimes(1);
   },
 };
+
+const submitted = {
+  ...packetFixture, execution: 'submitted' as const,
+  dispatch: { reviewed_revision: 1, branch: 'cartograph/packet-0123456789ab', base_revision: 'a'.repeat(40),
+    head_revision: 'b'.repeat(40), stop: 'end_turn', changed_paths: ['src/adapter.rs'], changed_paths_omitted: 0, refused_requests: 2 },
+};
+export const SubmittedDispatch: Story = {
+  // AC-1346: a dispatched packet shows its execution state and the local branch it came back on, unpushed.
+  args: { state: { ...state, detail: submitted } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('packet-execution')).toHaveTextContent('submitted');
+    const dispatch = canvas.getByRole('region', { name: 'Packet dispatch' });
+    await expect(dispatch).toHaveTextContent('cartograph/packet-0123456789ab');
+    await expect(canvas.getByTestId('packet-dispatch-head')).toHaveTextContent('b'.repeat(40));
+    await expect(dispatch).toHaveTextContent('1 changed path · 2 agent requests refused. Not pushed or merged');
+    await expect(dispatch).toHaveTextContent('src/adapter.rs');
+    await expect(canvas.queryByText('unoffered')).toBeNull();
+  },
+};

@@ -13,6 +13,68 @@ use std::{collections::BTreeSet, path::Path, time::Duration};
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionState {
     Unoffered,
+    /// Dispatched to an agent whose turn ended without a commit (ADR-0092).
+    Dispatched,
+    /// Dispatched, and the agent's change is a commit on a local branch.
+    Submitted,
+}
+
+/// Most paths a dispatch record keeps; the rest are counted.
+pub const MAX_DISPATCH_PATHS: usize = 200;
+
+/// What one ACP dispatch of a reviewed packet returned (ADR-0092). The
+/// host records it; the branch is local and nothing was pushed or merged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchRecord {
+    /// Review revision, with status reviewed, the packet was dispatched at.
+    pub reviewed_revision: u64,
+    pub branch: String,
+    pub base_revision: String,
+    /// The commit holding the agent's change, if the turn ended with
+    /// `end_turn` and changed something.
+    pub head_revision: Option<String>,
+    /// How the turn ended (`end_turn`, `timed_out`, `agent_exited`, ...).
+    pub stop: String,
+    /// Changed paths, at most [`MAX_DISPATCH_PATHS`].
+    pub changed_paths: Vec<String>,
+    /// Changed paths left out past the limit.
+    pub changed_paths_omitted: u32,
+    /// Agent requests the host refused.
+    pub refused_requests: u32,
+}
+
+impl DispatchRecord {
+    fn validate(&self) -> PacketResult<()> {
+        let text = |value: &str, maximum: usize| {
+            if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+                Err(PacketError::InvalidInput("dispatch record"))
+            } else {
+                Ok(())
+            }
+        };
+        text(&self.branch, 256)?;
+        text(&self.base_revision, 64)?;
+        text(&self.stop, 64)?;
+        if let Some(head) = &self.head_revision {
+            text(head, 64)?;
+        }
+        if self.changed_paths.len() > MAX_DISPATCH_PATHS {
+            return Err(PacketError::LimitExceeded("dispatch paths"));
+        }
+        for path in &self.changed_paths {
+            text(path, 1024)?;
+        }
+        Ok(())
+    }
+
+    fn execution(&self) -> ExecutionState {
+        if self.head_revision.is_some() {
+            ExecutionState::Submitted
+        } else {
+            ExecutionState::Dispatched
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +150,9 @@ pub struct PacketDetail {
     pub lineage: PacketLineage,
     pub freshness: PacketFreshness,
     pub execution: ExecutionState,
+    /// The latest dispatch, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<DispatchRecord>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -498,6 +563,7 @@ impl PacketStore {
                 lineage: PacketLineage::default(),
                 freshness: PacketFreshness::default(),
                 execution: ExecutionState::Unoffered,
+                dispatch: None,
             }
         };
         if exists && detail.body.canonical_bytes()? != canonical {
@@ -591,7 +657,7 @@ impl PacketStore {
                 packet_id: id,
                 objective: detail.body.intent.objective,
                 review: detail.review,
-                execution: ExecutionState::Unoffered,
+                execution: detail.execution,
             };
             let comma = usize::from(!summaries.is_empty());
             let budget = remaining
@@ -646,6 +712,44 @@ impl PacketStore {
             });
         }
         transaction.execute("INSERT INTO work_packet_events(packet_id,kind,at,revision,note) VALUES(?1,?2,?3,?4,?5)",params![id,status.as_str(),at,revision as i64,note])?;
+        transaction.commit()?;
+        Ok(detail)
+    }
+    /// Records what an ACP dispatch returned (ADR-0092). The packet must have
+    /// been reviewed at `record.reviewed_revision`; a later review does not
+    /// undo a dispatch that already ran. Records are append-only events and
+    /// the latest one sets the packet's execution state.
+    pub fn record_dispatch(
+        &mut self,
+        id: &str,
+        record: &DispatchRecord,
+        at: &str,
+    ) -> PacketResult<PacketDetail> {
+        metadata_text(at, 128)?;
+        record.validate()?;
+        let note = bounded_json(record, 64 * 1024)?;
+        let note =
+            String::from_utf8(note).map_err(|_| PacketError::InvalidInput("dispatch record"))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let reviewed_revision = i64::try_from(record.reviewed_revision)
+            .map_err(|_| PacketError::InvalidInput("dispatch revision"))?;
+        let reviewed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_packet_events WHERE packet_id=?1 AND kind='reviewed' AND revision=?2)",
+            params![id, reviewed_revision],
+            |r| r.get(0),
+        )?;
+        if !reviewed {
+            return Err(PacketError::InvalidInput(
+                "dispatch of an unreviewed packet",
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO work_packet_events(packet_id,kind,at,revision,note) VALUES(?1,'dispatched',?2,?3,?4)",
+            params![id, at, reviewed_revision, note],
+        )?;
+        let detail = load_detail(&transaction, id)?;
         transaction.commit()?;
         Ok(detail)
     }
@@ -838,6 +942,7 @@ fn load_detail(connection: &Connection, id: &str) -> PacketResult<PacketDetail> 
     } else {
         PacketFreshness::default()
     };
+    let dispatch = load_dispatch(connection, id)?;
     let detail = PacketDetail {
         packet_id: id.into(),
         body,
@@ -849,10 +954,40 @@ fn load_detail(connection: &Connection, id: &str) -> PacketResult<PacketDetail> 
         },
         lineage: PacketLineage { predecessor_ids },
         freshness,
-        execution: ExecutionState::Unoffered,
+        execution: dispatch
+            .as_ref()
+            .map_or(ExecutionState::Unoffered, DispatchRecord::execution),
+        dispatch,
     };
     validate_detail(&detail)?;
     Ok(detail)
+}
+/// The latest dispatch record of a packet, if any.
+fn load_dispatch(connection: &Connection, id: &str) -> PacketResult<Option<DispatchRecord>> {
+    let latest: Option<(i64, Option<i64>)> = connection
+        .query_row(
+            "SELECT event_id,length(CAST(note AS BLOB)) FROM work_packet_events WHERE packet_id=?1 AND kind='dispatched' ORDER BY event_id DESC LIMIT 1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((event_id, length)) = latest else {
+        return Ok(None);
+    };
+    if length.is_none_or(|n| n > 64 * 1024) {
+        return Err(PacketError::LimitExceeded("stored dispatch record"));
+    }
+    let note: Option<String> = connection.query_row(
+        "SELECT note FROM work_packet_events WHERE event_id=?1",
+        [event_id],
+        |r| r.get(0),
+    )?;
+    let record: DispatchRecord = note
+        .as_deref()
+        .and_then(|note| serde_json::from_str(note).ok())
+        .ok_or(PacketError::InvalidInput("stored dispatch record"))?;
+    record.validate()?;
+    Ok(Some(record))
 }
 fn check_ancestors(connection: &Connection, root: &str, forbidden: &str) -> PacketResult<()> {
     check_combined_ancestors(connection, &[root.into()], forbidden)
