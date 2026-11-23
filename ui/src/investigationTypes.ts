@@ -324,6 +324,8 @@ export interface InvestigationArtifactReadView {
   artifact_id: string;
   title: string;
   content_id: string;
+  /** Hash of the exact page envelope the specialist received. */
+  response_hash: string;
   offset: number;
   next_offset: number | null;
   response_bytes: number;

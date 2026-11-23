@@ -14,6 +14,8 @@ pub(crate) struct InvestigationArtifactReadView {
     /// The catalogue title, or the id when the catalogue no longer lists it.
     pub title: String,
     pub content_id: String,
+    /// Hash of the exact page envelope the specialist received.
+    pub response_hash: String,
     pub offset: usize,
     pub next_offset: Option<usize>,
     pub response_bytes: usize,
@@ -35,6 +37,7 @@ pub(crate) fn artifact_read_views(
                     |artifact| artifact.title.to_owned(),
                 ),
             content_id: read.content_id.clone(),
+            response_hash: read.response_hash.clone(),
             offset: read.request.offset,
             next_offset: read.next_offset,
             response_bytes: read.response_bytes,
@@ -103,6 +106,7 @@ mod tests {
         assert_eq!((views[0].offset, views[0].next_offset), (0, Some(3500)));
         assert_eq!((views[1].offset, views[1].next_offset), (3500, None));
         assert_eq!(views[2].title, "retired-artifact");
+        assert_eq!(views[0].response_hash, "c".repeat(64));
         assert!(artifact_read_views(&[]).is_empty());
     }
 }

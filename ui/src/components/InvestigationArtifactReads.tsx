@@ -21,6 +21,7 @@ export function InvestigationArtifactReads({ reads, error }: InvestigationArtifa
           <details><summary>Exact saved page identity</summary>
             <p>Artifact <code>{read.artifact_id}</code></p>
             <p>Content <code>{read.content_id}</code> · {read.response_bytes.toLocaleString('en-US')} bytes supplied</p>
+            <p>Supplied page <code>{read.response_hash}</code></p>
           </details>
         </li>)}</ol>}
   </section>;
