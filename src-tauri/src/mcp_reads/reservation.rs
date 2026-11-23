@@ -11,12 +11,16 @@ pub(crate) mod scoped_bound;
 pub(crate) mod session;
 pub(crate) mod worker_bound;
 
+// The transport accounting sizes the Unix-socket MCP service's connections,
+// which exist only on Unix; the worker and session bounds are portable.
+#[cfg(unix)]
 use mcp_local::activation::ActivationLimits;
 use serde_json::Value;
 use std::mem::size_of;
 
 pub(crate) const TRANSPORT_MODEL: &str = "mcp-transport-payload-v1";
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct TransportReservation {
     pub model: &'static str,
@@ -36,6 +40,7 @@ fn json_payload(bytes: usize) -> Option<usize> {
     bytes.checked_add(entries.checked_mul(headers)?)
 }
 
+#[cfg(unix)]
 impl TransportReservation {
     pub(crate) fn for_limits(limits: ActivationLimits) -> Option<Self> {
         let read = limits.read_frame_bytes.get();
@@ -63,7 +68,7 @@ impl TransportReservation {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{num::NonZeroUsize, time::Duration};

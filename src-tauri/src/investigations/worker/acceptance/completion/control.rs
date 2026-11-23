@@ -193,9 +193,11 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
-    File::open(path.parent().ok_or("Missing artifact parent.")?)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())
+    // Portable directory sync: a plain `File::open` of a directory is
+    // refused on Windows.
+    super::super::expanded::vendure_prepare::sync_directory(
+        path.parent().ok_or("Missing artifact parent.")?,
+    )
 }
 fn external(path: &Path, run_dir: &Path) -> Result<ExternalArtifact, String> {
     let path = path.canonicalize().map_err(|e| e.to_string())?;

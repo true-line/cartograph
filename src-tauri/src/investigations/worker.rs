@@ -1741,6 +1741,7 @@ fn stop_keeping<R: tauri::Runtime>(
 mod tests;
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(unused_imports))]
 pub(super) use tests::{
     with_public_start_fixture, with_public_start_fixture_then, with_response_app,
 };

@@ -645,7 +645,12 @@ pub(crate) mod tests {
             ],
         );
 
-        let cmd = format!("touch '{}'", marker.display());
+        // Forward slashes: git config reads a backslash as an escape, and a
+        // Windows path would make the whole config unreadable.
+        let cmd = format!(
+            "touch '{}'",
+            marker.display().to_string().replace('\\', "/")
+        );
         let config_path = repo_root.join(".git/config");
         let mut config = fs::read_to_string(&config_path).unwrap();
         config.push_str(&format!(

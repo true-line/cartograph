@@ -251,6 +251,7 @@ pub(crate) fn redraft_question(state: &AppState, draft_id: &str) -> Result<Strin
 /// The outcome of a task when it is a drafting run, and none for a task of
 /// any other role. The MCP result read reports it to the session that
 /// started the run.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn outcome_of_drafting_run(
     state: &AppState,
     id: &str,

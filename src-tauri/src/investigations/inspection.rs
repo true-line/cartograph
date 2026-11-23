@@ -14,6 +14,7 @@ use serde::Serialize;
 use tauri::Manager;
 
 /// Share the receipt role vocabulary with bounded read-only consumers.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn receipt_range_role(
     value: adapters_lang_ts::captured::RangeRole,
 ) -> agents::TaskRangeRole {
@@ -322,6 +323,7 @@ pub(crate) fn resolve_with_receipt_typed_bounded(
 
 /// MCP-only positive forgotten classification. It identifies retention of the
 /// exact checked binding; it does not validate old range fields after reclaim.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn resolve_mcp_with_receipt_typed_bounded(
     state: &AppState,
     fact: &TaskFactKey,

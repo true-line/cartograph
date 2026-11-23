@@ -14587,7 +14587,7 @@ export function App() {
         std::fs::write(
             &manifest,
             format!(
-                "[[repos]]\nurl = \"file://{}\"\n\n[[repos]]\nurl = \"api\"\n",
+                "[[repos]]\nurl = 'file://{}'\n\n[[repos]]\nurl = \"api\"\n",
                 bare.display()
             ),
         )
@@ -14899,7 +14899,7 @@ export function App() {
         std::fs::write(
             &manifest,
             format!(
-                "[[repos]]\nurl = \"file://{}\"\nlayers = [\"infra\"]\nstate_json = \"state.json\"\notel_jsonl = [\"trace.otlp.jsonl\"]\n",
+                "[[repos]]\nurl = 'file://{}'\nlayers = [\"infra\"]\nstate_json = \"state.json\"\notel_jsonl = [\"trace.otlp.jsonl\"]\n",
                 bare.display()
             ),
         )
@@ -15500,7 +15500,7 @@ export function App() {
         std::fs::write(
             &manifest,
             format!(
-                "[[repos]]\nurl = \"file://{}\"\n\n[[repos]]\nurl = \"api\"\nstate_json = \"missing.tfstate.json\"\n",
+                "[[repos]]\nurl = 'file://{}'\n\n[[repos]]\nurl = \"api\"\nstate_json = \"missing.tfstate.json\"\n",
                 bare.display()
             ),
         )
@@ -15645,7 +15645,7 @@ export function App() {
         std::fs::write(
             &manifest,
             format!(
-                "[[repos]]\nurl = \"file://{}\"\n\n[[repos]]\nurl = \"api\"\n",
+                "[[repos]]\nurl = 'file://{}'\n\n[[repos]]\nurl = \"api\"\n",
                 bare.display()
             ),
         )

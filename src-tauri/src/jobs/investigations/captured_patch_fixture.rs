@@ -725,7 +725,13 @@ fn scan_candidate_absence(root: &std::path::Path) {
         if path.is_dir() {
             scan_candidate_absence(&path);
         } else {
-            let bytes = std::fs::read(path).unwrap();
+            // A held execution lock is an empty file that Windows refuses to
+            // read while locked; an empty file holds no prose either way.
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(_) if std::fs::metadata(&path).is_ok_and(|meta| meta.len() == 0) => continue,
+                Err(error) => panic!("{}: {error}", path.display()),
+            };
             for needle in [
                 b"Volatile candidate sentinel must never be retained.".as_slice(),
                 b"MissingStrategy controls this behavior.".as_slice(),

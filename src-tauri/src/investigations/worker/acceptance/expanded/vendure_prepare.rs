@@ -62,7 +62,7 @@ fn write(directory: &Path, name: &str, value: &impl Serialize) -> Result<(), Str
     vendure::write_preparation_artifact(&directory.join(name), value)?;
     sync_directory(directory)
 }
-pub(super) fn sync_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(any(unix, windows))]
     {
         let mut options = std::fs::OpenOptions::new();

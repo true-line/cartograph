@@ -169,6 +169,7 @@ pub(crate) async fn save_export_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Seek;
 
     #[test]
@@ -302,6 +303,7 @@ mod tests {
     }
 
     /// A temp file holding `text`, as the bundle stream leaves it.
+    #[cfg(unix)]
     fn finished_temp(text: &str) -> tempfile::NamedTempFile {
         let mut temp = tempfile::NamedTempFile::new().unwrap();
         temp.write_all(text.as_bytes()).unwrap();

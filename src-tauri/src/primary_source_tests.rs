@@ -5111,6 +5111,9 @@ fn linked_worktrees_are_distinct_sources_and_refuse_each_others_receipts() {
     std::fs::write(main.join("source.ts"), STABLE_A).unwrap();
     std::fs::write(main.join("shared.ts"), ORIGINAL).unwrap();
     git(&["init", "-q", "-b", "main"], &main);
+    // The linked checkout must hold the committed bytes; Git for Windows
+    // turns on autocrlf system-wide, which would rewrite shared.ts there.
+    git(&["config", "core.autocrlf", "false"], &main);
     git(&["add", "."], &main);
     git(&["commit", "-q", "-m", "init"], &main);
     let linked_path = dir.path().join("linked");

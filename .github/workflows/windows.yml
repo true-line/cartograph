@@ -67,10 +67,11 @@ jobs:
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
-    # The Linux Rust lane's three test groups, plus fmt and clippy. The app
-    # stays on Linux for both: its MCP and job paths are Unix-only, so Windows
-    # clippy reports them as dead code (#227). The installer job still builds
-    # the app here.
+    # The Linux Rust lane's three test groups and the app's two test groups
+    # (scripts/app-test-groups.json), plus fmt and clippy. Each app group
+    # builds only its own tests (APP_TEST_GROUP, src-tauri/build.rs) and runs
+    # them in one plain libtest process. The acceptance build still compiles
+    # the core group's tests, so that lane filters to its one prefix.
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +86,13 @@ jobs:
               --workspace --exclude app --exclude adapters-lang-ts --exclude adapters-lang-python
               --exclude adapters-lang-java --exclude adapters-lang-kotlin --exclude ingest
               --exclude work-packets --exclude adapters-lang-go --exclude app-store
+          - lane: app-core
+            packages: -p app --lib
+            app_group: core
+          - lane: app-acceptance
+            packages: -p app --lib
+            app_group: acceptance
+            filter: 'investigations::worker::tests::acceptance::'
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,16 +152,19 @@ jobs:
 
       - name: Clippy
         if: matrix.lane == 'lint'
-        run: cargo clippy --locked --workspace --exclude app --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test
         if: matrix.lane != 'lint'
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
+          APP_TEST_GROUP: ${{ matrix.app_group }}
+          FILTER: ${{ matrix.filter }}
         # PACKAGES is a list of cargo arguments: split it on spaces. Every
         # package runs, so one run lists all of a lane's Windows failures.
-        run: cargo test --locked --no-fail-fast $PACKAGES
+        # FILTER, when set, is the libtest name filter for the lane.
+        run: cargo test --locked --no-fail-fast $PACKAGES -- $FILTER
 
   # An unsigned NSIS installer with both sidecars, as an artifact for manual
   # testing. It is never published: release.yml ships macOS only until the

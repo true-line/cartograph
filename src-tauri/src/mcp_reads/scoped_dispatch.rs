@@ -491,6 +491,7 @@ enum Evidence {
 }
 mod logical;
 pub(super) mod schemas;
+#[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use logical::logical_protocol_workspace_bytes;
 #[cfg(all(test, not(app_test_group = "acceptance")))]
 mod tests;

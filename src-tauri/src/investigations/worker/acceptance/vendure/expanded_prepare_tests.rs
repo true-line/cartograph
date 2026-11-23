@@ -884,6 +884,7 @@ fn captured_auditor_output_preflight_rejects_overlaps_before_side_effects() {
     std::fs::write(&definition, b"{}").unwrap();
     let code = crate::paths::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
         .unwrap();
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut invalid = vec![
         case.root.join("auditor-output"),
         prepared
