@@ -30,6 +30,9 @@ use crate::attested::{
     AttestationRefusal, AttestedRecord, AttestedTarget, ContributorId, Standing, admit,
     citation_id, identity, standing,
 };
+use context_hub::curated::{
+    AttestedAnswer, AttestedContribution, AttestedStanding, ReviewedAttested,
+};
 use core_prov::content_hash;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -124,6 +127,13 @@ pub enum AttestedStoreError {
     /// An attestation names a contributor of the other kind.
     #[error("attestation {attestation} names a contributor of another kind")]
     ContributorKind {
+        /// Zero-based position of the attestation.
+        attestation: usize,
+    },
+    /// An agent attestation names a role, provider or model other than the
+    /// one its contributor id was registered for.
+    #[error("attestation {attestation} claims another role, provider or model than its agent")]
+    AgentMismatch {
         /// Zero-based position of the attestation.
         attestation: usize,
     },
@@ -473,6 +483,18 @@ fn check_contributors(
         if known.kind != expected {
             return Err(AttestedStoreError::ContributorKind { attestation });
         }
+        // An agent contributor is one role, provider and model: an
+        // attestation claiming another under its id is refused.
+        if let Attestation::Agent {
+            role,
+            provider,
+            model,
+            ..
+        } = value
+            && derived_id(AGENT_DOMAIN, &[role, provider, model]) != known.id
+        {
+            return Err(AttestedStoreError::AgentMismatch { attestation });
+        }
         if let Attestation::Agent {
             directed_by: Some(director),
             ..
@@ -560,6 +582,77 @@ fn get_on(
         record,
         created_at,
     }))
+}
+
+/// A verb's snake_case name, as it is serialized.
+fn verb_name(verb: &impl Serialize) -> String {
+    serde_json::to_value(verb)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// One stored record as curated projection input (ADR-0090 decision 8,
+/// AC-1075). Contributors are named by id only.
+pub fn reviewed_attested(stored: &StoredAttested) -> ReviewedAttested {
+    use crate::attested::AttestedTarget;
+    let answer = match &stored.record.target {
+        AttestedTarget::Gap { gap_id, slot } => AttestedAnswer::Gap {
+            gap_id: gap_id.clone(),
+            slot: slot.clone(),
+        },
+        AttestedTarget::Section { address } => AttestedAnswer::Section {
+            catalogue_version: address.catalogue_version.clone(),
+            document: address.document.clone(),
+            section: address.section.clone(),
+            scope: address.scope.clone(),
+        },
+    };
+    let attestations = stored
+        .record
+        .attestations
+        .iter()
+        .map(|attestation| match attestation {
+            Attestation::Agent {
+                contributor,
+                verb: said,
+                role,
+                run,
+                ..
+            } => AttestedContribution {
+                contributor_id: contributor.0.clone(),
+                engineer: false,
+                verb: verb_name(said),
+                role: Some(role.clone()),
+                run: Some(run.clone()),
+            },
+            Attestation::Engineer {
+                contributor,
+                verb: said,
+                ..
+            } => AttestedContribution {
+                contributor_id: contributor.0.clone(),
+                engineer: true,
+                verb: verb_name(said),
+                role: None,
+                run: None,
+            },
+        })
+        .collect();
+    ReviewedAttested {
+        record_id: stored.record_id.clone(),
+        citation_id: stored.citation_id.clone(),
+        answer,
+        statement: stored.record.statement.clone(),
+        recorded_hashes: stored.record.recorded_hashes.clone(),
+        standing: match stored.standing {
+            Standing::Withdrawn => AttestedStanding::Withdrawn,
+            Standing::Disputed => AttestedStanding::Disputed,
+            Standing::EngineerBacked => AttestedStanding::EngineerBacked,
+            Standing::AgentAttestedUnconfirmed => AttestedStanding::AgentAttestedUnconfirmed,
+        },
+        attestations,
+    }
 }
 
 #[cfg(test)]

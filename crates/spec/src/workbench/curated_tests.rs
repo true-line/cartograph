@@ -118,6 +118,7 @@ fn projection(records: &[ReviewedProposal]) -> CuratedProjection {
         cited_fact_hashes: &std::collections::BTreeMap::new(),
         findings: &[],
         cited_fact_digests: &std::collections::BTreeMap::new(),
+        attested: &[],
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()

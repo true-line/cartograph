@@ -76,13 +76,14 @@ A proposal that is pending or rejected has no state and is not listed.
 
 ### Curated revision
 
-`revision = digest("curated-revision-v3", policy_version, graph_content_hash,
+`revision = digest("curated-revision-v4", policy_version, graph_content_hash,
 [(record_id, review_decision, state, reason)…], [(draft_id, review_decision,
 state, reason)…], [(finding_ref, review_decision, state, reason)…],
-assertion_decision_digest)`, with the record list, the draft list and the
-finding list each in identity order. Version 2 added the section drafts of
-SPEC-15 (ADR-0064 decision 7). Version 3 adds findings accepted as curated
-(ADR-0074 decision 6); the policy version is `curated-policy-v3`. A rejected record enters with
+[(attested_id, state, reason)…], assertion_decision_digest)`, with the
+record, draft, finding and attested lists each in identity order. Version 2
+added the section drafts of SPEC-15 (ADR-0064 decision 7). Version 3 added
+findings accepted as curated (ADR-0074 decision 6). Version 4 adds attested
+records (ADR-0090 decision 8); the policy version is `curated-policy-v4`. A rejected record enters with
 its decision and no state, so any review gives a new revision; a pending
 record does not enter. The assertion-decision digest covers the rejections
 applied and the decisions that match no current assertion. Review notes,
@@ -99,11 +100,18 @@ and `reason`.
 ## Attested context
 
 [ADR-0090](adr/ADR-0090-attested-context.md) adds attested context as the
-fourth record kind. It is designed, not built. An attested record gets the
-first state that applies: `withdrawn`, `disputed`, `already-covered`,
+fourth record kind. The projection is built (AC-1075,
+`context_hub::curated::attested`); printing, reads and capture are not yet.
+Every stored record is projected: its attestations are its review. An
+attested record gets the first state that applies: `withdrawn`, `disputed`, `already-covered`,
 `unresolvable`, `stale`, then `eligible` when an engineer stated or
 confirmed it, otherwise `agent-attested, unconfirmed` (agents only). The
-last is never promoted to accepted without an engineer. The revision and the policy move to version 4. An attested record
+last is never promoted to accepted without an engineer. `already-covered`
+means the answered Gap kept its id and is now a node an ingest recovered
+deterministically (valid provenance, not Agentic, not Gap confidence); a
+Gap id with no node, or now an Agentic node, is `unresolvable`, as is a
+supporting `F-` id with no current hash. A section target names no graph
+node and is resolved by its supporting citations alone. The revision and the policy move to version 4. An attested record
 never changes a base fact or the Gap count, and its DR-4 `tier` and
 `confidence` are empty: it is labelled *attested* with its contributors.
 

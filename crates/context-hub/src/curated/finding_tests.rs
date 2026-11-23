@@ -54,6 +54,7 @@ fn run_with(
         cited_fact_hashes: &BTreeMap::new(),
         findings,
         cited_fact_digests: current,
+        attested: &[],
         policy_version: CURATED_POLICY_VERSION,
     })
 }
@@ -112,7 +113,7 @@ fn an_accepted_finding_whose_cited_facts_are_unchanged_is_eligible_and_stays_t3(
     assert_eq!(projection.counts, CuratedCounts::default());
     assert_eq!(projection.draft_counts, DraftCounts::default());
     assert_eq!(projection.graph_basis, GRAPH_HASH);
-    assert!(projection.revision.starts_with("curated-revision-v3:"));
+    assert!(projection.revision.starts_with("curated-revision-v4:"));
 }
 
 #[test]
@@ -268,6 +269,7 @@ fn a_finding_review_changes_the_revision_shared_with_drafts_and_proposals() {
             cited_fact_hashes: &BTreeMap::new(),
             findings,
             cited_fact_digests: &current(),
+            attested: &[],
             policy_version: CURATED_POLICY_VERSION,
         })
         .unwrap()

@@ -294,7 +294,8 @@ committed there.
 Slices AC-1071 to AC-1083 are listed in ADR-0090. Built: the record model,
 its admission, `A-` id and standing (AC-1071, `agents::attested`), and the
 store with append-only attestations and the contributor table
-(AC-1073, `agents::attested_store`). Not built: projection, printing,
+(AC-1073, `agents::attested_store`), and the curated projection's fourth
+kind (AC-1075, `context_hub::curated::attested`). Not built: printing,
 capture paths and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section

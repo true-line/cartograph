@@ -58,6 +58,7 @@ fn run_with(
         cited_fact_hashes: current,
         findings: &[],
         cited_fact_digests: &std::collections::BTreeMap::new(),
+        attested: &[],
         policy_version: CURATED_POLICY_VERSION,
     })
 }
@@ -101,7 +102,7 @@ fn an_accepted_draft_whose_cited_facts_are_unchanged_is_eligible_and_stays_t3() 
     assert!(projection.items.is_empty() && projection.listed.is_empty());
     assert_eq!(projection.counts, CuratedCounts::default());
     assert_eq!(projection.graph_basis, GRAPH_HASH);
-    assert!(projection.revision.starts_with("curated-revision-v3:"));
+    assert!(projection.revision.starts_with("curated-revision-v4:"));
 }
 
 #[test]
