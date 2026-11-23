@@ -315,8 +315,14 @@ capture paths are app commands, never MCP tools: setting the project's one
 engineer, answering an open Gap from the Gaps register (engineer-backed,
 with hashes from the current graph; the Gap stays a Gap), and confirming,
 disputing or withdrawing a stored record at the attestation count read
-(AC-1079, part 1). Not built: agent proposals from investigations and
-chat, MCP staging, and surfaces.
+(AC-1079, part 1). The engineer may propose a finding of a completed
+investigation or chat as its agent's answer to an open Gap: stated by the
+run's agent (role, provider, model and run), directed by the engineer,
+citing the facts of the run's ledger, and only while the graph is the one
+the run read. It is `agent-attested, unconfirmed` until the engineer
+confirms it; a proposed design is refused, and the same content from
+another agent is recorded as that agent agreeing (AC-1079, part 2). Not
+built: MCP staging and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting
