@@ -319,6 +319,16 @@ export interface InvestigationEvent {
   created_at: string;
 }
 
+/** One saved `read_artifact` page, as the task's ledger records it (AC-1816). */
+export interface InvestigationArtifactReadView {
+  artifact_id: string;
+  title: string;
+  content_id: string;
+  offset: number;
+  next_offset: number | null;
+  response_bytes: number;
+}
+
 export interface InvestigationEventPage {
   investigation_id: string;
   items: InvestigationEvent[];
