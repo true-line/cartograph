@@ -61,8 +61,9 @@ fn estate_captured_local_analyst() {
 /// selections for one prepared estate profile: `selections` holds entries for
 /// the analyst definition and `ranking` the counts behind each. Point CARTOGRAPH_ESTATE_PROFILE_DATA at a copy of the
 /// profile's data directory (opening it runs the normal store migrations) and
-/// CARTOGRAPH_ESTATE_CLOSURE at a JSON list of the question's closure paths.
-/// Rule v3 fills any shortfall in rule v2 order outside this test.
+/// CARTOGRAPH_ESTATE_CLOSURE at a JSON list of the question's closure paths;
+/// CARTOGRAPH_ESTATE_REPO, when set, names the registered repository those
+/// paths belong to. Rule v3 fills any shortfall in rule v2 order outside this test.
 #[test]
 #[ignore = "manual #1728 rule v3 selection; reads a copied profile, no provider"]
 fn estate_rule_bearing_selections() {
@@ -70,9 +71,15 @@ fn estate_rule_bearing_selections() {
     let closure: Vec<String> =
         serde_json::from_slice(&std::fs::read(path("CARTOGRAPH_ESTATE_CLOSURE")).unwrap()).unwrap();
     let files = closure.into_iter().collect();
+    let repo = std::env::var("CARTOGRAPH_ESTATE_REPO").ok();
     let state = crate::registered_source_tests::app_state(&data);
-    let sources =
-        crate::investigations::rule_sources::rule_bearing_sources(&state, Some(&files), 7).unwrap();
+    let sources = crate::investigations::rule_sources::rule_bearing_sources(
+        &state,
+        repo.as_deref(),
+        Some(&files),
+        7,
+    )
+    .unwrap();
     let selections: Vec<_> = sources
         .iter()
         .map(|source| {

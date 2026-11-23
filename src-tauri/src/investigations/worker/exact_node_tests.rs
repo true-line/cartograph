@@ -458,7 +458,7 @@ fn rule_bearing_sources_name_resolvable_rule_owners_capped_per_file() {
     let (base, _) = seven_target_base(&provider);
     let state = base.base.app.state::<AppState>();
     let sources =
-        crate::investigations::rule_sources::rule_bearing_sources(&state, None, 7).unwrap();
+        crate::investigations::rule_sources::rule_bearing_sources(&state, None, None, 7).unwrap();
     assert_eq!(sources.len(), 2, "one file contributes at most two owners");
     for source in &sources {
         assert!(source.owner.guarded_exits >= 1);
@@ -477,8 +477,13 @@ fn rule_bearing_sources_name_resolvable_rule_owners_capped_per_file() {
     }
     let elsewhere: std::collections::BTreeSet<String> = ["no/such/file.ts".to_owned()].into();
     assert!(
-        crate::investigations::rule_sources::rule_bearing_sources(&state, Some(&elsewhere), 7)
-            .unwrap()
-            .is_empty()
+        crate::investigations::rule_sources::rule_bearing_sources(
+            &state,
+            None,
+            Some(&elsewhere),
+            7
+        )
+        .unwrap()
+        .is_empty()
     );
 }

@@ -34,11 +34,14 @@ pub(crate) struct RuleBearingOwner {
 
 /// Rank the owners of `rules` (nodes labelled `BusinessRule`): most guarded
 /// throws first, then most guarded exits, then most guarded effects, then path
-/// and owner id. At most `per_file` owners come from one file. With `files`,
-/// only rules whose exit lies in one of those repository paths count. A rule
-/// whose payload does not decode is skipped, never guessed.
+/// and owner id. At most `per_file` owners come from one file. With `repo`,
+/// only rules whose exit lies in that registered repository count, so two
+/// registrations sharing a relative path never mix; with `files`, only rules
+/// whose exit lies in one of those repository paths count. A rule whose
+/// payload does not decode is skipped, never guessed.
 pub(crate) fn rank_owners(
     rules: &[Node],
+    repo: Option<&str>,
     files: Option<&BTreeSet<String>>,
     per_file: usize,
 ) -> Vec<RuleBearingOwner> {
@@ -48,6 +51,9 @@ pub(crate) fn rank_owners(
             continue;
         };
         let source = &rule.exit_source;
+        if repo.is_some_and(|repo| repo != source.repo) {
+            continue;
+        }
         if files.is_some_and(|files| !files.contains(&source.path)) {
             continue;
         }
@@ -114,6 +120,7 @@ pub(crate) struct RuleBearingSource {
 /// without a bound capture receipt is skipped, so every entry resolves.
 pub(crate) fn rule_bearing_sources(
     state: &AppState,
+    repo: Option<&str>,
     files: Option<&BTreeSet<String>>,
     limit: usize,
 ) -> Result<Vec<RuleBearingSource>, String> {
@@ -125,7 +132,7 @@ pub(crate) fn rule_bearing_sources(
         .nodes_with_label("BusinessRule")
         .map_err(|error| error.to_string())?;
     let mut sources = Vec::new();
-    for owner in rank_owners(&rules, files, MAX_PER_FILE) {
+    for owner in rank_owners(&rules, repo, files, MAX_PER_FILE) {
         if sources.len() >= limit {
             break;
         }
@@ -153,13 +160,19 @@ pub(crate) fn rule_bearing_sources(
 
 #[tauri::command]
 pub(crate) async fn investigation_rule_bearing_sources(
+    repo: Option<String>,
     files: Option<Vec<String>>,
     limit: usize,
     app: tauri::AppHandle,
 ) -> Result<Vec<RuleBearingSource>, String> {
     crate::off_ui_thread(move || {
         let files = files.map(|files| files.into_iter().collect::<BTreeSet<_>>());
-        rule_bearing_sources(&app.state::<AppState>(), files.as_ref(), limit)
+        rule_bearing_sources(
+            &app.state::<AppState>(),
+            repo.as_deref(),
+            files.as_ref(),
+            limit,
+        )
     })
     .await
 }
@@ -170,9 +183,13 @@ mod tests {
     use serde_json::json;
 
     fn rule(id: &str, owner: &str, path: &str, kind: &str, effect: &str) -> Node {
+        rule_in("o/r", id, owner, path, kind, effect)
+    }
+
+    fn rule_in(repo: &str, id: &str, owner: &str, path: &str, kind: &str, effect: &str) -> Node {
         use core_graph::rules::*;
         let source = |start: u64, end: u64| core_prov::EvidenceRef {
-            repo: "o/r".into(),
+            repo: repo.into(),
             path: path.into(),
             byte_start: start,
             byte_end: end,
@@ -232,6 +249,7 @@ mod tests {
             rule("r5", "third", "B.java", "exit", "throw"),
             rule("r6", "effects", "C.java", "effect", "call"),
             rule("r7", "outside", "D.java", "exit", "throw"),
+            rule_in("o/other", "r8", "twin", "A.java", "exit", "throw"),
             Node {
                 id: "bad".into(),
                 label: "BusinessRule".into(),
@@ -242,11 +260,12 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let ranked = rank_owners(&rules, Some(&files), 2);
+        let ranked = rank_owners(&rules, Some("o/r"), Some(&files), 2);
         let order: Vec<_> = ranked.iter().map(|o| o.owner_id.as_str()).collect();
         // validate (2 throws) > guard (1 throw, B.java before third) > helper
         // (1 exit) > effects; `third` is the third B.java owner, `outside` is
-        // not in the closure, and the undecodable payload is skipped.
+        // not in the closure, `twin` shares A.java's path in another
+        // registration, and the undecodable payload is skipped.
         assert_eq!(order, ["validate", "guard", "helper", "effects"]);
         assert_eq!(
             (
@@ -257,8 +276,12 @@ mod tests {
             (2, 2, 0)
         );
         assert_eq!(ranked[3].guarded_effects, 1);
-        let all = rank_owners(&rules, None, 2);
+        let all = rank_owners(&rules, None, None, 2);
         assert_eq!(all.first().map(|o| o.owner_id.as_str()), Some("validate"));
         assert!(all.iter().any(|o| o.owner_id == "outside"));
+        assert!(
+            all.iter()
+                .any(|o| o.owner_id == "twin" && o.repo == "o/other")
+        );
     }
 }
