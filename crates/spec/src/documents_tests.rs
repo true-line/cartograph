@@ -1203,3 +1203,69 @@ fn section_content_hash_matches_the_section_provenance() {
         prov(&section.props).content_hash
     );
 }
+
+// AC-1065 (T-1065, #385): over a source capture the documentation walk
+// reads the captured bytes of its whole selection and never the checkout:
+// a document or decision record edited, deleted or created after capture
+// changes no document, decision or count, and a file the walk skips is
+// never selected.
+#[test]
+fn captured_documents_are_read_instead_of_the_checkout() {
+    let dir = tree();
+    fs::create_dir_all(dir.path().join("docs/adr")).unwrap();
+    fs::write(
+        dir.path().join("docs/adr/0001-orders.md"),
+        "# 1. Orders\n\nStatus: accepted\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("docs/latin1.md"), [0xE9, b'\n']).unwrap();
+    fs::write(
+        dir.path().join("docs/huge.md"),
+        vec![b'a'; MAX_DOCUMENT_BYTES as usize + 1],
+    )
+    .unwrap();
+    let decisions = |_: &str| false;
+    let cases = DocumentationCases {
+        documents: true,
+        api_references: &[],
+        decisions: Some(&decisions),
+    };
+    let facts = |read: &Documentation| format!("{read:?}");
+    let before = facts(&read_documentation(dir.path(), "local/shop", "c1", &cases).unwrap());
+
+    let paths = documentation_paths(dir.path()).unwrap();
+    assert!(paths.contains(&"docs/adr/0001-orders.md".to_string()));
+    assert!(paths.contains(&"docs/NOTES.TXT".to_string()));
+    assert!(!paths.contains(&"main.rs".to_string()));
+    assert!(!paths.contains(&"node_modules/pkg/README.md".to_string()));
+    let captured: std::collections::BTreeMap<String, Vec<u8>> = paths
+        .iter()
+        .map(|rel| (rel.clone(), fs::read(dir.path().join(rel)).unwrap()))
+        .collect();
+
+    // After capture: edits, a deletion and new documents.
+    fs::write(dir.path().join("README.md"), "# Other\n").unwrap();
+    fs::write(
+        dir.path().join("docs/adr/0001-orders.md"),
+        "# 1. Payments\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("docs/adr/0002-late.md"), "# 2. Late\n").unwrap();
+    fs::write(dir.path().join("LATE.md"), "# Late\n").unwrap();
+    fs::remove_file(dir.path().join("docs/NOTES.TXT")).unwrap();
+    // The capture's other files are not documentation and stay unlisted.
+    let mut held: Vec<String> = captured.keys().cloned().collect();
+    held.push("main.rs".to_string());
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let after = read_documentation_from_capture(&held, &read, "local/shop", "c1", &cases).unwrap();
+    assert_eq!(facts(&after), before);
+    assert_ne!(
+        facts(&read_documentation(dir.path(), "local/shop", "c1", &cases).unwrap()),
+        before
+    );
+}

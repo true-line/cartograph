@@ -534,6 +534,85 @@ pub fn read_documentation(
     commit: &str,
     cases: &DocumentationCases<'_>,
 ) -> std::io::Result<Documentation> {
+    let files: Vec<String> = source_walk::files(root, &walk_skips, source_walk::Gitignores::Honor)?
+        .into_iter()
+        .map(|file| file.rel)
+        .collect();
+    let open = |rel: &str| -> std::io::Result<Opened> {
+        let path = root.join(rel);
+        if path.metadata()?.len() > MAX_DOCUMENT_BYTES {
+            return Ok(Opened::TooLarge);
+        }
+        std::fs::read(path).map(Opened::Bytes)
+    };
+    read_listed(&files, &open, repo, commit, cases)
+}
+
+/// True when the documentation walk may open `rel`: a Markdown or
+/// plain-text file outside the directories the walk never enters. A source
+/// capture retains these files (AC-1065).
+pub fn is_documentation_file(rel: &str) -> bool {
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    let name = parts.pop().unwrap_or(rel);
+    Format::of(name).is_some() && !parts.iter().any(|part| walk_skips(part))
+}
+
+/// The files [`read_documentation`] may open under `root`, in path order: a
+/// source capture retains them (AC-1065).
+pub fn documentation_paths(root: &Path) -> std::io::Result<Vec<String>> {
+    Ok(
+        source_walk::files(root, &walk_skips, source_walk::Gitignores::Honor)?
+            .into_iter()
+            .map(|file| file.rel)
+            .filter(|rel| is_documentation_file(rel))
+            .collect(),
+    )
+}
+
+/// [`read_documentation`] over a source capture (AC-1065, #385):
+/// `captured` is the capture's own paths and `read` their bytes. Only the
+/// capture's [`is_documentation_file`] paths are listed, so a document
+/// edited, deleted or created in the checkout after capture changes nothing.
+/// Declared API references are still read from the contents their loader
+/// validated.
+pub fn read_documentation_from_capture(
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    repo: &str,
+    commit: &str,
+    cases: &DocumentationCases<'_>,
+) -> std::io::Result<Documentation> {
+    let mut files: Vec<String> = captured
+        .iter()
+        .filter(|rel| is_documentation_file(rel))
+        .cloned()
+        .collect();
+    files.sort();
+    files.dedup();
+    let open = |rel: &str| -> std::io::Result<Opened> {
+        let bytes = read(rel)?;
+        Ok(if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
+            Opened::TooLarge
+        } else {
+            Opened::Bytes(bytes)
+        })
+    };
+    read_listed(&files, &open, repo, commit, cases)
+}
+
+/// A listed file's bytes, or that it is over [`MAX_DOCUMENT_BYTES`].
+enum Opened {
+    TooLarge,
+    Bytes(Vec<u8>),
+}
+
+fn read_listed(
+    files: &[String],
+    open: &dyn Fn(&str) -> std::io::Result<Opened>,
+    repo: &str,
+    commit: &str,
+    cases: &DocumentationCases<'_>,
+) -> std::io::Result<Documentation> {
     let mut read = Documentation::default();
     let declared: BTreeMap<&str, &crate::DeclaredApiDoc> = cases
         .api_references
@@ -548,11 +627,11 @@ pub fn read_documentation(
     let skipped = |facts: &mut DocumentFacts, reason: DocumentSkip| {
         *facts.counts.skipped.entry(reason.code()).or_default() += 1;
     };
-    for file in source_walk::files(root, &walk_skips, source_walk::Gitignores::Honor)? {
-        let path = file.rel.as_str();
-        let format =
-            Format::of(&file.name).filter(|_| cases.documents && !under_build_output(path));
-        let decision = crate::adr::is_decision_record(path, &file.name);
+    for path in files {
+        let path = path.as_str();
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let format = Format::of(name).filter(|_| cases.documents && !under_build_output(path));
+        let decision = crate::adr::is_decision_record(path, name);
         let mut decision_case = cases.decisions.filter(|_| decision);
         if format.is_none() && decision_case.is_none() {
             continue;
@@ -576,7 +655,11 @@ pub fn read_documentation(
         // same bytes (AC-1601).
         let validated = declared.get(path).map(|doc| doc.contents.as_str());
         // One size bound for every case: both readers kept 1 MiB.
-        if validated.is_none() && file.path.metadata()?.len() > MAX_DOCUMENT_BYTES {
+        let opened = match validated {
+            Some(_) => None,
+            None => Some(open(path)?),
+        };
+        if matches!(opened, Some(Opened::TooLarge)) {
             if document.is_some() {
                 skipped(&mut read.documents, DocumentSkip::TooLarge);
             }
@@ -601,7 +684,9 @@ pub fn read_documentation(
         let owned;
         let text = if let Some(validated) = validated {
             validated
-        } else if let Ok(text) = String::from_utf8(std::fs::read(&file.path)?) {
+        } else if let Some(Opened::Bytes(bytes)) = opened
+            && let Ok(text) = String::from_utf8(bytes)
+        {
             owned = text;
             owned.as_str()
         } else {
@@ -636,7 +721,7 @@ pub fn read_documentation(
                 repo,
                 commit,
                 path,
-                &file.name,
+                name,
                 format,
                 text,
                 &roles,

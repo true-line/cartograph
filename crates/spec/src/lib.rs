@@ -18,7 +18,8 @@ pub use documents::{
     DocumentReference, DocumentSkip, Documentation, DocumentationCases, DocumentationDrift,
     MAX_DOCUMENT_BYTES, MAX_DOCUMENTS_PER_REPO, MAX_SECTIONS_PER_DOCUMENT, ROLE_API_REFERENCE,
     ROLE_DECISION_RECORD, ReferenceIndex, ReferenceRule, document_id, documentation_drift,
-    extract_documents, link_references, read_documentation, section_content_hash, section_id,
+    documentation_paths, extract_documents, is_documentation_file, link_references,
+    read_documentation, read_documentation_from_capture, section_content_hash, section_id,
 };
 mod graph_basis;
 pub use graph_basis::{
