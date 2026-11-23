@@ -25,6 +25,7 @@ pub use decision_selection::{
 };
 pub mod area_expert;
 pub mod attested;
+pub mod attested_store;
 pub mod claim_review;
 pub mod curated;
 pub mod draft_store;
