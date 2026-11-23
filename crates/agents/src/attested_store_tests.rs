@@ -5,10 +5,12 @@ use crate::attested::{AgentVerb, AttestationSource, EngineerVerb};
 const ENGINEER: &str = "Placeholder Engineer";
 const HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
-fn store() -> (tempfile::TempDir, AttestedStore) {
+const FILE: &str = "section-drafts.sqlite";
+
+fn store() -> (tempfile::TempDir, DraftStore) {
     let dir = tempfile::tempdir().unwrap();
-    let store = AttestedStore::open(dir.path().join("review.sqlite")).unwrap();
-    (dir, store)
+    let drafts = DraftStore::open(dir.path().join(FILE)).unwrap();
+    (dir, drafts)
 }
 
 fn agent_says(
@@ -64,7 +66,8 @@ fn record(statement: &str, attestations: Vec<Attestation>) -> AttestedRecord {
 
 #[test]
 fn a_record_is_stored_once_and_its_attestations_are_appended_at_the_count_read() {
-    let (_dir, mut store) = store();
+    let (_dir, drafts) = store();
+    let store = drafts.attested();
     let engineer = store.set_engineer(ENGINEER, None).unwrap();
     let writer = store
         .agent("section-writer@1", "local", "placeholder-model")
@@ -136,7 +139,8 @@ fn a_record_is_stored_once_and_its_attestations_are_appended_at_the_count_read()
 
 #[test]
 fn the_project_holds_one_engineer_and_names_only_in_its_contributor_table() {
-    let (dir, mut store) = store();
+    let (dir, drafts) = store();
+    let store = drafts.attested();
     let engineer = store
         .set_engineer(ENGINEER, Some("engineer@example.invalid"))
         .unwrap();
@@ -177,10 +181,10 @@ fn the_project_holds_one_engineer_and_names_only_in_its_contributor_table() {
         !json.contains(ENGINEER) && !json.contains("example.invalid"),
         "{json}"
     );
-    drop(store);
+    drop(drafts);
     // The name is in the contributor table and in no record or attestation
     // row.
-    let conn = Connection::open(dir.path().join("review.sqlite")).unwrap();
+    let conn = Connection::open(dir.path().join(FILE)).unwrap();
     let in_records: i64 = conn
         .query_row(
             "SELECT (SELECT count(*) FROM attested_records WHERE instr(content_json, ?1) > 0)
@@ -194,7 +198,8 @@ fn the_project_holds_one_engineer_and_names_only_in_its_contributor_table() {
 
 #[test]
 fn agents_fill_a_gap_together_and_stay_unconfirmed_until_the_engineer_confirms() {
-    let (_dir, mut store) = store();
+    let (_dir, drafts) = store();
+    let store = drafts.attested();
     let writer = store.agent("section-writer@1", "local", "model-a").unwrap();
     let reviewer = store.agent("claim-reviewer@1", "local", "model-b").unwrap();
     let staged = store
@@ -225,7 +230,8 @@ fn agents_fill_a_gap_together_and_stay_unconfirmed_until_the_engineer_confirms()
 
 #[test]
 fn every_attestation_names_a_known_contributor_of_its_kind() {
-    let (_dir, mut store) = store();
+    let (_dir, drafts) = store();
+    let store = drafts.attested();
     let engineer = store.set_engineer(ENGINEER, None).unwrap();
     let writer = store.agent("section-writer@1", "local", "model-a").unwrap();
     let stranger = Contributor {
@@ -298,7 +304,8 @@ fn every_attestation_names_a_known_contributor_of_its_kind() {
 
 #[test]
 fn stored_content_and_attestations_cannot_be_changed() {
-    let (dir, mut store) = store();
+    let (dir, drafts) = store();
+    let store = drafts.attested();
     let engineer = store.set_engineer(ENGINEER, None).unwrap();
     let staged = store
         .stage(record(
@@ -306,8 +313,8 @@ fn stored_content_and_attestations_cannot_be_changed() {
             vec![engineer_says(&engineer, EngineerVerb::Stated)],
         ))
         .unwrap();
-    drop(store);
-    let conn = Connection::open(dir.path().join("review.sqlite")).unwrap();
+    drop(drafts);
+    let conn = Connection::open(dir.path().join(FILE)).unwrap();
     for sql in [
         "UPDATE attested_records SET content_json = '{}'",
         "UPDATE attested_attestations SET attestation_json = '{}'",
@@ -320,13 +327,17 @@ fn stored_content_and_attestations_cannot_be_changed() {
         );
     }
     drop(conn);
-    let store = AttestedStore::open(dir.path().join("review.sqlite")).unwrap();
-    assert_eq!(store.get(&staged.record_id).unwrap().unwrap(), staged);
+    let drafts = DraftStore::open(dir.path().join(FILE)).unwrap();
+    assert_eq!(
+        drafts.attested().get(&staged.record_id).unwrap().unwrap(),
+        staged
+    );
 }
 
 #[test]
 fn records_are_listed_newest_first_in_bounded_pages() {
-    let (_dir, mut store) = store();
+    let (_dir, drafts) = store();
+    let store = drafts.attested();
     let engineer = store.set_engineer(ENGINEER, None).unwrap();
     let mut ids = Vec::new();
     for n in 0..3 {
@@ -365,7 +376,8 @@ fn records_are_listed_newest_first_in_bounded_pages() {
 
 #[test]
 fn an_agent_attestation_must_match_the_role_provider_and_model_of_its_id() {
-    let (_dir, mut store) = store();
+    let (_dir, drafts) = store();
+    let store = drafts.attested();
     let writer = store.agent("section-writer@1", "local", "model-a").unwrap();
     // The id registered for model-a, claiming another model.
     let mut claimed = agent_says(&writer, AgentVerb::Stated, None);
@@ -373,14 +385,37 @@ fn an_agent_attestation_must_match_the_role_provider_and_model_of_its_id() {
         *model = "model-b".into();
     }
     assert!(matches!(
-        store.stage(record("A statement.", vec![claimed])),
+        store.stage(record("A statement.", vec![claimed.clone()])),
         Err(AttestedStoreError::AgentMismatch { attestation: 0 })
+    ));
+    // A row written before the binding held is not read as that agent's.
+    let staged = store
+        .stage(record(
+            "A statement.",
+            vec![agent_says(&writer, AgentVerb::Stated, None)],
+        ))
+        .unwrap();
+    drafts
+        .connection()
+        .execute_batch("DROP TRIGGER attested_attestations_no_update")
+        .unwrap();
+    drafts
+        .connection()
+        .execute(
+            "UPDATE attested_attestations SET attestation_json = ?1 WHERE record_id = ?2",
+            params![serde_json::to_string(&claimed).unwrap(), staged.record_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.get(&staged.record_id),
+        Err(AttestedStoreError::InvalidRecord)
     ));
 }
 
 #[test]
 fn a_stored_record_becomes_projection_input_with_ids_and_standing() {
-    let (_dir, mut store) = store();
+    let (_dir, drafts) = store();
+    let store = drafts.attested();
     let engineer = store.set_engineer(ENGINEER, None).unwrap();
     let writer = store
         .agent("section-writer@1", "local", "placeholder-model")
@@ -391,7 +426,7 @@ fn a_stored_record_becomes_projection_input_with_ids_and_standing() {
             vec![agent_says(&writer, AgentVerb::Stated, Some(&engineer))],
         ))
         .unwrap();
-    let input = reviewed_attested(&staged);
+    let input = reviewed_attested(&staged, &BTreeMap::new());
     assert_eq!(input.standing, AttestedStanding::AgentAttestedUnconfirmed);
     assert_eq!(input.citation_id, staged.citation_id);
     assert_eq!(
@@ -408,7 +443,8 @@ fn a_stored_record_becomes_projection_input_with_ids_and_standing() {
             engineer_says(&engineer, EngineerVerb::Confirmed),
         )
         .unwrap();
-    let input = reviewed_attested(&confirmed);
+    let names = BTreeMap::from([(engineer.id.0.clone(), engineer.display_name.clone())]);
+    let input = reviewed_attested(&confirmed, &names);
     assert_eq!(input.standing, AttestedStanding::EngineerBacked);
     assert_eq!(
         input
@@ -421,6 +457,13 @@ fn a_stored_record_becomes_projection_input_with_ids_and_standing() {
             (true, "confirmed", None)
         ]
     );
-    let json = serde_json::to_string(&input).unwrap();
-    assert!(!json.contains(ENGINEER), "{json}");
+    // The name comes from the contributor table at read time; the stored
+    // record holds none.
+    assert_eq!(
+        input.attestations[1].display_name.as_deref(),
+        Some(ENGINEER)
+    );
+    assert_eq!(input.attestations[0].display_name, None);
+    let stored = serde_json::to_string(&confirmed.record).unwrap();
+    assert!(!stored.contains(ENGINEER), "{stored}");
 }

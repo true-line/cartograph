@@ -1,8 +1,10 @@
 //! Durable attested records, their attestations and the project's
 //! contributors (#2463, ADR-0090 decisions 1 to 4, AC-1073).
 //!
-//! Three tables in the review store's file, beside the staged proposals and
-//! the section drafts, sharing neither their tables nor their decisions:
+//! Three tables in the section draft store's file, beside the section
+//! drafts and the finding curation reviews, sharing neither their tables
+//! nor their decisions. [`DraftStore::attested`] reads and writes them
+//! over that store's connection, so one lock covers all three kinds:
 //!
 //! - `attested_contributors` resolves a [`ContributorId`] to its kind, a
 //!   display name and an optional handle. It is the only place a name is
@@ -30,14 +32,14 @@ use crate::attested::{
     AttestationRefusal, AttestedRecord, AttestedTarget, ContributorId, Standing, admit,
     citation_id, identity, standing,
 };
+use crate::draft_store::DraftStore;
 use context_hub::curated::{
     AttestedAnswer, AttestedContribution, AttestedStanding, ReviewedAttested,
 };
 use core_prov::content_hash;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 /// Most records one page returns.
 pub const MAX_ATTESTED_PAGE_ITEMS: usize = 50;
@@ -199,19 +201,11 @@ fn derived_id(domain: &[u8], parts: &[&str]) -> ContributorId {
     ContributorId(format!("C-{}", &content_hash(&bytes)[..16]))
 }
 
-/// SQLite store of attested records, in the review store's file.
-pub struct AttestedStore {
-    conn: Connection,
-}
-
-impl AttestedStore {
-    /// Open the attested tables in the review store at `path`, creating
-    /// them when absent. Other tables of the file are not read or changed.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, AttestedStoreError> {
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS attested_contributors (
+/// Create the attested tables in `conn` when absent. Called by
+/// [`DraftStore::open`]; other tables of the file are not read or changed.
+pub(crate) fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS attested_contributors (
                  contributor_id TEXT PRIMARY KEY CHECK (length(contributor_id) = 18),
                  kind TEXT NOT NULL CHECK (kind IN ('engineer', 'agent')),
                  display_name TEXT NOT NULL
@@ -245,14 +239,35 @@ impl AttestedStore {
              CREATE TRIGGER IF NOT EXISTS attested_attestations_no_delete
              BEFORE DELETE ON attested_attestations
              BEGIN SELECT RAISE(ABORT, 'attestations are append-only'); END;",
-        )?;
-        Ok(Self { conn })
-    }
+    )
+}
 
+/// The attested records of a section draft store's file.
+pub struct AttestedStore<'a> {
+    conn: &'a Connection,
+}
+
+impl DraftStore {
+    /// The attested tables of this store's file (ADR-0090).
+    pub fn attested(&self) -> AttestedStore<'_> {
+        AttestedStore {
+            conn: self.connection(),
+        }
+    }
+}
+
+fn immediate(conn: &Connection) -> Result<Transaction<'_>, AttestedStoreError> {
+    Ok(Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
+}
+
+impl AttestedStore<'_> {
     /// Set the project's engineer, once (v1 holds one). The id is opaque and
     /// derived from nothing a reader can recover the name from.
     pub fn set_engineer(
-        &mut self,
+        &self,
         display_name: &str,
         handle: Option<&str>,
     ) -> Result<Contributor, AttestedStoreError> {
@@ -262,9 +277,7 @@ impl AttestedStore {
         if handle.is_some_and(|handle| !plain(handle)) {
             return Err(AttestedStoreError::InvalidContributor("handle"));
         }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = immediate(self.conn)?;
         if engineer_on(&tx)?.is_some() {
             return Err(AttestedStoreError::EngineerExists);
         }
@@ -287,7 +300,7 @@ impl AttestedStore {
     /// registering it on first use. The same role, provider and model always
     /// yield the same id.
     pub fn agent(
-        &mut self,
+        &self,
         role: &str,
         provider: &str,
         model: &str,
@@ -305,7 +318,7 @@ impl AttestedStore {
              VALUES (?1, 'agent', ?2) ON CONFLICT (contributor_id) DO NOTHING",
             params![id.0, display_name],
         )?;
-        contributor_on(&self.conn, &id)?.ok_or(AttestedStoreError::InvalidRecord)
+        contributor_on(self.conn, &id)?.ok_or(AttestedStoreError::InvalidRecord)
     }
 
     /// One contributor, by id.
@@ -313,23 +326,21 @@ impl AttestedStore {
         &self,
         id: &ContributorId,
     ) -> Result<Option<Contributor>, AttestedStoreError> {
-        contributor_on(&self.conn, id)
+        contributor_on(self.conn, id)
     }
 
     /// The project's engineer, when set.
     pub fn engineer(&self) -> Result<Option<Contributor>, AttestedStoreError> {
-        engineer_on(&self.conn)
+        engineer_on(self.conn)
     }
 
     /// Store an admitted record with its attestations. Identical attested
     /// content returns the stored record with its current attestations; the
     /// given ones are then not appended, and the caller attests instead.
-    pub fn stage(&mut self, record: AttestedRecord) -> Result<StoredAttested, AttestedStoreError> {
+    pub fn stage(&self, record: AttestedRecord) -> Result<StoredAttested, AttestedStoreError> {
         let record = admit(record).map_err(AttestedStoreError::Refused)?;
         let record_id = identity(&record);
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = immediate(self.conn)?;
         if let Some(stored) = get_on(&tx, &record_id)? {
             return Ok(stored);
         }
@@ -356,14 +367,12 @@ impl AttestedStore {
     /// caller read. The record's content and earlier attestations are not
     /// changed.
     pub fn attest(
-        &mut self,
+        &self,
         record_id: &str,
         expected_count: u64,
         attestation: Attestation,
     ) -> Result<StoredAttested, AttestedStoreError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = immediate(self.conn)?;
         let current = get_on(&tx, record_id)?.ok_or(AttestedStoreError::UnknownRecord)?;
         if current.attestation_count() != expected_count {
             return Err(AttestedStoreError::StaleAttestationCount {
@@ -384,7 +393,7 @@ impl AttestedStore {
 
     /// One record with its attestations.
     pub fn get(&self, record_id: &str) -> Result<Option<StoredAttested>, AttestedStoreError> {
-        get_on(&self.conn, record_id)
+        get_on(self.conn, record_id)
     }
 
     /// Stored records, newest first, at most `limit` per page. `before` is
@@ -415,7 +424,7 @@ impl AttestedStore {
                 break;
             }
             last = Some(u64::try_from(sequence).map_err(|_| AttestedStoreError::InvalidRecord)?);
-            items.push(get_on(&self.conn, &record_id)?.ok_or(AttestedStoreError::InvalidRecord)?);
+            items.push(get_on(self.conn, &record_id)?.ok_or(AttestedStoreError::InvalidRecord)?);
         }
         Ok(AttestedPage { items, next_before })
     }
@@ -562,6 +571,18 @@ fn get_on(
         if position != attestations.len() as i64 || attestation.contributor().0 != contributor {
             return Err(AttestedStoreError::InvalidRecord);
         }
+        // A row written before agent ids were bound to their role, provider
+        // and model is not read as that agent's.
+        if let Attestation::Agent {
+            role,
+            provider,
+            model,
+            ..
+        } = &attestation
+            && derived_id(AGENT_DOMAIN, &[role, provider, model]).0 != contributor
+        {
+            return Err(AttestedStoreError::InvalidRecord);
+        }
         attestations.push(attestation);
     }
     let record = AttestedRecord {
@@ -593,8 +614,12 @@ fn verb_name(verb: &impl Serialize) -> String {
 }
 
 /// One stored record as curated projection input (ADR-0090 decision 8,
-/// AC-1075). Contributors are named by id only.
-pub fn reviewed_attested(stored: &StoredAttested) -> ReviewedAttested {
+/// AC-1075). An engineer's display name is taken from `engineers`, the
+/// contributor table's names by id, at read time.
+pub fn reviewed_attested(
+    stored: &StoredAttested,
+    engineers: &BTreeMap<String, String>,
+) -> ReviewedAttested {
     use crate::attested::AttestedTarget;
     let answer = match &stored.record.target {
         AttestedTarget::Gap { gap_id, slot } => AttestedAnswer::Gap {
@@ -621,6 +646,7 @@ pub fn reviewed_attested(stored: &StoredAttested) -> ReviewedAttested {
                 ..
             } => AttestedContribution {
                 contributor_id: contributor.0.clone(),
+                display_name: None,
                 engineer: false,
                 verb: verb_name(said),
                 role: Some(role.clone()),
@@ -632,6 +658,7 @@ pub fn reviewed_attested(stored: &StoredAttested) -> ReviewedAttested {
                 ..
             } => AttestedContribution {
                 contributor_id: contributor.0.clone(),
+                display_name: engineers.get(&contributor.0).cloned(),
                 engineer: true,
                 verb: verb_name(said),
                 role: None,
