@@ -404,7 +404,11 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    `reconciliation_stale` once the graph snapshot moved, a reconciled span's
    capture is no longer retained, or its fact's current association names
    another receipt. `staged_reconciliation_history` returns the state and up
-   to 64 results. The `StagedProposal` DTO field and the history UI follow.
+   to 64 results.
+   *As built (AC-1074):* the review dialog reads the derived state and the
+   results on request and offers "Reconcile now". The state is derived per
+   read, never a `StagedProposal` field, so listing proposals stays a
+   store read.
 4. **SPEC-12 consumption** (`context-hub`). `curated-policy-v3`,
    reconciled evidence, separate DR-4 counts. *Tests:* each reconciliation
    state maps to its listed reason; a reconciled v1 record leaves

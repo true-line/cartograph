@@ -15,6 +15,10 @@ import type { CuratedDraftCounts, CuratedDraftRow } from './sectionDocument';
 import type { SurfaceView } from './views';
 import type { EgressPreview } from './components/EgressConsentDialog';
 import type { ProjectEntry } from './components/ProjectsCard';
+import {
+  HISTORY_INCOMPLETE, RECONCILE_FAILED, RECONCILIATION_UNAVAILABLE, MAX_RECONCILIATION_HISTORY,
+  requireReconciliationHistory, type ReconciliationHistory, type ReconciliationView,
+} from './reconciliation';
 
 export interface GraphStats {
   nodes: number;
@@ -1072,6 +1076,8 @@ export interface EscalationState {
   decided: 'accepted' | 'rejected' | null;
   /** Transient observation of this selection; never merged into proposal history. */
   basisAssessment?: BasisAssessmentState;
+  /** The host's reconciliation state and results for this selection (AC-1074). */
+  reconciliation?: ReconciliationView;
 }
 
 /** Exact redacted payload preview for the one-action consent dialog. */
@@ -1325,6 +1331,10 @@ export interface AppStore {
   closeResolution: () => void;
   openStagedProposal: (proposal: StagedProposal) => void;
   assessStagedBasis: () => Promise<void>;
+  /** Read the selected proposal's reconciliation state and results (AC-1074). */
+  loadReconciliation: () => Promise<void>;
+  /** Explicitly reconcile the selected proposal as one durable job (AC-1074). */
+  reconcileStaged: () => Promise<void>;
   loadStagedProposals: (loadMore?: boolean) => Promise<void>;
   /** Read the recorded coverage inventories; a superseded read is dropped,
    *  and so is one whose caller began before the coverage epoch `since`
@@ -1362,6 +1372,7 @@ async function loadEndpoints(): Promise<GraphNode[]> {
 
 let evidenceRequestVersion = 0;
 let basisAssessmentGeneration = 0;
+let reconciliationGeneration = 0;
 // A later mode/curation request owns the visible spec result, error, and busy state.
 let specRequestVersion = 0;
 /** Bumped by every recorded-coverage read: a read that settles after a
@@ -2261,6 +2272,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  loadReconciliation: () => readReconciliation(false),
+
+  reconcileStaged: () => readReconciliation(true),
+
   loadStagedProposals: async (loadMore = false) => {
     if (get().stagedLoading) return;
     const cursor = loadMore ? get().stagedNextCursor : null;
@@ -2485,3 +2500,47 @@ export const useAppStore = create<AppStore>((set, get) => ({
     return saved;
   },
 }));
+
+/** Read, or with `reconcile` first record, the selected proposal's
+ *  reconciliation (AC-1074). A response for another selection, or one
+ *  overtaken by a newer request, is dropped; a failure keeps no earlier
+ *  result, so nothing stale is shown as current. */
+async function readReconciliation(reconcile: boolean): Promise<void> {
+  const proposalId = useAppStore.getState().escalation?.proposal?.proposal_id;
+  if (!proposalId) return;
+  const requestGeneration = ++reconciliationGeneration;
+  const request: ReconciliationView = {
+    proposalId, requestGeneration, loading: true, reconciling: reconcile, history: null, error: null,
+  };
+  useAppStore.setState((state) => state.escalation?.proposal?.proposal_id === proposalId
+    ? { escalation: { ...state.escalation, reconciliation: request } } : {});
+  const update = (fields: Partial<ReconciliationView>) => useAppStore.setState((state) => {
+    const current = state.escalation;
+    if (current?.proposal?.proposal_id !== proposalId ||
+        current.reconciliation?.requestGeneration !== requestGeneration) return {};
+    return { escalation: { ...current, reconciliation: { ...request, ...fields } } };
+  });
+  const readHistory = async () => requireReconciliationHistory(
+    await invokeOr<ReconciliationHistory | null>('staged_reconciliation_history', null, {
+      proposalId, limit: MAX_RECONCILIATION_HISTORY,
+    }), proposalId);
+  let recorded: ReconciliationHistory;
+  try {
+    if (!reconcile) {
+      update({ loading: false, history: await readHistory() });
+      return;
+    }
+    recorded = requireReconciliationHistory(
+      await invokeOr<ReconciliationHistory | null>('reconcile_staged', null, { proposalId }), proposalId);
+  } catch {
+    update({ loading: false, reconciling: false, error: reconcile ? RECONCILE_FAILED : RECONCILIATION_UNAVAILABLE });
+    return;
+  }
+  // The job answers with its own result only; the earlier ones follow.
+  try {
+    update({ loading: false, reconciling: false, history: await readHistory() });
+  } catch {
+    // The new result was recorded: show it, and say the rest is missing.
+    update({ loading: false, reconciling: false, history: recorded, error: HISTORY_INCOMPLETE });
+  }
+}
