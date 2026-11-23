@@ -61,6 +61,7 @@ mod task_validation_workspace;
 mod turn;
 mod validation_workspace;
 mod withholding;
+mod withholding_reading;
 mod withholding_witness;
 
 pub use artifact_reads::*;
@@ -102,6 +103,7 @@ pub use validation_workspace::{
     ledger_validation_workspace,
 };
 pub use withholding::{FindingWithholdingPlan, WithheldFinishProjection};
+pub use withholding_reading::{SavedFindingPosition, WITHHOLDING_READING_NOTE, WithholdingReading};
 pub use withholding_witness::{
     FINDINGS_WITHHELD_MESSAGE, FindingWithholdingWitness, WithholdingDisposition,
 };

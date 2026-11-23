@@ -580,6 +580,9 @@ fn investigation_output_metadata_cannot_complete_a_split_source_replay() {
 #[path = "disclosure_tests.rs"]
 mod disclosure_tests;
 
+#[path = "withholding_reading_tests.rs"]
+mod withholding_reading_tests;
+
 #[path = "projection_tests.rs"]
 mod projection_tests;
 
