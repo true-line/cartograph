@@ -14,6 +14,8 @@ import { InspectionAssessment } from './InspectionAssessment';
 import { CompletionAssessment } from './CompletionAssessment';
 import { investigationPolicy, obligationEnvelope } from '../investigationObligations';
 import { InvestigationCoverage } from './InvestigationCoverage';
+import { InvestigationArtifactReads } from './InvestigationArtifactReads';
+import { useArtifactReads } from '../investigationArtifactReads';
 import { InvestigationChatTranscript } from './InvestigationChatTranscript';
 import type { SpecialistActivityState } from '../specialistActivityStore';
 
@@ -50,6 +52,9 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
   const summary = state.detail ?? state.history.find((item) => item.investigation_id === state.selectedId);
+  // AC-1816: only a specialist that offers read_artifact has saved pages to show.
+  const readsArtifacts = state.detail?.specialist.operations.includes('read_artifact') ?? false;
+  const artifactReads = useArtifactReads(state.detail?.investigation_id ?? null, state.detail?.revision ?? 0, readsArtifacts);
   const conversationSelected = state.conversationPinned?.investigation_id === state.selectedId &&
     state.conversationPinned.conversation_id === state.conversationId ? state.conversationPinned :
     summary?.investigation_id === state.selectedId && summary.conversation_id === state.conversationId ? summary : null;
@@ -385,6 +390,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
           {state.detail && <>
             {[3, 4, 5, 6, 7].includes(state.detail.schema_version) && <InvestigationCoverage context={state.detail.coverage_context}
               attestation={state.result?.coverage} />}
+            {readsArtifacts && <InvestigationArtifactReads reads={artifactReads.reads} error={artifactReads.error} />}
             {[4, 5, 6, 7].includes(state.detail.schema_version) && state.detail.completion && <CompletionAssessment completion={state.detail.completion} outcome={state.detail.completion_outcome} />}
             {![4, 5, 6, 7].includes(state.detail.schema_version) && <InspectionAssessment requirements={state.detail.inspection_requirements ?? []}
               awaitingAssessment={!['completed', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state.detail.status) || state.detail.invocation_pending}
