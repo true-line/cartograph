@@ -1195,6 +1195,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `app` · ADR-0085 · T-1818
 - **AC-1433** Given a recovered graph whose language adapters emitted `BusinessRule` guarded-exit facts, when a caller asks for rule-bearing sources (optionally limited to one registered repository and a closure of its paths, so registrations sharing a relative path never mix), then the host ranks the callables that own those rules by guarded throws, then guarded exits, then guarded effects, then path and id, takes at most two per file and at most 64 in total, skips an undecodable rule payload or an owner without a bound capture, and returns each owner's fact, counts, graph snapshot, receipt and first captured range, so that every entry resolves as a source obligation. The ranking reads graph metadata only; no source text or model is consulted (#1728).
 - **Trace:** H4 · `app` · ADR-0085 · T-1433
+- **AC-1434** Given an @29 finish patch whose new top-level limitation text (a capacity disclosure or a replaced limitation) has a sentence that names a finding beside a withdrawal word (withdraw, withdrawn, withdrew, retracted) or a replacement word (replaced, revised, rewritten, amended, corrected), with no negation, when it is merged, then it is rejected as `unsupported_edit_claim` unless the merge withdrew (or replaced) every finding the sentence numbers, or at least one finding when it numbers none; the rejection goes back to the model as an invalid_action refusal within the run's allowance (AC-1432), and earlier roles merge such text unchanged (#1728 run-29).
+- **Trace:** H4 · `agents` · ADR-0085 · T-1434
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned
