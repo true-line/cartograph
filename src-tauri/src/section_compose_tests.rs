@@ -576,6 +576,101 @@ fn a_rule_is_cited_with_the_capability_it_is_listed_under() {
     );
 }
 
+/// AC-1605 (#1748): `review_batches` halves a batch that does not fit, keeps
+/// the batches in order, and gives up only on one claim that does not fit.
+#[test]
+fn review_batches_halve_until_each_fits() {
+    let small = |batch: std::ops::Range<usize>| batch.len() <= 2;
+    assert_eq!(review_batches(5, &small), Some(vec![0..2, 2..3, 3..5]));
+    assert_eq!(
+        review_batches(2, &small),
+        Some(std::iter::once(0..2).collect())
+    );
+    assert_eq!(review_batches(3, &|_| false), None);
+}
+
+/// AC-1605 (#1748): claims too many for one review request are reviewed in
+/// batches that each fit, and a claim a batch's majority judges an
+/// overreach is left out as before.
+#[test]
+fn claims_over_the_review_ceiling_are_reviewed_in_batches() {
+    let (_dir, state) = state();
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&capability("cap:orders", "Place orders"))
+        .unwrap();
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let cites = [id("cap:orders")];
+    let composer = Scripted {
+        reply: json!({"claims": [
+            {"statement": "Shoppers place orders for themselves.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+            {"statement": "Shoppers place orders from every channel there is.",
+             "claim_kind": "implemented_behavior", "citation_ids": cites},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let mut composed = compose(
+        &state,
+        &composer,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(screen(&prepared, &mut composed), None);
+    assert_eq!(composed.finish.claims.len(), 2);
+    // A ceiling that holds one claim's review but not both.
+    let one = payload_bytes(&review_action(&prepared, &composed.finish.claims[..1]));
+    let both = payload_bytes(&review_action(&prepared, &composed.finish.claims));
+    assert!(one + 64 < both);
+    let reviewer = Scripted {
+        reply: json!({"verdicts": [{"claim": 1, "verdict": "overreach"}]}).to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let calls = Calls {
+        state: &state,
+        provider: &reviewer,
+        check: &|| CallDirective::Continue,
+        job_id: None,
+        ceiling: one + 64,
+    };
+    // Under a ceiling no single claim fits, nothing is reviewed.
+    let tiny = Calls {
+        state: &state,
+        provider: &reviewer,
+        check: &|| CallDirective::Continue,
+        job_id: None,
+        ceiling: 1,
+    };
+    let mut untouched = composed.clone();
+    assert_eq!(
+        review_claims(&tiny, &prepared, &mut untouched).unwrap(),
+        "review_too_large"
+    );
+    assert_eq!(untouched, composed);
+    assert!(reviewer.prompts.lock().unwrap().is_empty());
+    assert_eq!(
+        review_claims(&calls, &prepared, &mut composed).unwrap(),
+        "reviewed"
+    );
+    assert!(composed.finish.claims.is_empty());
+    assert_eq!(composed.reasons["claim_overreaches"], 2);
+    // Each batch asked the reviewer the usual number of times, about its own
+    // claim alone.
+    let prompts = reviewer.prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 2 * agents::claim_review::REVIEW_SAMPLES);
+    assert!(prompts[0].contains("1. Shoppers place orders for themselves."));
+    assert!(!prompts[0].contains("every channel"));
+    let last = &prompts[2 * agents::claim_review::REVIEW_SAMPLES - 1];
+    assert!(last.contains("1. Shoppers place orders from every channel there is."));
+}
+
 /// AC-1325 (T-1325, #2419): on a local lane each claim the reviewer judges
 /// an overreach is left out before staging; an unreadable review keeps the
 /// claims.
