@@ -144,17 +144,78 @@ pub(super) fn load_with_policy(
         return Err(InvestigationStoreError::Invalid);
     }
     let result = load_result(connection, &parent)?;
+    history_from(parent_id, &parent.detail.summary, &result, policy, true)
+}
+
+fn history_from(
+    parent_id: &str,
+    summary: &InvestigationSummary,
+    result: &Option<InvestigationResult>,
+    policy: &InvestigationPolicy,
+    reading: bool,
+) -> Result<NextParentHistory, InvestigationStoreError> {
     // Match the unchanged legacy worker representation and its whole-history
     // caps, including live/failed states with no saved result. No recursive replay.
-    let raw = encode_parent_history_with_limit(
+    let raw = encode_envelope(
         parent_id,
-        &parent.detail.summary,
-        &result,
+        summary,
+        result,
         policy.supplied_history_bytes(),
+        reading,
     )?;
     let history = vec![String::from_utf8(raw).map_err(|_| InvestigationStoreError::Invalid)?];
     encode(&history, policy.supplied_history_bytes())?;
     Ok(NextParentHistory { history })
+}
+
+/// The history a child resumes with. A child whose saved ledger hashes the
+/// history its withheld parent had before AC-1336 keeps those bytes, so an
+/// upgrade never stops it; every other child gets the current history.
+fn load_for_child(
+    connection: &Connection,
+    parent_id: &str,
+    conversation_id: &str,
+    policy: &InvestigationPolicy,
+    child_id: &str,
+) -> Result<NextParentHistory, InvestigationStoreError> {
+    let current = load_with_policy(connection, parent_id, conversation_id, policy)?;
+    let child = load_execution_task(connection, child_id)?;
+    let saved = load_ledger(connection, &child)?.and_then(|ledger| ledger.supplied_history_hash);
+    resume_history(current, saved.as_deref(), policy, || {
+        let parent = load_execution_task(connection, parent_id)?;
+        let result = load_result(connection, &parent)?;
+        if result
+            .as_ref()
+            .and_then(agents::investigation::WithholdingReading::of)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        history_from(parent_id, &parent.detail.summary, &result, policy, false).map(Some)
+    })
+}
+
+/// `current`, unless `saved` hashes the history `before` builds instead.
+fn resume_history(
+    current: NextParentHistory,
+    saved: Option<&str>,
+    policy: &InvestigationPolicy,
+    before: impl FnOnce() -> Result<Option<NextParentHistory>, InvestigationStoreError>,
+) -> Result<NextParentHistory, InvestigationStoreError> {
+    let hash = |history: &NextParentHistory| {
+        encode(&history.history, policy.supplied_history_bytes())
+            .map(|bytes| core_prov::content_hash(&bytes))
+    };
+    let Some(saved) = saved else {
+        return Ok(current);
+    };
+    if hash(&current)? == saved {
+        return Ok(current);
+    }
+    match before()? {
+        Some(before) if hash(&before)? == saved => Ok(before),
+        _ => Ok(current),
+    }
 }
 #[cfg(any(test, feature = "test-support"))]
 fn encode_parent_history(
@@ -175,6 +236,15 @@ fn encode_parent_history_with_limit(
     result: &Option<InvestigationResult>,
     limit: usize,
 ) -> Result<Vec<u8>, InvestigationStoreError> {
+    encode_envelope(parent_id, summary, result, limit, true)
+}
+fn encode_envelope(
+    parent_id: &str,
+    summary: &InvestigationSummary,
+    result: &Option<InvestigationResult>,
+    limit: usize,
+    reading: bool,
+) -> Result<Vec<u8>, InvestigationStoreError> {
     #[derive(Serialize)]
     struct Envelope<'a> {
         parent_investigation_id: &'a str,
@@ -184,6 +254,10 @@ fn encode_parent_history_with_limit(
         cancellation_requested: bool,
         invocation_outcome_pending: bool,
         authority: &'static str,
+        // AC-1336: only a withheld parent carries it, so every other
+        // parent's history keeps its bytes.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        withholding_reading: Option<agents::investigation::WithholdingReading>,
         saved_result: &'a Option<InvestigationResult>,
     }
     let raw = encode(
@@ -195,6 +269,10 @@ fn encode_parent_history_with_limit(
             cancellation_requested: summary.cancel_requested,
             invocation_outcome_pending: summary.invocation_pending,
             authority: "Prior specialist findings remain T3/InferredWeak; execution status does not establish complete knowledge.",
+            withholding_reading: result
+                .as_ref()
+                .filter(|_| reading)
+                .and_then(agents::investigation::WithholdingReading::of),
             saved_result: result,
         },
         limit,
@@ -228,6 +306,22 @@ impl JobStore {
         let tx = self.conn.unchecked_transaction()?;
         validate(&tx, &self.namespace)?;
         let history = load_with_policy(&tx, parent_id, conversation_id, policy)?;
+        tx.commit()?;
+        Ok(history)
+    }
+
+    /// [`Self::investigation_next_parent_history_with_policy`] for the
+    /// running child `child_id`, keeping the bytes its saved ledger hashed.
+    pub fn investigation_next_parent_history_for_child(
+        &self,
+        parent_id: &str,
+        conversation_id: &str,
+        policy: &InvestigationPolicy,
+        child_id: &str,
+    ) -> Result<NextParentHistory, InvestigationStoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        validate(&tx, &self.namespace)?;
+        let history = load_for_child(&tx, parent_id, conversation_id, policy, child_id)?;
         tx.commit()?;
         Ok(history)
     }

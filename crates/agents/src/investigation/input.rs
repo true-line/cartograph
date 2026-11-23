@@ -663,6 +663,15 @@ impl InvestigationInput {
             for raw in supplied_history {
                 strict::preflight(raw, policy.supplied_history_bytes(), 32, 16384, 128)?;
                 let history: PriorHistory = decode_record(raw)?;
+                if history.withholding_reading.is_some()
+                    && history.withholding_reading
+                        != history
+                            .saved_result
+                            .as_ref()
+                            .and_then(WithholdingReading::of)
+                {
+                    return Err(InvestigationError::InvalidInput);
+                }
                 if let Some(result) = history.saved_result {
                     for finding in result.findings {
                         supplied_strings.push(finding.title);
@@ -1402,6 +1411,10 @@ struct PriorHistory {
     cancellation_requested: bool,
     invocation_outcome_pending: bool,
     authority: String,
+    /// Present only for a withheld parent; equal to the saved result's
+    /// reading (AC-1336). Histories saved before it omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withholding_reading: Option<WithholdingReading>,
     saved_result: Option<InvestigationResult>,
 }
 
