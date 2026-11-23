@@ -24,9 +24,10 @@
 //! R-INT-3).
 
 use context_hub::curated::{
-    AssertionDecisionSummary, CuratedCounts, CuratedDraft, CuratedFinding, CuratedProjection,
-    CuratedRecord, CuratedView, DraftAddress, DraftCounts, DraftState, DraftStateReason,
-    FindingCounts, FindingState, FindingStateReason,
+    AssertionDecisionSummary, AttestedAnswer, AttestedCounts, AttestedState, AttestedStateReason,
+    CuratedAttested, CuratedCounts, CuratedDraft, CuratedFinding, CuratedProjection, CuratedRecord,
+    CuratedView, DraftAddress, DraftCounts, DraftState, DraftStateReason, FindingCounts,
+    FindingState, FindingStateReason,
 };
 use serde::Serialize;
 use spec::{CuratedFailure, ExportMode};
@@ -198,6 +199,91 @@ impl FindingsRead {
             omitted,
             listed,
             finding_counts: projection.finding_counts,
+        }
+    }
+}
+
+/// One attested record a read shows, with the label it prints: `attested`
+/// for an engineer-backed one, `agent-attested, unconfirmed` when only
+/// agents attest it (ADR-0090 decision 7).
+#[derive(Debug, Serialize)]
+pub(crate) struct AttestedRow {
+    #[serde(flatten)]
+    record: CuratedAttested,
+    label: &'static str,
+}
+
+/// One attested record a read does not show: its identity, state and the
+/// cited ids behind the state, with no statement.
+#[derive(Debug, Serialize)]
+pub(crate) struct AttestedListing {
+    record_id: String,
+    citation_id: String,
+    answer: AttestedAnswer,
+    cited_facts: usize,
+    state: AttestedState,
+    label: &'static str,
+    reason: AttestedStateReason,
+    changed: Vec<String>,
+    missing: Vec<String>,
+}
+
+/// The attested records of a projection as one export mode reads them
+/// (ADR-0090 decisions 7 and 8). `best-effort` shows the eligible and the
+/// agent-attested, unconfirmed ones; `verified-only` shows neither and
+/// counts them. Every other record is listed without its statement in both
+/// modes. `shown` plus `omitted` plus `listed` is every projected record.
+#[derive(Debug, Serialize)]
+pub(crate) struct AttestedRead {
+    #[serde(rename = "attested")]
+    shown: Vec<AttestedRow>,
+    #[serde(rename = "attested_omitted")]
+    omitted: usize,
+    #[serde(rename = "attested_listed")]
+    listed: Vec<AttestedListing>,
+    attested_counts: AttestedCounts,
+}
+
+impl AttestedRead {
+    pub(crate) fn of(projection: &CuratedProjection, mode: ExportMode) -> Self {
+        let mut shown = Vec::new();
+        let mut listed = Vec::new();
+        let mut omitted = 0;
+        for record in &projection.attested {
+            let printable = matches!(
+                record.state,
+                AttestedState::Eligible | AttestedState::AgentAttestedUnconfirmed
+            );
+            let label = match record.state {
+                AttestedState::Eligible => "attested",
+                state => state.label(),
+            };
+            if printable && mode == ExportMode::BestEffort {
+                shown.push(AttestedRow {
+                    record: record.clone(),
+                    label,
+                });
+            } else if printable {
+                omitted += 1;
+            } else {
+                listed.push(AttestedListing {
+                    record_id: record.record_id.clone(),
+                    citation_id: record.citation_id.clone(),
+                    answer: record.answer.clone(),
+                    cited_facts: record.citations.len(),
+                    state: record.state,
+                    label,
+                    reason: record.reason,
+                    changed: record.changed.clone(),
+                    missing: record.missing.clone(),
+                });
+            }
+        }
+        Self {
+            shown,
+            omitted,
+            listed,
+            attested_counts: projection.attested_counts,
         }
     }
 }
