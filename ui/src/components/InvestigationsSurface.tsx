@@ -320,7 +320,12 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
             <p className="muted">Specialist: <code>{summary.specialist_id}</code>{isRetired(summary.specialist_id) &&
               ' · retired: this run reopens read-only, and a follow-up needs a version offered today'}</p>
             <p className="muted">Scope: {summary.scope.type === 'all' ? 'Recovered system' : `${summary.scope.anchor} · ${summary.scope.hops} hop(s)`}</p>
-            <p className="muted">Prepared graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
+            {/* graph_snapshot_id is the complete-graph identity, equal for every scope (AC-1301);
+                the scope snapshot is what a narrower scope narrows (#2475). */}
+            <p className="muted">Recovered graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
+            {state.detail?.investigation_id === summary.investigation_id && state.detail.scope_snapshot_id &&
+              <p className="muted">Scope snapshot: <code>{state.detail.scope_snapshot_id}</code>
+                {state.detail.scope_snapshot_id === summary.graph_snapshot_id ? ' · the whole recovered graph' : ' · narrower than the recovered graph'}</p>}
             <div className="investigation-actions">
               {[4, 5, 6, 7].includes(summary.schema_version) && <p>{summary.completion_outcome === 'obligations_unmet' ? 'Completion obligations unmet; no result admitted.' :
                 summary.completion_outcome === 'findings_withheld_after_correction' ? 'Some findings were withheld because their claims could not be verified.' :

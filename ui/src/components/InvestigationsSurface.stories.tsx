@@ -100,6 +100,28 @@ export const PerStepCloudConsent: Story = {
   },
 };
 
+export const ScopeIdentity: Story = {
+  // #2475: the whole-graph identity is labelled as such; the scope's own
+  // snapshot shows whether the scope narrowed it.
+  args: { state: state({ detail: investigationDetail('inv-fixture') }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/Recovered graph:/)).toHaveTextContent('snapshot:original');
+    await expect(canvas.getByText(/Scope snapshot:/)).toHaveTextContent('scope:original');
+    await expect(canvas.getByText(/narrower than the recovered graph/)).toBeVisible();
+    await expect(canvas.queryByText(/Prepared graph/)).not.toBeInTheDocument();
+  },
+};
+
+export const WholeSystemScopeIdentity: Story = {
+  args: { state: state({ detail: investigationDetail('inv-fixture', { scope: { type: 'all' },
+    scope_snapshot_id: 'snapshot:original' }) }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/the whole recovered graph/)).toBeVisible();
+  },
+};
+
 export const CancelledOutstandingInvocation: Story = {
   args: { state: state({ detail: investigationDetail('inv-fixture', { status: 'cancelled', cancel_requested: true,
     invocation_pending: true, actions: { can_cancel: false, can_follow_up: false } }) }) },

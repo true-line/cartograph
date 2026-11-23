@@ -78,7 +78,7 @@ export function TaskEvidence({ basis, compact = false }: TaskEvidenceProps) {
                     : 'Legacy working-tree read unavailable'}.</li>
               ))}
             </ul>
-            <p>Prepared graph: <code>{basis.graph_snapshot_id}</code></p>
+            <p>Recovered graph: <code>{basis.graph_snapshot_id}</code></p>
           </details>
           <details>
             <summary>Saved basis metadata</summary>
