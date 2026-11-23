@@ -15,7 +15,7 @@ test('an empty signing environment is visibly unsigned', () => {
   assert.deepEqual(signingMode({}, 'windows'), { mode: 'unsigned-dev', signed: false });
 });
 
-test('all five signing secrets enable the production path', () => {
+test('every complete signing set enables the production path', () => {
   for (const [platform, names] of SETS) {
     const env = Object.fromEntries(names.map((name) => [name, `${name}-value`]));
     assert.deepEqual(signingMode(env, platform), { mode: 'signed', signed: true });
