@@ -31,6 +31,7 @@ use crate::section_draft::{self, DraftRefusal, SectionDraft, SectionDraftFinish}
 use core_prov::content_hash;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Version of the immutable draft envelope.
@@ -169,6 +170,12 @@ pub enum DraftStoreError {
     /// A successor cannot be returned.
     #[error("a successor draft cannot be returned")]
     SuccessorCannotBeReturned,
+    /// Only a draft no one has reviewed can be accepted with claims left out.
+    #[error("the draft has already been reviewed")]
+    AlreadyReviewed,
+    /// The claims to leave out are none, all, or not the draft's.
+    #[error("the claims to leave out must be some, not all, of the draft's, by number")]
+    InvalidRemoval,
     /// A page limit outside 1..=[`MAX_DRAFT_PAGE_ITEMS`].
     #[error("draft page limit must be between 1 and {MAX_DRAFT_PAGE_ITEMS}")]
     InvalidLimit,
@@ -557,6 +564,112 @@ impl DraftStore {
         let reviewed = get_on(&tx, draft_id)?.ok_or(DraftStoreError::InvalidRecord)?;
         tx.commit()?;
         Ok(reviewed)
+    }
+
+    /// Accept the draft without the claims numbered in `remove` (from 1, as
+    /// the Workbench numbers them), in one transaction (#1748): the draft is
+    /// returned with a note naming the claims left out, its successor (the
+    /// same address, origin and remaining claims, citing hashes only for
+    /// the ids those claims cite) is stored in its place and accepted. No
+    /// claim is written or reworded, so every claim kept is one its role
+    /// drafted. Only an unreviewed draft that replaces none qualifies, at
+    /// the revision the reviewer read.
+    pub fn accept_without(
+        &mut self,
+        draft_id: &str,
+        expected_revision: u64,
+        remove: &BTreeSet<usize>,
+        note: Option<&str>,
+    ) -> Result<StoredDraft, DraftStoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = get_on(&tx, draft_id)?.ok_or(DraftStoreError::UnknownDraft)?;
+        if current.review_revision != expected_revision {
+            return Err(DraftStoreError::StaleReviewRevision {
+                expected: expected_revision,
+                actual: current.review_revision,
+            });
+        }
+        if current.review_decision.is_some() {
+            return Err(DraftStoreError::AlreadyReviewed);
+        }
+        if current.replaces.is_some() {
+            return Err(DraftStoreError::SuccessorCannotBeReturned);
+        }
+        let claims = current.draft.claims.len();
+        if remove.is_empty()
+            || remove.len() >= claims
+            || remove.iter().any(|n| !(1..=claims).contains(n))
+        {
+            return Err(DraftStoreError::InvalidRemoval);
+        }
+        let kept: Vec<_> = current
+            .draft
+            .claims
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !remove.contains(&(index + 1)))
+            .map(|(_, claim)| claim.clone())
+            .collect();
+        let cited: BTreeSet<&str> = kept
+            .iter()
+            .flat_map(|claim| claim.citations.iter().map(String::as_str))
+            .collect();
+        let trimmed = SectionDraft {
+            address: current.draft.address.clone(),
+            cited_hashes: current
+                .draft
+                .cited_hashes
+                .iter()
+                .filter(|(id, _)| cited.contains(id.as_str()))
+                .map(|(id, hash)| (id.clone(), hash.clone()))
+                .collect(),
+            claims: kept,
+        };
+        validate(&trimmed, &current.origin)?;
+        let numbers: Vec<String> = remove.iter().map(usize::to_string).collect();
+        let returned_note = match note.map(str::trim).filter(|note| !note.is_empty()) {
+            Some(note) => format!("Accepted without claims {}: {note}", numbers.join(", ")),
+            None => format!("Accepted without claims {}", numbers.join(", ")),
+        };
+        if returned_note.len() > MAX_DRAFT_NOTE_BYTES {
+            return Err(DraftStoreError::NoteTooLarge);
+        }
+        let next = i64::try_from(expected_revision)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or(DraftStoreError::InvalidRecord)?;
+        let changed = tx.execute(
+            "UPDATE staged_section_drafts SET review_revision = ?1, review_decision = 'returned',
+                 review_note = ?2, reviewed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             WHERE draft_id = ?3 AND review_revision = ?4",
+            params![next, returned_note, draft_id, next - 1],
+        )?;
+        if changed != 1 {
+            return Err(DraftStoreError::InvalidRecord);
+        }
+        let content = DraftContent {
+            schema_version: DRAFT_SCHEMA_VERSION,
+            draft: trimmed,
+            origin: current.origin.clone(),
+            replaces: Some(draft_id.to_owned()),
+        };
+        let json = serde_json::to_string(&content)?;
+        if json.len() > MAX_DRAFT_RECORD_BYTES {
+            return Err(DraftStoreError::RecordTooLarge { bytes: json.len() });
+        }
+        let successor = DraftContent::identity(&json);
+        // An unreviewed draft has no successor, so this is its first.
+        tx.execute(
+            "INSERT INTO staged_section_drafts (draft_id, immutable_json, replaces,
+                 review_revision, review_decision, review_note, reviewed_at)
+             VALUES (?1, ?2, ?3, 1, 'accepted', ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            params![successor, json, draft_id, returned_note],
+        )?;
+        let stored = get_on(&tx, &successor)?.ok_or(DraftStoreError::InvalidRecord)?;
+        tx.commit()?;
+        Ok(stored)
     }
 
     /// Stored drafts, newest first, at most `limit` per page. `before` is
