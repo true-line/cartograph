@@ -1053,3 +1053,63 @@ fn a_reply_losing_claims_to_uncited_figures_is_asked_once_more() {
     let cancelled = || CallDirective::Cancelled;
     assert!(screen_or_retry(&state, &Failing, &prepared, first(2), &cancelled, None).is_err());
 }
+
+/// AC-1606 (#1748): in a gated run by area, a failed model call on one
+/// part is that part's, and the next is drafted; a host failure, a cancel or
+/// lost ownership still ends the run, which fails whole when nothing was
+/// staged.
+#[test]
+fn one_part_failing_does_not_end_a_gated_run() {
+    for staged_any in [false, true] {
+        assert_eq!(
+            after_failure(staged_any, true, CallDirective::Continue),
+            AfterFailure::Next
+        );
+    }
+    assert_eq!(
+        after_failure(false, false, CallDirective::Continue),
+        AfterFailure::Fail
+    );
+    assert_eq!(
+        after_failure(true, false, CallDirective::Continue),
+        AfterFailure::Stop
+    );
+    for directive in [CallDirective::Cancelled, CallDirective::OwnershipLost] {
+        for provider_failed in [false, true] {
+            assert_eq!(
+                after_failure(false, provider_failed, directive),
+                AfterFailure::Fail
+            );
+            assert_eq!(
+                after_failure(true, provider_failed, directive),
+                AfterFailure::Stop
+            );
+        }
+    }
+    // The watch follows the last model call.
+    struct Quiet;
+    impl LlmProvider for Quiet {
+        fn id(&self) -> &str {
+            "local-quiet"
+        }
+        fn locality(&self) -> Locality {
+            Locality::Local
+        }
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps {
+                embeddings: false,
+                chat: true,
+                tool_use: false,
+            }
+        }
+        fn embed(&self, _: &[String]) -> Result<Vec<Embedding>, ProviderError> {
+            Err(ProviderError::Unsupported("fixture"))
+        }
+    }
+    let watched = Watched::new(&Quiet);
+    assert!(!watched.last_call_failed());
+    assert!(watched.noted::<(), ()>(Err(())).is_err());
+    assert!(watched.last_call_failed());
+    assert!(watched.noted::<(), ()>(Ok(())).is_ok());
+    assert!(!watched.last_call_failed());
+}

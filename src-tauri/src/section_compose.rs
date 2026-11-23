@@ -1482,29 +1482,38 @@ pub(crate) fn compose_gated_by_area(
         if whole { compiled.text.clone() } else { rest },
     ));
     let mut drafts = Vec::new();
+    let mut first_failure = None;
     for (scope, area, text) in parts {
         let address = SectionAddress {
             scope: scope.clone(),
             ..compiled.address.clone()
         };
+        let watched = Watched::new(provider);
         let outcome = match prepared(&compiled, address, area.clone(), &text, true) {
-            Ok(prepared) => compose_gated(state, provider, &prepared, check, job_id),
+            Ok(prepared) => compose_gated(state, &watched, &prepared, check, job_id),
             // The rest of an arranged section may print no fact at all.
             Err(reason) if reason == "no_citable_fact" && !whole => continue,
             Err(reason) => Err(reason),
         };
-        match outcome {
-            Ok(outcome) => drafts.push(GatedDraft {
-                scope,
-                area,
-                outcome,
-            }),
+        let error = match outcome {
+            Ok(outcome) => {
+                drafts.push(GatedDraft {
+                    scope,
+                    area,
+                    outcome,
+                });
+                continue;
+            }
+            Err(error) => error,
+        };
+        let provider_failed = watched.last_call_failed();
+        match after_failure(drafts.iter().any(staged), provider_failed, check()) {
             // Nothing was staged yet: the run failed as a whole.
-            Err(error) if !drafts.iter().any(staged) => return Err(error),
+            AfterFailure::Fail => return Err(error),
             // Drafts of earlier areas are already staged under this job, so
             // the run ends here and reports them, with this part named as
-            // where it stopped (a cancel, a provider failure).
-            Err(_) => {
+            // where it stopped.
+            AfterFailure::Stop => {
                 drafts.push(GatedDraft {
                     scope,
                     area,
@@ -1512,9 +1521,126 @@ pub(crate) fn compose_gated_by_area(
                 });
                 break;
             }
+            // One area's failure is that area's: the next is drafted (#1748).
+            AfterFailure::Next => {
+                first_failure.get_or_insert(error);
+                drafts.push(GatedDraft {
+                    scope,
+                    area,
+                    outcome: ComposeOutcome::none("part_failed"),
+                });
+            }
         }
     }
-    Ok(drafts)
+    match first_failure {
+        // Every part failed or staged nothing: the run failed as a whole.
+        Some(error) if !drafts.iter().any(staged) => Err(error),
+        _ => Ok(drafts),
+    }
+}
+
+/// What a gated run by area does when one part's composition fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterFailure {
+    /// Fail the run: nothing is staged under its job.
+    Fail,
+    /// End the run, reporting the drafts staged so far.
+    Stop,
+    /// Record the part as failed and draft the next.
+    Next,
+}
+
+/// A failure whose last model call failed (`provider_failed`) while the
+/// job goes on (`directive`, read after the failure) is the failing part's
+/// alone (#1748). A cancel, lost ownership or host failure (the graph, the
+/// draft store) ends the run, which fails as a whole when nothing was
+/// `staged_any`.
+fn after_failure(
+    staged_any: bool,
+    provider_failed: bool,
+    directive: CallDirective,
+) -> AfterFailure {
+    match (directive, provider_failed, staged_any) {
+        (CallDirective::Continue, true, _) => AfterFailure::Next,
+        (_, _, false) => AfterFailure::Fail,
+        (_, _, true) => AfterFailure::Stop,
+    }
+}
+
+/// A provider that remembers whether its last model call failed, so a gated
+/// run by area tells a model failure from a host one (#1748).
+struct Watched<'a> {
+    inner: &'a dyn LlmProvider,
+    last_failed: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> Watched<'a> {
+    fn new(inner: &'a dyn LlmProvider) -> Self {
+        Self {
+            inner,
+            last_failed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn last_call_failed(&self) -> bool {
+        self.last_failed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn noted<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
+        self.last_failed
+            .store(result.is_err(), std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+}
+
+impl LlmProvider for Watched<'_> {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn locality(&self) -> Locality {
+        self.inner.locality()
+    }
+    fn capabilities(&self) -> llm::ProviderCaps {
+        self.inner.capabilities()
+    }
+    fn embed(&self, batch: &[String]) -> Result<Vec<llm::Embedding>, llm::ProviderError> {
+        self.inner.embed(batch)
+    }
+    fn embedding_cache_identity(
+        &self,
+    ) -> Result<Option<llm::EmbeddingIdentity>, llm::ProviderError> {
+        self.inner.embedding_cache_identity()
+    }
+    fn embedding_model_id(&self) -> String {
+        self.inner.embedding_model_id()
+    }
+    fn completion_model_id(&self) -> String {
+        self.inner.completion_model_id()
+    }
+    fn complete(
+        &self,
+        request: &llm::ProviderCompletionRequest,
+    ) -> Result<llm::Completion, llm::ProviderError> {
+        self.noted(self.inner.complete(request))
+    }
+    fn supports_bounded_response_schema(&self) -> bool {
+        self.inner.supports_bounded_response_schema()
+    }
+    fn bounded_profile(
+        &self,
+    ) -> Result<llm::bounded::ProviderProfile, llm::bounded::BoundedCallError> {
+        self.inner.bounded_profile()
+    }
+    fn complete_bounded(
+        &self,
+        request: &llm::bounded::AuthorizedBoundedCompletion,
+        control: &llm::bounded::CompletionControl<'_>,
+    ) -> Result<llm::bounded::BoundedCompletion, llm::bounded::BoundedCallError> {
+        self.noted(self.inner.complete_bounded(request, control))
+    }
+    fn proxy_credential(&self) -> Option<llm::UpstreamCredential> {
+        self.inner.proxy_credential()
+    }
 }
 
 fn staged(draft: &GatedDraft) -> bool {
