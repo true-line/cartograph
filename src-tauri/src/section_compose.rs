@@ -1713,6 +1713,7 @@ pub(crate) fn compose_gated_by_area(
             Err(error) => PartResult::Failed {
                 error,
                 failed_class: watched.last_failure_class(),
+                directive: None,
             },
         }
     };
@@ -1726,7 +1727,7 @@ pub(crate) fn compose_gated_by_area(
     let mut first_failure = None;
     let mut ended = false;
     for ((scope, area, _), result) in parts.into_iter().zip(results) {
-        let (error, failed_class) = match result {
+        let (error, failed_class, directive) = match result {
             PartResult::NotStarted | PartResult::Skipped => continue,
             PartResult::Composed(outcome) => {
                 drafts.push(GatedDraft {
@@ -1741,10 +1742,14 @@ pub(crate) fn compose_gated_by_area(
             PartResult::Failed {
                 error,
                 failed_class,
-            } => (error, failed_class),
+                directive,
+            } => (error, failed_class, directive),
         };
         let provider_failed = failed_class.is_some();
-        match after_failure(staged_any, provider_failed, check()) {
+        // The job's directive as it was when this part failed, not after
+        // later parts ran.
+        let directive = directive.unwrap_or_else(check);
+        match after_failure(staged_any, provider_failed, directive) {
             // Nothing was staged: the run failed as a whole.
             AfterFailure::Fail => return Err(error),
             // Drafts of other parts are already staged under this job, so
@@ -1803,11 +1808,17 @@ fn draft_parts(
             if index >= count {
                 break;
             }
-            let result = draft(index);
-            if let PartResult::Failed { failed_class, .. } = &result
-                && (failed_class.is_none() || check() != CallDirective::Continue)
+            let mut result = draft(index);
+            if let PartResult::Failed {
+                failed_class,
+                directive,
+                ..
+            } = &mut result
             {
-                stopped.store(true, Ordering::SeqCst);
+                let now = *directive.get_or_insert_with(check);
+                if failed_class.is_none() || now != CallDirective::Continue {
+                    stopped.store(true, Ordering::SeqCst);
+                }
             }
             *results[index].lock().unwrap_or_else(|e| e.into_inner()) = result;
         }
@@ -1840,6 +1851,8 @@ enum PartResult {
         error: String,
         /// The failed model call's class; none for a host failure.
         failed_class: Option<String>,
+        /// The job's directive read when the part failed.
+        directive: Option<CallDirective>,
     },
 }
 

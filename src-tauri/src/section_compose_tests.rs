@@ -1421,6 +1421,7 @@ fn gated_parts_are_drafted_in_parallel_and_reported_in_order() {
             PartResult::Failed {
                 error: index.to_string(),
                 failed_class: Some("deadline_exceeded".into()),
+                directive: None,
             }
         };
         let results = draft_parts(6, workers, &draft, &continue_);
@@ -1459,6 +1460,7 @@ fn a_run_ending_failure_starts_no_further_part() {
                 PartResult::Failed {
                     error: "stopped".into(),
                     failed_class: failed_class.clone(),
+                    directive: None,
                 }
             } else {
                 PartResult::Skipped
@@ -1467,7 +1469,11 @@ fn a_run_ending_failure_starts_no_further_part() {
         let results = draft_parts(4, 1, &draft, check);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(results[0], PartResult::Skipped);
-        assert!(matches!(results[1], PartResult::Failed { .. }));
+        // The directive is kept as read when the part failed.
+        let PartResult::Failed { directive, .. } = &results[1] else {
+            panic!("{:?}", results[1]);
+        };
+        assert_eq!(*directive, Some(check()));
         assert_eq!(results[2], PartResult::NotStarted);
         assert_eq!(results[3], PartResult::NotStarted);
     }
