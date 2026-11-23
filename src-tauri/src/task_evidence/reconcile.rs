@@ -564,6 +564,58 @@ pub(crate) fn current_state(
     Ok(result.outcome.into())
 }
 
+/// The record's latest reconciliation as the curated projection reads it
+/// (ADR-0072 slice 4, AC-1076), with the store revision its graph read
+/// observed. `None` when the record was never reconciled. A current
+/// `reconciled` result reports how many items matched their retained bytes
+/// and how many a recapture corroborated.
+pub(crate) fn curated_reconciliation(
+    state: &AppState,
+    proposal_id: &str,
+    shared: &mut SharedObservation,
+) -> Result<
+    Option<(
+        context_hub::curated::RecordReconciliation,
+        Option<core_graph::StoreRevision>,
+    )>,
+    String,
+> {
+    use agents::reconciliation::ItemOutcome;
+    use context_hub::curated::RecordReconciliation as Read;
+    let results = state
+        .proposals
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .reconciliations(proposal_id, 1)
+        .map_err(|error| error.to_string())?;
+    let Some(latest) = results.first() else {
+        return Ok(None);
+    };
+    let staged = staged(state, proposal_id)?;
+    let read = match current_state(state, &staged, Some(latest), shared)? {
+        ReconciliationState::AwaitingReconciliation => return Ok(None),
+        ReconciliationState::Reconciled => {
+            let count = |kind: fn(&ItemOutcome) -> bool| {
+                latest
+                    .result
+                    .evidence
+                    .iter()
+                    .filter(|item| kind(&item.outcome))
+                    .count()
+            };
+            Read::Reconciled {
+                retained_match: count(|o| matches!(o, ItemOutcome::RetainedMatch)),
+                recapture_corroborated: count(|o| matches!(o, ItemOutcome::RecaptureCorroborated)),
+            }
+        }
+        ReconciliationState::Changed => Read::Changed,
+        ReconciliationState::Missing => Read::Missing,
+        ReconciliationState::Unverifiable => Read::Unverifiable,
+        ReconciliationState::ReconciliationStale => Read::Stale,
+    };
+    Ok(Some((read, shared.revision())))
+}
+
 /// A record's state and up to `limit` results, newest first.
 pub(crate) fn history(
     state: &AppState,
