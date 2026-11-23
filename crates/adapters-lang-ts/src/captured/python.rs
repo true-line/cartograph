@@ -109,7 +109,9 @@ fn mint_lane_receipts_in(
                 .map(|edge| Receipt::for_edge_in(file, capture, id, edge)),
         );
     for receipt in minted {
-        let Ok(receipt) = receipt.and_then(|receipt| MintedReceipt::compact(receipt, &mut header))
+        let Ok(receipt) = receipt
+            .and_then(|receipt| measured(receipt, file))
+            .and_then(|receipt| MintedReceipt::compact(receipt, &mut header))
         else {
             continue;
         };
@@ -119,6 +121,18 @@ fn mint_lane_receipts_in(
         }
     }
     Ok(receipts)
+}
+
+/// Attach capture-time source sizes (#1728, AC-1441), as the TypeScript lane
+/// does, so a later read of this receipt's ranges reserves their measured
+/// JSON size instead of the six-fold worst case. A receipt that also cites
+/// other files carries no sizes: its ranges are not all in `file`.
+fn measured(receipt: Receipt, file: &CapturedFile) -> Result<Receipt, CapturedError> {
+    if receipt.other_files().is_empty() {
+        receipt.with_source_sizes(file)
+    } else {
+        Ok(receipt)
+    }
 }
 
 /// Receipt candidates for a lane's final facts, after directory resolution
@@ -422,6 +436,44 @@ mod tests {
         assert!(mint_rust_file_receipts(file, &id, &[own], &[]).is_err());
     }
 
+    // AC-1441 (#1728): a lane receipt carries its ranges' measured JSON
+    // sizes, so a read reserves those and not the six-fold worst case.
+    #[test]
+    fn lane_receipts_carry_measured_source_sizes() {
+        const JAVA: &str = "class App {\n\tvoid check() { throw new Error(\"no\"); }\n}\n";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("App.java"), JAVA).unwrap();
+        let capture = source_capture::capture_working_tree(
+            dir.path(),
+            &source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap(),
+            &["App.java".to_string()],
+            source_capture::CaptureLimits::default(),
+        )
+        .unwrap();
+        let file = capture.file("App.java").unwrap();
+        let id = SourceId {
+            repo: "local/src_11111111111111111111111111111111",
+            commit: "workdir",
+        };
+        let span = (12, JAVA.len() as u64 - 3);
+        let own = node(
+            "sym:App.java#check",
+            json!({ "prov": prov("App.java", span) }),
+        );
+        let receipts = mint_java_file_receipts(file, &id, &[own], &[]).unwrap();
+        let receipt = receipts[0].to_receipt().unwrap();
+        let text = &JAVA[span.0 as usize..span.1 as usize];
+        let sizes = receipt.source_sizes(0).unwrap().unwrap();
+        // The tab and the two quotes each escape to two bytes.
+        assert_eq!(sizes.original, text.len() + 3);
+        assert!(sizes.original < 6 * text.len());
+        assert!(receipt.source_sizes_fit(0, text).unwrap());
+        assert_eq!(
+            Receipt::from_json(&receipt.to_json().unwrap()).unwrap(),
+            receipt
+        );
+    }
+
     // AC-1033: a Rust fact citing its own captured file gets a Rust receipt
     // under its own prefix; a rule-bearing fact gets none.
     #[test]
@@ -661,6 +713,8 @@ mod tests {
             .map(|file| file.path.as_str())
             .collect();
         assert_eq!(others, ["app.py", "blog.py"]);
+        // AC-1441: its ranges span files, so it carries no measured sizes.
+        assert_eq!(receipt.source_sizes(0).unwrap(), None);
         assert!(receipt.matches_node(&route));
         assert!(minted.matches_node(&route));
         let cited: Vec<_> = receipt
