@@ -78,6 +78,7 @@ fn projection(drafts: &[ReviewedDraft], nodes: &[Node]) -> CuratedProjection {
         cited_fact_hashes: &cited_fact_hashes(nodes, &[edge()], &cited),
         findings: &[],
         cited_fact_digests: &std::collections::BTreeMap::new(),
+        attested: &[],
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap()
@@ -719,6 +720,7 @@ fn a_draft_citing_a_derived_capability_resolves_in_the_fact_index() {
         cited_fact_hashes: &hashes,
         findings: &[],
         cited_fact_digests: &BTreeMap::new(),
+        attested: &[],
         policy_version: CURATED_POLICY_VERSION,
     })
     .unwrap();

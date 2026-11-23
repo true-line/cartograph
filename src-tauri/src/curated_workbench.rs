@@ -330,6 +330,7 @@ mod draft_tests {
             )]),
             findings: &[],
             cited_fact_digests: &std::collections::BTreeMap::new(),
+            attested: &[],
             policy_version: CURATED_POLICY_VERSION,
         })
         .unwrap();
