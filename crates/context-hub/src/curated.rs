@@ -892,10 +892,22 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
             listed.push(entry);
         }
     }
-    let drafts = drafts::project_drafts(input.drafts, input.cited_fact_hashes)?;
-    let findings = findings::project_findings(input.findings, input.cited_fact_digests)?;
     let attested =
         attested::project_attested(input.attested, input.nodes, input.cited_fact_hashes)?;
+    // A draft may cite a printable attested record by its `A-` id beside
+    // facts (ADR-0090 decision 6). The draft recorded the record's identity
+    // as that id's hash, and the identity covers the record's content, so
+    // the id resolves while the record may be printed and never drifts.
+    let mut citable = std::borrow::Cow::Borrowed(input.cited_fact_hashes);
+    for record in &attested.records {
+        if record.printed_label().is_some() {
+            citable
+                .to_mut()
+                .insert(record.citation_id.clone(), record.record_id.clone());
+        }
+    }
+    let drafts = drafts::project_drafts(input.drafts, &citable)?;
+    let findings = findings::project_findings(input.findings, input.cited_fact_digests)?;
     let assertion_decisions = summarize_assertions(input)?;
     let revision = digest(
         CURATED_REVISION_PREFIX,

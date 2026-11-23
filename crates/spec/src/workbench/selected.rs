@@ -510,6 +510,7 @@ fn produce(
         content,
         assertions,
         subjects,
+        attested,
     } = match a.id {
         "user-stories" => match stories.or(beside.knowledge) {
             Some(stories) => {
@@ -546,6 +547,7 @@ fn produce(
                 .expect("selected register content"),
                 assertions: output.assertions,
                 subjects: output.subjects,
+                attested: Vec::new(),
             }
         }
         "gap-register" | "gap-register-index" => {
@@ -562,6 +564,7 @@ fn produce(
                 .expect("selected register content"),
                 assertions: output.assertions,
                 subjects: output.subjects,
+                attested: Vec::new(),
             }
         }
         "rule-evidence" | "rule-evidence-index" => {
@@ -586,6 +589,7 @@ fn produce(
                 .expect("selected rule content"),
                 assertions: output.assertions,
                 subjects: output.subjects,
+                attested: Vec::new(),
             }
         }
         // A permission site carries its own provenance inside the endpoint
@@ -688,13 +692,23 @@ fn produce(
     Ok(Cited {
         artifact: identified_artifact(a.id, a.file, a.title, a.format, content, assertions),
         subjects,
+        attested,
     })
 }
 /// A produced artifact with the fact-key shape of each assertion's subject,
-/// which the artifact itself does not serialize (ADR-0058).
+/// which the artifact itself does not serialize (ADR-0058), and the
+/// attested records it cites (ADR-0090 decision 7).
 struct Cited {
     artifact: SpecArtifact,
     subjects: Vec<fact_index::Subject>,
+    attested: Vec<fact_index::AttestedIndexRow>,
+}
+impl Cited {
+    /// Record every citation of this artifact in `collector`.
+    fn cite(&self, id: &str, collector: &mut fact_index::Collector) -> Result<(), FactIndexError> {
+        collector.cite(id, &self.artifact.assertions, &self.subjects)?;
+        collector.cite_attested(id, &self.attested)
+    }
 }
 /// One of the two index artifacts over a finished index.
 fn index_artifact(
@@ -1003,14 +1017,12 @@ fn compile_selected(
             && fact_index::cites(a.id)
         {
             let cited = match &produced {
-                Some(Ok(cited)) => {
-                    collector.cite(a.id, &cited.artifact.assertions, &cited.subjects)
-                }
+                Some(Ok(cited)) => cited.cite(a.id, collector),
                 // Not selected, or selected and past the output budget: its
                 // citations still belong to the export.
                 Some(Err(_)) | None => {
                     let cited = produce(None).expect("unbounded native artifact");
-                    collector.cite(a.id, &cited.artifact.assertions, &cited.subjects)
+                    cited.cite(a.id, collector)
                 }
             };
             match cited {
@@ -1266,11 +1278,11 @@ fn bundle_kept<A>(
             None,
         )
         .expect("unbounded native artifact");
-        cite(
-            &mut citations,
+        cited.cite(
             a.id,
-            &cited.artifact.assertions,
-            &cited.subjects,
+            citations
+                .as_mut()
+                .expect("every citing artifact precedes the index"),
         )?;
         push(&mut artifacts, cited.artifact);
     }

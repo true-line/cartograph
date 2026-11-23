@@ -107,7 +107,11 @@ eligible and the agent-attested, unconfirmed ones with their label and
 contributors, in `best-effort` only), `attested_omitted`, `attested_listed`
 (every other record, without its statement) and `attested_counts`. The
 revision covers each record's attestations, since a read prints them.
-Printing in documents and capture are not built yet.
+An accepted draft may cite an attested record by its `A-` id: the draft
+records the record's identity as the id's hash, and the id resolves while
+the record is `eligible` or `agent-attested, unconfirmed`, so the draft is
+`unresolvable` once the record is withdrawn, disputed or otherwise not
+printable (AC-1077). Capture is not built yet.
 Every stored record is projected: its attestations are its review. An
 attested record gets the first state that applies: `withdrawn`, `disputed`, `already-covered`,
 `unresolvable`, `stale`, then `eligible` when an engineer stated or

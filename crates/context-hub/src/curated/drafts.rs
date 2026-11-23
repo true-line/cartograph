@@ -13,7 +13,9 @@
 //! - `superseded`: another accepted draft for the same address names this
 //!   one as the draft it replaces.
 //! - `unresolvable`: a cited id has no current content hash, so it resolves
-//!   to no fact in the current graph.
+//!   to no fact in the current graph. An `A-` id resolves while its attested
+//!   record is `eligible` or `agent-attested, unconfirmed`; in any other
+//!   state the draft is unresolvable (ADR-0090 decision 6).
 //! - `stale`: a cited fact's current content hash differs from the hash the
 //!   draft recorded. This and nothing else makes a draft stale.
 //! - `conflicted`: another accepted draft has the same address and no

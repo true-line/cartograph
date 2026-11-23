@@ -981,6 +981,7 @@ fn finish(mut content: Text, assertions: Assertions) -> Result<Output, RenderLim
         content: content.finish(),
         assertions: assertions.values,
         subjects: assertions.subjects,
+        attested: Vec::new(),
     })
 }
 

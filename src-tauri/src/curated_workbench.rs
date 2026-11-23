@@ -250,22 +250,17 @@ impl AttestedRead {
         let mut listed = Vec::new();
         let mut omitted = 0;
         for record in &projection.attested {
-            let printable = matches!(
-                record.state,
-                AttestedState::Eligible | AttestedState::AgentAttestedUnconfirmed
-            );
-            let label = match record.state {
-                AttestedState::Eligible => "attested",
-                state => state.label(),
-            };
-            if printable && mode == ExportMode::BestEffort {
-                shown.push(AttestedRow {
-                    record: record.clone(),
-                    label,
-                });
-            } else if printable {
-                omitted += 1;
+            if let Some(label) = record.printed_label() {
+                if mode == ExportMode::BestEffort {
+                    shown.push(AttestedRow {
+                        record: record.clone(),
+                        label,
+                    });
+                } else {
+                    omitted += 1;
+                }
             } else {
+                let label = record.state.label();
                 listed.push(AttestedListing {
                     record_id: record.record_id.clone(),
                     citation_id: record.citation_id.clone(),
