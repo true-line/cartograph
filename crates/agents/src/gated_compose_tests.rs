@@ -107,6 +107,7 @@ fn run_with(workflow: &Workflow, rows: usize, model: &mut Fake) -> GatedOutcome 
             title: "Business rules",
             section: &text,
             facts: &facts,
+            attested: &[],
         },
         model,
         &never,
@@ -555,9 +556,74 @@ fn a_model_error_stops_the_run() {
             title: "Business rules",
             section: &text,
             facts: &facts,
+            attested: &[],
         },
         &mut model,
         &never,
     );
     assert_eq!(result, Err("no reply".to_owned()));
+}
+
+// AC-1077 (T-1077, ADR-0090 decision 6): attested records handed to §1.5
+// are drafted after its rule rows as a chunk of their own, each its own row
+// citing its `A-` id, and gated like any row.
+#[test]
+fn attested_records_are_drafted_after_the_rule_rows_and_gated_as_rows() {
+    let address = address();
+    let text = section(2);
+    let facts: Vec<ComposeFact> = (1..=2).map(fact).collect();
+    let a = "A-00000000000000a1".to_owned();
+    let attested = [ComposeAttested {
+        citation_id: a.clone(),
+        label: "agent-attested, unconfirmed".into(),
+        statement: "A refund over 500 is approved by a supervisor.".into(),
+    }];
+    let chunks = attested_chunks(&text, &attested, 8);
+    assert_eq!(chunks.len(), 1);
+    assert!(
+        chunks[0]
+            .text
+            .starts_with("## 1.5 Business rules (P+A)\n\n### Attested records\n")
+    );
+    assert_eq!(chunks[0].ids(), BTreeSet::from([a.clone()]));
+    let attested_claim = serde_json::json!({
+        "statement": "A refund over 500 is approved by a supervisor.",
+        "claim_kind": "implemented_behavior",
+        "citation_ids": [a],
+    });
+    // A figure the record does not state fails the gate, then the retry
+    // keeps the record's own figure.
+    let invented = serde_json::json!({
+        "statement": "A refund over 900 is approved by a supervisor.",
+        "claim_kind": "implemented_behavior",
+        "citation_ids": [a],
+    });
+    let mut model = Fake::new(vec![
+        reply((1..=2).map(good).collect()),
+        reply(vec![invented]),
+        reply(vec![attested_claim]),
+    ]);
+    let outcome = run(
+        &no_audit(),
+        &GatedInput {
+            address: &address,
+            title: "Business rules",
+            section: &text,
+            facts: &facts,
+            attested: &attested,
+        },
+        &mut model,
+        &never,
+    )
+    .expect("the run completes");
+    assert_eq!(outcome.stats.chunks, 2);
+    assert_eq!(outcome.stats.rows_covered, 3);
+    let attested_prompt = &model.prompts[1];
+    assert!(attested_prompt.contains("<attested_records>"));
+    assert!(!attested_prompt.contains(&id(1)));
+    assert!(model.prompts[0].find("<attested_records>").is_none());
+    let claims = outcome.finish.expect("kept").claims;
+    assert_eq!(claims.len(), 3);
+    assert_eq!(claims[2].citations, vec![a]);
+    assert!(claims[2].statement.contains("500"));
 }
