@@ -383,17 +383,25 @@ fn captured_analyst_lane(
             | "domain-analyst@27"
             | "domain-analyst@28"
             | "domain-analyst@29"
+            | "domain-analyst@31"
     ) {
         return Err("unsupported captured analyst specialist".into());
     }
-    // ADR-0085: @29's tool-calling lane is local until the Claude lane lands.
-    if specialist == "domain-analyst@29" && mode != InvestigationProviderMode::Local {
+    // ADR-0085: the tool-calling lane (@29, and @31 on it) is local until the
+    // Claude lane lands.
+    if matches!(specialist, "domain-analyst@29" | "domain-analyst@31")
+        && mode != InvestigationProviderMode::Local
+    {
         return Err("tool-calling analyst is local only".into());
     }
     if local_finish
         && (!matches!(
             specialist,
-            "domain-analyst@26" | "domain-analyst@27" | "domain-analyst@28" | "domain-analyst@29"
+            "domain-analyst@26"
+                | "domain-analyst@27"
+                | "domain-analyst@28"
+                | "domain-analyst@29"
+                | "domain-analyst@31"
         ) || mode != InvestigationProviderMode::Local)
     {
         return Err("invalid local finish policy lane".into());
@@ -420,9 +428,13 @@ fn captured_analyst_lane_admits_analyst28_like_analyst27() {
     captured_analyst_lane("domain-analyst@29", false, Local).unwrap();
     captured_analyst_lane("domain-analyst@29", true, Local).unwrap();
     assert!(captured_analyst_lane("domain-analyst@29", false, Cloud).is_err());
+    // AC-1440 (#1728): @31 stages on @29's lane, so the frozen v3 set reruns
+    // with it; @30 is still not a captured analyst.
+    captured_analyst_lane("domain-analyst@31", false, Local).unwrap();
+    captured_analyst_lane("domain-analyst@31", true, Local).unwrap();
+    assert!(captured_analyst_lane("domain-analyst@31", false, Cloud).is_err());
     for role in [
         "domain-analyst@30",
-        "domain-analyst@31",
         "domain-analyst@16",
         "evidence-auditor@14",
     ] {
