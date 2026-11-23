@@ -3889,6 +3889,171 @@ fn toolchain_configs_are_read_from_the_capture() {
     assert!(checkout.iter().any(|id| id.contains("vue")), "{checkout:?}");
 }
 
+// AC-1065: the documentation walk's selection joins the capture, and with
+// the capture both the recovery's documentation read and the system-wide
+// ADR relinking read the retained bytes: a README and a decision record
+// edited and a decision record created in the checkout afterwards change
+// nothing. Without the flag that says the selection was retained, the
+// checkout is read.
+#[test]
+fn documents_and_found_adrs_are_read_from_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("README.md"), "# Shop\n\nOrders.\n").unwrap();
+    std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+    std::fs::write(root.join("docs/adr/0001-orders.md"), "# 1. Orders\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.documents_captured);
+    let capture = input.capture.as_ref().unwrap();
+    let held: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert!(
+        held.contains(&"README.md") && held.contains(&"docs/adr/0001-orders.md"),
+        "{held:?}"
+    );
+    std::fs::write(root.join("README.md"), "# Other\n\nPayments.\n").unwrap();
+    std::fs::write(root.join("docs/adr/0001-orders.md"), "# 1. Payments\n").unwrap();
+    std::fs::write(root.join("docs/adr/0002-late.md"), "# 2. Late\n").unwrap();
+    let documents = |nodes: &[core_graph::Node]| -> String {
+        let mut found: Vec<String> = nodes
+            .iter()
+            .filter(|node| matches!(node.label.as_str(), "Document" | "DocSection" | "ADR"))
+            .map(|node| format!("{} {}", node.id, node.props))
+            .collect();
+        found.sort();
+        found.join("\n")
+    };
+    let extract = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        let extraction = extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                documents_captured: captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0;
+        documents(&extraction.nodes)
+    };
+    let captured = extract(true);
+    let checkout = extract(false);
+    assert!(captured.contains("Orders"), "{captured}");
+    assert!(!captured.contains("Payments"), "{captured}");
+    assert!(!captured.contains("0002-late"), "{captured}");
+    assert!(
+        checkout.contains("Payments") && checkout.contains("0002-late"),
+        "{checkout}"
+    );
+
+    // The relinking pass reads the documents the capture retained.
+    let repo = core_graph::Node {
+        id: format!("repo:{}", source.repo_key),
+        label: "Repo".into(),
+        props: serde_json::json!({"commit": "workdir"}),
+    };
+    let relink = |captures: &crate::DocumentCaptures| {
+        let (adrs, docs) = crate::collect_documentation(
+            &spec::ReferenceIndex::default(),
+            std::slice::from_ref(&repo),
+            &|_| false,
+            &crate::Documented::from([(source.repo_key.clone(), Vec::new())]),
+            captures,
+            ingest::api_docs::ApiDocLimits::default(),
+            |_| Ok(source.root()),
+        )
+        .unwrap();
+        let mut nodes: Vec<core_graph::Node> =
+            docs.into_iter().flat_map(|(_, d)| d.nodes).collect();
+        nodes.extend(adrs.into_iter().flat_map(|(_, a)| a.nodes));
+        documents(&nodes)
+    };
+    let retained = crate::CapturedDocuments::of(Some(capture), true).unwrap();
+    let relinked = relink(&crate::DocumentCaptures::from([(
+        source.repo_key.clone(),
+        retained,
+    )]));
+    assert!(relinked.contains("Orders"), "{relinked}");
+    assert!(!relinked.contains("Payments"), "{relinked}");
+    assert!(!relinked.contains("0002-late"), "{relinked}");
+    let live = relink(&crate::DocumentCaptures::new());
+    assert!(live.contains("Payments") && live.contains("0002-late"));
+}
+
+// AC-1065: a documentation selection that does not fit beside the readers
+// is dropped first: the readers and lanes keep their capture and only the
+// documentation walk reads the checkout.
+#[test]
+fn a_documentation_selection_that_does_not_fit_never_costs_the_readers() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "local");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("app.py"), "print('app')\n").unwrap();
+    std::fs::write(
+        root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("README.md"), "# Local\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits {
+                max_files: 3,
+                ..source_capture::CaptureLimits::default()
+            },
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+        )
+        .unwrap();
+    assert!(input.environments_captured);
+    assert!(!input.documents_captured);
+    let paths: Vec<_> = input
+        .capture
+        .as_ref()
+        .unwrap()
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["app.py", "compose.yaml", "source.ts"]);
+}
+
 // AC-1055: the Python observed-infrastructure pass reads the same captured
 // bytes as the Python lane, so a checkout edit after capture changes neither.
 #[test]

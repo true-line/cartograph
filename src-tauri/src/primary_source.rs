@@ -2050,6 +2050,7 @@ impl PrimarySourceStore {
                 environments_captured: false,
                 starts_captured: false,
                 toolchain_captured: false,
+                documents_captured: false,
                 _guard: None,
             });
         }
@@ -2139,9 +2140,21 @@ impl PrimarySourceStore {
             .flatten()
             .cloned()
             .collect();
-        let mut capture = (environments.is_some() || starts.is_some() || toolchain.is_some())
-            .then(|| capture_paths(&with(&readers)).ok())
-            .flatten();
+        // The documentation walk's selection (AC-1065) is tried with them
+        // first, and dropped before they are: documents never cost a reader
+        // or a lane its capture.
+        let documents = spec::documentation_paths(root).ok();
+        let mut documents_captured = false;
+        let mut capture = documents.as_ref().and_then(|documents| {
+            let mut paths = readers.clone();
+            paths.extend(documents.iter().cloned());
+            capture_paths(&with(&paths)).ok()
+        });
+        if capture.is_some() {
+            documents_captured = true;
+        } else if environments.is_some() || starts.is_some() || toolchain.is_some() {
+            capture = capture_paths(&with(&readers)).ok();
+        }
         let environments_captured = capture.is_some() && environments.is_some();
         let starts_captured = capture.is_some() && starts.is_some();
         let toolchain_captured = capture.is_some() && toolchain.is_some();
@@ -2161,6 +2174,7 @@ impl PrimarySourceStore {
             environments_captured,
             starts_captured,
             toolchain_captured,
+            documents_captured,
             _guard: Some(guard),
         })
     }
@@ -2312,6 +2326,10 @@ pub struct PrimaryInput {
     /// Whether the capture holds the toolchain reader's whole selection
     /// (AC-1063); when it does not, that reader reads the checkout.
     pub toolchain_captured: bool,
+    /// Whether the capture holds the documentation walk's whole selection
+    /// (AC-1065); when it does not, documents and found ADRs are read from
+    /// the checkout.
+    pub documents_captured: bool,
     _guard: Option<RetentionGuard>,
 }
 
