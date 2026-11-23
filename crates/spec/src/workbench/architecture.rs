@@ -2493,6 +2493,7 @@ pub(super) fn markdown(
         content: content.finish(),
         assertions: assertions.values,
         subjects: assertions.subjects,
+        attested: Vec::new(),
     })
 }
 
@@ -2655,6 +2656,7 @@ pub(super) fn dsl(model: &Model<'_>, max: Option<usize>) -> Result<Output, Rende
         content: out.finish(),
         assertions: Vec::new(),
         subjects: Vec::new(),
+        attested: Vec::new(),
     })
 }
 
