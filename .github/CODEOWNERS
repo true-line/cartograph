@@ -36,6 +36,8 @@ CLAUDE.md   @qwts
 /agent-runtime/ @qwts
 /crates/semantic/ @qwts
 /crates/adapters-plugin-host/ @qwts
+# ADR-0092: launches coding agents and enforces their worktree boundary.
+/crates/acp-host/ @qwts
 /src-tauri/capabilities/ @qwts
 /src-tauri/tauri.conf.json @qwts
 /src-tauri/tauri.macos.conf.json @qwts
