@@ -217,7 +217,8 @@ pub fn definition_fingerprint() -> String {
     crate::source_basis::domain_hash(
         b"cartograph:draft-rules-definition:v1\0",
         format!(
-            "{DRAFT_RULES_ROLE}\0{}\0{WORKFLOW_FILE}\0{AUDITOR_SYSTEM}\0{ROW_SELECTION}",
+            "{DRAFT_RULES_ROLE}\0{}\0{WORKFLOW_FILE}\0{AUDITOR_SYSTEM}\0{ROW_SELECTION}\0\
+             {RULES_GUIDANCE}",
             section_compose::definition_fingerprint()
         )
         .as_bytes(),
@@ -242,14 +243,57 @@ pub struct Chunk {
     pub text: String,
     /// Its rule rows.
     pub rows: Vec<Row>,
+    /// The `Operations:` lines of the capabilities its rows sit under
+    /// (#2539): citable, so a claim can name the operation a rule belongs
+    /// to, but not rows a claim must cover.
+    pub context: Vec<Row>,
 }
 
 impl Chunk {
-    /// The citable ids the chunk prints.
+    /// The citable ids the chunk prints, its context's included.
     pub fn ids(&self) -> BTreeSet<String> {
-        self.rows.iter().flat_map(|row| row.ids.clone()).collect()
+        self.rows
+            .iter()
+            .chain(&self.context)
+            .flat_map(|row| row.ids.clone())
+            .collect()
     }
 }
+
+/// Whether compiled row `text` explains the row above it: a `↳` row
+/// states what a check or a configured value the row above names decides
+/// (#1998). The row and its `↳` rows are one rule (#2539).
+fn explains(text: &str) -> bool {
+    text.trim_start_matches('|').trim_start().starts_with('↳')
+}
+
+/// Each rule of `rows` as a run of row indexes: a row and the `↳` rows
+/// under it (#2539). A `↳` row with no row above it is a rule of its own.
+fn rule_groups(rows: &[Row]) -> Vec<std::ops::Range<usize>> {
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        match groups.last_mut() {
+            Some(group) if explains(&row.text) => group.end = at + 1,
+            _ => groups.push(at..at + 1),
+        }
+    }
+    groups
+}
+
+/// What each chunk's drafter is told beyond the composer's own guidance
+/// (#2539): state a capability's rules for its operation, as a reader of
+/// the requirements would, not one claim per code branch.
+pub const RULES_GUIDANCE: &str = "State the rules of each operation as its requirements: one \
+     claim per rule a client or user meets, naming the operation in domain terms (the \
+     capability heading, or the operation the Operations line lists). A row and the rows marked \
+     ↳ under it are one rule: state the outcome with the conditions and configured values the ↳ \
+     rows give, in one claim citing the rows it uses. Rows of one operation that refuse the same \
+     request for related reasons may be one claim. When a claim names an operation's method or \
+     route, or states its rate limit, cite that operation's id from its Operations line or its \
+     row.";
+
+/// The lead of a capability's operations line (#2539).
+const OPERATIONS_PREFIX: &str = "Operations: ";
 
 /// Every `F-` citation id `text` prints, in order, once each.
 fn printed_ids(text: &str) -> Vec<String> {
@@ -282,6 +326,11 @@ struct Block {
     heads: Vec<String>,
     header: Vec<String>,
     rows: Vec<Row>,
+    /// The area and capability headings it sits under: blocks with the
+    /// same are one capability, drafted together when they fit (#2539).
+    capability: (Option<String>, Option<String>),
+    /// Its capability's operations line, citable (#2539).
+    context: Option<Row>,
 }
 
 fn separator(line: &str) -> bool {
@@ -295,7 +344,8 @@ const NOT_STATED_PREFIX: &str = "Not stated in domain terms (Gap)";
 
 /// Bump when the rows [`partition`] keeps change; it is part of the role's
 /// definition fingerprint, so a draft records which selection it read.
-const ROW_SELECTION: &str = "rows@4:gap-skipped:repeated-rules-dropped:attested-rows-after";
+const ROW_SELECTION: &str = "rows@5:gap-skipped:repeated-rules-dropped:attested-rows-after:\
+     capability-whole:explained-rows-with-their-rule:operations-context";
 
 /// Rule rows [`partition`] did not hand to the drafter (#1748).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -332,20 +382,33 @@ pub fn partition_counted(
     let mut blocks: Vec<Block> = Vec::new();
     let (mut area, mut capability, mut label): (Option<&str>, Option<&str>, Option<&str>) =
         (None, None, None);
+    let mut operations: Option<&str> = None;
     let mut in_table = false;
     let title = text.lines().find(|line| line.starts_with("## "));
     for line in text.lines() {
         if line.starts_with('|') {
             if !in_table {
                 in_table = true;
+                let context = operations.and_then(|line| {
+                    let ids: Vec<String> = printed_ids(line)
+                        .into_iter()
+                        .filter(|id| citable.contains(id))
+                        .collect();
+                    (!ids.is_empty()).then(|| Row {
+                        text: line.to_owned(),
+                        ids,
+                    })
+                });
                 blocks.push(Block {
-                    heads: [area, capability, label]
+                    heads: [area, capability, operations, label]
                         .into_iter()
                         .flatten()
                         .map(str::to_owned)
                         .collect(),
                     header: vec![line.to_owned()],
                     rows: Vec::new(),
+                    capability: (area.map(str::to_owned), capability.map(str::to_owned)),
+                    context,
                 });
                 continue;
             }
@@ -385,18 +448,42 @@ pub fn partition_counted(
         }
         in_table = false;
         if line.starts_with("### ") {
-            (area, capability, label) = (Some(line), None, None);
+            (area, capability, label, operations) = (Some(line), None, None, None);
         } else if line.starts_with("#### ") {
-            (capability, label) = (Some(line), None);
+            (capability, label, operations) = (Some(line), None, None);
+        } else if line.starts_with(OPERATIONS_PREFIX) {
+            operations = Some(line);
         } else if !line.trim().is_empty() && !line.starts_with("## ") {
             label = Some(line);
         }
     }
+    let blocks: Vec<&Block> = blocks
+        .iter()
+        .filter(|block| !block.rows.is_empty())
+        .collect();
+    // A capability's rows, over all its tables: one that fits a chunk is
+    // drafted whole, so one call sees every rule of its operations (#2539).
+    let mut sizes: BTreeMap<&(Option<String>, Option<String>), usize> = BTreeMap::new();
+    for block in &blocks {
+        *sizes.entry(&block.capability).or_default() += block.rows.len();
+    }
     let mut chunks = Vec::new();
     let mut parts: Vec<(&Block, &[Row])> = Vec::new();
     let mut count = 0;
-    for block in blocks.iter().filter(|block| !block.rows.is_empty()) {
-        for rows in block.rows.chunks(max_rows) {
+    let mut previous: Option<&(Option<String>, Option<String>)> = None;
+    for block in blocks {
+        let size = sizes[&block.capability];
+        if previous != Some(&block.capability)
+            && size <= max_rows
+            && count + size > max_rows
+            && !parts.is_empty()
+        {
+            chunks.push(render(title, &parts));
+            parts.clear();
+            count = 0;
+        }
+        previous = Some(&block.capability);
+        for rows in pieces(&block.rows, max_rows) {
             if count + rows.len() > max_rows && !parts.is_empty() {
                 chunks.push(render(title, &parts));
                 parts.clear();
@@ -412,6 +499,29 @@ pub fn partition_counted(
     (chunks, skipped)
 }
 
+/// `rows` cut into runs of at most `max_rows`, never between a row and
+/// its `↳` rows unless that rule alone is longer (#2539).
+fn pieces(rows: &[Row], max_rows: usize) -> Vec<&[Row]> {
+    let mut out: Vec<&[Row]> = Vec::new();
+    let mut start = 0;
+    let mut end = 0;
+    for group in rule_groups(rows) {
+        if group.end - start > max_rows && end > start {
+            out.push(&rows[start..end]);
+            start = end;
+        }
+        while group.end - start > max_rows {
+            out.push(&rows[start..start + max_rows]);
+            start += max_rows;
+        }
+        end = group.end;
+    }
+    if end > start {
+        out.push(&rows[start..end]);
+    }
+    out
+}
+
 fn render(title: Option<&str>, parts: &[(&Block, &[Row])]) -> Chunk {
     let mut text = String::new();
     if let Some(title) = title {
@@ -419,7 +529,13 @@ fn render(title: Option<&str>, parts: &[(&Block, &[Row])]) -> Chunk {
         text.push_str("\n\n");
     }
     let mut rows = Vec::new();
+    let mut context: Vec<Row> = Vec::new();
     for (block, part) in parts {
+        if let Some(line) = &block.context
+            && !context.contains(line)
+        {
+            context.push(line.clone());
+        }
         for head in &block.heads {
             text.push_str(head);
             text.push('\n');
@@ -436,7 +552,11 @@ fn render(title: Option<&str>, parts: &[(&Block, &[Row])]) -> Chunk {
         }
         text.push('\n');
     }
-    Chunk { text, rows }
+    Chunk {
+        text,
+        rows,
+        context,
+    }
 }
 
 /// The heading of a chunk of attested records.
@@ -473,7 +593,11 @@ pub fn attested_chunks(text: &str, attested: &[ComposeAttested], max_rows: usize
                 text.push_str(&row.text);
                 text.push('\n');
             }
-            Chunk { text, rows }
+            Chunk {
+                text,
+                rows,
+                context: Vec::new(),
+            }
         })
         .collect()
 }
@@ -703,7 +827,7 @@ pub fn gate(
     let mut prescriptions: Vec<String> = Vec::new();
     let ids = chunk.ids();
     let mut row_text: BTreeMap<&str, String> = BTreeMap::new();
-    for row in &chunk.rows {
+    for row in chunk.rows.iter().chain(&chunk.context) {
         for id in &row.ids {
             let entry = row_text.entry(id.as_str()).or_default();
             entry.push(' ');
@@ -840,10 +964,16 @@ pub fn gate(
         claim_failures.push(kinds);
     }
     if on(CheckType::RowsCovered) {
-        let missing: Vec<&Row> = chunk
-            .rows
-            .iter()
-            .filter(|row| !row.ids.iter().any(|id| covered.contains(id.as_str())))
+        // A row and its `↳` rows are one rule: a passing claim citing any
+        // of them covers the rule (#2539).
+        let missing: Vec<&Row> = rule_groups(&chunk.rows)
+            .into_iter()
+            .filter(|group| {
+                !chunk.rows[group.clone()]
+                    .iter()
+                    .any(|row| row.ids.iter().any(|id| covered.contains(id.as_str())))
+            })
+            .map(|group| &chunk.rows[group.start])
             .collect();
         if !missing.is_empty() {
             failures.insert(CheckType::RowsCovered);
@@ -1078,6 +1208,16 @@ struct Attempt {
     left_out: usize,
 }
 
+/// `prompt` with [`RULES_GUIDANCE`] before its section (#2539).
+fn with_rules_guidance(mut prompt: String) -> String {
+    let at = prompt.find("<section>").unwrap_or(prompt.len());
+    prompt.insert_str(
+        at,
+        &format!("<rules_guidance>\n{RULES_GUIDANCE}\n</rules_guidance>\n\n"),
+    );
+    prompt
+}
+
 fn feedback(base: &str, reply: &str, prescriptions: &[String], kept_note: &str) -> String {
     let mut prompt = base.to_owned();
     let _ = write!(
@@ -1179,13 +1319,22 @@ fn score(attempt: &Attempt, chunk: &Chunk) -> (usize, usize) {
         .filter(|(_, ok)| **ok)
         .flat_map(|(claim, _)| &claim.citations)
         .collect();
-    let rows = chunk
-        .rows
-        .iter()
-        .filter(|row| row.ids.iter().any(|id| cited.contains(id)))
-        .count();
     let ok = attempt.gate.claim_ok.iter().filter(|ok| **ok).count();
-    (rows, ok)
+    (covered_rows(chunk, &cited), ok)
+}
+
+/// The rule rows of `chunk` whose rule (the row and its `↳` rows) `cited`
+/// cites (#2539).
+fn covered_rows(chunk: &Chunk, cited: &BTreeSet<&String>) -> usize {
+    rule_groups(&chunk.rows)
+        .into_iter()
+        .filter(|group| {
+            chunk.rows[group.clone()]
+                .iter()
+                .any(|row| row.ids.iter().any(|id| cited.contains(id)))
+        })
+        .map(|group| group.len())
+        .sum()
 }
 
 /// Run the workflow over `input`. `names_source` is the host's AC-0683
@@ -1244,7 +1393,8 @@ pub fn run(
             attested: &attested,
         };
         let base = section_compose::action(&compose, String::new());
-        let base_prompt = section_compose::prompt_with(&compose, workflow.max_claims);
+        let base_prompt =
+            with_rules_guidance(section_compose::prompt_with(&compose, workflow.max_claims));
         let id = |step: &str, n: usize| {
             format!(
                 "draft-rules:{}:{}:chunk-{number}:{step}-{n}",
@@ -1422,11 +1572,7 @@ pub fn run(
     claims.truncate(MAX_CLAIMS);
     left_out += before - claims.len();
     let cited: BTreeSet<&String> = claims.iter().flat_map(|claim| &claim.citations).collect();
-    stats.rows_covered = chunks
-        .iter()
-        .flat_map(|chunk| &chunk.rows)
-        .filter(|row| row.ids.iter().any(|id| cited.contains(id)))
-        .count();
+    stats.rows_covered = chunks.iter().map(|chunk| covered_rows(chunk, &cited)).sum();
     let finish = (!claims.is_empty()).then(|| SectionDraftFinish {
         address: input.address.clone(),
         claims,
