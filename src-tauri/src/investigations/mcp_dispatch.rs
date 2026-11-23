@@ -16,12 +16,13 @@ pub(crate) struct TaskReadLimits {
     pub evidence: crate::mcp_reads::dispatch::EvidenceWorkLimits,
 }
 
-pub(crate) const TOOLS: [TaskTool; 5] = [
+pub(crate) const TOOLS: [TaskTool; 6] = [
     TaskTool::Start,
     TaskTool::Status,
     TaskTool::Events,
     TaskTool::Result,
     TaskTool::Cancel,
+    TaskTool::ProposeAttested,
 ];
 
 pub(crate) struct TaskDispatcher {
@@ -144,6 +145,54 @@ impl TaskDispatcher {
                 super::emit_changed(app, &detail);
                 response(id, &detail.summary, cap)
             }
+            TaskArguments::ProposeAttested {
+                task_id,
+                finding_id,
+                gap_id,
+                slot,
+            } => {
+                // Admit this session to the task before anything is read
+                // or staged; a task it does not own reads as unknown.
+                state
+                    .jobs
+                    .lock()
+                    .map_err(|_| ReadError::Storage)?
+                    .investigation_access(&task_id, Some(&self.session))
+                    .map_err(|_| ReadError::InvalidRequest)?;
+                // Staged for review in the app, never directed by or
+                // confirmed for the engineer (ADR-0090 decision 9).
+                let stored = crate::attested_capture::propose_from_finding(
+                    &state,
+                    &task_id,
+                    &finding_id,
+                    &gap_id,
+                    &slot,
+                    false,
+                )
+                .map_err(|_| ReadError::InvalidRequest)?;
+                response(id, &ProposedReply::from(&stored), cap)
+            }
+        }
+    }
+}
+
+/// What a staged proposal returns: its id and standing, never its
+/// contributors.
+#[derive(Serialize)]
+struct ProposedReply<'a> {
+    record_id: &'a str,
+    citation_id: &'a str,
+    standing: agents::attested::Standing,
+    attestation_count: u64,
+}
+
+impl<'a> From<&'a agents::attested_store::StoredAttested> for ProposedReply<'a> {
+    fn from(stored: &'a agents::attested_store::StoredAttested) -> Self {
+        Self {
+            record_id: stored.record_id.as_str(),
+            citation_id: stored.citation_id.as_str(),
+            standing: stored.standing,
+            attestation_count: stored.attestation_count(),
         }
     }
 }
@@ -194,6 +243,12 @@ pub(crate) fn descriptor(tool: TaskTool) -> Value {
         }
         TaskTool::Events => {
             json!({"type":"object","properties":{"task_id":{"type":"string"},"after":{"type":"integer","minimum":0}},"required":["task_id","after"],"additionalProperties":false})
+        }
+        TaskTool::ProposeAttested => {
+            // `maxLength` counts characters and the parser counts UTF-8 bytes, so
+            // advertise the character count no byte-bounded value can exceed.
+            let reference = json!({"type":"string","minLength":1,"maxLength":mcp_wire::task_arguments::MAX_ATTESTED_REFERENCE_BYTES / 4});
+            json!({"type":"object","properties":{"task_id":{"type":"string"},"finding_id":reference,"gap_id":reference,"slot":reference},"required":["task_id","finding_id","gap_id","slot"],"additionalProperties":false})
         }
         _ => {
             json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"],"additionalProperties":false})

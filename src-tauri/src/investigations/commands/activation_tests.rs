@@ -879,6 +879,9 @@ mod task_relay;
 #[path = "activation_tests/service_relay.rs"]
 mod service_relay;
 
+#[path = "activation_tests/attested_proposal.rs"]
+mod attested_proposal;
+
 // AC-0552: exact version opt-in uses ordinary start/worker/store and reopen.
 #[test]
 fn explicit_acquisition_start_reopens_and_recovers_nonce() {
