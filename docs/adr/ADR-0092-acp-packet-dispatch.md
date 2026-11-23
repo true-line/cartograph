@@ -58,7 +58,12 @@ accepted automatically from repository text.
 3. **Bounded and cancellable.** The turn has a wall-clock limit, a cap on
    recorded updates and on file bytes per read or write. On the limit the
    host sends `session/cancel`, waits a short grace period for the prompt
-   reply, then kills the process. The outcome records the stop reason
+   reply, then kills the agent's whole process tree (its process group on
+   unix, `taskkill /T` on Windows), which it also does after every turn, so
+   nothing the agent started outlives the dispatch or edits the worktree
+   while it is committed. Agent output is read through a bounded queue and
+   the limit is checked before each line, so a flooding agent neither grows
+   host memory nor outlives its limit. The outcome records the stop reason
    (`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`)
    or the host's own reason (`timed_out`, `agent_exited`, `protocol_error`).
 
