@@ -174,10 +174,12 @@ jobs:
               'SharedTokenCacheCredential', 'VisualStudioCredential', 'VisualStudioCodeCredential',
               'AzurePowerShellCredential', 'AzureDeveloperCliCredential', 'InteractiveBrowserCredential')
           } | ConvertTo-Json | Set-Content -Encoding utf8 $metadata
-          # Tauri reads signCommand from config; it names this script by absolute path.
+          # Tauri reads signCommand from config. The object form passes each
+          # argument as is; the string form splits on spaces and keeps quotes.
           $script = (Resolve-Path scripts/windows-sign.ps1).Path
           $config = Join-Path $root 'tauri.windows-sign.conf.json'
-          @{ bundle = @{ windows = @{ signCommand = "pwsh -NoProfile -File `"$script`" %1" } } } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $config
+          $sign = @{ cmd = 'pwsh'; args = @('-NoProfile', '-File', $script, '%1') }
+          @{ bundle = @{ windows = @{ signCommand = $sign } } } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $config
           "signtool=$($signtool.FullName)" >> $env:GITHUB_OUTPUT
           "dlib=$dlib" >> $env:GITHUB_OUTPUT
           "metadata=$metadata" >> $env:GITHUB_OUTPUT
