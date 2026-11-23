@@ -1911,7 +1911,9 @@ export const ClearGraphPreservesJobs: Story = {
     // AC-0085: cold UI startup reads a saved graph, not an ingest response.
     await expect(useAppStore.getState().ingestSummary).toBeNull();
     const breadcrumb = within(canvas.getByRole('navigation', { name: 'Breadcrumb' }));
-    await expect(breadcrumb.getByText('Ingested system')).toBeVisible();
+    // #2469: the breadcrumb names the persisted system after a relaunch.
+    await expect(breadcrumb.getByText('local/image-trail')).toBeVisible();
+    await expect(breadcrumb.queryByText('Ingested system')).not.toBeInTheDocument();
 
     // The seeded job exists, then clear the graph from Workspace: the
     // durable job spine must survive a graph clear.
