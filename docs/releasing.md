@@ -147,8 +147,16 @@ with the GitHub OIDC token, signs both sidecars with `scripts/windows-sign.ps1`,
 and lets `tauri bundle` sign the app and the installer through the same
 script. Every shipped binary must then report a valid, timestamped
 Authenticode signature or nothing is uploaded. `windows.yml` calls it without
-secrets, so pull requests and main stay `unsigned-dev` (#631). Until a signing
-caller lands in `release.yml` (#227), releases publish macOS only.
+secrets, so pull requests and main stay `unsigned-dev` (#631).
+
+`release.yml` is the one signing caller. Its `windows` job builds the
+installer from the release tag beside the macOS package, passing exactly the
+five secrets and granting `id-token: write`. When the build is `signed`,
+`publish-windows` attaches it to the release the macOS job published as
+`Cartograph_<version>_x64_signed-setup.exe`. An `unsigned-dev` Windows build
+is never published, and a Windows failure never holds the macOS release.
+Until the Artifact Signing account and its secrets exist, releases therefore
+carry macOS assets only.
 
 ## Required GitHub secrets
 
