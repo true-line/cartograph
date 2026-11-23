@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import type { RepoCoverage, RestoredCoverage } from './coverage';
 import type { FactKey } from './primarySourceStore';
 import { invokeOr } from './tauri';
+import type { PacketDetail } from './workPacketTypes';
 import type { CuratedDraftCounts, CuratedDraftRow } from './sectionDocument';
 import type { SurfaceView } from './views';
 import type { EgressPreview } from './components/EgressConsentDialog';
@@ -1351,6 +1352,8 @@ export interface AppStore {
   /** Draft adapter work packets for a recovered repo (#1101, AC-0371);
    *  read-only — nothing is written to the graph, packet store, or register. */
   draftAdapterWorkPackets: (repo: string) => Promise<DraftAdapterPacket[]>;
+  /** Saves one drafted adapter packet for review (AC-1350); re-drafted on the host. */
+  saveAdapterWorkPacket: (repo: string, contentId: string) => Promise<PacketDetail>;
 }
 
 async function loadEndpoints(): Promise<GraphNode[]> {
@@ -2468,5 +2471,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
       throw new Error('unavailable_evidence');
     }
     return packets;
+  },
+
+  saveAdapterWorkPacket: async (repo, contentId) => {
+    const saved = await invokeOr<PacketDetail | null>(
+      'save_adapter_work_packet',
+      null,
+      { repo, contentId },
+    );
+    if (!saved) {
+      throw new Error('unavailable_evidence');
+    }
+    return saved;
   },
 }));

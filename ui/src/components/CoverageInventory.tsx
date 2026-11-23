@@ -59,7 +59,11 @@ function RepoCoverageRow({
   );
   const [busy, setBusy] = useState(false);
   const [packets, setPackets] = useState<DraftAdapterPacket[] | null>(null);
+  const saveAdapterWorkPacket = useAppStore(
+    (state) => state.saveAdapterWorkPacket,
+  );
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<Record<string, string>>({});
   const generation = useRef(0);
   const { shown, notApplicable } = producerRows(repo);
   const unsupported = unsupportedRows(repo);
@@ -69,10 +73,31 @@ function RepoCoverageRow({
     setBusy(true);
     setPackets(null);
     setError(null);
+    setSaved({});
     try {
       const result = await draftAdapterWorkPackets(repo.repo);
       if (ticket === generation.current) {
         setPackets(result);
+      }
+    } catch (failure) {
+      if (ticket === generation.current) {
+        setError(formatPacketError(failure));
+      }
+    } finally {
+      if (ticket === generation.current) {
+        setBusy(false);
+      }
+    }
+  };
+
+  const handleSave = async (contentId: string) => {
+    const ticket = generation.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const detail = await saveAdapterWorkPacket(repo.repo, contentId);
+      if (ticket === generation.current) {
+        setSaved((current) => ({ ...current, [contentId]: detail.packet_id }));
       }
     } catch (failure) {
       if (ticket === generation.current) {
@@ -202,8 +227,22 @@ function RepoCoverageRow({
                     }
                   >
                     Copy
+                  </button>{" "}
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    disabled={busy || packet.content_id in saved}
+                    onClick={() => void handleSave(packet.content_id)}
+                  >
+                    Save for review
                   </button>
                 </div>
+                {saved[packet.content_id] && (
+                  <p role="status" className="muted">
+                    Saved for review as <code>{saved[packet.content_id]}</code>.
+                    Review it under Agent work packets before dispatching it.
+                  </p>
+                )}
                 <pre aria-label={`${packet.language} adapter work packet`}>
                   {packet.markdown}
                 </pre>

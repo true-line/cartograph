@@ -145,6 +145,32 @@ export const DraftPacketErrorIsStatedInPlainWords: Story = {
   },
 };
 
+export const SaveDraftedPacketForReview: Story = {
+  // AC-1350: a drafted adapter packet is saved for review by its content id,
+  // once, and the saved packet id is shown.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const seen: unknown[] = [];
+    mockIPC((command, args) => {
+      if (command === 'draft_adapter_work_packets') {
+        return [{ language: 'Ruby', content_id: 'work-packet-v1:' + 'a'.repeat(64), markdown: '# Ruby adapter' }];
+      }
+      if (command === 'save_adapter_work_packet') {
+        seen.push(args);
+        return { packet_id: 'work-packet-v1:' + 'a'.repeat(64) };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const [limitedButton] = canvas.getAllByRole('button', { name: 'Draft adapter work packet' });
+    await userEvent.click(limitedButton);
+    const save = await canvas.findByRole('button', { name: 'Save for review' });
+    await userEvent.click(save);
+    await expect(await canvas.findByRole('status')).toHaveTextContent('Saved for review as work-packet-v1:' + 'a'.repeat(64));
+    await expect(seen).toEqual([{ repo: 'acme/api', contentId: 'work-packet-v1:' + 'a'.repeat(64) }]);
+    await expect(save).toBeDisabled();
+  },
+};
+
 export const NothingRecordedRendersNothing: Story = {
   args: { coverage: [] },
   play: async ({ canvasElement }) => {
