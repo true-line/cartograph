@@ -35,11 +35,19 @@ passed off as recovered fact.
    (SPEC-15). It holds a statement (at most 2,048 UTF-8 bytes), its target,
    optional supporting citations (ADR-0058 fact ids, source spans,
    documents), the content hashes of the facts around its target when it
-   was recorded, and its attestations. It has its own table and a
-   complete-content identity. It is not a proposal, a draft or a finding,
-   and it reuses none of their tables or decision types.
-2. **Every contributor is named, by contributor id.** A record carries one
-   attestation per contributor, and none without a contributor.
+   was recorded, and its attestations. It has its own table. Its identity
+   covers the attested content only (target, statement, supporting
+   citations and recorded hashes), never the attestations, so a
+   confirmation, dispute or withdrawal leaves its citation id unchanged and
+   a draft that cites it always resolves to its current standing. It is not
+   a proposal, a draft or a finding, and it reuses none of their tables or
+   decision types.
+2. **Every contributor is named, by contributor id.** A record's
+   attestations are an append-only history, oldest first, and none is
+   without a contributor. A contributor may attest more than once (an
+   engineer confirms and later disputes or withdraws); each contributor's
+   latest attestation sets the standing, and earlier ones are kept. The
+   first attestation states the statement.
    - An **agent attestation** records the role and its definition
      fingerprint, the model and provider, the producing run or chat, and the
      contributor id of the engineer who directed it.
@@ -151,16 +159,16 @@ passed off as recovered fact.
 2. **A new tier above Agentic.** Rejected: tiers describe how a fact was
    recovered from the system. Attested content is not recovered from the
    system, and a tier would let it be counted as coverage.
-3. **Anonymous attestation with a count.** Rejected: a reader must know who
-   stands behind each claim, and later disputes between engineers need named
-   positions.
-4. **Store the engineer as a single profile field on each record.**
-   Rejected: it would need a migration when several engineers arrive.
-   Contributor ids cost nothing now.
+3. **Anonymous attestation, or the engineer as a profile field on each
+   record.** Rejected: a reader must know who stands behind each claim,
+   disputes between engineers need named positions, and a per-record field
+   would need a migration when several engineers arrive. Contributor ids
+   cost nothing now.
 
 ## Slices
 
-Each slice is one PR with its acceptance criterion (odd ids from AC-1071).
+Each slice is one PR with its acceptance criterion (odd ids from AC-1071),
+defined under US-0047 in `docs/user_stories.md`.
 
 1. **Contributor model and attested record** (AC-1071): types, identity, the
    `A-` id and the pure admission check, in `crates/agents`.

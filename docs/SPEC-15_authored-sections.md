@@ -298,7 +298,8 @@ Designed, not built. Slices AC-1071 to AC-1083 are listed in ADR-0090.
   citations, the content hashes of the facts around its target when it was
   recorded, and its attestations. Its citation id is `A-` and 16 lowercase
   hex characters of its identity.
-- **Attestations.** One per contributor, each keyed by contributor id. An
+- **Attestations.** An append-only history, each keyed by contributor id;
+  each contributor's latest sets the standing, and none changes the `A-` id. An
   agent attestation names the role, its definition fingerprint, the model
   and provider, the run or chat, and the directing engineer's contributor
   id. An engineer attestation names the verb (`stated`, `confirmed`,
