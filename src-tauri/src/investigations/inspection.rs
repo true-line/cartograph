@@ -28,6 +28,9 @@ const REFRESH: &str =
 pub(crate) enum InspectionError {
     Stale,
     OrdinalOutOfRange,
+    /// The selected range is longer than one inspection target may name
+    /// ([`MAX_INSPECTION_RANGE_BYTES`]), so it can never be inspected (#2523).
+    RangeTooLarge,
     Limit,
     Unavailable,
     Forgotten,
@@ -434,6 +437,12 @@ fn resolve_receipt_inner(
     // reconnecting to the same graph; reserve Stale for changed identities.
     if ordinal >= receipt.ranges().len() {
         return Err(InspectionError::OrdinalOutOfRange);
+    }
+    // A range longer than one target may name is permanent for this receipt;
+    // it is not a changed identity, so it is not Stale (#2523).
+    let range = &receipt.ranges()[ordinal].evidence;
+    if range.byte_end.saturating_sub(range.byte_start) > MAX_INSPECTION_RANGE_BYTES {
+        return Err(InspectionError::RangeTooLarge);
     }
     let target = descriptor(&receipt, &snapshot_id, ordinal).map_err(|_| InspectionError::Stale)?;
     match state

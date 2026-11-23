@@ -8,6 +8,7 @@ fn inspection_error(error: crate::investigations::inspection::InspectionError) -
     match error {
         InspectionError::Stale => ReadError::StaleBasis,
         InspectionError::OrdinalOutOfRange => ReadError::InvalidRequest,
+        InspectionError::RangeTooLarge => ReadError::Limit,
         InspectionError::Limit => ReadError::Limit,
         InspectionError::Forgotten => ReadError::EvidenceForgotten,
         InspectionError::Omitted(kind) => ReadError::EvidenceOmitted(kind),
