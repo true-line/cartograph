@@ -115,6 +115,26 @@ pub fn compute_packed(
     Ok(tally.finish(scope))
 }
 
+/// The repository and file an artifact-evidence fact belongs to.
+type Owner<'a> = Option<(&'a str, &'a str)>;
+
+/// A fact cited only by artifact evidence (a compiled class, AC-1215) has no
+/// source span naming its repository, so it is owned by the `{repo}@{path}`
+/// its identity names (`sym:{repo}@{path}#…`; an edge's source node).
+fn artifact_owner<'a>(provenance: &core_prov::Provenance, identity: &'a str) -> Owner<'a> {
+    if !provenance.evidence.is_empty()
+        || !matches!(
+            provenance.basis(),
+            core_prov::EvidenceBasis::Artifact { .. }
+        )
+    {
+        return None;
+    }
+    let (_, rest) = identity.split_once(':')?;
+    let (repo, rest) = rest.split_once('@')?;
+    Some((repo, rest.split('#').next().unwrap_or(rest)))
+}
+
 /// The running counts behind [`compute`], fed one fact at a time.
 struct Tally<'a> {
     coverage_repos: &'a BTreeSet<String>,
@@ -149,15 +169,16 @@ impl<'a> Tally<'a> {
     // production call site passes at least one repo; only whole-graph-hash
     // callers with no registration of their own pass the empty set) — the
     // hash then spans everything given, same as before #466.
-    fn in_recorded_scope(&self, provenance: &core_prov::Provenance) -> bool {
+    fn in_recorded_scope(&self, provenance: &core_prov::Provenance, owner: Owner<'_>) -> bool {
         self.coverage_repos.is_empty()
             || provenance
                 .evidence
                 .iter()
                 .any(|evidence| self.coverage_repos.contains(&evidence.repo))
+            || owner.is_some_and(|(repo, _)| self.coverage_repos.contains(repo))
     }
 
-    fn count(&mut self, provenance: &core_prov::Provenance) {
+    fn count(&mut self, provenance: &core_prov::Provenance, owner: Owner<'_>) {
         use core_prov::ConfidenceTier::*;
         self.facts += 1;
         match provenance.confidence_tier {
@@ -166,26 +187,32 @@ impl<'a> Tally<'a> {
             InferredWeak => self.inferred_weak += 1,
             Gap => self.gap += 1,
         }
-        if !self.in_recorded_scope(provenance) {
+        if !self.in_recorded_scope(provenance, owner) {
             return;
         }
         *self
             .facts_by_extractor
             .entry(provenance.extractor_id.clone())
             .or_default() += 1;
-        for evidence in &provenance.evidence {
-            if self.coverage_repos.contains(&evidence.repo) {
+        let files = provenance
+            .evidence
+            .iter()
+            .map(|evidence| (evidence.repo.as_str(), evidence.path.as_str()))
+            .chain(owner);
+        for (repo, path) in files {
+            if self.coverage_repos.contains(repo) {
                 self.files_by_extractor
                     .entry(provenance.extractor_id.clone())
                     .or_default()
-                    .insert(format!("{}:{}", evidence.repo, evidence.path));
+                    .insert(format!("{repo}:{path}"));
             }
         }
     }
 
     fn node(&mut self, node: &Node) {
         let provenance = spec::provenance(&node.props, &node.id);
-        self.count(&provenance);
+        let owner = artifact_owner(&provenance, &node.id);
+        self.count(&provenance, owner);
         // The registration's own `repo:<key>` node (see `compute`): no
         // evidence spans, but its content hash is bound to the commit it was
         // recorded at, so it must stay in the scoped hash by id.
@@ -193,7 +220,7 @@ impl<'a> Tally<'a> {
             .id
             .strip_prefix("repo:")
             .is_some_and(|key| self.coverage_repos.contains(key));
-        if self.in_recorded_scope(&provenance) || own_registration {
+        if self.in_recorded_scope(&provenance, owner) || own_registration {
             self.lines.push_node(node, &provenance);
         }
     }
@@ -201,8 +228,9 @@ impl<'a> Tally<'a> {
     fn edge(&mut self, edge: &Edge) {
         let identity = format!("{} {} {}", edge.src, edge.label, edge.dst);
         let provenance = spec::provenance(&edge.props, &identity);
-        self.count(&provenance);
-        if self.in_recorded_scope(&provenance) {
+        let owner = artifact_owner(&provenance, &edge.src);
+        self.count(&provenance, owner);
+        if self.in_recorded_scope(&provenance, owner) {
             self.lines.push_edge(edge, &provenance);
         }
     }
@@ -474,6 +502,47 @@ mod tests {
 
     fn fixture_repos() -> BTreeSet<String> {
         BTreeSet::from(["local/fixture".to_string()])
+    }
+
+    // AC-1215: facts cited only by artifact evidence belong to the
+    // registration their identity names, so they count toward their
+    // extractor's coverage and the recorded hash.
+    #[test]
+    fn artifact_facts_are_in_their_repository_scope() {
+        let class = include_bytes!(
+            "../../crates/adapters-artifact-jvm/tests/fixtures/classes/com/acme/pay/Ledger$Store.class"
+        );
+        let read = |repo: &str, bytes: &[u8]| {
+            adapters_artifact_jvm::extract(
+                &adapters_artifact_jvm::SourceId {
+                    repo,
+                    commit: "workdir",
+                },
+                &[("lib/Store.class".to_string(), bytes.to_vec())],
+            )
+        };
+        let scope = BTreeMap::from([(adapters_artifact_jvm::EXTRACTOR_ID.to_string(), 1)]);
+        let own = read("local/fixture", class);
+        let metrics = compute(&own.nodes, &own.edges, &scope, &fixture_repos());
+        let jvm = &metrics.coverage[0];
+        assert_eq!(jvm.extractor, adapters_artifact_jvm::EXTRACTOR_ID);
+        assert_eq!(jvm.facts as usize, own.nodes.len() + own.edges.len());
+        assert_eq!(jvm.files_with_facts, 1);
+        assert_eq!(jvm.coverage_pct, Some(100.0));
+
+        // Changed class bytes change the recorded hash; another repo's
+        // artifact facts do not.
+        let mut changed = class.to_vec();
+        changed.push(0);
+        let changed = read("local/fixture", &changed);
+        let other = read("local/other", class);
+        let hash = |facts: &[&adapters_artifact_jvm::Extraction]| {
+            let nodes: Vec<Node> = facts.iter().flat_map(|f| f.nodes.clone()).collect();
+            let edges: Vec<Edge> = facts.iter().flat_map(|f| f.edges.clone()).collect();
+            compute(&nodes, &edges, &scope, &fixture_repos()).content_hash
+        };
+        assert_ne!(hash(&[&own]), hash(&[&changed]));
+        assert_eq!(hash(&[&own]), hash(&[&own, &other]));
     }
 
     #[test]
