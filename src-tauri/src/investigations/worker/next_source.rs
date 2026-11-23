@@ -118,6 +118,24 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                 policy,
             )
         };
+        // #1653 (AC-1818): opt-in operator trace of the read's continuation
+        // fit, numeric only. No identifiers, paths, source or response text.
+        if std::env::var_os("CARTOGRAPH_CAPACITY_TRACE").is_some() {
+            eprintln!(
+                "{}",
+                capacity_trace_line(
+                    next_ordinal,
+                    serde_json::to_vec(&current_prepared.preview().egress.payload)
+                        .map_or(0, |payload| payload.len() as u64),
+                    source.target().source.byte_end - source.target().source.byte_start,
+                    current_prepared.limits().values().input_bytes,
+                    certification
+                        .as_ref()
+                        .ok()
+                        .map(|proof| proof.continuation()),
+                )
+            );
+        }
         let proof = match certification {
             Ok(proof) => proof,
             Err(InvestigationError::LimitExceeded) => {
@@ -284,5 +302,80 @@ mod capacity_hash_tests {
             *index = 1;
         }
         assert_ne!(shifted.capacity_refusal_hash().unwrap(), expected);
+    }
+}
+
+/// One `capacity_trace` line: the call ordinal, the current payload, the source
+/// range and the input ceiling, then the certified continuation sizes and the
+/// headroom left, or `refused` when the continuation could not be proven.
+fn capacity_trace_line(
+    call: u32,
+    current_payload: u64,
+    source_bytes: u64,
+    ceiling: u64,
+    continuation: Option<agents::investigation::AdmissionReserveMeasurements>,
+) -> String {
+    let base = format!(
+        "capacity_trace kind=read_evidence call={call} current_payload={current_payload} source_bytes={source_bytes} ceiling={ceiling}"
+    );
+    match continuation {
+        Some(measured) => {
+            let peak = [measured.choice, measured.finish_only]
+                .iter()
+                .map(|m| m.original_payload_bytes.max(m.redacted_payload_bytes))
+                .max()
+                .unwrap_or(0);
+            format!(
+                "{base} choice={} finish_only={} reserve={} headroom={}",
+                measured
+                    .choice
+                    .original_payload_bytes
+                    .max(measured.choice.redacted_payload_bytes),
+                measured
+                    .finish_only
+                    .original_payload_bytes
+                    .max(measured.finish_only.redacted_payload_bytes),
+                peak.saturating_sub(current_payload),
+                ceiling.saturating_sub(peak)
+            )
+        }
+        None => format!("{base} refused"),
+    }
+}
+
+#[cfg(test)]
+mod capacity_trace_tests {
+    use super::*;
+
+    fn wire(bytes: u64) -> llm::bounded::BoundedWireMeasurements {
+        llm::bounded::BoundedWireMeasurements {
+            raw_string_bytes: bytes,
+            original_payload_bytes: bytes,
+            redacted_payload_bytes: bytes,
+            original_action_bytes: bytes,
+            egress_fingerprint_bytes: bytes,
+        }
+    }
+
+    #[test]
+    fn capacity_trace_names_reserve_and_headroom_or_refusal() {
+        let admitted = capacity_trace_line(
+            15,
+            70_000,
+            829,
+            131_072,
+            Some(agents::investigation::AdmissionReserveMeasurements {
+                choice: wire(110_000),
+                finish_only: wire(104_000),
+            }),
+        );
+        assert_eq!(
+            admitted,
+            "capacity_trace kind=read_evidence call=15 current_payload=70000 source_bytes=829 ceiling=131072 choice=110000 finish_only=104000 reserve=40000 headroom=21072"
+        );
+        assert!(
+            capacity_trace_line(15, 73_746, 1_822, 131_072, None)
+                .ends_with("current_payload=73746 source_bytes=1822 ceiling=131072 refused")
+        );
     }
 }
