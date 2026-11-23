@@ -853,7 +853,7 @@ pub(crate) async fn section_compose_preview(
     .await
 }
 
-fn run_blocking(
+pub(crate) fn run_blocking(
     state: &AppState,
     execution: &JobExecution,
     provider: &dyn LlmProvider,

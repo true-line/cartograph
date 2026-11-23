@@ -528,6 +528,249 @@ fn showcase_compose_rules_gated() {
     std::fs::write(output.join("gated-rules.md"), report).unwrap();
 }
 
+/// The W13 content-acceptance pilot (#1748, AC-0670): draft D1 1.2 and 1.3
+/// through `section-composer@1` and 1.5 through the gated `draft-rules@1`
+/// workflow, all at the system scope, on a local OpenAI-compatible server
+/// (vLLM), as the Workbench's "Draft this section" does.
+/// `CARTOGRAPH_SHOWCASE_OPENAI_URL` is the loopback base (`{url}v1/`) and
+/// `CARTOGRAPH_SHOWCASE_OPENAI_MODEL` the model.
+///
+/// The run writes the staged drafts to `staged.json` and `pilot.json` (per
+/// section: outcome, seconds, the job's reported usage, the role and its
+/// definition fingerprint), then waits for the reviewer's decisions: a file
+/// `decisions.json` in the output directory, `[{"draft_id", "decision":
+/// "accepted" | "rejected" | "returned", "reviewer", "note"}]`, written by
+/// the person the pilot names after reading the drafts. Nothing is accepted
+/// without that file, a draft it does not name stays pending, and the wait
+/// ends after `CARTOGRAPH_W13_DECISION_WAIT_SECS` (default 6 hours) with no
+/// export. Each decision is recorded through the Workbench's review path,
+/// its note naming the reviewer, and the `best-effort/` bundle is written
+/// with the curated read. Nothing is scored here.
+#[test]
+#[ignore = "manual W13 pilot over local checkouts; calls a local model"]
+fn showcase_w13_pilot() {
+    use crate::section_compose::{compose_gated_by_area, run_blocking};
+    use agents::draft_store::DraftDecision;
+    use llm::bounded::CallDirective;
+    let url = std::env::var("CARTOGRAPH_SHOWCASE_OPENAI_URL")
+        .unwrap_or_else(|_| llm::openai_compatible::OpenAiCompatibleProvider::DEFAULT_URL.into());
+    let model = required("CARTOGRAPH_SHOWCASE_OPENAI_MODEL");
+    let wait = std::env::var("CARTOGRAPH_W13_DECISION_WAIT_SECS")
+        .map(|secs| secs.parse::<u64>().expect("seconds"))
+        .unwrap_or(6 * 3600);
+    let provider = llm::openai_compatible::OpenAiCompatibleProvider::new(
+        &url,
+        model.clone(),
+        std::time::Duration::from_secs(600),
+    )
+    .expect("a loopback endpoint")
+    .with_thinking_disabled();
+    let (output, app) = showcase_output();
+    let started = std::time::Instant::now();
+    recover(&app, &output);
+    let ingest_seconds = started.elapsed().as_secs();
+    let state = app.state::<AppState>();
+    let usage_of = |job: i64| {
+        let jobs = state.jobs.lock().unwrap();
+        jobs.list_usage()
+            .unwrap()
+            .into_iter()
+            .filter(|usage| usage.job_id == job)
+            .map(|usage| serde_json::to_value(usage).unwrap())
+            .collect::<Vec<_>>()
+    };
+    // As the desktop's `finish_job`: a run that errored fails its job.
+    let finish = |job: &JobExecution, drafts: &[String], error: Option<&String>| {
+        let mut jobs = state.jobs.lock().unwrap();
+        match error {
+            Some(error) => jobs.fail_execution(job, error).unwrap(),
+            None => jobs.finish_execution(job, drafts).unwrap(),
+        };
+    };
+    let mut sections = Vec::new();
+    let mut staged: Vec<String> = Vec::new();
+    for section in ["1.2", "1.3"] {
+        let (_, job) = start_job(
+            &state,
+            &format!("section-compose:D1:{section}:system:local"),
+        )
+        .unwrap();
+        let begun = std::time::Instant::now();
+        let outcome = run_blocking(
+            &state,
+            &job,
+            &provider,
+            (spec::CATALOGUE_VERSION, "D1", section, spec::SYSTEM_SCOPE),
+            None,
+        );
+        let seconds = begun.elapsed().as_secs();
+        let drafts: Vec<String> = match &outcome {
+            Ok(outcome) => match &outcome.outcome {
+                crate::investigations::section_drafts::DraftingOutcome::Staged { draft_id } => {
+                    vec![draft_id.clone()]
+                }
+                _ => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        finish(&job, &drafts, outcome.as_ref().err());
+        staged.extend(drafts.iter().cloned());
+        sections.push(serde_json::json!({
+            "section": section, "role": agents::section_compose::SECTION_COMPOSER_ROLE,
+            "role_definition": agents::section_compose::definition_fingerprint(),
+            "seconds": seconds, "job": job.id(), "usage": usage_of(job.id()),
+            "outcome": outcome.as_ref().ok(), "error": outcome.as_ref().err(),
+            "drafts": drafts,
+        }));
+    }
+    // 1.5 on the gated workflow; a run that stages nothing is tried once more.
+    for attempt in 1..=2 {
+        let (_, job) = start_job(&state, "section-compose-gated:D1:1.5:system:local").unwrap();
+        let begun = std::time::Instant::now();
+        let result = compose_gated_by_area(
+            &state,
+            &provider,
+            (spec::CATALOGUE_VERSION, "D1", "1.5"),
+            &|| CallDirective::Continue,
+            job.id(),
+        );
+        let seconds = begun.elapsed().as_secs();
+        let drafts: Vec<String> = result
+            .iter()
+            .flatten()
+            .filter_map(|draft| match &draft.outcome.outcome {
+                crate::investigations::section_drafts::DraftingOutcome::Staged { draft_id } => {
+                    Some(draft_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        finish(&job, &drafts, result.as_ref().err());
+        staged.extend(drafts.iter().cloned());
+        sections.push(serde_json::json!({
+            "section": "1.5", "attempt": attempt, "role": agents::gated_compose::DRAFT_RULES_ROLE,
+            "role_definition": agents::gated_compose::definition_fingerprint(),
+            "seconds": seconds, "job": job.id(), "usage": usage_of(job.id()),
+            "outcome": result.as_ref().ok(), "error": result.as_ref().err(),
+            "drafts": drafts,
+        }));
+        if !drafts.is_empty() {
+            break;
+        }
+    }
+    let write_pilot = |sections: &[serde_json::Value]| {
+        std::fs::write(
+            output.join("pilot.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "model": model, "endpoint": url,
+                "cartograph_version": env!("CARGO_PKG_VERSION"),
+                "ingest_seconds": ingest_seconds,
+                "total_seconds": started.elapsed().as_secs(),
+                "sections": sections,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    write_pilot(&sections);
+    let stored: Vec<_> = {
+        let store = state.drafts.lock().unwrap();
+        staged
+            .iter()
+            .map(|draft_id| {
+                store
+                    .get(draft_id)
+                    .unwrap()
+                    .expect("a staged draft is stored")
+            })
+            .collect()
+    };
+    std::fs::write(
+        output.join("staged.json"),
+        serde_json::to_vec_pretty(&stored).unwrap(),
+    )
+    .unwrap();
+    // The reviewer's decisions, made after reading `staged.json`.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Decision {
+        draft_id: String,
+        decision: DraftDecision,
+        reviewer: String,
+        note: Option<String>,
+    }
+    let decisions_path = output.join("decisions.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    eprintln!("waiting for {}", decisions_path.display());
+    while !decisions_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no decisions.json within {wait} s; nothing was reviewed or exported"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    // A file still being written is read again.
+    let decisions: Vec<Decision> = loop {
+        match serde_json::from_slice(&std::fs::read(&decisions_path).unwrap()) {
+            Ok(decisions) => break decisions,
+            Err(error) if std::time::Instant::now() < deadline => {
+                eprintln!("decisions.json does not parse yet: {error}");
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            Err(error) => panic!("decisions.json does not parse: {error}"),
+        }
+    };
+    let mut reviewed = Vec::new();
+    {
+        let mut store = state.drafts.lock().unwrap();
+        for decision in &decisions {
+            assert!(
+                staged.contains(&decision.draft_id),
+                "decision for a draft this run did not stage: {}",
+                decision.draft_id
+            );
+            assert!(
+                !decision.reviewer.trim().is_empty(),
+                "a decision names its reviewer"
+            );
+            let current = store
+                .get(&decision.draft_id)
+                .unwrap()
+                .expect("a staged draft is stored");
+            let note = match decision.note.as_deref().map(str::trim) {
+                Some(note) if !note.is_empty() => format!("{}: {note}", decision.reviewer),
+                _ => decision.reviewer.clone(),
+            };
+            let recorded = store
+                .review(
+                    &decision.draft_id,
+                    current.review_revision,
+                    decision.decision,
+                    Some(&note),
+                )
+                .unwrap();
+            reviewed.push(serde_json::to_value(&recorded).unwrap());
+        }
+    }
+    std::fs::write(
+        output.join("drafts.json"),
+        serde_json::to_vec_pretty(&reviewed).unwrap(),
+    )
+    .unwrap();
+    // The desktop export path, curated read included.
+    let bundle = crate::compile_spec_bundle(
+        crate::export_inputs(&state).unwrap(),
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap();
+    let root = output.join("best-effort");
+    std::fs::create_dir(&root).unwrap();
+    for artifact in &bundle.artifacts {
+        std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
+    }
+    write_pilot(&sections);
+}
+
 /// A fourth manual run (#258): the yield-only T2 pass at full scale.
 /// It recovers the sources, then runs the desktop's T2 preview path twice on
 /// a local embedding model with no labelled pairs and no reviewed evidence,
