@@ -10,6 +10,9 @@ use crate::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[path = "showcase_tests/attested_pilot.rs"]
+mod attested_pilot;
+
 fn required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("set {name}"))
 }
@@ -550,7 +553,6 @@ fn showcase_compose_rules_gated() {
 #[ignore = "manual W13 pilot over local checkouts; calls a local model"]
 fn showcase_w13_pilot() {
     use crate::section_compose::{compose_gated_by_area, run_blocking};
-    use agents::draft_store::DraftDecision;
     use llm::bounded::CallDirective;
     let url = std::env::var("CARTOGRAPH_SHOWCASE_OPENAI_URL")
         .unwrap_or_else(|_| llm::openai_compatible::OpenAiCompatibleProvider::DEFAULT_URL.into());
@@ -690,6 +692,40 @@ fn showcase_w13_pilot() {
         serde_json::to_vec_pretty(&stored).unwrap(),
     )
     .unwrap();
+    let reviewed = await_decisions(&state, &output, &staged, wait);
+    std::fs::write(
+        output.join("drafts.json"),
+        serde_json::to_vec_pretty(&reviewed).unwrap(),
+    )
+    .unwrap();
+    // The desktop export path, curated read included.
+    let bundle = crate::compile_spec_bundle(
+        crate::export_inputs(&state).unwrap(),
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap();
+    let root = output.join("best-effort");
+    std::fs::create_dir(&root).unwrap();
+    for artifact in &bundle.artifacts {
+        std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
+    }
+    write_pilot(&sections);
+}
+
+/// The reviewer's decisions on the drafts `staged`, read from the file
+/// `decisions.json` in `output` once the person the pilot names writes it
+/// after reading the drafts, and recorded through the Workbench's review
+/// path, each note naming the reviewer. Nothing is accepted without that
+/// file, a draft it does not name stays pending, and the wait ends after
+/// `wait` seconds with a failure. Shared by the W13 (#1748) and attested
+/// (AC-1083) pilots.
+fn await_decisions(
+    state: &AppState,
+    output: &Path,
+    staged: &[String],
+    wait: u64,
+) -> Vec<serde_json::Value> {
+    use agents::draft_store::DraftDecision;
     // The reviewer's decisions, made after reading `staged.json`.
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -768,23 +804,7 @@ fn showcase_w13_pilot() {
             reviewed.push(serde_json::to_value(&recorded).unwrap());
         }
     }
-    std::fs::write(
-        output.join("drafts.json"),
-        serde_json::to_vec_pretty(&reviewed).unwrap(),
-    )
-    .unwrap();
-    // The desktop export path, curated read included.
-    let bundle = crate::compile_spec_bundle(
-        crate::export_inputs(&state).unwrap(),
-        spec::ExportMode::BestEffort,
-    )
-    .unwrap();
-    let root = output.join("best-effort");
-    std::fs::create_dir(&root).unwrap();
-    for artifact in &bundle.artifacts {
-        std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
-    }
-    write_pilot(&sections);
+    reviewed
 }
 
 /// A fourth manual run (#258): the yield-only T2 pass at full scale.
