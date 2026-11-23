@@ -973,7 +973,13 @@ fn validate_proposal(
     if proposal.get("schema_version").is_some()
         || !matches!(
             proposal.get("type").and_then(Value::as_str),
-            Some("query_context" | "replay_query" | "read_evidence" | "read_coverage_inventory")
+            Some(
+                "query_context"
+                    | "replay_query"
+                    | "read_evidence"
+                    | "read_coverage_inventory"
+                    | "read_artifact"
+            )
         )
     {
         return Err(InvestigationStoreError::Invalid);
