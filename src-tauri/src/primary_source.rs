@@ -2056,7 +2056,7 @@ impl PrimarySourceStore {
                 toolchain_captured: false,
                 documents_captured: false,
                 api_doc_paths: None,
-                plugins_captured: false,
+                plugin_paths: None,
                 _guard: None,
             });
         }
@@ -2177,7 +2177,7 @@ impl PrimarySourceStore {
                 break;
             }
         }
-        let plugins_captured = kept >= 2 && groups[1].is_some();
+        let plugin_paths = if kept >= 2 { groups[1].clone() } else { None };
         let documents_captured = kept == groups.len();
         if capture.is_none()
             && (environments.is_some()
@@ -2211,7 +2211,7 @@ impl PrimarySourceStore {
             toolchain_captured,
             documents_captured,
             api_doc_paths,
-            plugins_captured,
+            plugin_paths,
             _guard: Some(guard),
         })
     }
@@ -2385,9 +2385,10 @@ pub struct PrimaryInput {
     /// (AC-1067); `None` when it does not hold them, and their loader reads
     /// the checkout.
     pub api_doc_paths: Option<Vec<String>>,
-    /// Whether the capture holds every file the active plugins claim
-    /// (AC-1069); when it does not, plugins are routed the checkout's files.
-    pub plugins_captured: bool,
+    /// The files the active plugins claim, as the caller listed them, when
+    /// the capture holds them all (AC-1069); `None` when it does not, and
+    /// plugins are routed the checkout's files.
+    pub plugin_paths: Option<Vec<String>>,
     _guard: Option<RetentionGuard>,
 }
 

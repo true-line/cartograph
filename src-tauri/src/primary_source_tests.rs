@@ -4112,7 +4112,7 @@ fn plugin_claimed_files_are_routed_from_the_capture() {
             },
         )
         .unwrap();
-    assert!(input.plugins_captured);
+    assert_eq!(input.plugin_paths.as_deref(), Some(&claimed[..]));
     let capture = input.capture.as_ref().unwrap();
 
     // After capture: a refused edit, a deletion and a new claimed file.
@@ -4128,7 +4128,7 @@ fn plugin_claimed_files_are_routed_from_the_capture() {
         let mut caches = state.extraction_caches.lock().unwrap();
         let cache = caches.repos.entry(source.repo_key.clone()).or_default();
         let mut reads = crate::ProducerReads {
-            plugins_captured: captured,
+            plugin_paths: captured.then(|| claimed.clone()),
             ..crate::ProducerReads::default()
         };
         let extraction = extract_tree_with_primary(
@@ -4170,6 +4170,115 @@ fn plugin_claimed_files_are_routed_from_the_capture() {
     let (routed, refused) = route(false);
     assert_eq!(routed, [":c.zz"]);
     assert_eq!(refused, ["a.zz"]);
+}
+
+// AC-1069 (Codex review on #2497): a file another reader retains is never
+// routed to a plugin unless the plugin's own listing claimed it. An ignored
+// API reference with a claimed extension is in the capture, yet the plugin
+// is routed only the claimed files the checkout walk listed, as the
+// checkout route is.
+#[test]
+fn a_file_only_another_reader_retained_is_never_routed_to_a_plugin() {
+    const REFUSING_ADAPTER: &[u8] =
+        include_bytes!("../../crates/adapters-plugin-host/tests/fixtures/refusing-adapter.wat");
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join(".cartograph")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join(".gitignore"), "docs/private.md\n").unwrap();
+    std::fs::write(root.join("docs/private.md"), "#### GET /api/items\n").unwrap();
+    std::fs::write(root.join("notes.md"), "fine").unwrap();
+    std::fs::write(
+        root.join(ingest::api_docs::API_DOCS_REL_PATH),
+        "[[doc]]\npath = \"docs/private.md\"\n",
+    )
+    .unwrap();
+    let artifact = dir.path().join("t0.plugin-refusing.wasm");
+    std::fs::write(&artifact, REFUSING_ADAPTER).unwrap();
+    let active = [crate::ActivePlugin {
+        plugin_id: "t0.plugin-refusing".into(),
+        path: artifact,
+        content_hash: core_prov::content_hash(REFUSING_ADAPTER),
+        extensions: vec!["md".into()],
+        cells: Vec::new(),
+        languages: BTreeMap::new(),
+        gate_key: "gate".into(),
+        limits: adapters_plugin_host::PluginLimits::default(),
+    }];
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let limits = ingest::api_docs::ApiDocLimits::default();
+    let api_docs = ingest::api_docs::api_doc_paths(source.root(), &[], limits).unwrap();
+    assert!(api_docs.contains(&"docs/private.md".to_string()));
+    let claimed = crate::plugin_claimed_paths(source.root(), &active).unwrap();
+    assert!(
+        !claimed.contains(&"docs/private.md".to_string()),
+        "{claimed:?}"
+    );
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            crate::primary_source::CallerSelections {
+                api_docs: Some(&api_docs),
+                plugins: Some(&claimed),
+            },
+        )
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    assert!(capture.file("docs/private.md").is_ok());
+    let pinned = format!(
+        "t0.plugin-refusing@{}",
+        &core_prov::content_hash(REFUSING_ADAPTER)[..12]
+    );
+    let route = |plugin_paths: Option<Vec<String>>| {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        let extraction = extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &active,
+            &mut |_| {},
+            Some(capture),
+            &mut Vec::new(),
+            &mut crate::ProducerReads {
+                plugin_paths,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0;
+        let mut routed: Vec<String> = extraction
+            .nodes
+            .iter()
+            .filter(|node| node.props["prov"]["extractor_id"] == serde_json::json!(pinned))
+            .map(|node| node.id.trim_start_matches(&source.repo_key).to_string())
+            .collect();
+        routed.sort();
+        routed
+    };
+    let captured = route(input.plugin_paths.clone());
+    assert!(
+        !captured.iter().any(|id| id.contains("private.md")),
+        "{captured:?}"
+    );
+    assert_eq!(captured, route(None));
 }
 
 // AC-1069: the plugins' claimed files are kept before the documentation
@@ -4224,13 +4333,13 @@ fn plugin_claimed_files_never_cost_the_readers_their_capture() {
         (input, paths)
     };
     let (input, paths) = prepare(3);
-    assert!(input.environments_captured && input.plugins_captured);
+    assert!(input.environments_captured && input.plugin_paths.is_some());
     assert!(!input.documents_captured);
     assert_eq!(paths, ["a.zz", "compose.yaml", "source.ts"]);
     drop(input);
     let (input, paths) = prepare(2);
     assert!(input.environments_captured);
-    assert!(!input.plugins_captured && !input.documents_captured);
+    assert!(input.plugin_paths.is_none() && !input.documents_captured);
     assert_eq!(paths, ["compose.yaml", "source.ts"]);
 }
 

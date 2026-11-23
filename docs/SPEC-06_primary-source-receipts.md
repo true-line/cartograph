@@ -400,10 +400,12 @@ The caller lists the files the active gated plugins claim
 (`plugin_claimed_paths`, the union of `route::claimed_files` over them), and
 they join the capture as a droppable group kept after shipped class files
 and before the documentation selection, so they never cost a reader or a
-lane its capture. The capture records whether they were retained
-(`plugins_captured`). When they were, each plugin is routed
-`route::extract_captured_counted`: the capture's own paths it `claims`, read
-from the retained bytes, so a claimed file edited, deleted or created in the
+lane its capture. The capture records the claimed paths when it retained
+them all (`plugin_paths`). When it did, each plugin is routed
+`route::extract_captured_counted` over those paths, the ones it `claims`,
+read from the retained bytes. A file only another reader retained, such as
+an ignored declared API reference, is never routed, as on the checkout. A
+claimed file edited, deleted or created in the
 checkout after capture changes no plugin fact, count or refusal. Otherwise,
 and with no capture, plugins are routed the checkout as before. The plugin
 artifact itself is still read from disk and checked against its gated hash.
