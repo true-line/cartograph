@@ -59,13 +59,82 @@ fn symbol_id(repo: &str, path: &str, name: &str) -> String {
 
 /// `sha256:` and the lowercase hex digest of `bytes`.
 pub fn digest(bytes: &[u8]) -> String {
-    let hash = Sha256::digest(bytes);
+    hex_digest(&Sha256::digest(bytes))
+}
+
+fn hex_digest(hash: &[u8]) -> String {
     let mut out = String::with_capacity(71);
     out.push_str("sha256:");
     for byte in hash {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// A class file as read for extraction: its bytes, or the length and
+/// digest of one larger than [`MAX_CLASS_BYTES`], which is never held whole.
+enum Content {
+    Bytes(Vec<u8>),
+    TooLarge { digest: String, len: u64 },
+}
+
+impl Content {
+    fn of(bytes: Vec<u8>) -> Content {
+        if bytes.len() > MAX_CLASS_BYTES {
+            Content::TooLarge {
+                digest: digest(&bytes),
+                len: bytes.len() as u64,
+            }
+        } else {
+            Content::Bytes(bytes)
+        }
+    }
+}
+
+/// Read a class file of the checkout holding at most [`MAX_CLASS_BYTES`]
+/// and one more byte: a larger file is streamed through its digest.
+fn read_class_file(path: &std::path::Path) -> std::io::Result<Content> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_CLASS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() <= MAX_CLASS_BYTES {
+        return Ok(Content::Bytes(bytes));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let mut len = bytes.len() as u64;
+    drop(bytes);
+    let mut buf = vec![0; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        len += n as u64;
+    }
+    Ok(Content::TooLarge {
+        digest: hex_digest(&hasher.finalize()),
+        len,
+    })
+}
+
+fn gap(id: &SourceId<'_>, path: &str, code: &str, digest: &str, len: u64) -> Node {
+    let gap = format!("gap:{}@{path}#jvm-class", id.repo);
+    Node {
+        id: gap.clone(),
+        label: "Gap".into(),
+        props: serde_json::json!({
+            "path": path,
+            "reason": format!("unreadable JVM class file: {code}"),
+            "reason_code": code,
+            "attempted_tiers": ["T0"],
+            "prov": prov(digest, (0, len), ConfidenceTier::Gap, &format!("Gap {gap}")),
+        }),
+    }
 }
 
 fn prov(digest: &str, span: Span, confidence: ConfidenceTier, fact: &str) -> serde_json::Value {
@@ -149,19 +218,70 @@ fn added_constructor_parameters(class: &ClassFile, descriptor: &str) -> usize {
     }
 }
 
-/// A method's qualified name as the Java source adapter spells it:
-/// `Owner.method(Type,Type)`, a constructor named for its class and listing
-/// only the parameters its source declares.
-fn method_name(owner: &str, class: &ClassFile, method: &str, descriptor: &str) -> Option<String> {
-    let mut params = class_file::parameter_types(descriptor)?;
-    let name = if method == "<init>" {
+/// A method's parameters as its source declares them, spelled simply or
+/// fully qualified: a constructor drops the parameters the compiler added.
+fn source_parameters(
+    class: &ClassFile,
+    method: &str,
+    descriptor: &str,
+    qualified: bool,
+) -> Option<Vec<String>> {
+    let mut params = if qualified {
+        class_file::qualified_parameter_types(descriptor)?
+    } else {
+        class_file::parameter_types(descriptor)?
+    };
+    if method == "<init>" {
         let added = added_constructor_parameters(class, descriptor).min(params.len());
         params.drain(..added);
-        owner.rsplit('.').next().unwrap_or(owner)
-    } else {
-        method
-    };
-    Some(format!("{owner}.{name}({})", params.join(",")))
+    }
+    Some(params)
+}
+
+/// The qualified name of each of the class's methods, index for index, as
+/// the Java source adapter spells it: `Owner.method(Type,Type)`, a
+/// constructor named for its class and listing only the parameters its
+/// source declares. Overloads whose simple spellings collide
+/// (`java.util.Date` and `java.sql.Date`) spell their classes in full, so
+/// each method keeps its own identity. `None` for a method not emitted.
+fn method_names(owner: &str, class: &ClassFile) -> Vec<Option<String>> {
+    let simple: Vec<Option<Vec<String>>> = class
+        .methods
+        .iter()
+        .map(|method| {
+            emitted(method)
+                .then(|| source_parameters(class, &method.name, &method.descriptor, false))
+                .flatten()
+        })
+        .collect();
+    let mut spellings: BTreeMap<(&str, &[String]), usize> = BTreeMap::new();
+    for (method, params) in class.methods.iter().zip(&simple) {
+        if let Some(params) = params {
+            *spellings
+                .entry((method.name.as_str(), params.as_slice()))
+                .or_default() += 1;
+        }
+    }
+    let short = owner.rsplit('.').next().unwrap_or(owner);
+    class
+        .methods
+        .iter()
+        .zip(&simple)
+        .map(|(method, params)| {
+            let params = params.as_ref()?;
+            let params = if spellings[&(method.name.as_str(), params.as_slice())] > 1 {
+                source_parameters(class, &method.name, &method.descriptor, true)?
+            } else {
+                params.clone()
+            };
+            let name = if method.name == "<init>" {
+                short
+            } else {
+                &method.name
+            };
+            Some(format!("{owner}.{name}({})", params.join(",")))
+        })
+        .collect()
 }
 
 /// A method this reader emits: not a static initializer, bridge or other
@@ -175,13 +295,28 @@ struct Read<'a> {
     digest: String,
     class: ClassFile,
     nested: String,
+    /// [`method_names`] of the class.
+    names: Vec<Option<String>>,
 }
 
 /// Read `files` — `(repository-relative path, bytes)` pairs of `.class`
 /// files — into graph facts. Output is ordered by path, so the same files
 /// in any order give the same extraction.
 pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
+    extract_with(id, files, &[])
+}
+
+/// [`extract`], plus a Gap for each `(path, digest, length)` of a class
+/// file too large to read.
+fn extract_with(
+    id: &SourceId<'_>,
+    files: &[(String, Vec<u8>)],
+    too_large: &[(String, String, u64)],
+) -> Extraction {
     let mut out = Extraction::default();
+    for (path, digest, len) in too_large {
+        out.nodes.push(gap(id, path, "too_large", digest, *len));
+    }
     let mut ordered: Vec<&(String, Vec<u8>)> = files.iter().collect();
     ordered.sort_by(|a, b| a.0.cmp(&b.0));
     let mut reads: Vec<Read<'_>> = Vec::new();
@@ -197,32 +332,19 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
                 // An anonymous or local class has no name to cite; its
                 // calls are not attributed (AC-1215).
                 if let Some(nested) = nested_name(&class.this_class) {
+                    let names = method_names(&nested, &class);
                     reads.push(Read {
                         path,
                         digest,
                         class,
                         nested,
+                        names,
                     });
                 }
             }
             Err(code) => {
-                let gap = format!("gap:{}@{path}#jvm-class", id.repo);
-                out.nodes.push(Node {
-                    id: gap.clone(),
-                    label: "Gap".into(),
-                    props: serde_json::json!({
-                        "path": path,
-                        "reason": format!("unreadable JVM class file: {code}"),
-                        "reason_code": code,
-                        "attempted_tiers": ["T0"],
-                        "prov": prov(
-                            &digest,
-                            (0, bytes.len() as u64),
-                            ConfidenceTier::Gap,
-                            &format!("Gap {gap}"),
-                        ),
-                    }),
-                });
+                out.nodes
+                    .push(gap(id, path, code, &digest, bytes.len() as u64));
             }
         }
     }
@@ -232,13 +354,8 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
     // the same binary class more than once.
     let mut methods: Methods<'_> = BTreeMap::new();
     for read in &reads {
-        for method in &read.class.methods {
-            if !emitted(method) {
-                continue;
-            }
-            if let Some(name) =
-                method_name(&read.nested, &read.class, &method.name, &method.descriptor)
-            {
+        for (method, name) in read.class.methods.iter().zip(&read.names) {
+            if let Some(name) = name {
                 methods
                     .entry((
                         read.class.this_class.clone(),
@@ -246,7 +363,7 @@ pub fn extract(id: &SourceId<'_>, files: &[(String, Vec<u8>)]) -> Extraction {
                         method.descriptor.clone(),
                     ))
                     .or_default()
-                    .insert(read.path, symbol_id(id.repo, read.path, &name));
+                    .insert(read.path, symbol_id(id.repo, read.path, name));
             }
         }
     }
@@ -266,6 +383,7 @@ fn emit_class(id: &SourceId<'_>, read: &Read<'_>, methods: &Methods<'_>, out: &m
         digest,
         class,
         nested,
+        names,
     } = read;
     let file = file_id(id.repo, path);
     out.nodes.push(Node {
@@ -324,11 +442,11 @@ fn emit_class(id: &SourceId<'_>, read: &Read<'_>, methods: &Methods<'_>, out: &m
         .map(|method| ((method.name.as_str(), method.descriptor.as_str()), method))
         .collect();
 
-    for method in class.methods.iter().filter(|method| emitted(method)) {
-        let Some(name) = method_name(nested, class, &method.name, &method.descriptor) else {
+    for (method, name) in class.methods.iter().zip(names) {
+        let Some(name) = name else {
             continue;
         };
-        let source = symbol_id(id.repo, path, &name);
+        let source = symbol_id(id.repo, path, name);
         out.nodes.push(Node {
             id: source.clone(),
             label: "Symbol".into(),
@@ -525,6 +643,7 @@ fn source_stems(paths: &[String]) -> BTreeSet<String> {
         let Some(stem) = path
             .strip_suffix(".java")
             .or_else(|| path.strip_suffix(".kt"))
+            .or_else(|| path.strip_suffix(".kts"))
         else {
             continue;
         };
@@ -557,9 +676,14 @@ fn kotlin_package(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A Kotlin source or script, both of which the Kotlin adapter reads.
+fn is_kotlin(path: &str) -> bool {
+    path.ends_with(".kt") || path.ends_with(".kts")
+}
+
 fn sources(paths: &[String], read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>) -> Sources {
     let mut kotlin_packages: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for path in paths.iter().filter(|path| path.ends_with(".kt")) {
+    for path in paths.iter().filter(|path| is_kotlin(path)) {
         let Ok(bytes) = read(path) else {
             continue;
         };
@@ -575,8 +699,8 @@ fn sources(paths: &[String], read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>) ->
     }
 }
 
-/// Whether the checkout holds the source of `class`: a `.java` or `.kt`
-/// file at its outer class's package path or for its `…Kt` file facade,
+/// Whether the checkout holds the source of `class`: a `.java`, `.kt` or
+/// `.kts` file at its outer class's package path or for its `…Kt` file facade,
 /// the file its `SourceFile` attribute names at its package path, or a
 /// Kotlin file of that name declaring its package (Kotlin files need not
 /// sit at their package path, nor be named for their classes).
@@ -596,7 +720,8 @@ fn has_source(sources: &Sources, class: &ClassFile) -> bool {
     let package = package_of(internal);
     let stem = file
         .strip_suffix(".java")
-        .or_else(|| file.strip_suffix(".kt"));
+        .or_else(|| file.strip_suffix(".kt"))
+        .or_else(|| file.strip_suffix(".kts"));
     let at_package = stem.is_some_and(|stem| {
         sources.stems.contains(&if package.is_empty() {
             stem.to_string()
@@ -624,7 +749,8 @@ pub fn extract_dir(
 ) -> std::io::Result<Extraction> {
     let (classes, source_paths) = walk(root)?;
     let read = |rel: &str| std::fs::read(root.join(rel));
-    extract_selected(id, &classes, &source_paths, &read, on_file)
+    let read_class = |rel: &str| read_class_file(&root.join(rel));
+    extract_selected(id, &classes, &source_paths, &read, &read_class, on_file)
 }
 
 /// [`extract_dir`] over a capture: `classes` are the `.class` paths and
@@ -639,7 +765,8 @@ pub fn extract_dir_from(
     read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
     on_file: &mut dyn FnMut(&str),
 ) -> std::io::Result<Extraction> {
-    extract_selected(id, classes, source_paths, read, on_file)
+    let read_class = |rel: &str| read(rel).map(Content::of);
+    extract_selected(id, classes, source_paths, read, &read_class, on_file)
 }
 
 /// The `.class` files the ordinary walk of `root` selects, sorted: the
@@ -654,7 +781,7 @@ fn walk(root: &std::path::Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
     let (mut classes, mut source_paths): (Vec<_>, Vec<_>) = walked
         .into_iter()
         .map(|file| file.rel)
-        .filter(|rel| rel.ends_with(".class") || rel.ends_with(".java") || rel.ends_with(".kt"))
+        .filter(|rel| rel.ends_with(".class") || rel.ends_with(".java") || is_kotlin(rel))
         .partition(|rel| rel.ends_with(".class"));
     classes.sort();
     source_paths.sort();
@@ -666,20 +793,26 @@ fn extract_selected(
     classes: &[String],
     source_paths: &[String],
     read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    read_class: &dyn Fn(&str) -> std::io::Result<Content>,
     on_file: &mut dyn FnMut(&str),
 ) -> std::io::Result<Extraction> {
     let sources = sources(source_paths, read);
     let mut files = Vec::new();
+    let mut too_large = Vec::new();
     for rel in classes {
         on_file(rel);
-        let bytes = read(rel)?;
-        let covered = bytes.len() <= MAX_CLASS_BYTES
-            && class_file::parse(&bytes).is_ok_and(|class| has_source(&sources, &class));
-        if !covered {
-            files.push((rel.clone(), bytes));
+        match read_class(rel)? {
+            Content::Bytes(bytes) => {
+                let covered =
+                    class_file::parse(&bytes).is_ok_and(|class| has_source(&sources, &class));
+                if !covered {
+                    files.push((rel.clone(), bytes));
+                }
+            }
+            Content::TooLarge { digest, len } => too_large.push((rel.clone(), digest, len)),
         }
     }
-    Ok(extract(id, &files))
+    Ok(extract_with(id, &files, &too_large))
 }
 
 #[cfg(test)]

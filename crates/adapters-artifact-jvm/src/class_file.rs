@@ -39,6 +39,8 @@ pub enum Refusal {
     Opcode,
     /// Bytes left over after the class's attributes.
     Trailing,
+    /// A field or method descriptor that is not well formed (JVMS §4.3).
+    Descriptor,
 }
 
 impl Refusal {
@@ -51,6 +53,7 @@ impl Refusal {
             Refusal::ConstantIndex => "constant_index",
             Refusal::Opcode => "opcode",
             Refusal::Trailing => "trailing_bytes",
+            Refusal::Descriptor => "descriptor",
         }
     }
 }
@@ -597,6 +600,9 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
         reader.u16()?;
         pool.utf8(reader.u16()?)?;
         let descriptor = pool.utf8(reader.u16()?)?.to_string();
+        if !field_descriptor_ok(&descriptor) {
+            return Err(Refusal::Descriptor);
+        }
         read_attributes(&mut reader, &pool, false)?;
         fields.push(Field {
             descriptor,
@@ -609,6 +615,9 @@ pub fn parse(bytes: &[u8]) -> Result<ClassFile, Refusal> {
         let access = reader.u16()?;
         let name = pool.utf8(reader.u16()?)?.to_string();
         let descriptor = pool.utf8(reader.u16()?)?.to_string();
+        if !method_descriptor_ok(&descriptor) {
+            return Err(Refusal::Descriptor);
+        }
         let code = read_attributes(&mut reader, &pool, true)?;
         raw.push(RawMethod {
             access,
@@ -729,8 +738,9 @@ pub fn descriptor_classes(descriptor: &str) -> Vec<&str> {
 }
 
 /// The Java-source spelling of a field descriptor's type: simple class
-/// names (nested `$` read as `.`), primitives by keyword, arrays with `[]`.
-fn field_type(descriptor: &str) -> Option<(String, &str)> {
+/// names (nested `$` read as `.`), or fully qualified ones when `qualified`,
+/// primitives by keyword, arrays with `[]`.
+fn field_type(descriptor: &str, qualified: bool) -> Option<(String, &str)> {
     let mut dims = 0;
     let mut rest = descriptor;
     while let Some(next) = rest.strip_prefix('[') {
@@ -750,8 +760,15 @@ fn field_type(descriptor: &str) -> Option<(String, &str)> {
         b'L' => {
             let end = rest.find(';')?;
             let internal = &rest[1..end];
-            let simple = internal.rsplit('/').next().unwrap_or(internal);
-            (simple.replace('$', "."), &rest[end + 1..])
+            if internal.is_empty() {
+                return None;
+            }
+            let name = if qualified {
+                internal
+            } else {
+                internal.rsplit('/').next().unwrap_or(internal)
+            };
+            (name.replace(['/', '$'], "."), &rest[end + 1..])
         }
         _ => return None,
     };
@@ -761,19 +778,69 @@ fn field_type(descriptor: &str) -> Option<(String, &str)> {
 /// The parameter types of a method descriptor, spelled as in Java source
 /// (erased: no type arguments).
 pub fn parameter_types(descriptor: &str) -> Option<Vec<String>> {
+    spelled_parameters(descriptor, false)
+}
+
+/// [`parameter_types`] with every class fully qualified (`java.util.Date`),
+/// to tell apart overloads whose simple spellings collide.
+pub fn qualified_parameter_types(descriptor: &str) -> Option<Vec<String>> {
+    spelled_parameters(descriptor, true)
+}
+
+fn spelled_parameters(descriptor: &str, qualified: bool) -> Option<Vec<String>> {
+    Some(split_method(descriptor, qualified)?.0)
+}
+
+/// A method descriptor's spelled parameters and the text after `)`.
+fn split_method(descriptor: &str, qualified: bool) -> Option<(Vec<String>, &str)> {
     let mut rest = descriptor.strip_prefix('(')?;
     let mut types = Vec::new();
     while !rest.starts_with(')') {
-        let (spelled, next) = field_type(rest)?;
+        if is_void(rest) {
+            return None;
+        }
+        let (spelled, next) = field_type(rest, qualified)?;
         types.push(spelled);
         rest = next;
     }
-    Some(types)
+    Some((types, &rest[1..]))
+}
+
+/// Whether a descriptor fragment's type is `void` (or an array of it).
+fn is_void(fragment: &str) -> bool {
+    fragment.trim_start_matches('[').starts_with('V')
+}
+
+/// A whole field descriptor: one non-void field type and nothing after it.
+fn field_descriptor_ok(descriptor: &str) -> bool {
+    !is_void(descriptor) && matches!(field_type(descriptor, false), Some((_, "")))
+}
+
+/// A whole method descriptor: parameters, then one return type (or `V`)
+/// and nothing after it.
+fn method_descriptor_ok(descriptor: &str) -> bool {
+    split_method(descriptor, false).is_some_and(|(_, ret)| ret == "V" || field_descriptor_ok(ret))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Descriptors are walked whole (JVMS §4.3): no unknown type letter,
+    /// no `void` parameter or field, nothing after the return type.
+    #[test]
+    fn descriptors_are_checked_whole() {
+        for good in ["()V", "(I[JLjava/util/List;)Ljava/lang/String;", "([[Z)[I"] {
+            assert!(method_descriptor_ok(good), "{good}");
+        }
+        for bad in ["(Q)V", "(V)V", "()", "()VV", "(I", "()[V", "(L;)V", "I"] {
+            assert!(!method_descriptor_ok(bad), "{bad}");
+        }
+        assert!(field_descriptor_ok("[Ljava/util/Map$Entry;"));
+        for bad in ["V", "[V", "II", "Lx", ""] {
+            assert!(!field_descriptor_ok(bad), "{bad}");
+        }
+    }
 
     /// An `invokedynamic` naming a bootstrap method the class does not have
     /// is a bad constant index, not a call with no handles.
