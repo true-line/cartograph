@@ -140,10 +140,16 @@ pub(super) fn project(
             }
             (kind, None, None)
         }
-        SourceSettlement::Discarded { kind, diagnostic: d } => {
+        SourceSettlement::Discarded {
+            kind,
+            diagnostic: d,
+        } => {
             if (!discard_records(kind) && d.is_some())
                 || d.is_some_and(|d| {
-                    !matches!(d, InvestigationTerminalDiagnostic::SourceReadDiscarded { .. })
+                    !matches!(
+                        d,
+                        InvestigationTerminalDiagnostic::SourceReadDiscarded { .. }
+                    )
                 })
             {
                 return Err(InvestigationStoreError::Invalid);
