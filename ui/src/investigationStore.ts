@@ -12,8 +12,9 @@ import type {
   InvestigationConsent, InvestigationDetail, InvestigationEvent,
   InvestigationEventPage, InvestigationPage, InvestigationResult,
   InvestigationSummary, StartInvestigationRequest, InvestigationInspectionTarget, InvestigationCapturedLocation,
-  SpecialistId, InvestigationProviderMode, InvestigationObligation, InvestigationObligationChoices, InvestigationScope,
+  SpecialistId, InvestigationProviderMode, InvestigationObligation, InvestigationObligationChoices, InvestigationScope, InvestigationScopeType,
 } from './investigationTypes';
+import { composerScope } from './investigationTypes';
 
 export interface InvestigationDraft {
   specialist_id: SpecialistId; question: string; scope: InvestigationScope;
@@ -35,14 +36,16 @@ export interface InvestigationComposer {
   limitProfile?: string;
   providerMode: InvestigationProviderMode;
   question: string;
-  scopeType: 'all' | 'neighborhood';
+  scopeType: InvestigationScopeType;
   anchor: string;
   hops: number;
+  /** The Subsystem id of an area scope. */
+  area: string;
   parent: { conversation_id: string; parent_id: string } | null;
 }
 const initialComposer: InvestigationComposer = {
   specialistId: 'domain-analyst@3', providerMode: 'local', question: '',
-  scopeType: 'all', anchor: '', hops: 1, parent: null,
+  scopeType: 'all', anchor: '', hops: 1, area: '', parent: null,
 };
 /** Desktop default when the host advertises it (#1618): the domain analyst's current version (ADR-0071,
  * AC-1402), or schema-backed @27 (AC-0574) from a host that does not advertise the current one yet. */
@@ -733,7 +736,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     citationId: null, citationRead: null, citationLoading: false, citationError: null,
 
     updateComposer: (patch) => {
-      if (!get().starting && !get().pendingStart && ['scopeType', 'anchor', 'hops'].some((key) => key in patch && patch[key as keyof InvestigationComposer] !== get().composer[key as keyof InvestigationComposer])) {
+      if (!get().starting && !get().pendingStart && ['scopeType', 'anchor', 'hops', 'area'].some((key) => key in patch && patch[key as keyof InvestigationComposer] !== get().composer[key as keyof InvestigationComposer])) {
         ++choicesRequest;
         set({ draftObligations: [], obligationChoices: null, obligationChoicesLoading: false,
           obligationDraftError: get().draftObligations.length ? 'Scope changed. Select the evidence to inspect in this scope.' : null });
@@ -789,8 +792,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
     addSourceObligation: async (target) => {
       const state = get();
       if (state.starting || state.pendingStart) return false;
-      const scope: InvestigationScope = state.composer.scopeType === 'all' ? { type: 'all' } :
-        { type: 'neighborhood', anchor: state.composer.anchor, hops: state.composer.hops };
+      const scope: InvestigationScope = composerScope(state.composer);
       if (!state.obligationChoices) {
         const loading = get().loadObligationChoices(scope);
         const loadingGeneration = choicesRequest;

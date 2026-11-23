@@ -1,11 +1,13 @@
 import { isCompletionSpecialist, isExpandedSpecialist } from '../investigationFamilies';
 import { SPECIALIST_TABLE } from '../generated/specialistTable';
 import { ROLE_LABELS, currentVersion, isRetired, offeredRoles, offeredVersions, profileFor, roleOf } from '../specialistRoles';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RunLimitFooter } from './RunLimitFooter';
 import type { InvestigationState } from '../investigationStore';
 import type { GraphNode } from '../store';
-import type { InvestigationProviderMode, InvestigationScope, InvestigationStatus, SpecialistActivityItem, SpecialistId } from '../investigationTypes';
+import type { InvestigationProviderMode, InvestigationScope, InvestigationScopeType, InvestigationStatus, SpecialistActivityItem, SpecialistId } from '../investigationTypes';
+import { composerScope, investigationScopeLabel, investigationScopeValid } from '../investigationTypes';
+import { loadAreaChoices, type AreaChoice } from '../areaExpert';
 import { InvestigationActivity } from './InvestigationActivity';
 import { InvestigationProgress } from './InvestigationProgress';
 import { InvestigationFindings } from './InvestigationFindings';
@@ -38,14 +40,25 @@ const EMPTY_ACTIVITY: Pick<SpecialistActivityState, 'status' | 'tasks' | 'error'
 /** Props/callbacks only: the coordinator and dedicated store own task lifecycle. */
 export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefreshActivity, anchors, canStart }: InvestigationsSurfaceProps) {
   const [historySearchText, setHistorySearchText] = useState(state.historySearch);
-  const { specialistId, providerMode, question, scopeType, anchor, hops, parent } = state.composer;
+  const { specialistId, providerMode, question, scopeType, anchor, hops, area, parent } = state.composer;
   // ADR-0071: one choice; the version fixes its profile, so no separate budget picker.
   const chooseSpecialist = (id: SpecialistId) => state.updateComposer({ specialistId: id, limitProfile: profileFor(state.catalog, id) });
   const setProviderMode = (providerMode: InvestigationProviderMode) => state.updateComposer({ providerMode });
   const setQuestion = (question: string) => state.updateComposer({ question });
-  const setScopeType = (scopeType: 'all' | 'neighborhood') => state.updateComposer({ scopeType });
+  const setScopeType = (scopeType: InvestigationScopeType) => state.updateComposer({ scopeType });
   const setAnchor = (anchor: string) => state.updateComposer({ anchor });
   const setHops = (hops: number) => state.updateComposer({ hops });
+  const setArea = (area: string) => state.updateComposer({ area });
+  // Areas are the recovered Subsystems (#2477); loaded once an area is chosen or shown.
+  const [areas, setAreas] = useState<AreaChoice[] | null>(null);
+  const areaShown = scopeType === 'area' || state.detail?.scope.type === 'area';
+  useEffect(() => {
+    if (!areaShown || areas) return;
+    let live = true;
+    void loadAreaChoices().then((choices) => { if (live) setAreas(choices); }, () => { if (live) setAreas([]); });
+    return () => { live = false; };
+  }, [areaShown, areas]);
+  const areaName = (id: string) => areas?.find((choice) => choice.area === id)?.name;
   const setParent = (parent: typeof state.composer.parent) => state.updateComposer({ parent });
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const provider = state.catalog?.providers.find((item) => item.mode === providerMode);
@@ -103,7 +116,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
   const inspectionVersion = specialistId.endsWith('@5');
   const coverageVersion = specialistId.endsWith('@6');
   const supportsRequirements = inspectionVersion || coverageVersion;
-  const scope: InvestigationScope = scopeType === 'all' ? { type: 'all' } : { type: 'neighborhood', anchor, hops };
+  const scope: InvestigationScope = composerScope({ scopeType, anchor, hops, area });
   const requestBytes = completionVersion ? new TextEncoder().encode(JSON.stringify({ schema_version: policy?.request_schema_version ?? 4, request_nonce: '0'.repeat(36),
     specialist_id: specialistId, obligations, question, scope, provider_mode: providerMode, limit_profile: profile,
     expected_graph_revision: choices?.graph_snapshot_id ?? null, expected_context_id: choices?.context_id ?? '',
@@ -114,7 +127,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
       expected_graph_revision: requirements[0].graph_snapshot_id } : {}) })).length;
   const startEnabled = canStart && !locked && !state.catalogLoading && Boolean(provider?.available) &&
     selectedSpecialistAvailable && Boolean(policy) && question.trim().length > 0 &&
-    questionBytes <= 2048 && (scopeType === 'all' || anchor.trim().length > 0) &&
+    questionBytes <= 2048 && investigationScopeValid(scope) &&
     (completionVersion ? completionBound && requirements.length === 0 :
       state.draftObligations.length === 0 && (inspectionVersion ? requirements.length > 0 : coverageVersion || requirements.length === 0)) && requestBytes <= requestLimit;
   const refresh = () => { void state.loadCatalog(); void state.loadHistory(); onRefreshActivity?.(); };
@@ -227,8 +240,8 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
         {state.inspectionDraftError && <p role="alert" className="error-text">{state.inspectionDraftError}</p>}
       </fieldset>}
       <div className="investigation-form-row">
-        <label>Scope<select value={scopeType} disabled={locked} onChange={(event) => setScopeType(event.target.value as 'all' | 'neighborhood')}>
-          <option value="all">Recovered system</option><option value="neighborhood">Fact neighborhood</option>
+        <label>Scope<select value={scopeType} disabled={locked} onChange={(event) => setScopeType(event.target.value as InvestigationScopeType)}>
+          <option value="all">Recovered system</option><option value="neighborhood">Fact neighborhood</option><option value="area">Area</option>
         </select></label>
         <label>Provider<select value={providerMode} disabled={locked} onChange={(event) => setProviderMode(event.target.value as InvestigationProviderMode)}>
           <option value="local">Local</option><option value="cloud">Cloud · consent for every step</option>
@@ -241,7 +254,12 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
             <option value={1}>1</option><option value={2}>2</option><option value={3}>3</option>
           </select></label>
         </>}
+        {scopeType === 'area' && <label>Area<select value={area} disabled={locked || !areas?.length} onChange={(event) => setArea(event.target.value)}>
+          <option value="">{areas === null ? 'Loading areas…' : areas.length ? 'Choose an area' : 'No areas recovered'}</option>
+          {areas?.map((choice) => <option key={choice.area} value={choice.area}>{choice.name} · {choice.files} file{choice.files === 1 ? '' : 's'}</option>)}
+        </select></label>}
       </div>
+      {scopeType === 'area' && <p className="muted">An area reads one recovered subsystem: its files and what they define.</p>}
       {scopeType === 'neighborhood' && <p className="muted">Suggestions show up to 200 loaded facts. The host validates the exact anchor and neighborhood.</p>}
       {provider && <p className={provider.available ? 'muted' : 'error-text'}>
         {provider.provider_id} · {provider.model}{!provider.available && ` — ${provider.unavailable_reason ?? 'Unavailable'}`}
@@ -319,7 +337,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
             {summary.status === 'interrupted' && <p className="investigation-notice">The original worker input is no longer available. A follow-up uses a new task and basis.</p>}
             <p className="muted">Specialist: <code>{summary.specialist_id}</code>{isRetired(summary.specialist_id) &&
               ' · retired: this run reopens read-only, and a follow-up needs a version offered today'}</p>
-            <p className="muted">Scope: {summary.scope.type === 'all' ? 'Recovered system' : `${summary.scope.anchor} · ${summary.scope.hops} hop(s)`}</p>
+            <p className="muted">Scope: {investigationScopeLabel(summary.scope, summary.scope.type === 'area' ? areaName(summary.scope.id) : undefined)}</p>
             {/* graph_snapshot_id is the complete-graph identity, equal for every scope (AC-1301);
                 the scope snapshot is what a narrower scope narrows (#2475). */}
             <p className="muted">Recovered graph: <code>{summary.graph_snapshot_id ?? 'Pending preparation'}</code></p>
@@ -343,6 +361,7 @@ export function InvestigationsSurface({ state, activity = EMPTY_ACTIVITY, onRefr
                 state.clearObligations();
                 setParent({ conversation_id: summary.conversation_id, parent_id: summary.investigation_id });
                 setScopeType(summary.scope.type); if (summary.scope.type === 'neighborhood') { setAnchor(summary.scope.anchor); setHops(summary.scope.hops); }
+                if (summary.scope.type === 'area') setArea(summary.scope.id);
                 state.updateComposer({ specialistId: summary.specialist_id, limitProfile: isExpandedSpecialist(summary.specialist_id) ? 'investigation-v2' : 'investigation-v1' });
                 setProviderMode(summary.provider_mode); setQuestion(''); questionRef.current?.focus();
               }}>Ask a follow-up</button>}

@@ -6,6 +6,7 @@ import { ROLE_LABELS, currentVersion, offeredRoles, offeredVersions, profileFor,
 import { investigationPolicy, obligationEnvelope, validObligationChoices, validObligationEnvelope } from '../investigationObligations';
 import { invokeOr } from '../tauri';
 import type { InvestigationFollowUpContext, InvestigationObligation, InvestigationObligationChoices, InvestigationProviderMode, InvestigationScope, SpecialistId } from '../investigationTypes';
+import { composerScope, investigationScopeLabel, investigationScopeValid } from '../investigationTypes';
 
 
 export interface InvestigationQuickDispatchProps {
@@ -57,13 +58,13 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
   const provider = providers.find((item) => item.mode === providerMode);
   const supported = dialogParent ? parentOffered : specialists.some((item) => item.id === specialistId);
   const composer = state.composer;
-  const composerScope: InvestigationScope = useMemo(() => composer.scopeType === 'all' ? { type: 'all' } :
-    { type: 'neighborhood', anchor: composer.anchor, hops: composer.hops }, [composer.anchor, composer.hops, composer.scopeType]);
-  const scope = dialogParent?.scope ?? composerScope;
+  const fromComposer: InvestigationScope = useMemo(() => composerScope(composer),
+    [composer]);
+  const scope = dialogParent?.scope ?? fromComposer;
   const scopeKey = JSON.stringify(scope);
   const choicesRequestIdentity = useMemo(() => ({ choicesRefresh, dialogParent, open, scopeKey, specialistId }),
     [choicesRefresh, dialogParent, open, scopeKey, specialistId]);
-  const scopeValid = scope.type === 'all' || (scope.anchor.trim().length > 0 && Number.isInteger(scope.hops) && scope.hops >= 1 && scope.hops <= 3);
+  const scopeValid = investigationScopeValid(scope);
   const questionBytes = new TextEncoder().encode(question).length;
   const hasPendingStart = state.pendingStart !== null;
   const inFlight = busy || state.starting;
@@ -269,7 +270,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
           {specialists.map((item) => <option key={item.id} value={item.id}>{ROLE_LABELS[roleOf(item.id)!]}</option>)}
         </select></label>
         <p className="muted">{specialist?.purpose} T3 · InferredWeak. Advanced evidence and completion work stays in the full composer.</p>
-        <p className="muted">Scope: {scope.type === 'all' ? 'Recovered system' : `Fact neighborhood · ${scope.anchor} · ${scope.hops} hop${scope.hops === 1 ? '' : 's'}`}{dialogParent ? ' · captured from the saved parent' : '. Change scope in the full Investigations composer.'}</p>
+        <p className="muted">Scope: {investigationScopeLabel(scope)}{dialogParent ? ' · captured from the saved parent' : '. Change scope in the full Investigations composer.'}</p>
         <label>Provider<select value={providerMode} disabled={locked || Boolean(dialogParent) || !providers.length} onChange={(event) => setProviderMode(event.target.value as InvestigationProviderMode)}>
           {dialogParent && !providers.some((item) => item.mode === dialogParent.provider_mode) &&
             <option value={dialogParent.provider_mode}>{dialogParent.provider_mode} · unavailable</option>}
@@ -300,6 +301,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
         </fieldset>}
         {state.catalog && specialists.length === 0 && <p className="muted">No supported quick-dispatch specialists are available. Use the full Investigations composer.</p>}
         {scope.type === 'neighborhood' && !scopeValid && <p role="alert" className="error-text">Choose a valid fact anchor and one to three hops in the full Investigations composer.</p>}
+        {scope.type === 'area' && !scopeValid && <p role="alert" className="error-text">Choose an area in the full Investigations composer.</p>}
         <footer><button type="button" className="secondary-button" onClick={() => close()} disabled={inFlight}>Cancel</button>
           <button type="submit" disabled={!valid || locked || state.catalogLoading}>{inline ? 'Send reply task' : dialogParent ? 'Start follow-up task' : 'Start investigation'}</button></footer>
       </form>}
