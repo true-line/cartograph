@@ -179,9 +179,16 @@ mod tests {
             policy.resolve(&root.join("../escape.txt")),
             Err(PathRefusal::Outside)
         );
+        // Unix cannot walk `..` out of a missing directory, so the climb is
+        // refused as such; Windows folds `..` lexically before the lookup,
+        // so the same path lands outside the root. Both refuse it.
         assert_eq!(
             policy.resolve(&root.join("missing/../../escape.txt")),
-            Err(PathRefusal::Climbs)
+            Err(if cfg!(windows) {
+                PathRefusal::Outside
+            } else {
+                PathRefusal::Climbs
+            })
         );
         assert_eq!(
             policy.resolve(&root.join(".git/hooks/pre-commit")),
