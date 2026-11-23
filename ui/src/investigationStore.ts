@@ -417,7 +417,8 @@ let conversationDirtyInFlight: { conversationId: string; cursor: string; request
 let detailRequest = 0;
 // A newer task notification seen while a detail read is loading. That read may
 // predate it (#2476), so one trailing refresh runs when the read settles.
-let detailRefreshPending: { id: string; generation: number } | null = null;
+type DetailRefreshPending = { id: string; generation: number };
+let detailRefreshPending: DetailRefreshPending | null = null;
 let citationRequest = 0;
 let citationOwnerCleanup: (() => void) | undefined;
 let actionRequest = 0;
@@ -1312,11 +1313,14 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => {
           if (current()) set({ loading: false });
         }
         options?.loadingSignal?.removeEventListener('abort', releaseLoading);
-        const pending = detailRefreshPending;
+        // Set by `invalidate` while this read awaited; flow analysis can't see that.
+        const pending = detailRefreshPending as DetailRefreshPending | null;
         if (pending && request === detailRequest && !get().loading &&
             get().selectedId === pending.id && get().selectionGeneration === pending.generation) {
           detailRefreshPending = null;
-          void get().refreshSelected();
+          // Keep the caller's abort ownership for the trailing read.
+          const loadingSignal = options?.loadingSignal?.aborted ? undefined : options?.loadingSignal;
+          void get().refreshSelected(loadingSignal ? { loadingSignal } : undefined);
         }
       }
     },
