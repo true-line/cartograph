@@ -78,12 +78,16 @@ After publication, verify the workflow and release:
 gh run list --workflow release.yml --limit 5
 gh release view vX.Y.Z --json tagName,isDraft,isPrerelease,name,assets
 gh release download vX.Y.Z --pattern 'Cartograph_*_universal_*' --dir dist
+gh release download vX.Y.Z --pattern 'Cartograph_*_x64_signed-setup.exe' --dir dist
 ```
 
 For a production release, require `isDraft: false`, `isPrerelease: false`, and
-exactly three versioned `signed` assets: the app zip, the DMG and the dSYM zip
-(`Cartograph_X.Y.Z_universal_signed.dSYM.zip`, the debug symbols for crash
-symbolication). Then perform the manual
+exactly three versioned macOS `signed` assets: the app zip, the DMG and the
+dSYM zip (`Cartograph_X.Y.Z_universal_signed.dSYM.zip`, the debug symbols for
+crash symbolication). Once Windows signing is configured, also require the
+fourth asset, `Cartograph_X.Y.Z_x64_signed-setup.exe`, and check on Windows
+that `Get-AuthenticodeSignature` reports it `Valid` with a timestamp; without
+the Windows secrets the release has the three macOS assets only. Then perform the manual
 Gatekeeper installation smoke test below and record the evidence on the release
 task.
 
