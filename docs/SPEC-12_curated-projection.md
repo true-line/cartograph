@@ -101,7 +101,13 @@ and `reason`.
 
 [ADR-0090](adr/ADR-0090-attested-context.md) adds attested context as the
 fourth record kind. The projection is built (AC-1075,
-`context_hub::curated::attested`); printing, reads and capture are not yet.
+`context_hub::curated::attested`), and the export and the MCP read take
+every stored record into it. `curated-json` carries `attested` (the
+eligible and the agent-attested, unconfirmed ones with their label and
+contributors, in `best-effort` only), `attested_omitted`, `attested_listed`
+(every other record, without its statement) and `attested_counts`. The
+revision covers each record's attestations, since a read prints them.
+Printing in documents and capture are not built yet.
 Every stored record is projected: its attestations are its review. An
 attested record gets the first state that applies: `withdrawn`, `disputed`, `already-covered`,
 `unresolvable`, `stale`, then `eligible` when an engineer stated or
