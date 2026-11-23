@@ -1,5 +1,37 @@
 # cartograph
 
+## 0.77.0
+
+### Minor Changes
+
+- 137bc9a: Adds `domain-analyst@30`, the tool-calling analyst with one more tool: `read_artifact` pages a compiled document such as the gap register or topology from the investigation's frozen facts, so the analyst can read the recovered system's official artifacts as context. Pages are never citations. It starts where `domain-analyst@29` does (#250, ADR-0089).
+- 6df9f09: Declared API references and their config are now read from the source capture when it holds them, so contract and documentation facts match the bytes the rest of recovery used (#385, AC-1067).
+- ee4945c: Investigations can be scoped to one recovered area: the composer offers "Area" with a picker over the recovered subsystems, and saved tasks show the area's name.
+- 8209c7a: A saved `domain-analyst@30` investigation lists the compiled documents it read, page by page, with each document's title and the span it was shown. The list comes from what the run saved, not from today's documents (#250, ADR-0089).
+- 99b37df: Documents and found decision records are now read from the source capture when it holds them, in recovery and in the ADR relinking that follows, so their facts match the bytes the rest of recovery used (#385, AC-1065).
+- 888d255: Compose, Kubernetes, kustomize, Helm and settings files are now read from the source capture when it holds them, so environment facts match the bytes the rest of recovery used (#385, AC-1059).
+- 02863fc: The Flow Inspector can filter triggers by kind, including "Client-side" (screens, extension contexts and commands), instead of matching "client" inside server routes.
+- b7aa05c: Ingest now reads compiled JVM class files a repository ships without their source, as classes, methods, calls and imports. Each fact cites the class file and the bytes it came from, and they show as their own "JVM classes" layer. For a cloned repository the class files are read from the cloned commit, not the working copy. Scripts (`.kts`) count as Kotlin source. A file it cannot read, one with a malformed signature or one over 8 MiB, is recorded as a gap, and overloads whose parameter types share a short name keep separate symbols (#1445).
+- 84c637d: The manifest guide suggests the configuration keys the last recovery's client calls could not resolve, with their call counts, and adds one as a configuration row in a click.
+- a4955ea: After a relaunch the breadcrumb and Workspace name the recovered system instead of "Ingested system", the first read says it is loading instead of "No system yet", and coverage inventories name local sources by folder instead of `local/src_<hash>`.
+- d4c8664: The investigation detail pane shows how many nodes and edges a task's prepared scope holds, beside its scope snapshot.
+- e78f469: Schedules and process entry points are now read from the source capture when it holds them, so their facts match the bytes the rest of recovery used (#385, AC-1061).
+- 12fd0fa: Toolchain configuration files are now read from the source capture when it holds them, so toolchain facts match the bytes the rest of recovery used; env files are never retained (#385, AC-1063).
+
+### Patch Changes
+
+- fd155b5: Agent investigations reserve less prompt room for a correction that can only name the contract's own sources, so a run can read more sources before the 128 KiB input ceiling refuses one (#1653).
+- 4cf378b: The claim reviewer now asks three times and leaves a claim out only on a majority. It treats everyday operations on a cited capability as a detail rather than an overreach, and reads fact text without provenance.
+- 4aaa1e6: The composed purpose and scope overview is now six to ten claims in domain terms, one per capability area or group of users. It no longer reads the business rule excerpt.
+- 15e4460: A local section composition whose claims spelled out routes or counts no cited fact shows is asked once more, and the reply that keeps more claims is staged.
+- af94f6a: Composed claims that cite a business rule are now checked for scope: a claim stating the rule for more capabilities than it holds for, such as one provider's sign-in error stated for every provider, is left out before staging.
+- 7d9dbc4: An @29 finish patch that fails projection no longer ends the run. It is journaled as an invalid_action refusal with its rejection code, and the patch step is offered again, within the run's allowance of 2 (#2431, AC-1432).
+- 71994a9: domain-analyst@29: a capacity-gap finish patch that withdraws a limitation slot the finish does not have is no longer rejected; the withdraw removes nothing.
+- 16efd7e: Atlas cluster and group tiles name repositories as Workspace does, instead of by their `local/src_<hash>` keys. Gap class labels keep a readable width in a narrow window, where they used to collapse into a one-character column. The spec export's save panel opens while the bundle compiles, instead of after it (#1601).
+- 465e699: The investigation detail pane labels the whole-graph identity "Recovered graph" and shows the task's scope snapshot, so a narrower scope no longer looks identical to the whole system.
+- db199b2: The investigation detail pane now leaves "Running" when a run fails or finishes while the pane is refreshing, without reselecting the task.
+- e3937f5: Add a manual W13 pilot run (#1748) that drafts D1 1.2, 1.3 and 1.5 at the system scope on a local OpenAI-compatible server, records the reviewer's decisions from a file and writes the best-effort export.
+
 ## 0.76.0
 
 ### Minor Changes
