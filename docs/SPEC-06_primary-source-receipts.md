@@ -394,6 +394,20 @@ from the retained bytes, in recovery and in the relinking after publication;
 otherwise, and with no capture, the loader reads the checkout, so a gap's
 reason is always the checkout's.
 
+## Captured plugin routing (AC-1069, #385)
+
+The caller lists the files the active gated plugins claim
+(`plugin_claimed_paths`, the union of `route::claimed_files` over them), and
+they join the capture as a droppable group kept after shipped class files
+and before the documentation selection, so they never cost a reader or a
+lane its capture. The capture records whether they were retained
+(`plugins_captured`). When they were, each plugin is routed
+`route::extract_captured_counted`: the capture's own paths it `claims`, read
+from the retained bytes, so a claimed file edited, deleted or created in the
+checkout after capture changes no plugin fact, count or refusal. Otherwise,
+and with no capture, plugins are routed the checkout as before. The plugin
+artifact itself is still read from disk and checked against its gated hash.
+
 ## Directory-built lane facts (AC-1037, #385)
 
 The Python, Go, Java, Rust, Kotlin and Terraform lanes mint their receipts from each
