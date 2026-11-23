@@ -154,6 +154,10 @@ pub(super) struct Entry {
     pub proposal: Value,
     pub reason: RefusalReason,
     pub previous_entry_id: Option<String>,
+    /// @29 (#2431): set only on an `invalid_action` refusal of a finish-patch
+    /// call, with the code the merge returned. Absent entries keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_rejection: Option<agents::investigation::finish_patch::PatchRejection>,
 }
 impl Entry {
     fn content_id(&self) -> Result<String, InvestigationStoreError> {
@@ -190,6 +194,7 @@ impl Entry {
         Some(ActionFeedback {
             query_budget: None,
             reason,
+            patch_rejection: self.patch_rejection,
             invocation_ordinal: self.call.invocation_ordinal,
             action_hash: self.response.action_hash.clone(),
             choices_hash: self
@@ -521,6 +526,7 @@ fn timeline(
                         ActionFeedback {
                             query_budget: record.budget,
                             reason: record.feedback_reason(),
+                            patch_rejection: None,
                             invocation_ordinal: ordinal,
                             action_hash: record.action_hash.clone(),
                             choices_hash: acquisition.choices_hash.clone(),
@@ -791,7 +797,8 @@ fn read_entries(
                     .is_some_and(|entry| entry.call.invocation_ordinal >= ordinal)
                 || witness.call.admission.capacity_refusal_count != before.count
                 || witness.call.admission.capacity_feedback != before.feedback
-                || witness.call.mode() != CompletionCallMode::Choice
+                || (witness.call.mode() != CompletionCallMode::Choice
+                    && entry.patch_rejection.is_none())
                 || witness.action_admitted
                 || line
                     .publications
@@ -811,6 +818,7 @@ fn read_entries(
                 &entry.proposal,
                 &entry.response,
                 entry.reason,
+                entry.patch_rejection,
                 history,
             )?;
             let action_reason = match entry.reason {
@@ -991,15 +999,40 @@ fn validate_proposal(
 
 /// An `invalid_action` proposal is a saved choice-call response that still
 /// does not decode under the call's saved ledger and policy.
+///
+/// @29 (#2431): it may instead be a finish-patch call's response that the
+/// merge rejected. The first candidate is never stored (@27), so replay cannot
+/// re-run that merge. It checks the saved binding instead: a native-runtime
+/// finish-only call stamped with a patch basis, an object proposal bound by
+/// the response's action hash, and a recorded rejection code. Such a refusal
+/// admits nothing; it only spends one of the run's capped retries.
 fn validate_invalid_proposal(
     proposal: &Value,
     response: &InvestigationResponseMeta,
     ledger: &InvestigationInputLedger,
     call: &SavedCallBasis,
     task: &StoredTask,
+    patch_rejection: Option<agents::investigation::finish_patch::PatchRejection>,
 ) -> Result<(), InvestigationStoreError> {
     let role = task.detail.summary.specialist_id;
     let raw = encode(proposal, MAX_ACTION_BYTES)?;
+    if patch_rejection.is_some() {
+        let patch_call = call.mode() == CompletionCallMode::FinishOnly
+            && call
+                .admission
+                .acquisition
+                .as_ref()
+                .is_some_and(|stamp| stamp.finish_patch.is_some());
+        if !patch_call
+            || !proposal.is_object()
+            || !role.uses_native_tool_runtime()
+            || !role.uses_finish_patch()
+            || response.action_hash != core_prov::content_hash(&raw)
+        {
+            return Err(InvestigationStoreError::Invalid);
+        }
+        return Ok(());
+    }
     let context = ledger
         .coverage
         .as_ref()
@@ -1026,6 +1059,7 @@ fn validate_invalid_proposal(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_reason(
     task: &StoredTask,
     call: &SavedCallBasis,
@@ -1033,10 +1067,14 @@ fn validate_reason(
     proposal: &Value,
     response: &InvestigationResponseMeta,
     reason: RefusalReason,
+    patch_rejection: Option<agents::investigation::finish_patch::PatchRejection>,
     history: &completion::SavedMetadataHistory<'_>,
 ) -> Result<(), InvestigationStoreError> {
     if reason == RefusalReason::Action(ActionRefusalReason::InvalidAction) {
-        return validate_invalid_proposal(proposal, response, ledger, call, task);
+        return validate_invalid_proposal(proposal, response, ledger, call, task, patch_rejection);
+    }
+    if patch_rejection.is_some() {
+        return Err(InvestigationStoreError::Invalid);
     }
     let action = validate_proposal(
         proposal,
@@ -1409,6 +1447,7 @@ pub(super) fn append(
         response,
         proposal,
         RefusalReason::Capacity(reason),
+        None,
     )
 }
 pub(super) fn append_reason(
@@ -1418,6 +1457,7 @@ pub(super) fn append_reason(
     response: &InvestigationResponseMeta,
     proposal: &Value,
     reason: RefusalReason,
+    patch_rejection: Option<agents::investigation::finish_patch::PatchRejection>,
 ) -> Result<Entry, InvestigationStoreError> {
     require_transaction(tx)?;
     if !preflight(tx)? {
@@ -1455,7 +1495,7 @@ pub(super) fn append_reason(
             .is_some_and(|entry| entry.call.invocation_ordinal >= call.invocation_ordinal)
         || call.admission.capacity_refusal_count != current.count
         || call.admission.capacity_feedback != current.feedback
-        || call.mode() != CompletionCallMode::Choice
+        || (call.mode() != CompletionCallMode::Choice && patch_rejection.is_none())
         || line
             .calls
             .get(&call.invocation_ordinal)
@@ -1492,6 +1532,7 @@ pub(super) fn append_reason(
         proposal,
         response,
         reason,
+        patch_rejection,
         &history,
     )?;
     let sequence = u32::try_from(entries.len())
@@ -1510,6 +1551,7 @@ pub(super) fn append_reason(
         proposal: proposal.clone(),
         reason,
         previous_entry_id: entries.last().map(|entry| entry.entry_id.clone()),
+        patch_rejection,
     };
     entry.entry_id = entry.content_id()?;
     let charge = entry.byte_charge()?;

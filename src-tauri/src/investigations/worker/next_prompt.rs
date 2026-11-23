@@ -22,6 +22,21 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             .ok_or(HostError::InvalidInput)?;
         let held = self.pending_patch.take();
         let is_patch = held.is_some();
+        // @29 (#2431): a patch the merge rejects goes back to the model as
+        // invalid_action while the run's allowance lasts, and the holder stays
+        // for the retry. Past the allowance the patch settles below, terminal.
+        if let Some(holder) = &held
+            && self.detail.summary.specialist_id.uses_native_tool_runtime()
+            && let Some(rejection) = holder.rejection(
+                &completion.text,
+                holder.basis(),
+                self.detail.summary.specialist_id.patches_whole_finish(),
+            )
+            && self.refuse_rejected_patch(completion, step_id, rejection)?
+        {
+            self.pending_patch = held;
+            return Ok(true);
+        }
         let action = if is_patch {
             None
         } else {
@@ -208,32 +223,7 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         else {
             return Err(stop(failure));
         };
-        let revision = self.detail.summary.revision;
-        self.check_new_work()?;
-        if self.detail.summary.revision != revision {
-            return Err(InvestigationStoreError::Stale.into());
-        }
-        let response = InvestigationResponseMeta {
-            finish_feedback_witness: None,
-            finish_telemetry: None,
-            step_id: step_id.into(),
-            response_hash: content_hash(completion.text.as_bytes()),
-            action_hash: self.hold_action(bounded_json(&original, 32 * 1024)?),
-            observed_model: completion.response_model.clone(),
-            reported_input_tokens: completion
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.input_tokens),
-            reported_output_tokens: completion
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.output_tokens),
-            reported_cache_read_tokens: completion
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.cache_read_input_tokens),
-            active_milliseconds: self.clock.active_milliseconds(),
-        };
+        let response = self.refused_response(completion, step_id, &original)?;
         let refused = self
             .state
             .jobs
@@ -256,6 +246,78 @@ impl<R: tauri::Runtime> Worker<'_, R> {
         };
         super::super::emit_changed(self.app, &self.detail);
         Ok(true)
+    }
+
+    /// @29 (#2431): journal a rejected finish patch as `invalid_action`. False
+    /// when the response is not a JSON object or the run's allowance is spent;
+    /// the caller then settles the patch, which rejects it terminally.
+    fn refuse_rejected_patch(
+        &mut self,
+        completion: &BoundedCompletion,
+        step_id: &str,
+        rejection: agents::investigation::finish_patch::PatchRejection,
+    ) -> Result<bool, Failure> {
+        let Ok(original @ serde_json::Value::Object(_)) =
+            serde_json::from_str::<serde_json::Value>(&completion.text)
+        else {
+            return Ok(false);
+        };
+        let response = self.refused_response(completion, step_id, &original)?;
+        let refused = self
+            .state
+            .jobs
+            .lock()
+            .map_err(|_| HostError::Operational)?
+            .refuse_next_prompt_patch(
+                self.execution,
+                self.detail.summary.revision,
+                &response,
+                &original,
+                rejection,
+            );
+        self.detail = match refused {
+            Ok(detail) => detail,
+            Err(InvestigationStoreError::Capacity) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        super::super::emit_changed(self.app, &self.detail);
+        Ok(true)
+    }
+
+    /// The response record of a refused call. Cancellation and new work
+    /// precede the refusal, which never rebases to a newer revision.
+    fn refused_response(
+        &mut self,
+        completion: &BoundedCompletion,
+        step_id: &str,
+        original: &serde_json::Value,
+    ) -> Result<InvestigationResponseMeta, Failure> {
+        let revision = self.detail.summary.revision;
+        self.check_new_work()?;
+        if self.detail.summary.revision != revision {
+            return Err(InvestigationStoreError::Stale.into());
+        }
+        Ok(InvestigationResponseMeta {
+            finish_feedback_witness: None,
+            finish_telemetry: None,
+            step_id: step_id.into(),
+            response_hash: content_hash(completion.text.as_bytes()),
+            action_hash: self.hold_action(bounded_json(original, 32 * 1024)?),
+            observed_model: completion.response_model.clone(),
+            reported_input_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.input_tokens),
+            reported_output_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.output_tokens),
+            reported_cache_read_tokens: completion
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.cache_read_input_tokens),
+            active_milliseconds: self.clock.active_milliseconds(),
+        })
     }
 
     pub(super) fn publish_next_invocation(

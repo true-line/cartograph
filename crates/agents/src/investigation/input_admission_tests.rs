@@ -1257,6 +1257,7 @@ fn gated_analyst_input_schema_and_membership_share_authority() {
             Some(ActionRefusalFeedback {
                 query_budget: None,
                 reason: ActionRefusalReason::ActionNotOffered,
+                patch_rejection: None,
                 invocation_ordinal: 1,
                 action_hash: "a".repeat(64),
                 choices_hash: choices.stamp_hash().unwrap(),

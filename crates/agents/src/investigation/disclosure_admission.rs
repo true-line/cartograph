@@ -89,13 +89,19 @@ pub struct ActionRefusalFeedback {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_budget: Option<query_refusal::QueryBudgetDiagnostic>,
     pub reason: ActionRefusalReason,
+    /// @29 (#2431): why a finish patch was rejected. Only an `invalid_action`
+    /// refusal of a finish-patch call carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_rejection: Option<finish_patch::PatchRejection>,
     pub invocation_ordinal: u32,
     pub action_hash: String,
     pub choices_hash: String,
 }
 impl ActionRefusalFeedback {
     pub fn stamp_hash(&self) -> Result<String, InvestigationError> {
-        if (self.reason == ActionRefusalReason::QueryPageBudget) != self.query_budget.is_some() {
+        if (self.reason == ActionRefusalReason::QueryPageBudget) != self.query_budget.is_some()
+            || (self.patch_rejection.is_some() && self.reason != ActionRefusalReason::InvalidAction)
+        {
             return Err(InvestigationError::InvalidInput);
         }
         if let Some(budget) = self.query_budget {

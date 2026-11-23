@@ -40,6 +40,47 @@ impl JobStore {
         proposal: &Value,
         reason: admission_journal::RefusalReason,
     ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.refuse_next_prompt_with(
+            execution,
+            expected_revision,
+            response,
+            proposal,
+            reason,
+            None,
+        )
+    }
+    /// @29 (#2431): a finish-patch response the merge rejected goes back to
+    /// the model as `invalid_action`, within the same per-run allowance. The
+    /// task keeps its pending correction; past the allowance this returns
+    /// Capacity and the caller settles the patch as before (terminal).
+    pub fn refuse_next_prompt_patch(
+        &mut self,
+        execution: &JobExecution,
+        expected_revision: u64,
+        response: &InvestigationResponseMeta,
+        proposal: &Value,
+        rejection: agents::investigation::finish_patch::PatchRejection,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
+        self.refuse_next_prompt_with(
+            execution,
+            expected_revision,
+            response,
+            proposal,
+            admission_journal::RefusalReason::Action(
+                agents::investigation::ActionRefusalReason::InvalidAction,
+            ),
+            Some(rejection),
+        )
+    }
+    fn refuse_next_prompt_with(
+        &mut self,
+        execution: &JobExecution,
+        expected_revision: u64,
+        response: &InvestigationResponseMeta,
+        proposal: &Value,
+        reason: admission_journal::RefusalReason,
+        patch_rejection: Option<agents::investigation::finish_patch::PatchRejection>,
+    ) -> Result<InvestigationDetail, InvestigationStoreError> {
         execution.verify()?;
         if execution.inner.namespace != self.namespace {
             return Err(InvestigationStoreError::Ownership);
@@ -60,7 +101,7 @@ impl JobStore {
             admission_journal::RefusalReason::Capacity(reason) => {
                 refuse_capacity(&tx, &task, response, proposal, reason)?
             }
-            reason => refuse(&tx, &task, response, proposal, reason)?,
+            reason => refuse(&tx, &task, response, proposal, reason, patch_rejection)?,
         };
         tx.commit()?;
         // No in-memory acknowledgement is returned before durable commit.
@@ -81,6 +122,7 @@ pub(super) fn refuse_capacity(
         response,
         proposal,
         admission_journal::RefusalReason::Capacity(reason),
+        None,
     )
 }
 fn refuse(
@@ -89,6 +131,7 @@ fn refuse(
     response: &InvestigationResponseMeta,
     proposal: &Value,
     reason: admission_journal::RefusalReason,
+    patch_rejection: Option<agents::investigation::finish_patch::PatchRejection>,
 ) -> Result<StoredTask, InvestigationStoreError> {
     storage::validate_next_prompt_task(task)?;
     if task.phase != Phase::Invocation {
@@ -110,7 +153,9 @@ fn refuse(
         .as_ref()
         .and_then(|state| state.current_call.as_ref())
         .ok_or(InvestigationStoreError::Invalid)?;
-    if call.mode() != CompletionCallMode::Choice {
+    // A rejected finish patch is the one finish-only refusal; the journal
+    // checks its saved patch binding.
+    if call.mode() != CompletionCallMode::Choice && patch_rejection.is_none() {
         // Worker settles the distinct terminal protocol outcome. A refusal here
         // must never create feedback or permit another model call.
         return Err(InvestigationStoreError::Invalid);
@@ -143,7 +188,15 @@ fn refuse(
         admission_journal::RefusalReason::Capacity(reason) => {
             admission_journal::append(tx, task, call, response, proposal, reason)?
         }
-        reason => admission_journal::append_reason(tx, task, call, response, proposal, reason)?,
+        reason => admission_journal::append_reason(
+            tx,
+            task,
+            call,
+            response,
+            proposal,
+            reason,
+            patch_rejection,
+        )?,
     };
     let expected_feedback = entry
         .action_feedback()

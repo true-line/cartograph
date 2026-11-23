@@ -780,6 +780,7 @@ fn dump_analyst_schema_variants() {
     let unknown = |choices: &AcquisitionChoices| ActionRefusalFeedback {
         query_budget: None,
         reason: ActionRefusalReason::UnknownAnchor,
+        patch_rejection: None,
         invocation_ordinal: 1,
         action_hash: "a".repeat(64),
         choices_hash: choices.stamp_hash().unwrap(),
