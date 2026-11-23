@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { WorkPacketForm } from './WorkPacketForm';
-import { packetFactKey, packetFactLabel, type PacketDetail,
+import { packetFactKey, packetFactLabel, type PacketDetail, type PacketDispatch,
   type PacketJson } from '../workPacketTypes';
 import type { useWorkPacketStore } from '../workPacketStore';
 
@@ -74,6 +74,20 @@ export function WorkPackets({ state, repositories }: Props & { repositories?: st
   </section>;
 }
 
+/** A dispatch's local branch, as recorded; nothing was pushed or merged. */
+function PacketDispatchView({ dispatch }: { dispatch: PacketDispatch }) {
+  const paths = dispatch.changed_paths.length + dispatch.changed_paths_omitted;
+  return <section aria-label="Packet dispatch"><h4>Dispatched over ACP</h4>
+    <p>Stop: <strong>{dispatch.stop}</strong> · at review revision {dispatch.reviewed_revision}</p>
+    <p>Local branch <code>{dispatch.branch}</code> from <code>{dispatch.base_revision}</code>{dispatch.head_revision
+      ? <> · commit <code data-testid="packet-dispatch-head">{dispatch.head_revision}</code></>
+      : <> · no commit</>}</p>
+    <p>{paths} changed {paths === 1 ? 'path' : 'paths'} · {dispatch.refused_requests} agent {dispatch.refused_requests === 1 ? 'request' : 'requests'} refused. Not pushed or merged; review the branch before merging it.</p>
+    {dispatch.changed_paths.length > 0 && <ul>{dispatch.changed_paths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>}
+    {dispatch.changed_paths_omitted > 0 && <p className="muted">{dispatch.changed_paths_omitted} more not listed.</p>}
+  </section>;
+}
+
 export function PacketDetailView({ detail }: { detail: PacketDetail }) {
   return <article className="packet-detail" aria-label="Saved packet detail"><h3>Saved immutable packet</h3>
     <p>Packet body schema: {detail.body.schema_version}</p>
@@ -81,7 +95,8 @@ export function PacketDetailView({ detail }: { detail: PacketDetail }) {
     <p>Review: <strong>{detail.review.status}</strong> · revision {detail.review.revision}</p>
     {detail.review.note && <p className="packet-source-text">Review note: {detail.review.note}</p>}
     <p>Source freshness: <strong>{detail.freshness.state}</strong> · checked {detail.freshness.checked_at ?? 'not yet assessed'}</p>
-    <p>Execution: <strong>unoffered</strong></p>
+    <p>Execution: <strong data-testid="packet-execution">{detail.execution}</strong></p>
+    {detail.dispatch && <PacketDispatchView dispatch={detail.dispatch} />}
     <details><summary>Lineage and independent freshness observations</summary><h4>Predecessors</h4>
       {detail.lineage.predecessor_ids.length ? <ul>{detail.lineage.predecessor_ids.map((id) => <li key={id}><code>{id}</code></li>)}</ul> : <p>None recorded.</p>}
       <PacketValue value={detail.freshness as unknown as PacketJson} /></details>

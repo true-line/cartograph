@@ -29,7 +29,14 @@ export interface PacketBody {
 }
 export interface PacketDetail {
   packet_id: string; body: PacketBody; review: PacketReview;
-  lineage: { predecessor_ids: string[] }; freshness: PacketFreshness; execution: 'unoffered';
+  lineage: { predecessor_ids: string[] }; freshness: PacketFreshness; execution: PacketExecution;
+  dispatch?: PacketDispatch;
+}
+/** `dispatched`: an agent's turn ended without a commit; `submitted`: its change is a local branch commit (ADR-0092). */
+export type PacketExecution = 'unoffered' | 'dispatched' | 'submitted';
+export interface PacketDispatch {
+  reviewed_revision: number; branch: string; base_revision: string; head_revision: string | null; stop: string;
+  changed_paths: string[]; changed_paths_omitted: number; refused_requests: number;
 }
 export interface PacketSummary { packet_id: string; objective?: PacketKnown<string>; review: PacketReview; freshness?: PacketFreshness }
 export interface PacketIntent {
