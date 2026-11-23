@@ -132,9 +132,18 @@ pub(crate) fn rule_bearing_sources(
         .nodes_with_label("BusinessRule")
         .map_err(|error| error.to_string())?;
     let mut sources = Vec::new();
-    for owner in rank_owners(&rules, repo, files, MAX_PER_FILE) {
+    // The per-file cap counts only owners that yield a suggestion, so an
+    // owner skipped below does not crowd out an inspectable one (#2523).
+    let mut taken: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for owner in rank_owners(&rules, repo, files, usize::MAX) {
         if sources.len() >= limit {
             break;
+        }
+        if taken
+            .get(&(owner.repo.clone(), owner.path.clone()))
+            .is_some_and(|count| *count >= MAX_PER_FILE)
+        {
+            continue;
         }
         let fact = TaskFactKey::Node {
             id: owner.owner_id.clone(),
@@ -153,6 +162,9 @@ pub(crate) fn rule_bearing_sources(
         }) else {
             continue;
         };
+        *taken
+            .entry((owner.repo.clone(), owner.path.clone()))
+            .or_default() += 1;
         sources.push(RuleBearingSource {
             fact,
             owner,

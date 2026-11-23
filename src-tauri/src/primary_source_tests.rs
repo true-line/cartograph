@@ -5736,7 +5736,7 @@ fn an_oversized_java_rule_owner_is_range_too_large_and_never_suggested() {
         .map(|index| format!("    int local{index} = values.size() + {index};\n"))
         .collect();
     let java = format!(
-        "package demo;\n\nimport java.util.Map;\n\nclass Registry {{\n  Object determine(Map<Class<?>, Object> values, String name) {{\n    if (values == null) {{\n      throw new IllegalArgumentException(name);\n    }}\n{filler}    return name;\n  }}\n\n  void small(String name) {{\n    if (name == null) {{\n      throw new IllegalStateException();\n    }}\n  }}\n}}\n"
+        "package demo;\n\nimport java.util.Map;\n\nclass Registry {{\n  Object determine(Map<Class<?>, Object> values, String name) {{\n    if (values == null) {{\n      throw new IllegalArgumentException(name);\n    }}\n    if (name == null) {{\n      throw new IllegalStateException();\n    }}\n{filler}    return name;\n  }}\n\n  void small(String name) {{\n    if (name == null) {{\n      throw new IllegalStateException();\n    }}\n  }}\n\n  void other(String name) {{\n    if (name.isEmpty()) {{\n      throw new IllegalStateException();\n    }}\n  }}\n}}\n"
     );
     let dir = tempfile::tempdir().unwrap();
     let app_data = directory(dir.path(), "private");
@@ -5783,7 +5783,13 @@ fn an_oversized_java_rule_owner_is_range_too_large_and_never_suggested() {
     }
     let suggested =
         crate::investigations::rule_sources::rule_bearing_sources(&state, None, None, 7).unwrap();
-    assert!(!suggested.is_empty());
+    // The oversized owner ranks first in its file; a skipped owner does not
+    // take one of the file's slots, so both smaller owners are still offered.
+    assert_eq!(
+        suggested.len(),
+        crate::investigations::rule_sources::MAX_PER_FILE,
+        "{suggested:?}"
+    );
     for source in &suggested {
         crate::investigations::inspection::resolve_typed(
             &state,
