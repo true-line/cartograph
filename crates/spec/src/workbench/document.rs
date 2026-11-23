@@ -1187,13 +1187,8 @@ pub(super) fn d1(
                     "Every rule observation, with its tier, confidence, citation and \
                      dependencies, is in `rule-evidence.md` of this export.\n",
                 )?;
-                cited += rules::rules_per_capability(
+                cited += rules::rules_per_capability_in(
                     (nodes, edges),
-                    knowledge,
-                    (&mut assertions, &mut drafted.asserted),
-                    &mut content,
-                )?;
-                cited += operations::limits_per_capability(
                     knowledge,
                     mode,
                     (&mut assertions, &mut drafted.asserted),
