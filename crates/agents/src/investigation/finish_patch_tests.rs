@@ -491,6 +491,48 @@ fn a_capacity_gap_is_disclosed_inside_the_patch() {
     );
 }
 
+/// AC-1434 (#1728 run-29): an @29 disclosure that claims a finding was
+/// withdrawn is refused when the patch withdrew nothing; earlier roles merge
+/// it unchanged.
+#[test]
+fn a_disclosure_claiming_an_unmade_withdrawal_is_refused() {
+    let first = finish();
+    let gap = "e".repeat(64);
+    let mut record = limitation_refusal(&first);
+    record.feedback.prose_correction = None;
+    record.feedback.unmet = vec![FeedbackEntry {
+        obligation_id: gap.clone(),
+        kind: "source".into(),
+        reason: RefusalReason::ExcludedByCapacity,
+    }];
+    record.refusal_id = record.content_id().unwrap();
+    let saved = PatchBasis::from_refusal_for(&record, 3, true).unwrap();
+    let name = capacity_name(&gap).to_string();
+    let merged = |text: &str, whole: bool| {
+        VolatileFinish::capture(first.clone(), saved.clone())
+            .unwrap()
+            .merge_with(
+                &json!({"type":"finish_patch","disclosures":{name.clone():text}}).to_string(),
+                &saved,
+                whole,
+            )
+    };
+    let claim = "Not read for capacity; finding 3 is withdrawn.";
+    assert_eq!(
+        merged(claim, true).err(),
+        Some(PatchRejection::UnsupportedEditClaim)
+    );
+    assert_eq!(
+        merged("Not read for capacity. Its finding was withdrawn.", true).err(),
+        Some(PatchRejection::UnsupportedEditClaim)
+    );
+    // The same disclosure without the claim, or with a negated one, merges.
+    assert!(merged("Not read for capacity.", true).is_ok());
+    assert!(merged("Not read for capacity; no finding was withdrawn.", true).is_ok());
+    // Earlier roles keep their exact merge.
+    assert!(merged(claim, false).is_ok());
+}
+
 // AC-1431 (T-1431): on a @29 patch step a full finish is read as a patch at
 // the flagged indices, so unflagged rows stay as first admitted; without the
 // opt-in, or with a different finding count, it stays InvalidShape.
