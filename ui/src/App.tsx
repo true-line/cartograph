@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isCompletionSpecialist } from './investigationFamilies';
+import { manifestSuggestions } from './manifestSuggestions';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
 import { createRepositoryLabeler } from './repositoryLabels';
@@ -1082,6 +1083,10 @@ export default function App() {
             manifestGuide={{
               preview: (draft) => invoke<string>('preview_system_manifest', { draft }),
               save: (draft) => invoke<string | null>('save_system_manifest', { draft }),
+              // #2474: suggest the keys the last recovery's client calls lacked.
+              suggestions: manifestSuggestions(
+                specBundle?.artifacts.find((item) => item.file_name === 'gap_register.md')?.assertions ?? [],
+              ),
             }}
             source={ingestSource}
             target={ingestTarget}
