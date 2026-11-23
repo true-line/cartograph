@@ -66,7 +66,10 @@ fn estate_captured_local_analyst() {
 /// paths belong to. CARTOGRAPH_ESTATE_V2_FILL, when set, points at a JSON
 /// list of selections in rule v2 order; a shortfall below seven is filled from
 /// it, skipping facts already taken (AC-1436, #2524). `selections` is then the
-/// complete rule v3 list in canonical selection order, ready to stage.
+/// complete rule v3 list in canonical selection order, ready to stage; each
+/// entry is re-bound to the profile and checked as staging checks it, and a
+/// fact that cannot be inspected is listed under `excluded` with its reason
+/// (AC-1438, #2523).
 #[test]
 #[ignore = "manual #1728 rule v3 selection; reads a copied profile, no provider"]
 fn estate_rule_bearing_selections() {
@@ -95,16 +98,55 @@ fn estate_rule_bearing_selections() {
     let fill: Vec<vendure_prepare::Selection> = std::env::var_os("CARTOGRAPH_ESTATE_V2_FILL")
         .map(|fill| serde_json::from_slice(&std::fs::read(fill).unwrap()).unwrap())
         .unwrap_or_default();
-    let selections = vendure_prepare::complete_rule_v3(owners, fill, 7);
+    // AC-1438 (#2523): stage only what this profile resolves now; a fact
+    // that cannot be inspected is excluded here with its typed reason.
+    let (selections, excluded) =
+        vendure_prepare::complete_rule_v3_current(owners, fill, 7, |candidate| {
+            current_selection(&state, candidate)
+        });
     let ranking: Vec<_> = sources.iter().map(|source| &source.owner).collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "selections": selections,
+            "excluded": excluded,
             "ranking": ranking,
         }))
         .unwrap()
     );
+}
+
+/// The selection as `state` binds its fact now, checked through the staging
+/// resolver, or the typed reason it cannot be inspected (#2523).
+fn current_selection(
+    state: &crate::AppState,
+    candidate: &vendure_prepare::Selection,
+) -> Result<vendure_prepare::Selection, String> {
+    let description =
+        crate::primary_source::describe(state, &crate::task_evidence::graph_fact(&candidate.fact))
+            .map_err(|error| format!("no current captured receipt: {error}"))?;
+    if candidate.ordinal >= description.ranges.len() {
+        return Err(format!(
+            "range {} is past the receipt's {} ranges",
+            candidate.ordinal,
+            description.ranges.len()
+        ));
+    }
+    let selection = vendure_prepare::Selection {
+        fact: candidate.fact.clone(),
+        graph_snapshot_id: description.graph_snapshot_id,
+        receipt_id: description.receipt_id,
+        ordinal: candidate.ordinal,
+    };
+    crate::investigations::inspection::resolve_typed(
+        state,
+        &selection.fact,
+        &selection.graph_snapshot_id,
+        &selection.receipt_id,
+        selection.ordinal,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(selection)
 }
 
 /// #2523 diagnostic: resolve each selection of a definition against a copied

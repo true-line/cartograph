@@ -5679,6 +5679,54 @@ fn a_java_only_source_is_captured_and_its_symbols_read_back() {
     }
 }
 
+// AC-1438 (#2523): a Java method whose parameter is `Map<Class<?>, Object>`
+// has a Symbol id with a space in its signature. Selected through the graph's
+// own binding, it resolves through the staging check to the same target.
+#[test]
+fn a_java_symbol_with_a_spaced_generic_signature_resolves_for_inspection() {
+    const JAVA: &str = "package demo;\n\nimport java.util.Map;\n\nclass Registry {\n  void register(Map<Class<?>, Object> values, String name) {\n    if (values == null) {\n      throw new IllegalArgumentException(name);\n    }\n  }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "java-generic");
+    std::fs::write(root.join("Registry.java"), JAVA).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let parsed = parse(&state, &source, || {});
+    let symbol = parsed
+        .extraction
+        .nodes
+        .iter()
+        .find(|node| node.label == "Symbol" && node.id.contains("register("))
+        .expect("the generic Java method is recovered")
+        .clone();
+    assert!(
+        symbol.id.contains(' '),
+        "the fixture covers a spaced signature: {}",
+        symbol.id
+    );
+    publish(&state, &source, &parsed);
+    let fact = FactKey::from_node(&symbol);
+    let description = primary_source::describe(&state, &fact).unwrap();
+    let task_fact = crate::task_evidence::task_fact(&fact);
+    assert!(!description.ranges.is_empty());
+    for range in &description.ranges {
+        let (target, _guard) = crate::investigations::inspection::resolve_typed(
+            &state,
+            &task_fact,
+            &description.graph_snapshot_id,
+            &description.receipt_id,
+            range.index,
+        )
+        .unwrap_or_else(|error| {
+            panic!("range {} of {} resolves: {error:?}", range.index, symbol.id)
+        });
+        assert_eq!(target.fact, task_fact);
+        assert_eq!(target.graph_snapshot_id, description.graph_snapshot_id);
+        assert_eq!(target.receipt_id, description.receipt_id);
+        assert_eq!(target.receipt_inventory_index as usize, range.index);
+    }
+}
+
 /// Receipts the production TS lane mints from `capture` (ADR-0072 slice 2).
 fn receipts_from(
     state: &AppState,
