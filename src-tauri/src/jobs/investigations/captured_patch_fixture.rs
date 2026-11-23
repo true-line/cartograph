@@ -339,6 +339,39 @@ impl CapturedSourceInvocationFixture {
             scan_candidate_absence(self.inner.directory.path());
             return;
         }
+        if case == "retry_refused" {
+            // Earlier roles keep the terminal patch rejection.
+            let bad =
+                json!({"type":"finish_patch","patches":[{"finding_index":0,"withdraw":true}]});
+            let (_, _, invoked) = self.patch_invocation(provider, firewall, pages, evidence);
+            let response = patch_response(&bad, &invoked);
+            assert!(
+                self.inner
+                    .store
+                    .refuse_next_prompt_patch(
+                        &self.inner._execution_guard,
+                        invoked.summary.revision,
+                        &response,
+                        &bad,
+                        agents::investigation::finish_patch::PatchRejection::InvalidIndex,
+                    )
+                    .is_err()
+            );
+            return;
+        }
+        if case.starts_with("retry") {
+            self.assert_patch_retry(
+                provider,
+                firewall,
+                pages,
+                evidence,
+                case,
+                &first_finish,
+                &marker,
+                &good,
+            );
+            return;
+        }
         let mut held = VolatileFinish::capture(first_finish.clone(), marker.clone()).unwrap();
         if case == "binding_mismatch" {
             let mut wrong = marker.clone();
@@ -521,6 +554,152 @@ impl CapturedSourceInvocationFixture {
                 // Each transaction rolls back, including independent response bytes.
             }
         }
+        scan_candidate_absence(self.inner.directory.path());
+    }
+}
+
+impl CapturedSourceInvocationFixture {
+    /// @29 (#2431): a rejected patch is journaled as invalid_action and the
+    /// patch step is offered again with the rejection as feedback, at most
+    /// MAX_INVALID_ACTION_REFUSALS times a run. `retry` then recovers with a
+    /// valid patch; `retry_cap` sends one more, which settles as terminal.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_patch_retry(
+        mut self,
+        provider: &dyn llm::LlmProvider,
+        firewall: &llm::EgressFirewall,
+        pages: &[String],
+        evidence: &[agents::AgentEvidence],
+        case: &str,
+        first_finish: &StagedFinish,
+        marker: &agents::investigation::finish_patch::PatchBasis,
+        good: &Value,
+    ) {
+        use agents::investigation::MAX_INVALID_ACTION_REFUSALS;
+        use agents::investigation::finish_patch::PatchRejection;
+        let role = self.inner.task.detail.summary.specialist_id;
+        let whole = role.patches_whole_finish();
+        // Withdrawing the unflagged finding 0 is outside the patch's rows.
+        let bad = json!({"type":"finish_patch","patches":[{"finding_index":0,"withdraw":true}]});
+        let refusals = if case == "retry" {
+            1
+        } else {
+            MAX_INVALID_ACTION_REFUSALS
+        };
+        for attempt in 0..refusals {
+            let held = VolatileFinish::capture(first_finish.clone(), marker.clone()).unwrap();
+            let raw = bad.to_string();
+            assert_eq!(
+                held.rejection(&raw, marker, whole),
+                Some(PatchRejection::InvalidIndex)
+            );
+            let (current, _, invoked) = self.patch_invocation(provider, firewall, pages, evidence);
+            let prompt: Value =
+                serde_json::from_str(&current.action("probe".into()).unwrap().payload.prompt)
+                    .unwrap();
+            let feedback = &prompt["turn_progress"]["action_feedback"];
+            if attempt == 0 {
+                assert!(feedback.is_null(), "{feedback}");
+            } else {
+                assert_eq!(feedback["reason"], "invalid_action");
+                assert_eq!(feedback["patch_rejection"], "invalid_index");
+            }
+            assert!(prompt["turn_progress"]["finish_patch"].is_object());
+            let response = patch_response(&bad, &invoked);
+            let detail = self
+                .inner
+                .store
+                .refuse_next_prompt_patch(
+                    &self.inner._execution_guard,
+                    invoked.summary.revision,
+                    &response,
+                    &bad,
+                    PatchRejection::InvalidIndex,
+                )
+                .unwrap();
+            assert_eq!(detail.summary.status, InvestigationStatus::Running);
+            assert_eq!(
+                self.inner
+                    .store
+                    .investigation_pending_patch(&self.inner._execution_guard, self.id())
+                    .unwrap()
+                    .as_ref(),
+                Some(marker)
+            );
+            // Reopen replays the journal, including the patch-mode entry.
+            let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
+            assert_eq!(reopened.investigation(self.id()).unwrap(), detail);
+            drop(reopened);
+            scan_candidate_absence(self.inner.directory.path());
+        }
+        let held = VolatileFinish::capture(first_finish.clone(), marker.clone()).unwrap();
+        let (current, prepared, invoked) =
+            self.patch_invocation(provider, firewall, pages, evidence);
+        let prompt: Value =
+            serde_json::from_str(&current.action("probe".into()).unwrap().payload.prompt).unwrap();
+        assert_eq!(
+            prompt["turn_progress"]["action_feedback"]["patch_rejection"],
+            "invalid_index"
+        );
+        let mut replacement = good.clone();
+        replacement["title"] = json!("Corrected selected evidence");
+        let patch = if case == "retry" {
+            json!({"type":"finish_patch","patches":[{"finding_index":1,"replace":replacement}]})
+        } else {
+            bad.clone()
+        };
+        let response = patch_response(&patch, &invoked);
+        if case != "retry" {
+            // The allowance is spent: the journal refuses a third.
+            assert_eq!(
+                self.inner
+                    .store
+                    .refuse_next_prompt_patch(
+                        &self.inner._execution_guard,
+                        invoked.summary.revision,
+                        &response,
+                        &patch,
+                        PatchRejection::InvalidIndex,
+                    )
+                    .unwrap_err(),
+                InvestigationStoreError::Capacity
+            );
+        }
+        let raw = patch.to_string();
+        let settled = self
+            .inner
+            .store
+            .admit_next_prompt_finish_with_patch(
+                &self.inner._execution_guard,
+                invoked.summary.revision,
+                &NextPromptFinish {
+                    request: &self.inner.request,
+                    response: &response,
+                    original_action: &patch,
+                    current: &current,
+                    current_prepared: &prepared,
+                },
+                Some(held),
+                Some(&raw),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            settled.summary.status,
+            if case == "retry" {
+                InvestigationStatus::Completed
+            } else {
+                InvestigationStatus::Failed
+            },
+            "{:?}",
+            settled.error
+        );
+        let reopened = JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
+        assert_eq!(reopened.investigation(self.id()).unwrap(), settled);
+        assert_eq!(
+            reopened.investigation_result(self.id()).unwrap().is_some(),
+            case == "retry"
+        );
         scan_candidate_absence(self.inner.directory.path());
     }
 }

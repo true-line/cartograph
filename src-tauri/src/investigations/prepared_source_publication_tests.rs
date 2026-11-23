@@ -382,6 +382,40 @@ fn prepared_source_publication_analyst24_unmeasured_receipt_uses_legacy_bound() 
     assert_acquired_publication_capture(Some(SpecialistId::DomainAnalystV24), false);
 }
 
+// #2431: an @29 patch the merge rejects goes back to the model as
+// invalid_action within the run's allowance; the third is terminal.
+#[test]
+fn analyst29_rejected_patch_retries_within_invalid_action_allowance() {
+    for case in ["retry", "retry_cap"] {
+        let (saved, state, mut context, target, _) =
+            fixture_for_role_capture(Some(SpecialistId::DomainAnalystV29), true);
+        reset_reads();
+        eprintln!("patch retry case: {case}");
+        let candidate = read(&saved, &state, &context, &target)
+            .unwrap_or_else(|e| panic!("read failed: {:?}", e.kind()));
+        let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+        let provider = provider();
+        let _published = candidate
+            .publish_acquired(
+                &mut context,
+                &state,
+                saved.execution(),
+                &clock(),
+                &publication(&saved, &firewall, &provider),
+            )
+            .unwrap_or_else(|e| panic!("publication failed: {}", e.error()));
+        let citation = &context.ledger.citations.last().unwrap().citation_id;
+        saved.assert_volatile_patch_after_capture(
+            &provider,
+            &firewall,
+            citation,
+            &context.query_pages,
+            &context.evidence,
+            case,
+        );
+    }
+}
+
 // AC-0572: every case starts fresh and invokes no model or provider transport.
 #[test]
 fn analyst27_volatile_patch_admission_and_reopen() {
@@ -402,6 +436,7 @@ fn analyst27_volatile_patch_admission_and_reopen() {
         "fallback_missing",
         "fallback_hash",
         "fallback_swapped",
+        "retry_refused",
     ] {
         let (saved, state, mut context, target, _) =
             fixture_for_role_capture(Some(SpecialistId::DomainAnalystV27), true);
