@@ -386,12 +386,21 @@ fn operations_and_limits(
             // The rule names its operation: two operations sharing one limit
             // state two rules, which the drafter's repeated-rule check keeps.
             // The refusal is the recorded status; a breach callback's
-            // response replaces it, and its status is not recorded.
-            let refusal = match endpoint.props["rate_limits"]["exceeded_status"].as_u64() {
-                Some(status) => format!("requests past it are refused with {status}"),
-                None => "requests past it get the response of a breach callback".to_owned(),
+            // response replaces it, and its status is not recorded. A graph
+            // recovered before either was recorded proves neither, so its
+            // row states the limit alone.
+            let recorded = &endpoint.props["rate_limits"];
+            let on_breach = recorded["entries"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().any(|entry| entry["on_breach"] == true));
+            let refusal = match recorded["exceeded_status"].as_u64() {
+                Some(status) => format!("; requests past it are refused with {status}"),
+                None if on_breach => {
+                    "; requests past it get the response of a breach callback".to_owned()
+                }
+                None => String::new(),
             };
-            let mut rule = format!("{} accepts {text}; {refusal}.", NodeName(endpoint));
+            let mut rule = format!("{} accepts {text}{refusal}.", NodeName(endpoint));
             if unresolved {
                 rule.push_str(" A declared limit's value is not resolved.");
             }
@@ -469,6 +478,15 @@ mod tests {
 
     /// §1.3 and §1.5 for one capability over a recovered Flask repository.
     fn render(files: &[(&str, &str)], mode: ExportMode) -> (String, String) {
+        render_with(files, mode, |_| {})
+    }
+
+    /// [`render`], with `edit` applied to the recovered nodes first.
+    fn render_with(
+        files: &[(&str, &str)],
+        mode: ExportMode,
+        edit: impl Fn(&mut Vec<Node>),
+    ) -> (String, String) {
         let dir = tempfile::tempdir().unwrap();
         for (path, source) in files {
             let file = dir.path().join(path);
@@ -483,6 +501,8 @@ mod tests {
             },
         )
         .unwrap();
+        let mut facts = facts;
+        edit(&mut facts.nodes);
         let nodes: Vec<&Node> = facts.nodes.iter().collect();
         let edges: Vec<&Edge> = facts.edges.iter().collect();
         let endpoints: Vec<&Node> = nodes
@@ -684,6 +704,31 @@ def ping():
                 .matches(" | rate limit declared on the handler | ")
                 .count(),
             1
+        );
+        // A graph recovered before the status was recorded proves no
+        // refusal, so its row states the limit alone; a breach callback's
+        // response is named.
+        let strip = |nodes: &mut Vec<Node>, on_breach: bool| {
+            for node in nodes.iter_mut().filter(|node| node.label == "Endpoint") {
+                let limits = &mut node.props["rate_limits"];
+                if let Some(limits) = limits.as_object_mut() {
+                    limits.remove("exceeded_status");
+                    if on_breach {
+                        limits["entries"][0]["on_breach"] = true.into();
+                    }
+                }
+            }
+        };
+        let (_, older) = render_with(FILES, ExportMode::BestEffort, |nodes| strip(nodes, false));
+        assert!(
+            older.contains("replaces it). | rate limit declared on the handler")
+                && !older.contains("429"),
+            "{older}"
+        );
+        let (_, breach) = render_with(FILES, ExportMode::BestEffort, |nodes| strip(nodes, true));
+        assert!(
+            breach.contains("requests past it get the response of a breach callback."),
+            "{breach}"
         );
         // An environment default is InferredStrong, which verified-only keeps.
         let (_, verified) = render(FILES, ExportMode::VerifiedOnly);
