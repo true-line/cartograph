@@ -232,7 +232,7 @@ impl Standing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum AttestationRefusal {
-    /// The target names an empty Gap id or slot.
+    /// A part of the target is blank, too long or not plain text.
     TargetIncomplete,
     /// The statement is blank.
     BlankStatement,
@@ -250,6 +250,8 @@ pub enum AttestationRefusal {
     CitationMalformed,
     /// The recorded hashes are not exactly the supporting ids.
     RecordedHashesMismatch,
+    /// A recorded hash is not 64 lowercase hex characters (BLAKE3).
+    RecordedHashMalformed,
     /// No attestation.
     NoAttestation,
     /// More than [`MAX_ATTESTATIONS`] attestations.
@@ -297,6 +299,7 @@ impl AttestationRefusal {
             Self::DuplicateCitation => "duplicate_citation",
             Self::CitationMalformed => "citation_malformed",
             Self::RecordedHashesMismatch => "recorded_hashes_mismatch",
+            Self::RecordedHashMalformed => "recorded_hash_malformed",
             Self::NoAttestation => "no_attestation",
             Self::TooManyAttestations => "too_many_attestations",
             Self::FirstDoesNotState => "first_does_not_state",
@@ -312,9 +315,20 @@ impl AttestationRefusal {
 /// Admit `record`, or refuse it whole with the first failing rule.
 pub fn admit(record: AttestedRecord) -> Result<AttestedRecord, AttestationRefusal> {
     use AttestationRefusal as R;
-    if let AttestedTarget::Gap { gap_id, slot } = &record.target
-        && (gap_id.trim().is_empty() || slot.trim().is_empty())
-    {
+    let complete = match &record.target {
+        AttestedTarget::Gap { gap_id, slot } => [gap_id, slot]
+            .into_iter()
+            .all(|part| field_admissible(part)),
+        AttestedTarget::Section { address } => [
+            &address.catalogue_version,
+            &address.document,
+            &address.section,
+            &address.scope,
+        ]
+        .into_iter()
+        .all(|part| field_admissible(part)),
+    };
+    if !complete {
         return Err(R::TargetIncomplete);
     }
     let statement = record.statement.as_str();
@@ -349,6 +363,13 @@ pub fn admit(record: AttestedRecord) -> Result<AttestedRecord, AttestationRefusa
             .all(|id| once.contains(id.as_str()))
     {
         return Err(R::RecordedHashesMismatch);
+    }
+    if !record
+        .recorded_hashes
+        .values()
+        .all(|hash| content_hash_shaped(hash))
+    {
+        return Err(R::RecordedHashMalformed);
     }
     if record.attestations.is_empty() {
         return Err(R::NoAttestation);
@@ -493,6 +514,10 @@ pub fn citation_id_well_formed(id: &str) -> bool {
 fn fact_id_well_formed(id: &str) -> bool {
     id.strip_prefix("F-")
         .is_some_and(|hex| hex.len() == HEX && hex.bytes().all(is_lower_hex))
+}
+
+fn content_hash_shaped(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(is_lower_hex)
 }
 
 fn field_admissible(field: &str) -> bool {

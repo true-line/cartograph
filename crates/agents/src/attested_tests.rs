@@ -1,5 +1,8 @@
 use super::*;
 
+const H1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const H2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
 // Placeholder contributors only (ADR-0090 decision 4).
 fn engineer_id() -> ContributorId {
     ContributorId("C-00000000000000e1".into())
@@ -39,7 +42,7 @@ fn record(attestations: Vec<Attestation>) -> AttestedRecord {
         },
         statement: "The login handler is registered at runtime by the plugin loader.".into(),
         supporting: vec!["F-0123456789abcdef".into()],
-        recorded_hashes: BTreeMap::from([("F-0123456789abcdef".into(), "h1".into())]),
+        recorded_hashes: BTreeMap::from([("F-0123456789abcdef".into(), H1.into())]),
         attestations,
     }
 }
@@ -70,7 +73,7 @@ fn an_attested_record_is_admitted_with_named_contributors_and_an_a_id() {
     let mut rehashed = admitted;
     rehashed
         .recorded_hashes
-        .insert("F-0123456789abcdef".into(), "h2".into());
+        .insert("F-0123456789abcdef".into(), H2.into());
     assert_ne!(citation_id(&rehashed), id);
     // A record holds contributor ids only, never a name.
     let json = serde_json::to_string(&reviewed).unwrap();
@@ -185,6 +188,17 @@ fn a_malformed_record_is_refused_with_a_closed_code() {
         }),
         R::TargetIncomplete
     );
+    assert_eq!(
+        refuse(&|r| r.target = AttestedTarget::Section {
+            address: SectionAddress {
+                catalogue_version: "1.0".into(),
+                document: "D1".into(),
+                section: "".into(),
+                scope: "system".into(),
+            }
+        }),
+        R::TargetIncomplete
+    );
     assert_eq!(refuse(&|r| r.statement = " .".into()), R::BlankStatement);
     assert_eq!(
         refuse(&|r| r.statement = "x".repeat(MAX_STATEMENT_BYTES + 1)),
@@ -213,6 +227,16 @@ fn a_malformed_record_is_refused_with_a_closed_code() {
         refuse(&|r| r.recorded_hashes.clear()),
         R::RecordedHashesMismatch
     );
+    for bad in ["", "h1", &"A".repeat(64), &"1".repeat(65)] {
+        assert_eq!(
+            refuse(&|r| {
+                r.recorded_hashes
+                    .insert("F-0123456789abcdef".into(), bad.into());
+            }),
+            R::RecordedHashMalformed,
+            "{bad}"
+        );
+    }
     assert_eq!(refuse(&|r| r.attestations.clear()), R::NoAttestation);
     assert_eq!(
         refuse(&|r| r.attestations = vec![engineer(EngineerVerb::Confirmed)]),
