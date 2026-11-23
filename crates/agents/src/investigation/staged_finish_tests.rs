@@ -565,6 +565,7 @@ fn staged_finish_inventory_redaction_and_omitted_source_do_not_discharge() {
 #[test]
 fn staged_finish_feedback_is_closed_bounded_and_protected_by_actual_firewall() {
     let feedback = RefusalFeedback {
+        citation_drop: None,
         prose_correction: None,
         schema_version: 1,
         citation_correction: None,
@@ -997,6 +998,7 @@ fn staged_policy_paths_preserve_v1_bounds_and_identities() {
         2048
     );
     let entries = |count: usize| RefusalFeedback {
+        citation_drop: None,
         prose_correction: None,
         schema_version: 1,
         citation_correction: None,

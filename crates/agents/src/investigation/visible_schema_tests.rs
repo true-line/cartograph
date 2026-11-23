@@ -198,6 +198,7 @@ fn analyst28_finish_patch_shows_its_patch_schema() {
         f.metadata.refusal_count = 1;
         f.metadata.last_refusal_id = Some("c".repeat(64));
         f.metadata.feedback = Some(RefusalFeedback {
+            citation_drop: None,
             schema_version: 6,
             unmet: vec![],
             citation_correction: None,

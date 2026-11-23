@@ -9,6 +9,7 @@ fn metadata(refusal_count: u32) -> ProtectedCompletionMetadata {
         refusal_count,
         last_refusal_id: (refusal_count > 0).then(|| "c".repeat(64)),
         feedback: (refusal_count > 0).then(|| RefusalFeedback {
+            citation_drop: None,
             prose_correction: None,
             schema_version: 1,
             citation_correction: None,
