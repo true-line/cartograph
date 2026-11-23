@@ -1,7 +1,7 @@
 # Typed-decision eval (#429)
 
 This is the harness for measuring a typed-decision provider, such as TypeSafe
-Jev, on candidate selection. The decision behind it is in ADR-0090.
+Jev, on candidate selection. The decision behind it is in ADR-0091.
 
 ## What it measures
 
@@ -30,7 +30,7 @@ firewall work; it is not an accuracy measurement.
 
 ## Running it live
 
-ADR-0090 lists what a live run needs: access and a key in the OS secure
+ADR-0091 lists what a live run needs: access and a key in the OS secure
 store, a Jev `TypedDecisionProvider`, the frozen #258 labels mapped into
 cases, consent per case, and the vendor's then-current price. The report goes
 in this folder next to this file, and #429 closes with the ADR follow-up that

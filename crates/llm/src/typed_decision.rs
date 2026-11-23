@@ -1,4 +1,4 @@
-//! Consented typed-decision providers (#429, ADR-0090).
+//! Consented typed-decision providers (#429, ADR-0091).
 //!
 //! A typed-decision provider returns no prose. It takes a state blob and
 //! choice questions, and answers each one with a choice, a probability per
@@ -9,7 +9,7 @@
 //! and a denied or ungranted call never reaches the provider.
 //!
 //! An answer is inferred, never confirmed: callers record it at the tier
-//! ADR-0090 names, with the answer's own confidence.
+//! ADR-0091 names, with the answer's own confidence.
 
 use crate::{
     AnalysisTier, CompletionPayload, ConsentGrant, EgressFirewall, EgressPreview, Locality,

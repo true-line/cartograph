@@ -1,4 +1,4 @@
-//! Typed-decision eval harness for candidate selection (#429, ADR-0090).
+//! Typed-decision eval harness for candidate selection (#429, ADR-0091).
 //!
 //! Each case is one unresolved hop: its cited context (the state), the
 //! resolved candidates, and its label (the acceptable targets, or no match).
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-/// The confidence every typed-decision answer is recorded at (ADR-0090):
+/// The confidence every typed-decision answer is recorded at (ADR-0091):
 /// the T3 ceiling, never above it.
 pub const DECISION_CONFIDENCE: ConfidenceTier = ConfidenceTier::InferredWeak;
 
