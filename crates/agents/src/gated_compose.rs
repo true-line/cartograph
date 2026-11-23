@@ -290,16 +290,17 @@ const NOT_STATED_PREFIX: &str = "Not stated in domain terms (Gap)";
 
 /// Bump when the rows [`partition`] keeps change; it is part of the role's
 /// definition fingerprint, so a draft records which selection it read.
-const ROW_SELECTION: &str = "rows@2:gap-skipped:repeats-dropped";
+const ROW_SELECTION: &str = "rows@3:gap-skipped:repeated-rules-dropped";
 
 /// Rule rows [`partition`] did not hand to the drafter (#1748).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Skipped {
     /// Rows whose Rule cell is a Gap: nothing to state.
     pub gap_rows: usize,
-    /// Rows whose rule an earlier row of the section already holds: the
-    /// same Rule cell, or no citable id an earlier row did not print. A
-    /// shared helper is printed under every capability that reaches it.
+    /// Rows whose rule an earlier row of the section already holds: under a
+    /// rules table, the same Rule cell (a shared helper is printed under
+    /// every capability that reaches it, each copy with its own Where);
+    /// under any other table, the same row.
     pub repeated_rows: usize,
 }
 
@@ -323,7 +324,6 @@ pub fn partition_counted(
     let max_rows = max_rows.max(1);
     let mut skipped = Skipped::default();
     let mut rules_seen: BTreeSet<String> = BTreeSet::new();
-    let mut ids_seen: BTreeSet<String> = BTreeSet::new();
     let mut blocks: Vec<Block> = Vec::new();
     let (mut area, mut capability, mut label): (Option<&str>, Option<&str>, Option<&str>) =
         (None, None, None);
@@ -359,12 +359,18 @@ pub fn partition_counted(
                     skipped.gap_rows += 1;
                     continue;
                 }
-                let fresh = ids.iter().any(|id| !ids_seen.contains(id));
-                if !rules_seen.insert(norm(rule)) || !fresh {
+                // A state machine's transitions all cite the machine, and two
+                // states may move to the same place: only the whole row says
+                // which transition it is.
+                let key = if rules_table(&block.header[0]) {
+                    norm(rule)
+                } else {
+                    norm(line)
+                };
+                if !rules_seen.insert(key) {
                     skipped.repeated_rows += 1;
                     continue;
                 }
-                ids_seen.extend(ids.iter().cloned());
                 block.rows.push(Row {
                     text: line.to_owned(),
                     ids,
@@ -623,6 +629,12 @@ fn clip(text: &str, max: usize) -> String {
     } else {
         format!("{}…", text.chars().take(max).collect::<String>())
     }
+}
+
+/// Whether `header` heads a rules table (`| Where | Rule | ... |`), whose
+/// Rule cell alone is the rule and whose Where says only where it applies.
+fn rules_table(header: &str) -> bool {
+    rule_cell(header) == "Rule"
 }
 
 /// The Rule cell of a compiled row, falling back to the row.

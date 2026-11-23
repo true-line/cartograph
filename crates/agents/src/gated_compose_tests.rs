@@ -181,7 +181,7 @@ fn partition_leaves_out_gap_rows_and_repeated_rules() {
         "| ↳ billing | When the plan is plan1, the page flashes \"Plan 1 chosen\" | billing.py | {} |\n",
         id(4)
     ));
-    // Another wording, but only an id an earlier row printed.
+    // Another rule of a guard an earlier row cited: kept.
     text.push_str(&format!(
         "| ↳ billing | The plan is checked | billing.py | {} |\n",
         id(2)
@@ -192,16 +192,47 @@ fn partition_leaves_out_gap_rows_and_repeated_rules() {
     ));
     let citable: BTreeSet<String> = (1..=5).map(id).collect();
     let (chunks, skipped) = partition_counted(&text, &citable, 10);
-    let kept: Vec<String> = chunks.iter().flat_map(|c| c.ids()).collect();
-    assert_eq!(kept, [id(1), id(2), id(5)]);
+    let kept: Vec<String> = chunks
+        .iter()
+        .flat_map(|c| c.rows.iter().flat_map(|row| row.ids.clone()))
+        .collect();
+    assert_eq!(kept, [id(1), id(2), id(2), id(5)]);
     assert_eq!(
         skipped,
         Skipped {
             gap_rows: 1,
-            repeated_rows: 2
+            repeated_rows: 1
         }
     );
     assert_eq!(partition(&text, &citable, 10), chunks);
+}
+
+// AC-1604 (#1748): a state machine's transitions all cite the machine and
+// may share a destination; each is kept, and only a repeated row is not.
+#[test]
+fn partition_keeps_each_transition_of_a_state_machine() {
+    let machine = id(1);
+    let text = format!(
+        "## 1.5 Business rules\n\n### Orders\n\nState machine: order\n\n\
+         | State | May move to | Citation |\n|---|---|---|\n\
+         | draft | nothing (final) | {machine} |\n\
+         | placed | nothing (final) | {machine} |\n\
+         | draft | nothing (final) | {machine} |\n"
+    );
+    let citable: BTreeSet<String> = [machine.clone()].into();
+    let (chunks, skipped) = partition_counted(&text, &citable, 10);
+    let rows: Vec<&str> = chunks
+        .iter()
+        .flat_map(|c| c.rows.iter().map(|row| row.text.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            format!("| draft | nothing (final) | {machine} |"),
+            format!("| placed | nothing (final) | {machine} |"),
+        ]
+    );
+    assert_eq!(skipped.repeated_rows, 1);
 }
 
 #[test]
