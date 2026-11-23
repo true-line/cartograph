@@ -4035,6 +4035,60 @@ button.register-row:hover {
   color: var(--tier-gap);
 }
 
+/* Attested records (ADR-0090, AC-1081): stated, not recovered. A dashed
+   border and their own label keep them apart from every tier badge. */
+.attested-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.attested-row {
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.attested-row p {
+  margin: 0;
+}
+
+.attested-label {
+  justify-self: start;
+  border: 1px dashed currentColor;
+  border-radius: 999px;
+  padding: 0 0.5em;
+  font-size: 0.74rem;
+  color: var(--accent);
+}
+
+.attested-agent_attested_unconfirmed .attested-label,
+.attested-disputed .attested-label,
+.attested-withdrawn .attested-label {
+  color: var(--text-muted);
+}
+
+.attested-withdrawn .attested-statement {
+  text-decoration: line-through;
+}
+
+.attested-id,
+.attested-target,
+.attested-contributors {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.attested-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 /* ── Provenance & Eval (#110) ── */
 
 .prov-surface {
