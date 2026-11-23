@@ -162,6 +162,79 @@ fn partition_cuts_rule_rows_into_bounded_chunks_that_read_on_their_own() {
     assert_eq!(partition(&section(3), &few, 10)[0].rows.len(), 1);
 }
 
+// AC-1604 (#1748): a Gap row states nothing and a row repeating an earlier
+// row's rule (the same Rule cell, or only ids already printed) is left out
+// before drafting, and counted.
+#[test]
+fn partition_leaves_out_gap_rows_and_repeated_rules() {
+    let mut text = section(2);
+    text.push_str(&format!(
+        "| billing | Not stated in domain terms (Gap): the condition or outcome is outside the \
+         rendering rules | x | {} |\n",
+        id(3)
+    ));
+    text.push_str(
+        "\n#### Change plan (API)\n\n| Where | Rule | Source | Citation |\n|---|---|---|---|\n",
+    );
+    // The same rule printed again under another capability, with its own id.
+    text.push_str(&format!(
+        "| ↳ billing | When the plan is plan1, the page flashes \"Plan 1 chosen\" | billing.py | {} |\n",
+        id(4)
+    ));
+    // Another rule of a guard an earlier row cited: kept.
+    text.push_str(&format!(
+        "| ↳ billing | The plan is checked | billing.py | {} |\n",
+        id(2)
+    ));
+    text.push_str(&format!(
+        "| api | When no plan is given, it fails | api.py | {} |\n",
+        id(5)
+    ));
+    let citable: BTreeSet<String> = (1..=5).map(id).collect();
+    let (chunks, skipped) = partition_counted(&text, &citable, 10);
+    let kept: Vec<String> = chunks
+        .iter()
+        .flat_map(|c| c.rows.iter().flat_map(|row| row.ids.clone()))
+        .collect();
+    assert_eq!(kept, [id(1), id(2), id(2), id(5)]);
+    assert_eq!(
+        skipped,
+        Skipped {
+            gap_rows: 1,
+            repeated_rows: 1
+        }
+    );
+    assert_eq!(partition(&text, &citable, 10), chunks);
+}
+
+// AC-1604 (#1748): a state machine's transitions all cite the machine and
+// may share a destination; each is kept, and only a repeated row is not.
+#[test]
+fn partition_keeps_each_transition_of_a_state_machine() {
+    let machine = id(1);
+    let text = format!(
+        "## 1.5 Business rules\n\n### Orders\n\nState machine: order\n\n\
+         | State | May move to | Citation |\n|---|---|---|\n\
+         | draft | nothing (final) | {machine} |\n\
+         | placed | nothing (final) | {machine} |\n\
+         | draft | nothing (final) | {machine} |\n"
+    );
+    let citable: BTreeSet<String> = [machine.clone()].into();
+    let (chunks, skipped) = partition_counted(&text, &citable, 10);
+    let rows: Vec<&str> = chunks
+        .iter()
+        .flat_map(|c| c.rows.iter().map(|row| row.text.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            format!("| draft | nothing (final) | {machine} |"),
+            format!("| placed | nothing (final) | {machine} |"),
+        ]
+    );
+    assert_eq!(skipped.repeated_rows, 1);
+}
+
 #[test]
 fn a_passing_draft_advances_without_a_retry() {
     let mut model = Fake::new(vec![reply((1..=3).map(good).collect())]);

@@ -170,6 +170,10 @@ export type ComposeOutcome =
 export interface GatedStats {
   chunks: number;
   rows: number;
+  /** Gap rows left out before drafting (#1748). */
+  gap_rows_skipped: number;
+  /** Rows left out because an earlier row holds the same rule (#1748). */
+  repeated_rows_skipped: number;
   rows_covered: number;
   calls: number;
   first_try_passed: number;

@@ -200,7 +200,7 @@ describe('section composition (AC-0862)', () => {
 describe('gated section composition (AC-0980)', () => {
   const address = { catalogue_version: '1.0', document: 'D1', section: '1.5', scope: 'system' };
   const gated = {
-    chunks: 3, rows: 24, rows_covered: 23, calls: 9, first_try_passed: 1, retries: 2,
+    chunks: 3, rows: 24, gap_rows_skipped: 0, repeated_rows_skipped: 0, rows_covered: 23, calls: 9, first_try_passed: 1, retries: 2,
     sent_back: 1, audit_dropped: 0, audit_failed: 0, failures: {},
   };
 
