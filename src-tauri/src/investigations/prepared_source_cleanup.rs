@@ -47,6 +47,17 @@ impl RetainedCleanup {
             Self::Publication(failure) => failure.stage(),
         }
     }
+    /// The closed step and error class that discarded an executed read
+    /// (AC-1609). A read released before access has none.
+    fn discard_diagnostic(&self) -> Option<agents::investigation::InvestigationTerminalDiagnostic> {
+        if self.stage() == SourceAccessStage::BeforeAccess {
+            return None;
+        }
+        match self {
+            Self::Read(failure) => failure.discard_diagnostic(),
+            Self::Publication(failure) => Some(failure.discard_diagnostic()),
+        }
+    }
     fn settle(
         self,
         state: &AppState,
@@ -75,6 +86,14 @@ impl RetainedCleanup {
             }
             // Cleanup remains possible after the deadline. This observed time
             // is monotonic-checked and retained by the genuine terminal writer.
+            let diagnostic = self.discard_diagnostic();
+            if let Some(diagnostic) = diagnostic {
+                // A closed record only: step and error class, no source text.
+                eprintln!(
+                    "investigation source read discarded: {}",
+                    serde_json::to_string(&diagnostic).unwrap_or_default()
+                );
+            }
             state
                 .jobs
                 .lock()
@@ -89,6 +108,7 @@ impl RetainedCleanup {
                     } else {
                         crate::jobs::investigations::KnownSourceDisposition::KnownReadDiscarded
                     },
+                    diagnostic,
                     clock.active_milliseconds(),
                 )
                 .map_err(SourceCleanupError::from)

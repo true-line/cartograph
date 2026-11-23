@@ -7,6 +7,9 @@ use crate::jobs::investigations::{
     CommittedSourceReservation, CommittedSourceValidation, InvestigationStoreError,
     SourceAdmission, SourceSizeBinding, SourceValidationBasis,
 };
+use agents::investigation::{
+    InvestigationTerminalDiagnostic, SourceDiscardClass, SourceDiscardStep,
+};
 
 /// Not Clone/Deserialize: preparation owns the actual retained-source leases.
 pub(in crate::investigations) struct PreparedCapturedSource {
@@ -92,6 +95,8 @@ impl SourceReadGateError {
 pub(in crate::investigations) struct PreparedSourceFailure {
     prepared: Box<PreparedCapturedSource>,
     kind: SourceReadFailureKind,
+    /// The read step of a known read failure (AC-1609).
+    step: Option<agents::investigation::SourceDiscardStep>,
 }
 /// Exact prospective evidence/ledger, with all leases still held. This neither
 /// installs the ledger nor proves prompt capacity, task ownership or cancellation.
@@ -494,24 +499,18 @@ impl PreparedCapturedSource {
                 return Err(self.failed(SourceReadFailureKind::ReadUnavailable));
             }
             Err(error) => {
-                return Err(
-                    self.failed(SourceReadFailureKind::KnownReadFailure(pinned_error(error)))
-                );
+                return Err(self.failed_at(SourceDiscardStep::ReadText, pinned_error(error)));
             }
         };
         if text.len() as u64 != self.target.captured.byte_end - self.target.captured.byte_start {
-            return Err(self.failed(SourceReadFailureKind::KnownReadFailure(
-                HostError::InvalidInput,
-            )));
+            return Err(self.failed_at(SourceDiscardStep::ReadLength, HostError::InvalidInput));
         }
         // Receipt identity authenticates a stored claim, not the correctness of
         // its sizes. Recompute only after the charged, digest-verified read and
         // reject understatement before source can enter context (AC-0287).
         let measured_fits = self.receipt.source_sizes_fit(index, &text).unwrap_or(false);
         if !measured_fits {
-            return Err(self.failed(SourceReadFailureKind::KnownReadFailure(
-                HostError::InvalidInput,
-            )));
+            return Err(self.failed_at(SourceDiscardStep::ReadSizes, HostError::InvalidInput));
         }
         let result = (|| {
             let registered = self
@@ -541,17 +540,52 @@ impl PreparedCapturedSource {
                 ledger,
                 evidence,
             }),
-            Err(error) => Err(self.failed(SourceReadFailureKind::KnownReadFailure(error))),
+            Err(error) => Err(self.failed_at(SourceDiscardStep::ReadEvidence, error)),
         }
     }
     fn failed(self, kind: SourceReadFailureKind) -> PreparedSourceFailure {
         PreparedSourceFailure {
             prepared: Box::new(self),
             kind,
+            step: None,
+        }
+    }
+    fn failed_at(self, step: SourceDiscardStep, error: HostError) -> PreparedSourceFailure {
+        PreparedSourceFailure {
+            prepared: Box::new(self),
+            kind: SourceReadFailureKind::KnownReadFailure(error),
+            step: Some(step),
         }
     }
 }
 
+/// Closed class of a host error that discarded an executed read (AC-1609).
+pub(in crate::investigations) fn host_discard_class(error: HostError) -> SourceDiscardClass {
+    match error {
+        HostError::InputChanged => SourceDiscardClass::HostInputChanged,
+        HostError::SourceUnavailable => SourceDiscardClass::HostSourceUnavailable,
+        HostError::InvalidInput => SourceDiscardClass::HostInvalidInput,
+        HostError::LimitExceeded => SourceDiscardClass::HostLimitExceeded,
+        HostError::StoreCapacity => SourceDiscardClass::HostStoreCapacity,
+        HostError::Operational => SourceDiscardClass::HostOperational,
+    }
+}
+/// Closed class of a store error that discarded an executed read (AC-1609).
+pub(in crate::investigations) fn store_discard_class(
+    error: InvestigationStoreError,
+) -> SourceDiscardClass {
+    match error {
+        InvestigationStoreError::Invalid => SourceDiscardClass::StoreInvalid,
+        InvestigationStoreError::Missing => SourceDiscardClass::StoreMissing,
+        InvestigationStoreError::Conflict => SourceDiscardClass::StoreConflict,
+        InvestigationStoreError::Stale => SourceDiscardClass::StoreStale,
+        InvestigationStoreError::Capacity => SourceDiscardClass::StoreCapacity,
+        InvestigationStoreError::Unavailable => SourceDiscardClass::StoreUnavailable,
+        InvestigationStoreError::Cancelled => SourceDiscardClass::StoreCancelled,
+        InvestigationStoreError::Ownership => SourceDiscardClass::StoreOwnership,
+        InvestigationStoreError::Storage => SourceDiscardClass::StoreStorage,
+    }
+}
 /// Bound the actual already-held source text and next exact span before cloning
 /// a ledger or reading/allocating the next source response. Durable task usage
 /// can include failed reads, so its independent budget check remains mandatory.
@@ -585,6 +619,20 @@ impl PreparedSourceFailure {
     }
     pub(in crate::investigations) fn kind(&self) -> SourceReadFailureKind {
         self.kind
+    }
+    /// The closed record of a known read failure (AC-1609).
+    pub(in crate::investigations) fn discard_diagnostic(
+        &self,
+    ) -> Option<InvestigationTerminalDiagnostic> {
+        match (self.step, self.kind) {
+            (Some(step), SourceReadFailureKind::KnownReadFailure(error)) => {
+                Some(InvestigationTerminalDiagnostic::SourceReadDiscarded {
+                    step,
+                    error_class: host_discard_class(error),
+                })
+            }
+            _ => None,
+        }
     }
     pub(in crate::investigations) fn stage(&self) -> SourceAccessStage {
         match self.kind {
