@@ -1173,6 +1173,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agents` · ADR-0085 · T-1430
 - **AC-1431** Given an @29 finish refused for prose located in top-level limitations, when the next step is offered, then it is a finish patch that must replace or withdraw every flagged limitation and finding, each as a required key, and a refusal whose only unmet entries are capacity exclusions is also patchable, the patch giving one required disclosure per gap keyed by its 12-character name that the host appends as a name-prefixed limitation; a full finish sent on a patch step is read as the patch at the flagged indices, leaving unflagged rows as first admitted; older roles keep their whole-answer fallback and their saved marker and schema bytes (ADR-0085).
 - **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1431
+- **AC-1432** Given an @29 finish-patch step, when the patch fails deterministic projection, then it is journaled as an invalid_action refusal carrying the rejection code and the same patch step is offered again with that feedback returned to the model as a tool error, the volatile first candidate and pending correction kept, within the run's invalid_action allowance of 2; a third is settled as before, terminal, reopen validates the patch-mode journal entries, and older roles keep the terminal rejection and their saved bytes (ADR-0085).
+- **Trace:** H4 · `agents`, `app` · ADR-0085 · T-1432
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned
