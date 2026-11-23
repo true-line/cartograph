@@ -1,4 +1,4 @@
-{"schema":"cartograph.spec-bundle-file/v2",
+{"schema":"cartograph.spec-bundle-file/v3",
 "mode":"best-effort",
 "assertion_count":6,
 "gap_count":3,

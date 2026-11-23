@@ -3,7 +3,7 @@
 //!
 //! The WebView sends only the identities of the preview it shows; this
 //! module compiles the full bundle one artifact at a time, checks each is
-//! the same selection, and streams the v2 bundle file (ADR-0086) to a temp
+//! the same selection, and streams the bundle file (ADR-0086, v3) to a temp
 //! file that is moved into place after the save panel. The bytes are the
 //! ones the browser preview builds (`specBundleFileContent`).
 
@@ -67,11 +67,11 @@ fn rewound(spool: BufWriter<std::fs::File>) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
-/// The v2 bundle file written as its artifacts compile (#2215, ADR-0086):
+/// The bundle file (v3) written as its artifacts compile (#2215, ADR-0086):
 /// each artifact is checked against the preview, its line and its new
 /// assertions written to their spools and its content to a third, then
 /// dropped, so the full bundle is never held at once. [`finish`] joins the
-/// spools into the named temp file in the v2 order.
+/// spools into the named temp file in the bundle file's order.
 ///
 /// [`finish`]: BundleFileStream::finish
 pub(crate) struct BundleFileStream<'a> {
@@ -174,10 +174,19 @@ impl<'a> BundleFileStream<'a> {
         let mut artifacts = rewound(artifacts)?;
         let mut assertions = rewound(assertions)?;
         let mut contents = rewound(contents)?;
+        // An artifact the reader renders from another (ADR-0086 v3) is
+        // carried by name; its spooled content is skipped.
+        let rendered = writer.rendered_from();
         writer.finish(bundle, &mut body, &mut artifacts, &mut assertions, |out| {
             for (i, (name, len)) in names.iter().enumerate() {
-                BundleFileV2::file_entry(out, i, name, b"")?;
-                std::io::copy(&mut (&mut contents).take(*len), out)?;
+                let content = &mut (&mut contents).take(*len);
+                if let Some(from) = &rendered[i] {
+                    BundleFileV2::rendered_entry(out, i, name, from)?;
+                    std::io::copy(content, &mut std::io::sink())?;
+                } else {
+                    BundleFileV2::file_entry(out, i, name, b"")?;
+                    std::io::copy(content, out)?;
+                }
             }
             Ok(())
         })?;
@@ -413,7 +422,7 @@ mod tests {
     }
 
     const INPUT: &str = include_str!("../../ui/src/fixtures/spec-bundle-file.input.json");
-    /// The v2 file of `INPUT`, which `ui/src/specExport.test.ts` checks the
+    /// The v3 file of `INPUT`, which `ui/src/specExport.test.ts` checks the
     /// browser preview builds too (ADR-0086).
     const EXPECTED: &str = include_str!("../../ui/src/fixtures/spec-bundle-file.expected.json");
 
@@ -475,22 +484,51 @@ mod tests {
         Ok(text)
     }
 
-    /// The spec crate's v2 file of the complete bundle.
+    /// The spec crate's bundle file of the complete bundle.
     fn whole(bundle: &spec::SpecBundle) -> String {
         let mut out = Vec::new();
         spec::bundle_file::write_bundle_file(bundle, &mut out).unwrap();
         String::from_utf8(out).unwrap()
     }
 
-    // AC-0740 (ADR-0086): the streamed file is byte for byte the v2 file the
+    // AC-0740 (ADR-0086): the streamed file is byte for byte the file the
     // browser preview builds for the fixture, and reads back to the full
     // bundle the host compiled.
     #[test]
-    fn streamed_bundle_file_is_the_v2_file_the_preview_builds() {
+    fn streamed_bundle_file_is_the_file_the_preview_builds() {
         let (preview, bundle) = fixture_bundle();
         let text = streamed(&preview, bundle.clone()).unwrap();
         assert_eq!(text, EXPECTED);
         assert_eq!(spec::bundle_file::read_bundle_file(&text).unwrap(), bundle);
+    }
+
+    // AC-1214 (ADR-0086 v3): the streamed file carries `fact-index.md` by
+    // the name of the file it is rendered from, as the spec crate's writer
+    // does, and skips its spooled content.
+    #[test]
+    fn streamed_bundle_file_carries_the_markdown_index_by_name() {
+        let (mut preview, mut bundle) = fixture_bundle();
+        for (id, file_name, content) in [
+            ("fact-index", "fact-index.md", "MARKDOWN-INDEX-BODY"),
+            ("fact-index-json", "fact-index.json", "{\"rows\":[]}"),
+        ] {
+            let mut artifact = bundle.artifacts[0].clone();
+            artifact.id = id.into();
+            artifact.file_name = file_name.into();
+            artifact.content = content.into();
+            preview.artifacts.push(ExpectedArtifact {
+                id: id.into(),
+                file_name: file_name.into(),
+                schema: artifact.schema.clone(),
+                content_id: artifact.content_id.clone(),
+            });
+            bundle.artifacts.push(artifact);
+        }
+        let text = streamed(&preview, bundle.clone()).unwrap();
+        assert_eq!(text, whole(&bundle));
+        assert!(text.contains("\"fact-index.md\":{\"rendered_from\":\"fact-index.json\"}"));
+        assert!(!text.contains("MARKDOWN-INDEX-BODY"));
+        assert!(text.contains("\"fact-index.json\":\"{\\\"rows\\\":[]}\""));
     }
 
     // AC-1213 (T-1213): a bundle temp file left by another process and not

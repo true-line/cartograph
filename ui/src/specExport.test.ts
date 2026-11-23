@@ -182,19 +182,36 @@ describe('Export bundle file (#1582, AC-0740)', () => {
     vi.unstubAllGlobals();
   });
 
-  it('builds the pinned v2 bundle file for the fixture preview (ADR-0086)', async () => {
+  it('builds the pinned v3 bundle file for the fixture preview (ADR-0086)', async () => {
     expect(preview.artifacts.some((a) => a.content_truncated)).toBe(true);
     const artifacts = await withFullArtifacts(preview.artifacts, readFull);
     expect(artifacts).not.toBeNull();
     const file = specBundleFileContent(preview, artifacts!);
     expect(file).toBe(bundleFileExpected);
     const parsed = JSON.parse(file);
-    expect(parsed.schema).toBe('cartograph.spec-bundle-file/v2');
+    expect(parsed.schema).toBe('cartograph.spec-bundle-file/v3');
     expect(Object.keys(parsed.files)).toEqual(artifacts!.map((a) => a.file_name));
     for (const artifact of artifacts!) {
       expect(parsed.files[artifact.file_name]).toBe(artifact.content);
       expect(file.split(JSON.stringify(artifact.content)).length - 1).toBe(1);
     }
+  });
+
+  it('carries fact-index.md by the name of the file it is rendered from (ADR-0086 v3)', async () => {
+    const artifacts = (await withFullArtifacts(preview.artifacts, readFull))!;
+    const base = artifacts[0];
+    const withIndex = [
+      ...artifacts,
+      { ...base, id: 'fact-index', file_name: 'fact-index.md', content: 'MARKDOWN-INDEX-BODY' },
+      { ...base, id: 'fact-index-json', file_name: 'fact-index.json', content: '{"rows":[]}' },
+    ];
+    const file = specBundleFileContent(preview, withIndex);
+    expect(file).toContain('\n"fact-index.md":{"rendered_from":"fact-index.json"},\n');
+    expect(file).not.toContain('MARKDOWN-INDEX-BODY');
+    expect(JSON.parse(file).files['fact-index.json']).toBe('{"rows":[]}');
+    // Without its JSON twin the Markdown index is carried as content.
+    const alone = specBundleFileContent(preview, withIndex.slice(0, -1));
+    expect(JSON.parse(alone).files['fact-index.md']).toBe('MARKDOWN-INDEX-BODY');
   });
 
   it('keeps the artifact order in files and refuses a repeated file name', async () => {
