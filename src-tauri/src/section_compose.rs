@@ -1198,13 +1198,15 @@ fn review_claims(
     Ok("reviewed")
 }
 
-/// Check the scope of each rule a claim cites (#2482, #2495): `rule-scope@2`
+/// Check the scope of each rule a claim cites (#2482, #2495): `rule-scope@3`
 /// judges, for each claim and cited rule, whether the claim states the
 /// rule beyond the capabilities it is listed under (or under which an
 /// identical rule is listed), asked [`rule_scope::SCOPE_SAMPLES`] times,
 /// and a claim a majority reads as widening any of its rules is left out
 /// as `rule_scope_widened`. A rule none of whose capabilities is a citable
-/// fact is not checked, nor a claim citing no other rule.
+/// fact is not checked, nor a claim citing no other rule. Identical rules a
+/// claim cites are one pair, and a rule [`identical_rule_settled`] for the
+/// claim is not asked (#1752 re-check 12).
 fn check_rule_scope(
     calls: &Calls<'_>,
     prepared: &Prepared,
@@ -1228,22 +1230,35 @@ fn check_rule_scope(
             Vec::new()
         }
     };
+    let capabilities: BTreeSet<&str> = by_name.values().flatten().copied().collect();
     let mut checked = Vec::new();
     let mut claims = Vec::new();
+    let mut settled = false;
     for (at, claim) in composed.finish.claims.iter().enumerate() {
-        let cited: Vec<rule_scope::ScopeRule<'_>> = claim
-            .citations
-            .iter()
-            .filter_map(|id| {
-                let (_, text) = rules.get(id)?;
-                let holds_for = holds_for(text);
-                (!holds_for.is_empty()).then_some(rule_scope::ScopeRule {
-                    id,
-                    text,
-                    holds_for,
-                })
-            })
-            .collect();
+        let cites: BTreeSet<&str> = claim.citations.iter().map(String::as_str).collect();
+        let mut cited: Vec<rule_scope::ScopeRule<'_>> = Vec::new();
+        for id in &claim.citations {
+            let Some((_, text)) = rules.get(id) else {
+                continue;
+            };
+            // Identical rules the claim cites are one pair (#1752 re-check 12).
+            if cited.iter().any(|rule| rule.text == text.as_str()) {
+                continue;
+            }
+            let holds_for = holds_for(text);
+            if holds_for.is_empty() {
+                continue;
+            }
+            if identical_rule_settled(&rules, &by_name, &capabilities, &cites, text, &holds_for) {
+                settled = true;
+                continue;
+            }
+            cited.push(rule_scope::ScopeRule {
+                id,
+                text,
+                holds_for,
+            });
+        }
         if cited.is_empty() {
             continue;
         }
@@ -1255,7 +1270,11 @@ fn check_rule_scope(
         checked.push(at);
     }
     if claims.is_empty() {
-        return Ok("none_cite_rules");
+        return Ok(if settled {
+            "settled"
+        } else {
+            "none_cite_rules"
+        });
     }
     let cited: BTreeSet<String> = claims
         .iter()
@@ -1293,6 +1312,44 @@ fn check_rule_scope(
         *composed.reasons.entry("rule_scope_widened").or_default() += dropped.len();
     }
     Ok("checked")
+}
+
+/// Whether a claim citing `cites` states the rule `text` only for the
+/// capabilities it `holds_for`, without asking (#1752 re-check 12): the rule is listed
+/// identically under two or more citable capabilities, the claim cites every
+/// such copy, and every Capability fact the claim cites is one of those the
+/// rule holds for. On re-check 12 the model read such a claim (the empty-body
+/// 400 of both API sign-in capabilities, stated for API sign-in) as widened
+/// on two of three samples.
+fn identical_rule_settled(
+    rules: &BTreeMap<String, (BTreeSet<String>, String)>,
+    by_name: &BTreeMap<&str, BTreeSet<&str>>,
+    capabilities: &BTreeSet<&str>,
+    cites: &BTreeSet<&str>,
+    text: &str,
+    holds_for: &[&str],
+) -> bool {
+    let copies: Vec<&str> = rules
+        .iter()
+        .filter(|(_, (names, other))| {
+            other == text && names.iter().any(|name| by_name.contains_key(name.as_str()))
+        })
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let allowed: BTreeSet<&str> = holds_for
+        .iter()
+        .filter_map(|name| by_name.get(name))
+        .flatten()
+        .copied()
+        .collect();
+    let named: Vec<&&str> = cites
+        .iter()
+        .filter(|id| capabilities.contains(*id))
+        .collect();
+    copies.len() >= 2
+        && copies.iter().all(|id| cites.contains(id))
+        && !named.is_empty()
+        && named.iter().all(|id| allowed.contains(**id))
 }
 
 /// The reviewer's action for `claims` of `prepared`: each cited fact's

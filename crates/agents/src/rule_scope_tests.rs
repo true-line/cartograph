@@ -1,4 +1,5 @@
-//! AC-1330 (T-1330, #2482) and AC-1331 (T-1331, #2495): the rule-scope
+//! AC-1330 (T-1330, #2482), AC-1331 (T-1331, #2495) and AC-1338 (T-1338):
+//! the rule-scope
 //! check's request and reply.
 use super::*;
 
@@ -56,6 +57,10 @@ fn the_check_asks_one_answer_per_claim_and_rule_pair() {
     let system = &action.payload.system;
     assert!(system.contains("Each rule holds only for the capabilities it is listed under"));
     assert!(system.contains("names other capabilities for other reasons in the same sentence"));
+    // AC-1338 (T-1338, #1752 re-check 12): wording is accuracy, not scope.
+    assert!(system.contains("words the rule's condition or outcome differently or less exactly"));
+    assert!(system.contains("not whether it states the rule accurately"));
+    assert_eq!(RULE_SCOPE_ROLE, "rule-scope@3");
     let schema: serde_json::Value =
         serde_json::from_str(action.payload.response_schema.as_deref().unwrap()).unwrap();
     let answers = &schema["properties"]["answers"];
