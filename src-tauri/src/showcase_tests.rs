@@ -531,14 +531,21 @@ fn showcase_compose_rules_gated() {
 /// The W13 content-acceptance pilot (#1748, AC-0670): draft D1 1.2 and 1.3
 /// through `section-composer@1` and 1.5 through the gated `draft-rules@1`
 /// workflow, all at the system scope, on a local OpenAI-compatible server
-/// (vLLM), as the Workbench's "Draft this section" does. Each staged draft
-/// is then accepted with the note `CARTOGRAPH_W13_ACCEPTOR` (the reviewer
-/// the pilot names), and the export is written in best-effort mode.
+/// (vLLM), as the Workbench's "Draft this section" does.
 /// `CARTOGRAPH_SHOWCASE_OPENAI_URL` is the loopback base (`{url}v1/`) and
-/// `CARTOGRAPH_SHOWCASE_OPENAI_MODEL` the model. The run writes `pilot.json`
-/// (per section: outcome, seconds, the job's reported usage, the role and
-/// its definition fingerprint, the graph content hash of each draft) and the
-/// `best-effort/` bundle. Nothing is scored here.
+/// `CARTOGRAPH_SHOWCASE_OPENAI_MODEL` the model.
+///
+/// The run writes the staged drafts to `staged.json` and `pilot.json` (per
+/// section: outcome, seconds, the job's reported usage, the role and its
+/// definition fingerprint), then waits for the reviewer's decisions: a file
+/// `decisions.json` in the output directory, `[{"draft_id", "decision":
+/// "accepted" | "rejected" | "returned", "reviewer", "note"}]`, written by
+/// the person the pilot names after reading the drafts. Nothing is accepted
+/// without that file, a draft it does not name stays pending, and the wait
+/// ends after `CARTOGRAPH_W13_DECISION_WAIT_SECS` (default 6 hours) with no
+/// export. Each decision is recorded through the Workbench's review path,
+/// its note naming the reviewer, and the `best-effort/` bundle is written
+/// with the curated read. Nothing is scored here.
 #[test]
 #[ignore = "manual W13 pilot over local checkouts; calls a local model"]
 fn showcase_w13_pilot() {
@@ -548,7 +555,9 @@ fn showcase_w13_pilot() {
     let url = std::env::var("CARTOGRAPH_SHOWCASE_OPENAI_URL")
         .unwrap_or_else(|_| llm::openai_compatible::OpenAiCompatibleProvider::DEFAULT_URL.into());
     let model = required("CARTOGRAPH_SHOWCASE_OPENAI_MODEL");
-    let acceptor = required("CARTOGRAPH_W13_ACCEPTOR");
+    let wait = std::env::var("CARTOGRAPH_W13_DECISION_WAIT_SECS")
+        .map(|secs| secs.parse::<u64>().expect("seconds"))
+        .unwrap_or(6 * 3600);
     let provider = llm::openai_compatible::OpenAiCompatibleProvider::new(
         &url,
         model.clone(),
@@ -570,9 +579,13 @@ fn showcase_w13_pilot() {
             .map(|usage| serde_json::to_value(usage).unwrap())
             .collect::<Vec<_>>()
     };
-    let finish = |job: &JobExecution, drafts: &[String]| {
+    // As the desktop's `finish_job`: a run that errored fails its job.
+    let finish = |job: &JobExecution, drafts: &[String], error: Option<&String>| {
         let mut jobs = state.jobs.lock().unwrap();
-        jobs.finish_execution(job, drafts).unwrap();
+        match error {
+            Some(error) => jobs.fail_execution(job, error).unwrap(),
+            None => jobs.finish_execution(job, drafts).unwrap(),
+        };
     };
     let mut sections = Vec::new();
     let mut staged: Vec<String> = Vec::new();
@@ -600,7 +613,7 @@ fn showcase_w13_pilot() {
             },
             Err(_) => Vec::new(),
         };
-        finish(&job, &drafts);
+        finish(&job, &drafts, outcome.as_ref().err());
         staged.extend(drafts.iter().cloned());
         sections.push(serde_json::json!({
             "section": section, "role": agents::section_compose::SECTION_COMPOSER_ROLE,
@@ -632,7 +645,7 @@ fn showcase_w13_pilot() {
                 _ => None,
             })
             .collect();
-        finish(&job, &drafts);
+        finish(&job, &drafts, result.as_ref().err());
         staged.extend(drafts.iter().cloned());
         sections.push(serde_json::json!({
             "section": "1.5", "attempt": attempt, "role": agents::gated_compose::DRAFT_RULES_ROLE,
@@ -645,24 +658,98 @@ fn showcase_w13_pilot() {
             break;
         }
     }
-    // Accept every staged draft, as the pilot's reviewer.
+    let write_pilot = |sections: &[serde_json::Value]| {
+        std::fs::write(
+            output.join("pilot.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "model": model, "endpoint": url,
+                "cartograph_version": env!("CARGO_PKG_VERSION"),
+                "ingest_seconds": ingest_seconds,
+                "total_seconds": started.elapsed().as_secs(),
+                "sections": sections,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    write_pilot(&sections);
+    let stored: Vec<_> = {
+        let store = state.drafts.lock().unwrap();
+        staged
+            .iter()
+            .map(|draft_id| {
+                store
+                    .get(draft_id)
+                    .unwrap()
+                    .expect("a staged draft is stored")
+            })
+            .collect()
+    };
+    std::fs::write(
+        output.join("staged.json"),
+        serde_json::to_vec_pretty(&stored).unwrap(),
+    )
+    .unwrap();
+    // The reviewer's decisions, made after reading `staged.json`.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Decision {
+        draft_id: String,
+        decision: DraftDecision,
+        reviewer: String,
+        note: Option<String>,
+    }
+    let decisions_path = output.join("decisions.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    eprintln!("waiting for {}", decisions_path.display());
+    while !decisions_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no decisions.json within {wait} s; nothing was reviewed or exported"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    // A file still being written is read again.
+    let decisions: Vec<Decision> = loop {
+        match serde_json::from_slice(&std::fs::read(&decisions_path).unwrap()) {
+            Ok(decisions) => break decisions,
+            Err(error) if std::time::Instant::now() < deadline => {
+                eprintln!("decisions.json does not parse yet: {error}");
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            Err(error) => panic!("decisions.json does not parse: {error}"),
+        }
+    };
     let mut reviewed = Vec::new();
     {
         let mut store = state.drafts.lock().unwrap();
-        for draft_id in &staged {
-            let stored = store
-                .get(draft_id)
+        for decision in &decisions {
+            assert!(
+                staged.contains(&decision.draft_id),
+                "decision for a draft this run did not stage: {}",
+                decision.draft_id
+            );
+            assert!(
+                !decision.reviewer.trim().is_empty(),
+                "a decision names its reviewer"
+            );
+            let current = store
+                .get(&decision.draft_id)
                 .unwrap()
                 .expect("a staged draft is stored");
-            let accepted = store
+            let note = match decision.note.as_deref().map(str::trim) {
+                Some(note) if !note.is_empty() => format!("{}: {note}", decision.reviewer),
+                _ => decision.reviewer.clone(),
+            };
+            let recorded = store
                 .review(
-                    draft_id,
-                    stored.review_revision,
-                    DraftDecision::Accepted,
-                    Some(&acceptor),
+                    &decision.draft_id,
+                    current.review_revision,
+                    decision.decision,
+                    Some(&note),
                 )
                 .unwrap();
-            reviewed.push(serde_json::to_value(&accepted).unwrap());
+            reviewed.push(serde_json::to_value(&recorded).unwrap());
         }
     }
     std::fs::write(
@@ -681,18 +768,7 @@ fn showcase_w13_pilot() {
     for artifact in &bundle.artifacts {
         std::fs::write(root.join(&artifact.file_name), &artifact.content).unwrap();
     }
-    std::fs::write(
-        output.join("pilot.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "model": model, "endpoint": url, "acceptor": acceptor,
-            "cartograph_version": env!("CARGO_PKG_VERSION"),
-            "ingest_seconds": ingest_seconds,
-            "total_seconds": started.elapsed().as_secs(),
-            "sections": sections,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    write_pilot(&sections);
 }
 
 /// A fourth manual run (#258): the yield-only T2 pass at full scale.
