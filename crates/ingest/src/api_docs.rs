@@ -227,7 +227,101 @@ pub fn load_api_docs_within(
     manifest_docs: &[ApiDocDeclaration],
     limits: ApiDocLimits,
 ) -> LoadedApiDocs {
-    let (repo_docs, config_gap) = match load_repo_config(root) {
+    load_from(&Checkout(root), manifest_docs, limits)
+}
+
+/// The files [`load_api_docs_within`] reads under `root` for
+/// `manifest_docs`: `.cartograph/api-docs.toml` when it is read, and every
+/// declared document, in path order. A source capture retains them
+/// (AC-1067). `None` when the load names any gap: a refused declaration is
+/// reported from the checkout, so its reason never depends on what a capture
+/// left out.
+pub fn api_doc_paths(
+    root: &Path,
+    manifest_docs: &[ApiDocDeclaration],
+    limits: ApiDocLimits,
+) -> Option<Vec<String>> {
+    let loaded = load_api_docs_within(root, manifest_docs, limits);
+    if !loaded.gaps.is_empty() {
+        return None;
+    }
+    let mut paths: Vec<String> = loaded.docs.into_iter().map(|doc| doc.path).collect();
+    let checkout = Checkout(root);
+    if checkout.config_present() && checkout.read(API_DOCS_REL_PATH, MAX_API_DOC_BYTES).is_ok() {
+        paths.push(API_DOCS_REL_PATH.to_string());
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
+/// [`load_api_docs_within`] over a source capture (AC-1067, #385): `read`
+/// gives a captured file's bytes, `None` for a path the capture does not
+/// hold. The capture holds [`api_doc_paths`], so the declarations, documents
+/// and contents are the captured ones: a declaration or document edited,
+/// deleted or created in the checkout after capture changes nothing.
+pub fn load_api_docs_from_capture(
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    manifest_docs: &[ApiDocDeclaration],
+    limits: ApiDocLimits,
+) -> LoadedApiDocs {
+    load_from(&Captured(read), manifest_docs, limits)
+}
+
+/// Where the loader's bytes come from.
+trait Files {
+    /// Whether `.cartograph` can hold a declaration: absent, or a plain
+    /// file, means the repository never opted in.
+    fn config_present(&self) -> bool;
+    /// [`read_anchored`]'s answer for `rel`.
+    fn read(&self, rel: &str, max_bytes: u64) -> Result<Vec<u8>, AnchoredRead>;
+}
+
+struct Checkout<'a>(&'a Path);
+
+impl Files for Checkout<'_> {
+    fn config_present(&self) -> bool {
+        // A repository that never opted in may already use `.cartograph` as a
+        // plain file; only a directory (or a symlink, refused by the read
+        // without being followed) can hold a declaration.
+        let config_dir = API_DOCS_REL_PATH
+            .split('/')
+            .next()
+            .expect("config path has a first component");
+        match cap_std::fs::Dir::open_ambient_dir(self.0, cap_std::ambient_authority())
+            .and_then(|dir| dir.symlink_metadata(config_dir))
+        {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Ok(meta) if !meta.is_dir() && !meta.file_type().is_symlink() => false,
+            _ => true,
+        }
+    }
+    fn read(&self, rel: &str, max_bytes: u64) -> Result<Vec<u8>, AnchoredRead> {
+        read_anchored(self.0, rel, max_bytes)
+    }
+}
+
+struct Captured<'a>(&'a dyn Fn(&str) -> Option<Vec<u8>>);
+
+impl Files for Captured<'_> {
+    fn config_present(&self) -> bool {
+        (self.0)(API_DOCS_REL_PATH).is_some()
+    }
+    fn read(&self, rel: &str, max_bytes: u64) -> Result<Vec<u8>, AnchoredRead> {
+        let bytes = (self.0)(rel).ok_or(AnchoredRead::NotFound)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(AnchoredRead::TooLarge(max_bytes));
+        }
+        Ok(bytes)
+    }
+}
+
+fn load_from(
+    files: &dyn Files,
+    manifest_docs: &[ApiDocDeclaration],
+    limits: ApiDocLimits,
+) -> LoadedApiDocs {
+    let (repo_docs, config_gap) = match load_repo_config(files) {
         Ok(docs) => (docs, None),
         Err(gap) => (Vec::new(), Some(gap)),
     };
@@ -282,7 +376,7 @@ pub fn load_api_docs_within(
     let mut docs = Vec::new();
     let mut gaps: Vec<ApiDocValidationGap> = config_gap.into_iter().collect();
     for decl in &merged {
-        match validate_one_doc(root, decl, limits.max_doc_bytes) {
+        match validate_one_doc(files, decl, limits.max_doc_bytes) {
             Ok(valid) => docs.push(valid),
             Err(gap) => gaps.push(gap),
         }
@@ -295,26 +389,15 @@ pub fn load_api_docs_within(
     }
 }
 
-fn load_repo_config(root: &Path) -> Result<Vec<ApiDocDeclaration>, ApiDocValidationGap> {
+fn load_repo_config(files: &dyn Files) -> Result<Vec<ApiDocDeclaration>, ApiDocValidationGap> {
     let gap = |reason: String| ApiDocValidationGap {
         doc_path: API_DOCS_REL_PATH.into(),
         reason,
     };
-    // A repository that never opted in may already use `.cartograph` as a
-    // plain file; only a directory (or a symlink, refused below without being
-    // followed) can hold a declaration.
-    let config_dir = API_DOCS_REL_PATH
-        .split('/')
-        .next()
-        .expect("config path has a first component");
-    match cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())
-        .and_then(|dir| dir.symlink_metadata(config_dir))
-    {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Ok(meta) if !meta.is_dir() && !meta.file_type().is_symlink() => return Ok(Vec::new()),
-        _ => {}
+    if !files.config_present() {
+        return Ok(Vec::new());
     }
-    let bytes = match read_anchored(root, API_DOCS_REL_PATH, MAX_API_DOC_BYTES) {
+    let bytes = match files.read(API_DOCS_REL_PATH, MAX_API_DOC_BYTES) {
         Ok(bytes) => bytes,
         Err(AnchoredRead::NotFound) => return Ok(Vec::new()),
         Err(failure) => {
@@ -335,7 +418,7 @@ fn load_repo_config(root: &Path) -> Result<Vec<ApiDocDeclaration>, ApiDocValidat
 }
 
 fn validate_one_doc(
-    root: &Path,
+    files: &dyn Files,
     decl: &ApiDocDeclaration,
     max_doc_bytes: u64,
 ) -> Result<ValidatedApiDoc, ApiDocValidationGap> {
@@ -414,8 +497,9 @@ fn validate_one_doc(
     }
 
     let norm_path = norm_parts.join("/");
-    let bytes =
-        read_anchored(root, &norm_path, max_doc_bytes).map_err(|failure| ApiDocValidationGap {
+    let bytes = files
+        .read(&norm_path, max_doc_bytes)
+        .map_err(|failure| ApiDocValidationGap {
             doc_path: norm_path.clone(),
             reason: anchored_reason(&format!("declared API doc \"{norm_path}\""), failure),
         })?;
@@ -701,6 +785,63 @@ prefix = "api"
             refused.gaps[0].reason.contains("no symlink in its path"),
             "{:?}",
             refused.gaps
+        );
+    }
+
+    // AC-1067 (T-1067, #385): over a source capture the loader reads the
+    // captured config and documents and never the checkout: a declaration or
+    // document edited, deleted or created after capture changes nothing. A
+    // load with any gap selects nothing, so its reasons stay the checkout's.
+    #[test]
+    fn captured_api_docs_are_read_instead_of_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".cartograph")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/api.md"), "#### GET /api/items\n").unwrap();
+        std::fs::write(root.join("docs/extra.md"), "#### POST /api/extra\n").unwrap();
+        std::fs::write(root.join("docs/unused.md"), "#### GET /api/unused\n").unwrap();
+        std::fs::write(
+            root.join(API_DOCS_REL_PATH),
+            "[[doc]]\npath = \"docs/api.md\"\nprefix = \"/api\"\n",
+        )
+        .unwrap();
+        let manifest = [ApiDocDeclaration {
+            path: "docs/extra.md".into(),
+            prefix: None,
+        }];
+        let limits = ApiDocLimits::default();
+        let before = load_api_docs_within(root, &manifest, limits);
+        assert_eq!(before.docs.len(), 2);
+
+        let paths = api_doc_paths(root, &manifest, limits).unwrap();
+        assert_eq!(paths, [API_DOCS_REL_PATH, "docs/api.md", "docs/extra.md"]);
+        let captured: std::collections::BTreeMap<String, Vec<u8>> = paths
+            .iter()
+            .map(|rel| (rel.clone(), std::fs::read(root.join(rel)).unwrap()))
+            .collect();
+
+        // After capture: edits, a deletion and a new declaration.
+        std::fs::write(root.join("docs/api.md"), "#### GET /api/other\n").unwrap();
+        std::fs::write(
+            root.join(API_DOCS_REL_PATH),
+            "[[doc]]\npath = \"docs/api.md\"\n[[doc]]\npath = \"docs/unused.md\"\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("docs/extra.md")).unwrap();
+        let read = |rel: &str| captured.get(rel).cloned();
+        assert_eq!(load_api_docs_from_capture(&read, &manifest, limits), before);
+        assert_ne!(load_api_docs_within(root, &manifest, limits), before);
+
+        // The deleted document is now a gap: nothing is selected.
+        assert_eq!(api_doc_paths(root, &manifest, limits), None);
+        // A repository that never opted in selects nothing to retain.
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(api_doc_paths(plain.path(), &[], limits), Some(Vec::new()));
+        let none = |_: &str| None;
+        assert_eq!(
+            load_api_docs_from_capture(&none, &[], limits),
+            load_api_docs_within(plain.path(), &[], limits)
         );
     }
 }

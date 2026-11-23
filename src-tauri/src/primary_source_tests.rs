@@ -3344,6 +3344,7 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
             Some(&commit),
             source_capture::CaptureLimits::default(),
             adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            Default::default(),
         )
         .unwrap();
     let capture = input.capture.as_ref().unwrap();
@@ -3398,6 +3399,7 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
             Some(&commit),
             source_capture::CaptureLimits::default(),
             adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            Default::default(),
         )
         .unwrap();
     assert!(matches!(
@@ -3422,6 +3424,7 @@ fn a_commit_capture_reads_git_blobs_not_the_checkout() {
             Some(&commit),
             source_capture::CaptureLimits::default(),
             adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            Default::default(),
         )
         .err()
         .unwrap();
@@ -3451,6 +3454,7 @@ fn the_selection_walk_follows_the_projects_capture_and_entry_limits() {
                 ..source_capture::CaptureLimits::default()
             },
             max_visited_entries,
+            Default::default(),
         )
     };
     let error = prepare(1, adapters_lang_ts::captured::MAX_VISITED_ENTRIES)
@@ -3496,6 +3500,7 @@ fn an_environment_selection_that_does_not_fit_never_costs_the_lanes() {
                 ..source_capture::CaptureLimits::default()
             },
             adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            Default::default(),
         )
         .unwrap();
     assert!(!input.environments_captured);
@@ -3995,7 +4000,7 @@ fn documents_and_found_adrs_are_read_from_the_capture() {
         nodes.extend(adrs.into_iter().flat_map(|(_, a)| a.nodes));
         documents(&nodes)
     };
-    let retained = crate::CapturedDocuments::of(Some(capture), true).unwrap();
+    let retained = crate::CapturedDocuments::of(&input).unwrap();
     let relinked = relink(&crate::DocumentCaptures::from([(
         source.repo_key.clone(),
         retained,
@@ -4038,6 +4043,7 @@ fn a_documentation_selection_that_does_not_fit_never_costs_the_readers() {
                 ..source_capture::CaptureLimits::default()
             },
             adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            Default::default(),
         )
         .unwrap();
     assert!(input.environments_captured);
@@ -4052,6 +4058,137 @@ fn a_documentation_selection_that_does_not_fit_never_costs_the_readers() {
         .map(|entry| entry.path.as_str())
         .collect();
     assert_eq!(paths, ["app.py", "compose.yaml", "source.ts"]);
+}
+
+// AC-1067: the declared API references and their config join the capture,
+// and with the capture both recovery's contract read and the relinking
+// pass's documents read the retained bytes: a reference and its config
+// edited in the checkout afterwards change nothing. Without the capture's
+// API references, the checkout is read.
+#[test]
+fn declared_api_references_are_read_from_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join(".cartograph")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/api.md"), "#### GET /api/items\n").unwrap();
+    std::fs::write(
+        root.join(ingest::api_docs::API_DOCS_REL_PATH),
+        "[[doc]]\npath = \"docs/api.md\"\n",
+    )
+    .unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let limits = ingest::api_docs::ApiDocLimits::default();
+    let selection = ingest::api_docs::api_doc_paths(source.root(), &[], limits).unwrap();
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            crate::primary_source::CallerSelections {
+                api_docs: Some(&selection),
+            },
+        )
+        .unwrap();
+    assert_eq!(input.api_doc_paths.as_deref(), Some(&selection[..]));
+    let capture = input.capture.as_ref().unwrap();
+    let held: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert!(
+        held.contains(&ingest::api_docs::API_DOCS_REL_PATH) && held.contains(&"docs/api.md"),
+        "{held:?}"
+    );
+    std::fs::write(root.join("docs/api.md"), "#### GET /api/other\n").unwrap();
+    std::fs::write(
+        root.join(ingest::api_docs::API_DOCS_REL_PATH),
+        "[[doc]]\npath = \"docs/api.md\"\nprefix = \"/api\"\n",
+    )
+    .unwrap();
+    let cited = |nodes: &[core_graph::Node]| -> String {
+        let mut found: Vec<String> = nodes
+            .iter()
+            .map(|node| format!("{} {}", node.id, node.props))
+            .filter(|line| line.contains("docs/api.md"))
+            .collect();
+        found.sort();
+        found.join("\n")
+    };
+    let extract = |captured: bool| {
+        let mut receipts = Vec::new();
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        let extraction = extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                api_docs_captured: captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+        .0;
+        cited(&extraction.nodes)
+    };
+    let captured = extract(true);
+    let checkout = extract(false);
+    assert!(captured.contains("/api/items"), "{captured}");
+    assert!(!captured.contains("/api/other"), "{captured}");
+    assert!(checkout.contains("/api/other"), "{checkout}");
+
+    // The relinking pass reads the references the capture retained.
+    let repo = core_graph::Node {
+        id: format!("repo:{}", source.repo_key),
+        label: "Repo".into(),
+        props: serde_json::json!({"commit": "workdir"}),
+    };
+    let relink = |captures: &crate::DocumentCaptures| {
+        let (_, docs) = crate::collect_documentation(
+            &spec::ReferenceIndex::default(),
+            std::slice::from_ref(&repo),
+            &|_| false,
+            &crate::Documented::from([(source.repo_key.clone(), Vec::new())]),
+            captures,
+            limits,
+            |_| Ok(source.root()),
+        )
+        .unwrap();
+        let nodes: Vec<core_graph::Node> = docs.into_iter().flat_map(|(_, d)| d.nodes).collect();
+        cited(&nodes)
+    };
+    let retained = crate::CapturedDocuments::of(&input).unwrap();
+    assert!(retained.api_docs.is_some());
+    let relinked = relink(&crate::DocumentCaptures::from([(
+        source.repo_key.clone(),
+        retained,
+    )]));
+    let live = relink(&crate::DocumentCaptures::new());
+    assert!(relinked.contains("/api/items"), "{relinked}");
+    assert!(!relinked.contains("/api/other"), "{relinked}");
+    assert!(live.contains("/api/other"), "{live}");
 }
 
 // AC-1055: the Python observed-infrastructure pass reads the same captured
@@ -5259,6 +5396,7 @@ fn checkout_bytes_and_blob_bytes_never_stand_in_for_each_other() {
                 commit,
                 source_capture::CaptureLimits::default(),
                 adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+                Default::default(),
             )
             .unwrap()
     };
