@@ -335,6 +335,11 @@ impl JobStore {
                 {
                     return Err(InvestigationStoreError::Invalid);
                 }
+                if tool == Some(InvestigationTool::ReadArtifact)
+                    && !task.detail.summary.specialist_id.uses_artifact_reads()
+                {
+                    return Err(InvestigationStoreError::Invalid);
+                }
                 let (invoked, usage) = validate_response(&tx, &task, &response)?;
                 if let Some(result) = &result {
                     let ledger =
@@ -1203,6 +1208,7 @@ pub(super) fn validate_input_candidate(
                 .iter()
                 .all(|citation| ledger.citations.contains(citation))
             || !ledger.coverage_reads.starts_with(&previous.coverage_reads)
+            || !ledger.artifact_reads.starts_with(&previous.artifact_reads)
             || !ledger.queries.starts_with(&previous.queries)
             || !previous
                 .receipt_references

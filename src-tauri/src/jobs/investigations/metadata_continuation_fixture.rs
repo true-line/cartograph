@@ -267,6 +267,9 @@ impl Proposal {
         self.ledger = prior.clone();
         self.ledger.revision += 1;
         match self.kind {
+            ContextPreviewKind::Artifact => {
+                unreachable!("artifact continuations are tested separately")
+            }
             ContextPreviewKind::Query => {
                 let query = InvestigationQuery {
                     scope: InvestigationScope::All,

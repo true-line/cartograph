@@ -105,6 +105,9 @@ impl Fixture {
         let mut ledger = saved.ledger.clone();
         ledger.revision += 1;
         let (raw, original, tool, read) = match kind {
+            ContextPreviewKind::Artifact => {
+                unreachable!("artifact admissions are tested separately")
+            }
             ContextPreviewKind::Query => {
                 let query = InvestigationQuery {
                     scope: InvestigationScope::All,
