@@ -385,6 +385,7 @@ fn source_preview_bound_covers_all_feedback_values_after_actual_append() {
         RefusalReason::Unavailable,
     ] {
         fixture.metadata.feedback = Some(RefusalFeedback {
+            citation_drop: None,
             prose_correction: None,
             schema_version: 1,
             citation_correction: None,
@@ -1765,6 +1766,7 @@ fn local_finish_policy_authenticates_complete_acquisition_and_restricts_schema()
                 f.metadata.refusal_count = 1;
                 f.metadata.last_refusal_id = Some("c".repeat(64));
                 f.metadata.feedback = Some(RefusalFeedback {
+                    citation_drop: None,
                     schema_version: 1,
                     prose_correction: None,
                     citation_correction: None,
@@ -1974,4 +1976,248 @@ fn withheld_sources_parser_accepts_only_closed_unique_entries() {
     ] {
         assert!(withheld_source_ids(&bad).is_err(), "{bad}");
     }
+}
+
+// AC-1435 (#2478): @31 turns every non-offered citation into one bounded
+// drop-only correction in choice and finish-only modes; an offered target in
+// choice mode keeps the typed acquisition correction; @30 is unchanged.
+#[test]
+fn analyst31_drops_non_offered_citations_under_the_single_repair() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in [
+        SpecialistId::DomainAnalystV30,
+        SpecialistId::DomainAnalystV31,
+    ] {
+        for mode in [CompletionCallMode::Choice, CompletionCallMode::FinishOnly] {
+            let (mut f, raw, target, _) = source_fixture(role, "bounded source");
+            f.request.specialist_id = serde_json::to_value(role).unwrap().as_str().unwrap().into();
+            let input = source_choices(&f, build_source(&f, &raw, &[], role, mode), &[], &f.ledger);
+            let disclosure = input
+                .seal_disclosure_with_policy(&prepare(&input), policy)
+                .unwrap()
+                .unwrap();
+            let contract = InvestigationCompletionContract {
+                schema_version: 1,
+                request_hash: f.metadata.request_hash.clone(),
+                obligations_hash: f.metadata.obligations_hash.clone(),
+                obligations: f.request.obligations.clone(),
+            };
+            let bound = input
+                .acquisition_choices
+                .as_ref()
+                .unwrap()
+                .bind_completion_disclosure(
+                    "source-preview-task",
+                    "current:1",
+                    &contract,
+                    &f.metadata,
+                    input.ledger(),
+                    &disclosure,
+                    None,
+                    policy,
+                )
+                .unwrap();
+            // (case, cited ids): A offered target, B offered plus hallucinated,
+            // C a graph-fact id, D an id that is not a plain identifier.
+            let cases: [(&str, Vec<String>); 4] = [
+                ("offered", vec![target.target_id.clone()]),
+                (
+                    "mixed",
+                    vec![target.target_id.clone(), "evidence-99".into()],
+                ),
+                ("graph-fact", vec!["sym:src/a.ts#Admin".into()]),
+                ("authored", vec!["not an id".into()]),
+            ];
+            for (case, ids) in cases {
+                let finish = staged_finish::StagedFinish {
+                    schema_version: 1,
+                    outcome: staged_finish::CompletionOutcome::Supported,
+                    narrative: None,
+                    action: InvestigationAction::Finish {
+                        findings: vec![ProposedInvestigationFinding {
+                            claim_kind: InvestigationClaimKind::InferredInterpretation,
+                            title: "Candidate interpretation".into(),
+                            statement: "A candidate interpretation requires a source check.".into(),
+                            citation_ids: ids.clone(),
+                            limitations: vec!["Only selected material was considered.".into()],
+                        }],
+                        knowledge_completeness: KnowledgeCompleteness::Partial,
+                        limitations: vec!["Only selected material was considered.".into()],
+                    },
+                };
+                let result = staged_finish::admit_finish_with_policy_using_consistency(
+                    &f.request,
+                    "source-preview-task",
+                    "current:1",
+                    &input,
+                    &disclosure,
+                    &finish,
+                    &[],
+                    None,
+                    "2026-11-03T00:00:00Z".into(),
+                    policy,
+                    Some(&bound),
+                );
+                let label = format!("{role:?} {mode:?} {case}");
+                let typed = role == SpecialistId::DomainAnalystV30
+                    || (case == "offered" && mode == CompletionCallMode::Choice);
+                if role == SpecialistId::DomainAnalystV30
+                    && !(case == "offered" && mode == CompletionCallMode::Choice)
+                    || case == "authored"
+                {
+                    assert_eq!(
+                        result.err(),
+                        Some(InvestigationError::InvalidCitation),
+                        "{label}"
+                    );
+                    continue;
+                }
+                let staged_finish::FinishDecision::Refused {
+                    assessment,
+                    feedback,
+                } = result.unwrap()
+                else {
+                    panic!("{label}: a citation correction never yields a result");
+                };
+                if typed {
+                    assert_eq!(feedback.schema_version, 2, "{label}");
+                    assert!(feedback.citation_correction.is_some(), "{label}");
+                    assert!(feedback.citation_drop.is_none(), "{label}");
+                    continue;
+                }
+                let mut expected = ids.clone();
+                expected.sort();
+                assert_eq!(feedback.schema_version, 7, "{label}");
+                assert!(feedback.citation_correction.is_none(), "{label}");
+                assert!(feedback.prose_correction.is_none(), "{label}");
+                assert_eq!(
+                    feedback.citation_drop,
+                    Some(staged_finish::CitationDrop {
+                        citation_ids: expected
+                    }),
+                    "{label}"
+                );
+                // The drop never offers acquisition or discharges anything.
+                assert!(!feedback.unmet.is_empty(), "{label}");
+                let wire = serde_json::to_value(&feedback).unwrap();
+                assert!(wire.get("citation_correction").is_none(), "{label}");
+                let mut refusal = staged_refusal::RefusalRecord {
+                    schema_version: 1,
+                    refusal_id: String::new(),
+                    task_id: "source-preview-task".into(),
+                    request_hash: f.metadata.request_hash.clone(),
+                    obligations_hash: f.metadata.obligations_hash.clone(),
+                    step_id: "current:1".into(),
+                    input_ledger_hash: f.ledger.fingerprint_with_policy(policy).unwrap(),
+                    disclosure_hash: bound.fingerprint().unwrap(),
+                    finish_hash: finish.fingerprint().unwrap(),
+                    outcome: finish.outcome,
+                    response_hash: core_prov::content_hash(b"synthetic drop response"),
+                    previous_refusal: None,
+                    refusal_count: 1,
+                    assessment: assessment.clone(),
+                    feedback: feedback.clone(),
+                };
+                refusal.refusal_id = refusal.content_id().unwrap();
+                // First refusal continues; the shared allowance makes a second
+                // refusal terminal, exactly as for every other correction.
+                assert_eq!(
+                    bound
+                        .validate_refusal(
+                            &refusal,
+                            &f.metadata.request_hash,
+                            &f.request.obligations,
+                            &[],
+                            None
+                        )
+                        .unwrap(),
+                    staged_refusal::RefusalDisposition::Continue,
+                    "{label}"
+                );
+                let mut saved = f.metadata.clone();
+                saved.refusal_count = 1;
+                saved.last_refusal_id = Some(refusal.refusal_id.clone());
+                saved.feedback = Some(feedback.clone());
+                assert_eq!(
+                    saved
+                        .finish_call_reserve_with_policy(policy)
+                        .unwrap()
+                        .model_invocations,
+                    1,
+                    "{label}: one corrected finish remains, never a second repair"
+                );
+                // Without the invocation witness a stored drop is not accepted.
+                assert!(
+                    refusal
+                        .validate_stored_basis_with_policy(
+                            &contract.request_hash,
+                            &contract.obligations,
+                            input.ledger(),
+                            &disclosure,
+                            None,
+                            policy
+                        )
+                        .is_err(),
+                    "{label}"
+                );
+            }
+        }
+    }
+}
+
+// AC-1435: the v7 shape is exact: sorted, unique, plain, bounded ids, and
+// never alongside a typed or prose correction.
+#[test]
+fn citation_drop_feedback_shape_is_exact() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    let entry = staged_finish::FeedbackEntry {
+        obligation_id: "a".repeat(64),
+        kind: "source".into(),
+        reason: staged_finish::RefusalReason::NotAttempted,
+    };
+    let drop = |ids: &[&str]| staged_finish::RefusalFeedback {
+        schema_version: 7,
+        prose_correction: None,
+        citation_correction: None,
+        citation_drop: Some(staged_finish::CitationDrop {
+            citation_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        }),
+        unmet: vec![],
+    };
+    assert!(
+        drop(&["evidence-9", "sym:a.ts#B"])
+            .bytes_with_policy(policy)
+            .is_ok()
+    );
+    // A hallucinated id with every obligation met still refuses.
+    assert!(drop(&["evidence-9"]).unmet.is_empty());
+    for bad in [
+        drop(&[]),
+        drop(&["b", "a"]),
+        drop(&["a", "a"]),
+        drop(&["has space"]),
+        drop(&[&"x".repeat(129)]),
+    ] {
+        assert!(bad.bytes_with_policy(policy).is_err(), "{bad:?}");
+    }
+    let many = (0..=staged_finish::MAX_CITATION_DROP_IDS)
+        .map(|n| format!("e{n:03}"))
+        .collect::<Vec<_>>();
+    let refs = many.iter().map(String::as_str).collect::<Vec<_>>();
+    assert!(drop(&refs).bytes_with_policy(policy).is_err());
+    let mut wrong_version = drop(&["a"]);
+    wrong_version.schema_version = 2;
+    assert!(wrong_version.bytes_with_policy(policy).is_err());
+    let mut with_prose = drop(&["a"]);
+    with_prose.unmet = vec![entry];
+    with_prose.prose_correction =
+        Some(staged_finish::ProseCorrection::RewriteSchemaPlaceholdersAsPlainProse);
+    assert!(with_prose.bytes_with_policy(policy).is_err());
+    // Historical feedback never carries the field.
+    let historical = serde_json::to_value(staged_finish::RefusalFeedback {
+        citation_drop: None,
+        ..drop(&["a"])
+    })
+    .unwrap();
+    assert!(historical.get("citation_drop").is_none());
 }
