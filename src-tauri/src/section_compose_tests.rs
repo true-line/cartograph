@@ -713,19 +713,22 @@ fn a_claim_the_reviewer_judges_an_overreach_is_left_out() {
 /// AC-1330 (T-1330, #2482): on a local lane a claim most samples read as
 /// stating a cited rule beyond the capabilities it is listed under (or
 /// under which an identical rule is listed) is left out before staging;
-/// a claim citing no rule is not checked, and no readable reply keeps all.
+/// a claim citing no rule, or only rules with no citable capability, is not
+/// checked, and no readable reply keeps all.
 #[test]
 fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
     let (_dir, state) = state();
     let mut prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
     let (checkout, refund) = (id("cap:checkout"), id("cap:refund"));
     let (valid, valid_too, window) = (id("rule:valid"), id("rule:valid-too"), id("rule:window"));
+    let orphan = id("rule:orphan");
     prepared.text.push_str(&format!(
         "\n### Rules the capabilities enforce (from 1.5)\n\n\
          | Capability | Rule | Citation |\n|---|---|---|\n\
          | Checkout | A card must be valid | {valid} |\n\
          | Refund | A card must be valid | {valid_too} |\n\
-         | Refund | Refunds within 30 days | {window} |\n"
+         | Refund | Refunds within 30 days | {window} |\n\
+         | Gone | Gift cards expire | {orphan} |\n"
     ));
     let claim = |statement: &str, citations: &[&String]| Claim {
         statement: statement.into(),
@@ -747,6 +750,7 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
                     &[&window, &refund, &checkout],
                 ),
                 claim("Shoppers check out.", &[&checkout]),
+                claim("Gift cards expire at checkout.", &[&orphan, &checkout]),
             ],
         },
         left_out: 0,
@@ -785,7 +789,8 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
         [
             "Checkout needs a valid card.",
             "Refunds need a valid card too.",
-            "Shoppers check out."
+            "Shoppers check out.",
+            "Gift cards expire at checkout."
         ]
     );
     assert_eq!((kept.left_out, kept.reasons["rule_scope_widened"]), (2, 2));
@@ -801,6 +806,8 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
         "{valid}: Rule of capability \"Checkout\": A card must be valid"
     )));
     assert!(!scoped[0].contains("Shoppers check out."));
+    // A rule whose capability is not citable is not checked (#2483).
+    assert!(!scoped[0].contains("Gift cards expire at checkout."));
     // A reply that is not the schema's keeps every claim.
     let unreadable = Scripted {
         reply: "not a scope".into(),
@@ -815,7 +822,7 @@ fn a_claim_stating_a_rule_wider_than_its_capabilities_is_left_out() {
         None,
     )
     .unwrap();
-    assert_eq!((scope, kept.finish.claims.len()), (Some("unavailable"), 5));
+    assert_eq!((scope, kept.finish.claims.len()), (Some("unavailable"), 6));
 }
 
 /// AC-1328 (T-1328, #2449): a local composition whose reply lost two claims

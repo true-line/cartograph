@@ -1050,7 +1050,8 @@ fn review_claims(
 /// asked [`rule_scope::SCOPE_SAMPLES`] times, and a claim a majority reads
 /// as stating a rule beyond the capabilities it is listed under (or under
 /// which an identical rule is listed) is left out as `rule_scope_widened`.
-/// A claim citing no rule or no Capability fact is not checked.
+/// A claim citing no Capability fact, or no rule with a citable
+/// capability, is not checked.
 fn check_rule_scope(
     calls: &Calls<'_>,
     prepared: &Prepared,
@@ -1086,17 +1087,19 @@ fn check_rule_scope(
                 .filter(|id| keep(id))
                 .collect()
         };
-        let cited_rules = cited(&|id| rules.contains_key(id));
+        // A rule none of whose capabilities is citable has nothing to
+        // compare with, so it is not checked.
+        let scoped: BTreeMap<&str, BTreeSet<&str>> = cited(&|id| rules.contains_key(id))
+            .into_iter()
+            .map(|rule| (rule, holds_for(rule)))
+            .filter(|(_, holds)| !holds.is_empty())
+            .collect();
+        let cited_rules: Vec<&str> = scoped.keys().copied().collect();
         let cited_capabilities = cited(&|id| capabilities.contains(id));
         if cited_rules.is_empty() || cited_capabilities.is_empty() {
             continue;
         }
-        in_scope.push(
-            cited_rules
-                .iter()
-                .map(|rule| (*rule, holds_for(rule)))
-                .collect::<BTreeMap<_, _>>(),
-        );
+        in_scope.push(scoped);
         claims.push(rule_scope::ScopeClaim {
             statement: &claim.statement,
             citations: &claim.citations,
