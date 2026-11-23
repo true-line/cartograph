@@ -191,3 +191,39 @@ fn a_request_needs_distinct_questions_with_two_to_255_options() {
     }
     assert!(local.seen.lock().unwrap().is_empty());
 }
+
+#[test]
+fn every_request_string_is_redacted_before_it_is_encoded() {
+    // JSON escapes the quotes, so redacting the encoded request would miss
+    // a quoted credential assignment; each string is redacted first.
+    let secret = "hunter2hunter2";
+    let request = DecisionRequest {
+        state: format!("login() checks password=\"{secret}\""),
+        questions: vec![ChoiceQuestion {
+            id: "q1".into(),
+            question: format!("Which verify runs for password=\"{secret}\"?"),
+            options: vec![
+                "fn:auth/jwt.ts#verify".into(),
+                format!("password=\"{secret}\""),
+                "none".into(),
+            ],
+        }],
+    };
+    let cloud = provider(Locality::Cloud, vec![good()]);
+    let allowed = EgressFirewall::new(EgressPolicy::allow_cloud_for([AnalysisTier::Semantic]));
+    let preview = allowed
+        .preview_decision(&cloud, AnalysisTier::Semantic, "a1", &request)
+        .unwrap();
+    assert!(
+        !preview.payload.prompt.contains(secret),
+        "{}",
+        preview.payload.prompt
+    );
+    assert!(preview.redaction_count >= 3);
+    let grant = ConsentGrant::from_preview(&preview);
+    allowed
+        .decide(&cloud, AnalysisTier::Semantic, "a1", &request, Some(&grant))
+        .unwrap();
+    let seen = cloud.seen.lock().unwrap();
+    assert!(!format!("{:?}", seen[0]).contains(secret));
+}

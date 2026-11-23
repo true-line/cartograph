@@ -84,6 +84,31 @@ pub trait TypedDecisionProvider: Send + Sync {
     fn decide(&self, request: &DecisionRequest) -> Result<DecisionResponse, ProviderError>;
 }
 
+/// The request with every string redacted, and the redaction count. Each
+/// string is redacted before the request is encoded: JSON escapes quotes,
+/// so a quoted credential assignment would no longer match afterwards.
+fn redacted(request: &DecisionRequest) -> (DecisionRequest, usize) {
+    let mut count = 0;
+    let mut redact = |text: &str| {
+        let (text, n) = crate::redact_text(text);
+        count += n;
+        text
+    };
+    let request = DecisionRequest {
+        state: redact(&request.state),
+        questions: request
+            .questions
+            .iter()
+            .map(|question| ChoiceQuestion {
+                id: redact(&question.id),
+                question: redact(&question.question),
+                options: question.options.iter().map(|o| redact(o)).collect(),
+            })
+            .collect(),
+    };
+    (request, count)
+}
+
 fn payload(request: &DecisionRequest) -> Result<CompletionPayload, ProviderError> {
     Ok(CompletionPayload {
         system: DECISION_SYSTEM.to_owned(),
@@ -162,7 +187,12 @@ impl EgressFirewall {
                 tier,
             });
         }
-        let (payload, redaction_count) = crate::redact_payload(&payload(request)?);
+        let (request, field_redactions) = redacted(request);
+        validate_request(&request)?;
+        // Redacting the encoded payload too keeps the completion path's
+        // guarantee for anything that only matches across fields.
+        let (payload, payload_redactions) = crate::redact_payload(&payload(&request)?);
+        let redaction_count = field_redactions + payload_redactions;
         let hash_bytes = serde_json::to_vec(&(
             provider.id(),
             provider.locality(),
