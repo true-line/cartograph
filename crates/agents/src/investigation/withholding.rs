@@ -179,6 +179,7 @@ mod tests {
     }
     fn feedback(entries: Vec<CombinedCorrection>) -> RefusalFeedback {
         RefusalFeedback {
+            citation_drop: None,
             schema_version: 6,
             citation_correction: None,
             unmet: vec![],
