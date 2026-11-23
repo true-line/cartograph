@@ -295,7 +295,7 @@ const NOT_STATED_PREFIX: &str = "Not stated in domain terms (Gap)";
 
 /// Bump when the rows [`partition`] keeps change; it is part of the role's
 /// definition fingerprint, so a draft records which selection it read.
-const ROW_SELECTION: &str = "rows@3:gap-skipped:repeated-rules-dropped";
+const ROW_SELECTION: &str = "rows@4:gap-skipped:repeated-rules-dropped:attested-rows-after";
 
 /// Rule rows [`partition`] did not hand to the drafter (#1748).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
