@@ -23,26 +23,90 @@ fn repeats_a_fact(selections: &[Selection]) -> bool {
         .any(|selection| !seen.insert(&selection.fact))
 }
 
-/// AC-1436 (#2524): #1728 selection rule v3 in full. The rule-bearing owners
-/// come first, in their ranking order; any shortfall below `max` is filled from
-/// `fill` (rule v2 order), skipping a fact already taken, by fact identity
-/// rather than serialized bytes.
-pub(in super::super) fn complete_rule_v3(
+/// A fact left out of a rule v3 list, with the reason it would not stage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(in super::super) struct Excluded {
+    pub fact: TaskFactKey,
+    pub reason: String,
+}
+
+/// AC-1438 (#2523): rule v3 that stages only what resolves now. Each candidate
+/// (owners in ranking order, then the rule v2 fill) goes through `current`,
+/// which returns the selection as the profile binds it today (a fill entry
+/// from an earlier profile gets the current snapshot and receipt) or the
+/// typed reason it cannot be inspected. A candidate that cannot is excluded
+/// with that reason and the next one takes its place, so one unresolvable
+/// fact never refuses the whole run at staging.
+/// AC-1436 (#2524) dedupes by fact identity, owners first, filled to `max`.
+pub(in super::super) fn complete_rule_v3_current(
     owners: Vec<Selection>,
     fill: Vec<Selection>,
     max: usize,
-) -> Vec<Selection> {
+    current: impl Fn(&Selection) -> Result<Selection, String>,
+) -> (Vec<Selection>, Vec<Excluded>) {
     let mut taken = std::collections::BTreeSet::new();
     let mut selections = Vec::new();
-    for selection in owners.into_iter().chain(fill) {
+    let mut excluded = Vec::new();
+    for candidate in owners.into_iter().chain(fill) {
         if selections.len() == max {
             break;
         }
-        if taken.insert(selection.fact.clone()) {
-            selections.push(selection);
+        if !taken.insert(candidate.fact.clone()) {
+            continue;
+        }
+        match current(&candidate) {
+            Ok(selection) => selections.push(selection),
+            Err(reason) => excluded.push(Excluded {
+                fact: candidate.fact,
+                reason,
+            }),
         }
     }
-    selections
+    (selections, excluded)
+}
+
+#[test]
+fn rule_v3_current_excludes_unresolvable_facts_with_a_reason_and_refills() {
+    let selection = |id: &str, snapshot: &str| Selection {
+        fact: TaskFactKey::Node { id: id.into() },
+        graph_snapshot_id: snapshot.into(),
+        receipt_id: format!("receipt-{id}"),
+        ordinal: 0,
+    };
+    let owners = vec![
+        selection("a", "context-v1:now"),
+        selection("b", "context-v1:now"),
+    ];
+    let fill = vec![
+        selection("a", "context-v1:old"),
+        selection("c", "context-v1:old"),
+        selection("d", "context-v1:old"),
+    ];
+    // `b` no longer resolves; the fill's stale snapshot ids are refreshed.
+    let current = |candidate: &Selection| match &candidate.fact {
+        TaskFactKey::Node { id } if id == "b" => Err("Stale".to_owned()),
+        _ => Ok(Selection {
+            graph_snapshot_id: "context-v1:now".into(),
+            ..candidate.clone()
+        }),
+    };
+    let (staged, excluded) = complete_rule_v3_current(owners, fill, 3, current);
+    assert_eq!(
+        staged,
+        [
+            selection("a", "context-v1:now"),
+            selection("c", "context-v1:now"),
+            selection("d", "context-v1:now")
+        ]
+    );
+    assert_eq!(
+        excluded,
+        [Excluded {
+            fact: TaskFactKey::Node { id: "b".into() },
+            reason: "Stale".into()
+        }]
+    );
+    assert!(!repeats_a_fact(&staged));
 }
 
 #[test]
@@ -63,7 +127,8 @@ fn rule_v3_fill_skips_taken_facts_and_staging_refuses_repeats() {
         selection("d", 0),
         selection("e", 0),
     ];
-    let complete = complete_rule_v3(owners.clone(), fill.clone(), 4);
+    let as_is = |candidate: &Selection| Ok(candidate.clone());
+    let complete = complete_rule_v3_current(owners.clone(), fill.clone(), 4, as_is).0;
     let ids: Vec<_> = complete
         .iter()
         .map(|s| match &s.fact {
@@ -74,7 +139,10 @@ fn rule_v3_fill_skips_taken_facts_and_staging_refuses_repeats() {
     assert_eq!(ids, ["a", "b", "c", "d"]);
     assert!(!repeats_a_fact(&complete));
     // Owners alone already at the cap take nothing from the fill.
-    assert_eq!(complete_rule_v3(owners.clone(), fill, 2), owners);
+    assert_eq!(
+        complete_rule_v3_current(owners.clone(), fill, 2, as_is).0,
+        owners
+    );
     // The canonical field order is the struct order, whatever the input order.
     let reordered: Selection = serde_json::from_str(
         r#"{"ordinal":0,"receipt_id":"receipt-a","graph_snapshot_id":"context-v1:g","fact":{"id":"a","kind":"node"}}"#,
