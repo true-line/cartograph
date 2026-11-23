@@ -3704,15 +3704,17 @@ type Documented = std::collections::BTreeMap<String, Vec<ingest::api_docs::ApiDo
 
 /// The documentation files a recovery's capture retained (AC-1065), kept
 /// past the capture so the documentation walk and the system-wide ADR
-/// relinking read the bytes recovery captured, never the checkout.
-struct CapturedDocuments(std::collections::BTreeMap<String, Vec<u8>>);
+/// relinking read the bytes recovery captured, never the checkout. Only
+/// the files the walk may parse keep their bytes, so what outlives the
+/// capture is bounded by the walk's own file and document bounds.
+struct CapturedDocuments(spec::RetainedDocuments);
 
 impl CapturedDocuments {
     /// The capture's documentation files, when it holds the walk's whole
     /// selection; `None` when it does not or a file cannot be read back.
     fn of(capture: Option<&source_capture::Capture>, captured: bool) -> Option<Self> {
         let capture = capture.filter(|_| captured)?;
-        capture
+        let files = capture
             .manifest()
             .files
             .iter()
@@ -3721,10 +3723,10 @@ impl CapturedDocuments {
                 capture
                     .file(&entry.path)
                     .ok()
-                    .map(|file| (entry.path.clone(), file.bytes().to_vec()))
+                    .map(|file| (entry.path.as_str(), file.bytes()))
             })
-            .collect::<Option<_>>()
-            .map(Self)
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self(spec::retained_documentation(files)))
     }
 }
 
@@ -3744,14 +3746,7 @@ fn read_documentation_at(
     let Some(CapturedDocuments(files)) = captured else {
         return spec::read_documentation(root, repo, commit, cases);
     };
-    let paths: Vec<String> = files.keys().cloned().collect();
-    let read = |rel: &str| {
-        files
-            .get(rel)
-            .cloned()
-            .ok_or_else(|| std::io::Error::other("captured document is unavailable"))
-    };
-    spec::read_documentation_from_capture(&paths, &read, repo, commit, cases)
+    spec::read_documentation_from_capture(files, repo, commit, cases)
 }
 
 /// Edge labels that start at a documentation fact and that a re-read of the

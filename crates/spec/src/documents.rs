@@ -569,33 +569,61 @@ pub fn documentation_paths(root: &Path) -> std::io::Result<Vec<String>> {
     )
 }
 
+/// A capture's documentation files as the walk needs them (AC-1065): each
+/// path with its bytes, or `None` for a file the walk never parses, so only
+/// its path is kept: a file over [`MAX_DOCUMENT_BYTES`], or a document past
+/// the first [`MAX_DOCUMENTS_PER_REPO`] readable ones that is not a decision
+/// record.
+pub type RetainedDocuments = BTreeMap<String, Option<Vec<u8>>>;
+
+/// What [`read_documentation_from_capture`] needs of a capture's `files`
+/// (path and bytes, in any order): its [`is_documentation_file`] paths,
+/// with bytes only for the files the walk may parse, so what is kept is
+/// bounded by the walk's own file and document bounds.
+pub fn retained_documentation<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> RetainedDocuments {
+    let sorted: BTreeMap<&str, &[u8]> = files
+        .into_iter()
+        .filter(|(rel, _)| is_documentation_file(rel))
+        .collect();
+    let mut documents = 0usize;
+    sorted
+        .into_iter()
+        .map(|(rel, bytes)| {
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            let fits = bytes.len() as u64 <= MAX_DOCUMENT_BYTES;
+            let document = Format::of(name).is_some() && !under_build_output(rel);
+            // Counted like the walk's read documents, never more, so a file
+            // the walk may parse always keeps its bytes.
+            let parsed = !document || documents < MAX_DOCUMENTS_PER_REPO;
+            documents += usize::from(document && fits && std::str::from_utf8(bytes).is_ok());
+            let kept = (fits && (parsed || crate::adr::is_decision_record(rel, name)))
+                .then(|| bytes.to_vec());
+            (rel.to_owned(), kept)
+        })
+        .collect()
+}
+
 /// [`read_documentation`] over a source capture (AC-1065, #385):
-/// `captured` is the capture's own paths and `read` their bytes. Only the
-/// capture's [`is_documentation_file`] paths are listed, so a document
-/// edited, deleted or created in the checkout after capture changes nothing.
-/// Declared API references are still read from the contents their loader
-/// validated.
+/// `captured` is what [`retained_documentation`] kept of it. Only its paths
+/// are listed, so a document edited, deleted or created in the checkout
+/// after capture changes nothing. Declared API references are still read
+/// from the contents their loader validated.
 pub fn read_documentation_from_capture(
-    captured: &[String],
-    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    captured: &RetainedDocuments,
     repo: &str,
     commit: &str,
     cases: &DocumentationCases<'_>,
 ) -> std::io::Result<Documentation> {
-    let mut files: Vec<String> = captured
-        .iter()
-        .filter(|rel| is_documentation_file(rel))
-        .cloned()
-        .collect();
-    files.sort();
-    files.dedup();
+    let files: Vec<String> = captured.keys().cloned().collect();
     let open = |rel: &str| -> std::io::Result<Opened> {
-        let bytes = read(rel)?;
-        Ok(if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
-            Opened::TooLarge
-        } else {
-            Opened::Bytes(bytes)
-        })
+        match captured.get(rel) {
+            Some(Some(bytes)) => Ok(Opened::Bytes(bytes.clone())),
+            // Kept without bytes: the walk opens only an oversized one.
+            Some(None) => Ok(Opened::TooLarge),
+            None => Err(std::io::Error::other("document is not in the capture")),
+        }
     };
     read_listed(&files, &open, repo, commit, cases)
 }
