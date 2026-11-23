@@ -236,6 +236,33 @@ fn a_capability_takes_the_area_holding_most_of_its_handler_files() {
     );
 }
 
+// AC-1602 (#2511): the areas a draft may cite are the concept Subsystems the
+// arrangement kept, each once; the shared group is not one.
+#[test]
+fn area_nodes_are_the_kept_concept_subsystems_once_each() {
+    let fixture = fixture();
+    let stories = fixture.stories(ExportMode::BestEffort, &BTreeSet::new());
+    let ids: Vec<&str> = stories.area_nodes().iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["subsystem:cluster:alias", "subsystem:cluster:mailbox"]
+    );
+    let candidates: Vec<CapabilityStory<'_>> = fixture
+        .capabilities
+        .iter()
+        .map(|(capability, cites)| CapabilityStory { capability, cites })
+        .collect();
+    let unarranged = validate_knowledge_stories(
+        &fixture.base,
+        &candidates,
+        &[],
+        ExportMode::BestEffort,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(unarranged.area_nodes().is_empty());
+}
+
 // AC-1205/T-1205 (#2224): a Capability id hashes the cited facts' ids,
 // which carry the registration's random key, so stories (and the US-R
 // numbers they are printed under) follow names, never ids: the same

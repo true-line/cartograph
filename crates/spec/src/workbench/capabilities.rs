@@ -89,6 +89,22 @@ impl<'a> KnowledgeStories<'a> {
     pub fn included_nodes(&self) -> impl Iterator<Item = &'a Node> + '_ {
         self.0.included.iter().map(|story| story.node)
     }
+    /// The concept Subsystems [`Self::with_areas`] kept, each once in id
+    /// order: the areas the document prints, which a draft may cite (#2511).
+    /// Empty before `with_areas`.
+    pub fn area_nodes(&self) -> Vec<&'a Node> {
+        let mut seen = BTreeSet::new();
+        let mut nodes: Vec<&'a Node> = self
+            .0
+            .file_areas
+            .values()
+            .chain(self.0.areas.values())
+            .copied()
+            .filter(|node| seen.insert(node.id.as_str()))
+            .collect();
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        nodes
+    }
 }
 
 /// Validate overlay Capability candidates and Actors against `base` under one
