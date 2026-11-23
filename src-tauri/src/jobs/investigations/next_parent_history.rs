@@ -184,6 +184,10 @@ fn encode_parent_history_with_limit(
         cancellation_requested: bool,
         invocation_outcome_pending: bool,
         authority: &'static str,
+        // AC-1336: only a withheld parent carries it, so every other
+        // parent's history keeps its bytes.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        withholding_reading: Option<agents::investigation::WithholdingReading>,
         saved_result: &'a Option<InvestigationResult>,
     }
     let raw = encode(
@@ -195,6 +199,9 @@ fn encode_parent_history_with_limit(
             cancellation_requested: summary.cancel_requested,
             invocation_outcome_pending: summary.invocation_pending,
             authority: "Prior specialist findings remain T3/InferredWeak; execution status does not establish complete knowledge.",
+            withholding_reading: result
+                .as_ref()
+                .and_then(agents::investigation::WithholdingReading::of),
             saved_result: result,
         },
         limit,

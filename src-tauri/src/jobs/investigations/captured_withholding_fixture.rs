@@ -402,6 +402,36 @@ impl CapturedSourceInvocationFixture {
                     serde_json::to_value(&result.findings).unwrap()
                 );
                 assert!(parent["saved_result"]["narrative"].is_null());
+                // AC-1336 (#598): each saved finding names its original
+                // position, and the withheld positions are named as absent.
+                let witness = completion.withholding.as_ref().unwrap();
+                let reading = &parent["withholding_reading"];
+                assert_eq!(
+                    reading["withheld_original_positions"],
+                    json!(witness.withheld_indexes)
+                );
+                let positions: Vec<Value> = result
+                    .findings
+                    .iter()
+                    .zip(&witness.survivor_indexes)
+                    .map(|(finding, position)| {
+                        json!({"finding_id": finding.finding_id, "original_position": position})
+                    })
+                    .collect();
+                assert_eq!(reading["saved_findings"], json!(positions));
+                assert!(
+                    witness
+                        .survivor_indexes
+                        .iter()
+                        .zip(1..)
+                        .any(|(p, n)| *p + 1 != n)
+                );
+                assert!(
+                    reading["note"]
+                        .as_str()
+                        .unwrap()
+                        .contains("not in saved_result.findings")
+                );
                 let reopened =
                     JobStore::open(self.inner.directory.path().join("state.db")).unwrap();
                 assert_eq!(reopened.investigation(self.id()).unwrap(), detail);
