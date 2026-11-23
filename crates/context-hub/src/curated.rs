@@ -51,6 +51,11 @@ use core_prov::{ConfidenceTier, Provenance, Tier};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+mod attested;
+pub use attested::{
+    AttestedAnswer, AttestedContribution, AttestedCounts, AttestedStanding, AttestedState,
+    AttestedStateReason, CuratedAttested, ReviewedAttested,
+};
 mod drafts;
 pub use drafts::{
     CuratedDraft, DraftAddress, DraftClaim, DraftCounts, DraftReview, DraftState, DraftStateReason,
@@ -73,14 +78,19 @@ mod draft_tests;
 #[path = "curated/finding_tests.rs"]
 mod finding_tests;
 
+#[cfg(test)]
+#[path = "curated/attested_tests.rs"]
+mod attested_tests;
+
 /// Version of the eligibility policy in this module. It enters the revision,
 /// so a policy change gives a new revision for unchanged inputs.
-pub const CURATED_POLICY_VERSION: &str = "curated-policy-v3";
+pub const CURATED_POLICY_VERSION: &str = "curated-policy-v4";
 
 /// Domain prefix of the curated revision. Version 2 added section drafts
 /// beside proposals (ADR-0064 decision 7); version 3 adds findings accepted
-/// as curated (ADR-0074 decision 6).
-pub const CURATED_REVISION_PREFIX: &str = "curated-revision-v3";
+/// as curated (ADR-0074 decision 6); version 4 adds attested records
+/// (ADR-0090 decision 8).
+pub const CURATED_REVISION_PREFIX: &str = "curated-revision-v4";
 
 /// Domain prefix of the assertion decision digest.
 pub const ASSERTION_DECISION_DIGEST_PREFIX: &str = "curated-assertion-decisions-v1";
@@ -271,6 +281,10 @@ pub struct ProjectionInput<'a> {
     /// Current digest of each fact a finding cites, by citation id. An id
     /// that resolves to no fact in the current graph is absent.
     pub cited_fact_digests: &'a BTreeMap<String, String>,
+    /// Stored attested records with their standing, in any order
+    /// (ADR-0090). Their supporting ids are looked up in
+    /// `cited_fact_hashes`.
+    pub attested: &'a [ReviewedAttested],
     /// Policy version; pass [`CURATED_POLICY_VERSION`].
     pub policy_version: &'a str,
 }
@@ -478,6 +492,12 @@ pub struct CuratedProjection {
     /// Finding totals.
     #[serde(default)]
     pub finding_counts: FindingCounts,
+    /// Every attested record with its state, ordered by identity.
+    #[serde(default)]
+    pub attested: Vec<CuratedAttested>,
+    /// Attested totals.
+    #[serde(default)]
+    pub attested_counts: AttestedCounts,
     /// Assertion decision digest and stale decisions.
     pub assertion_decisions: AssertionDecisionSummary,
     /// Record totals.
@@ -800,11 +820,12 @@ fn count(counts: &mut CuratedCounts, state: RecordState) {
 /// finding gets one state, and every accepted or rejected finding enters
 /// the revision.
 ///
-/// `revision = digest("curated-revision-v3", policy_version,
+/// `revision = digest("curated-revision-v4", policy_version,
 /// graph_content_hash, [(record_id, decision, state, reason)…],
 /// [(draft_id, decision, state, reason)…],
-/// [(finding_ref, decision, state, reason)…], assertion_decision_digest)`,
-/// records, drafts and findings each in identity order.
+/// [(finding_ref, decision, state, reason)…],
+/// [(attested_id, state, reason)…], assertion_decision_digest)`,
+/// records, drafts, findings and attested records each in identity order.
 pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, ProjectionError> {
     let mut reviewed: Vec<(&ReviewedProposal, ReviewDecision)> = input
         .proposals
@@ -873,6 +894,8 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
     }
     let drafts = drafts::project_drafts(input.drafts, input.cited_fact_hashes)?;
     let findings = findings::project_findings(input.findings, input.cited_fact_digests)?;
+    let attested =
+        attested::project_attested(input.attested, input.nodes, input.cited_fact_hashes)?;
     let assertion_decisions = summarize_assertions(input)?;
     let revision = digest(
         CURATED_REVISION_PREFIX,
@@ -882,6 +905,7 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
             &revision_records,
             &drafts.revision,
             &findings.revision,
+            &attested.revision,
             &assertion_decisions.digest,
         ),
     )?;
@@ -895,6 +919,8 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
         draft_counts: drafts.counts,
         findings: findings.findings,
         finding_counts: findings.counts,
+        attested: attested.records,
+        attested_counts: attested.counts,
         assertion_decisions,
         counts,
     })
