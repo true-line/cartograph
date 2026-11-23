@@ -18,6 +18,7 @@ pub(crate) mod provider_workspace;
 #[cfg(any(unix, test))]
 pub(crate) mod query_workspace;
 mod recovery;
+pub(crate) mod rule_sources;
 use app_store::investigation_runtime as runtime;
 pub(crate) mod section_drafts;
 #[cfg(unix)]
