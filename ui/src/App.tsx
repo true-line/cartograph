@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isCompletionSpecialist } from './investigationFamilies';
+import { manifestSuggestions } from './manifestSuggestions';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tierDistribution, useAppStore } from './store';
 import { createRepositoryLabeler, systemDisplayName } from './repositoryLabels';
@@ -725,7 +726,8 @@ export default function App() {
     data: Record<string, SpecAssertion[]>;
   }>({ bundle: null, data: {} });
   useEffect(() => {
-    if (view !== 'gaps' || !specBundle) return;
+    // Connect's manifest guide counts client-call gaps over the whole register (#2474).
+    if ((view !== 'gaps' && view !== 'connect') || !specBundle) return;
     const truncated = specBundle.artifacts.filter(
       (artifact) =>
         (artifact.id === 'gap-register' || artifact.id === 'drift-register') &&
@@ -1087,6 +1089,15 @@ export default function App() {
             manifestGuide={{
               preview: (draft) => invoke<string>('preview_system_manifest', { draft }),
               save: (draft) => invoke<string | null>('save_system_manifest', { draft }),
+              // #2474: suggest the keys the last recovery's client calls lacked,
+              // from the whole register; none until a truncated one has loaded.
+              suggestions: (() => {
+                const register = specBundle?.artifacts.find((item) => item.file_name === 'gap_register.md');
+                if (!register) return undefined;
+                if (!register.assertions_truncated) return manifestSuggestions(register.assertions);
+                const full = fullRegisterAssertions.bundle === specBundle ? fullRegisterAssertions.data[register.id] : undefined;
+                return full ? manifestSuggestions(full) : undefined;
+              })(),
             }}
             source={ingestSource}
             target={ingestTarget}

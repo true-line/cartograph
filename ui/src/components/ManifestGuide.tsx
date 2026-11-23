@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ManifestSuggestions } from '../manifestSuggestions';
 
 export interface ManifestDraft {
   repos: { url: string }[];
@@ -10,11 +11,13 @@ export interface ManifestGuideProps {
   preview: (draft: ManifestDraft) => Promise<string>;
   save: (draft: ManifestDraft) => Promise<string | null>;
   onSaved: (path: string) => void;
+  /** Keys the last recovery's client calls could not resolve (#2474). */
+  suggestions?: ManifestSuggestions;
 }
 const initial = (): ManifestDraft => ({ repos: [{ url: '' }], env: [], services: [], gateway_routes: [] });
 
 /** New files only. Host validation owns TOML and binding semantics (AC-0002). */
-export function ManifestGuide({ preview, save, onSaved }: ManifestGuideProps) {
+export function ManifestGuide({ preview, save, onSaved, suggestions }: ManifestGuideProps) {
   const [draft, setDraft] = useState(initial);
   const [text, setText] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -62,6 +65,28 @@ export function ManifestGuide({ preview, save, onSaved }: ManifestGuideProps) {
     <h3>Create a system manifest</h3>
     <p>Declare the repositories and URLs you know. These declarations help link client calls; unresolved or ambiguous calls remain gaps.</p>
     <p>Relative repository paths are relative to the saved manifest. Configuration keys must match the source exactly, including case and punctuation. No repositories are read while drafting or saving.</p>
+    {suggestions && (suggestions.keys.length > 0 || suggestions.computedCalls > 0) && (
+      <section aria-label="Suggested from the last recovery">
+        <h4>Suggested from the last recovery</h4>
+        {suggestions.keys.length > 0 && <>
+          <p>These client calls build their URL from a key the recovery could not resolve. Add the key with its value, then declare the service that answers it.</p>
+          <ul>
+            {suggestions.keys.map(({ key, calls, sites }) => {
+              const declared = draft.env.some(row => row.key === key);
+              return <li key={key}>
+                <code>{key}</code>: {calls} {calls === 1 ? 'call' : 'calls'} in {sites.slice(0, 3).join(', ')}{sites.length > 3 ? ` and ${sites.length - 3} more files` : ''}{' '}
+                <button type="button" disabled={busy || declared} onClick={() => edit({ ...draft, env: [...draft.env, { key, value: '' }] })}>
+                  {declared ? `${key} added` : `Add ${key}`}
+                </button>
+              </li>;
+            })}
+          </ul>
+        </>}
+        {suggestions.computedCalls > 0 && (
+          <p>{suggestions.computedCalls} {suggestions.computedCalls === 1 ? 'call builds its' : 'calls build their'} whole fetch URL at runtime, in {suggestions.computedSites.slice(0, 3).join(', ')}{suggestions.computedSites.length > 3 ? ` and ${suggestions.computedSites.length - 3} more files` : ''}. No manifest key can name these, so they stay gaps.</p>
+        )}
+      </section>
+    )}
     <fieldset disabled={busy}>
       <legend>Repositories</legend>
       {draft.repos.map((repo, i) => <div key={i}>
