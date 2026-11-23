@@ -1281,6 +1281,9 @@ struct ProducerReads {
     /// Whether the primary capture holds the toolchain reader's whole
     /// selection, so it reads it (AC-1063).
     toolchain_captured: bool,
+    /// Whether the primary capture holds the documentation walk's whole
+    /// selection, so it reads it (AC-1065).
+    documents_captured: bool,
     /// What the found ADR/RFC reader read and published (#1847).
     adrs: ingest::coverage::ProducerCount,
     /// Found ADR/RFC files over the size bound, in path order (#1847).
@@ -1309,6 +1312,7 @@ impl Default for ProducerReads {
             environments_captured: false,
             starts_captured: false,
             toolchain_captured: false,
+            documents_captured: false,
             adrs: ingest::coverage::ProducerCount::default(),
             adr_too_large: Vec::new(),
             adr_not_utf8: Vec::new(),
@@ -2554,8 +2558,10 @@ fn extract_tree_packed(
         let ids: std::collections::BTreeSet<&str> =
             facts.nodes().iter().map(|node| node.id.as_str()).collect();
         let is_candidate = |id: &str| ids.contains(id);
-        let read = spec::read_documentation(
+        let captured = CapturedDocuments::of(primary, reads.documents_captured);
+        let read = read_documentation_at(
             root,
+            captured.as_ref(),
             repo,
             commit,
             &spec::DocumentationCases {
@@ -3570,6 +3576,7 @@ fn stitch_http_bindings(
 /// operation publishes: a document is a fact about one repository's own
 /// files, so another repository's documents stay as its own publication
 /// read them, matching the counts its stored inventory carries.
+#[allow(clippy::too_many_arguments)]
 fn relink_found_adrs(
     state: &AppState,
     operation: &SourceOperation,
@@ -3577,6 +3584,7 @@ fn relink_found_adrs(
     facts: &mut OperationFacts,
     recorded: &mut std::collections::BTreeMap<String, RecordedCoverage>,
     documented: &Documented,
+    captured: &DocumentCaptures,
     api_doc_limits: ingest::api_docs::ApiDocLimits,
 ) -> Result<std::collections::BTreeMap<String, u64>, String> {
     ensure_running_job(state, execution)?;
@@ -3634,6 +3642,7 @@ fn relink_found_adrs(
         &repos,
         &|id| candidates.contains(id),
         documented,
+        captured,
         api_doc_limits,
         |repo| {
             ensure_running_job(state, execution)?;
@@ -3725,6 +3734,7 @@ fn collect_found_adrs_among<'a>(
         nodes,
         &is_candidate,
         &Documented::new(),
+        &DocumentCaptures::new(),
         ingest::api_docs::ApiDocLimits::default(),
         root_for,
     )?;
@@ -3735,6 +3745,53 @@ fn collect_found_adrs_among<'a>(
 /// references its system manifest declares (the repository's own
 /// `.cartograph/api-docs.toml` is read with them).
 type Documented = std::collections::BTreeMap<String, Vec<ingest::api_docs::ApiDocDeclaration>>;
+
+/// The documentation files a recovery's capture retained (AC-1065), kept
+/// past the capture so the documentation walk and the system-wide ADR
+/// relinking read the bytes recovery captured, never the checkout. Only
+/// the files the walk may parse keep their bytes, so what outlives the
+/// capture is bounded by the walk's own file and document bounds.
+struct CapturedDocuments(spec::RetainedDocuments);
+
+impl CapturedDocuments {
+    /// The capture's documentation files, when it holds the walk's whole
+    /// selection; `None` when it does not or a file cannot be read back.
+    fn of(capture: Option<&source_capture::Capture>, captured: bool) -> Option<Self> {
+        let capture = capture.filter(|_| captured)?;
+        let files = capture
+            .manifest()
+            .files
+            .iter()
+            .filter(|entry| spec::is_documentation_file(&entry.path))
+            .map(|entry| {
+                capture
+                    .file(&entry.path)
+                    .ok()
+                    .map(|file| (entry.path.as_str(), file.bytes()))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self(spec::retained_documentation(files)))
+    }
+}
+
+/// Each repository's captured documentation files, by repository key.
+type DocumentCaptures = std::collections::BTreeMap<String, CapturedDocuments>;
+
+/// One repository's documentation walk, over its captured documentation
+/// files when recovery retained them (AC-1065), and over the checkout
+/// otherwise.
+fn read_documentation_at(
+    root: &std::path::Path,
+    captured: Option<&CapturedDocuments>,
+    repo: &str,
+    commit: &str,
+    cases: &spec::DocumentationCases<'_>,
+) -> std::io::Result<spec::Documentation> {
+    let Some(CapturedDocuments(files)) = captured else {
+        return spec::read_documentation(root, repo, commit, cases);
+    };
+    spec::read_documentation_from_capture(files, repo, commit, cases)
+}
 
 /// Edge labels that start at a documentation fact and that a re-read of the
 /// repository restates.
@@ -3756,6 +3813,7 @@ fn collect_documentation<'a>(
     repos: &[Node],
     is_candidate: &dyn Fn(&str) -> bool,
     documented: &Documented,
+    captured: &DocumentCaptures,
     api_doc_limits: ingest::api_docs::ApiDocLimits,
     root_for: impl Fn(&str) -> Result<&'a std::path::Path, String>,
 ) -> Result<
@@ -3784,8 +3842,9 @@ fn collect_documentation<'a>(
                 ))
             })
             .unwrap_or_default();
-        let read = spec::read_documentation(
+        let read = read_documentation_at(
             root,
+            captured.get(repo),
             repo,
             commit,
             &spec::DocumentationCases {
@@ -3803,7 +3862,9 @@ fn collect_documentation<'a>(
         let mentions = spec::link_references(repo, commit, &facts.references, index);
         facts.edges.extend(mentions);
         // Whether a repo-relative path is in the tree: an existence
-        // check only, and a link is never followed out of it.
+        // check only, and a link is never followed out of it. A capture
+        // holds only selected files, so drift still compares against the
+        // checkout's tree (AC-1065).
         let exists = |path: &str| tree_has_path(root, path);
         let (drift, compared) =
             spec::documentation_drift(repo, commit, &facts.references, index, &exists);
@@ -3891,6 +3952,7 @@ fn collect_documents<'a>(
         nodes,
         &|_| false,
         &documented,
+        &DocumentCaptures::new(),
         ingest::api_docs::ApiDocLimits::default(),
         root_for,
     )?;
@@ -5848,6 +5910,7 @@ fn run_ingest<R: tauri::Runtime>(
         environments_captured: primary.environments_captured,
         starts_captured: primary.starts_captured,
         toolchain_captured: primary.toolchain_captured,
+        documents_captured: primary.documents_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -5965,6 +6028,7 @@ fn run_ingest<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
+    let documents = CapturedDocuments::of(primary.capture.as_ref(), primary.documents_captured);
     reclaim_superseded_receipts(state, source, primary, None);
 
     relink_found_adrs(
@@ -5974,6 +6038,9 @@ fn run_ingest<R: tauri::Runtime>(
         &mut published,
         &mut Default::default(),
         &Documented::from([(repo.clone(), Vec::new())]),
+        &documents
+            .map(|documents| DocumentCaptures::from([(repo.clone(), documents)]))
+            .unwrap_or_default(),
         limits.api_docs,
     )
     .map_err(&fail)?;
@@ -6318,6 +6385,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         environments_captured: primary.environments_captured,
         starts_captured: primary.starts_captured,
         toolchain_captured: primary.toolchain_captured,
+        documents_captured: primary.documents_captured,
         ..ProducerReads::default()
     };
     let (extraction, facts, layers, delta) = {
@@ -6430,6 +6498,7 @@ fn add_repo_blocking<R: tauri::Runtime>(
         stitch_backings(&mut graph, &mut published, &registries).map_err(&fail)?;
         stitch_name_unique(&mut graph, &mut published).map_err(&fail)?;
     }
+    let documents = CapturedDocuments::of(primary.capture.as_ref(), primary.documents_captured);
     reclaim_superseded_receipts(&state, &source, primary, None);
     relink_found_adrs(
         &state,
@@ -6438,6 +6507,9 @@ fn add_repo_blocking<R: tauri::Runtime>(
         &mut published,
         &mut Default::default(),
         &Documented::from([(source.repo_key.clone(), Vec::new())]),
+        &documents
+            .map(|documents| DocumentCaptures::from([(source.repo_key.clone(), documents)]))
+            .unwrap_or_default(),
         limits.api_docs,
     )
     .map_err(&fail)?;
@@ -6596,6 +6668,8 @@ fn add_system_blocking<R: tauri::Runtime>(
     // published: a later repo's failure must leave every register pending.
     let mut proofs = Vec::new();
     let mut recorded = std::collections::BTreeMap::new();
+    // Each repository's captured documentation files (AC-1065).
+    let mut document_captures = DocumentCaptures::new();
     let mut on_file = detail_throttle(&app, job_id);
     // AC-0240: declared services and gateway routes, resolved to repo keys
     // once. Their origins are deferred from each repo's own fetch matching.
@@ -6654,6 +6728,7 @@ fn add_system_blocking<R: tauri::Runtime>(
             environments_captured: primary.environments_captured,
             starts_captured: primary.starts_captured,
             toolchain_captured: primary.toolchain_captured,
+            documents_captured: primary.documents_captured,
             ..ProducerReads::default()
         };
         let (extraction, facts, repo_layers, repo_delta) = {
@@ -6822,6 +6897,12 @@ fn add_system_blocking<R: tauri::Runtime>(
                 .published,
             );
         }
+        // The documentation the capture retained outlives it for the
+        // system-wide relinking (AC-1065).
+        match CapturedDocuments::of(primary.capture.as_ref(), primary.documents_captured) {
+            Some(documents) => document_captures.insert(repo.clone(), documents),
+            None => document_captures.remove(&repo),
+        };
         reclaim_superseded_receipts(
             &state,
             source,
@@ -6879,6 +6960,7 @@ fn add_system_blocking<R: tauri::Runtime>(
         &mut published,
         &mut recorded,
         &documented,
+        &document_captures,
         limits.api_docs,
     )
     .map_err(&fail)?;
