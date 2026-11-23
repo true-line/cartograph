@@ -18,3 +18,19 @@ export function createRepositoryLabeler(
     return (counts.get(name) ?? 0) > 1 ? `${name} (${repo})` : name;
   };
 }
+
+/** The recovered system's name (#2469): one source is named by its label,
+ *  several by their count. Null when no evidence-backed source is recorded. */
+export function systemDisplayName(
+  sources: readonly Pick<SystemRepo, 'repo' | 'display_name'>[],
+): string | null {
+  if (sources.length === 0) return null;
+  if (sources.length === 1) return createRepositoryLabeler(sources)(sources[0].repo);
+  return `${sources.length} repos as one system`;
+}
+
+/** Host text names a source by its exact key; show its label there instead
+ *  (#2471). Display only: the key is never rewritten anywhere it is matched. */
+export function relabelRepoText(text: string, repo: string, label: string): string {
+  return label === repo ? text : text.split(repo).join(label);
+}

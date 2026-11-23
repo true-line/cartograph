@@ -2,7 +2,7 @@ import { CoverageInventory, RecordedCoverageInventory } from './CoverageInventor
 import type { RestoredCoverage } from '../coverage';
 import { HelpTip } from './HelpTip';
 import { IngestSummaryDetails } from './IngestSummaryDetails';
-import { createRepositoryLabeler } from '../repositoryLabels';
+import { createRepositoryLabeler, systemDisplayName } from '../repositoryLabels';
 import type {
   FindingsSummary,
   IngestSummary,
@@ -13,6 +13,9 @@ import type {
 
 export interface WorkspaceSurfaceProps {
   summary: IngestSummary | null;
+  /** The first read of the persisted system is still running (#2469): say
+   *  so rather than claim there is no system. */
+  loading?: boolean;
   /** Inventories recorded by earlier ingests (AC-0700), shown when this
    *  session has no ingest summary of its own. */
   recordedCoverage?: RestoredCoverage[];
@@ -64,6 +67,7 @@ function recoveryAuthority(findings: FindingsSummary, distribution: TierDistribu
  *  register summary and atlas projection the other surfaces read. */
 export function WorkspaceSurface({
   summary,
+  loading = false,
   recordedCoverage = [],
   recordedCoverageError = null,
   findings,
@@ -82,7 +86,9 @@ export function WorkspaceSurface({
   const systemName =
     (summary?.repo ? repoLabel(summary.repo) : null) ??
     (summary?.repos?.length ? `${summary.repos.length} repos as one system` : null) ??
-    (recovered ? 'Ingested system' : 'No system yet');
+    // After a relaunch there is no session summary: name the persisted system (#2469).
+    systemDisplayName(systemContents ?? []) ??
+    (recovered ? 'Ingested system' : loading ? 'Loading the recovered system…' : 'No system yet');
   // Manifest recoveries carry per-repo identities (`identity@sha12`) instead
   // of one top-level SHA — show those, never a false mutable-workdir label.
   const commit = summary?.repos?.length
@@ -134,9 +140,9 @@ export function WorkspaceSurface({
       </header>
 
       {summary?.coverage ? (
-        <CoverageInventory coverage={summary.coverage} />
+        <CoverageInventory coverage={summary.coverage} repoLabel={repoLabel} />
       ) : (
-        <RecordedCoverageInventory restored={recordedCoverage} error={recordedCoverageError} />
+        <RecordedCoverageInventory restored={recordedCoverage} error={recordedCoverageError} repoLabel={repoLabel} />
       )}
 
       {summary && <IngestSummaryDetails summary={summary} repoLabel={repoLabel} />}

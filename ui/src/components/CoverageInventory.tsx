@@ -7,6 +7,7 @@ import {
   type RepoCoverage,
   type RestoredCoverage,
 } from "../coverage";
+import { relabelRepoText } from "../repositoryLabels";
 import { useAppStore, type DraftAdapterPacket } from "../store";
 
 /** A plugin that was refused on a file ran, but not over every file. */
@@ -38,7 +39,21 @@ function formatPacketError(failure: unknown): string {
   return PACKET_ERROR[String(code)] ?? String(code);
 }
 
-function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
+/** Names a source by its readable label; the exact key stays the default. */
+type RepoLabel = (repo: string) => string;
+const exactKey: RepoLabel = (repo) => repo;
+
+function RepoCoverageRow({
+  repo,
+  repoLabel,
+}: {
+  repo: RepoCoverage;
+  repoLabel: RepoLabel;
+}) {
+  // #2471: a local source reads as its folder name, not `local/src_<hash>`;
+  // the exact key stays one hover away and in every request.
+  const label = repoLabel(repo.repo);
+  const named = (text: string) => relabelRepoText(text, repo.repo, label);
   const draftAdapterWorkPackets = useAppStore(
     (state) => state.draftAdapterWorkPackets,
   );
@@ -73,7 +88,8 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
   return (
     <details className="coverage-repo" open={repo.limited}>
       <summary>
-        <strong>{repo.repo}</strong> <code>@{repo.commit.slice(0, 12)}</code>
+        <strong title={label === repo.repo ? undefined : repo.repo}>{label}</strong>{" "}
+        <code>@{repo.commit.slice(0, 12)}</code>
         {repo.commit_note ? ` (${repo.commit_note})` : ""}{" "}
         <span
           className={repo.limited ? "coverage-limited" : "coverage-scoped"}
@@ -97,7 +113,7 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
                 : STATE_LABEL[producer.state]}
             </span>{" "}
             <code>{producer.id}</code> ({producer.covers}):{" "}
-            {producer.stopping_reason}
+            {named(producer.stopping_reason)}
             {producer.refusals && (
               <ul
                 className="coverage-refused"
@@ -131,7 +147,7 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
           <ul>
             {repo.missing_inputs.map((missing) => (
               <li key={missing.input}>
-                <code>{missing.input}</code>: {missing.reason}
+                <code>{missing.input}</code>: {named(missing.reason)}
               </li>
             ))}
           </ul>
@@ -144,7 +160,7 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
             {unsupported.map((unsupported) => (
               <li key={unsupported.capability}>
                 {unsupported.capability} ×{unsupported.occurrences}, first at{" "}
-                <code>{unsupported.first_site}</code>: {unsupported.reason}
+                <code>{unsupported.first_site}</code>: {named(unsupported.reason)}
               </li>
             ))}
           </ul>
@@ -205,8 +221,11 @@ function RepoCoverageRow({ repo }: { repo: RepoCoverage }) {
 export function CoverageInventory({
   coverage,
   note,
+  repoLabel = exactKey,
 }: {
   coverage: RepoCoverage[];
+  /** Readable source names (#2471); exact keys when absent. */
+  repoLabel?: RepoLabel;
   /** States where the inventories come from when not from this session. */
   note?: string;
 }) {
@@ -223,6 +242,7 @@ export function CoverageInventory({
         <RepoCoverageRow
           key={`${repo.repo}@${repo.commit}`}
           repo={repo}
+          repoLabel={repoLabel}
         />
       ))}
     </section>
@@ -236,9 +256,11 @@ export function CoverageInventory({
 export function RecordedCoverageInventory({
   restored,
   error,
+  repoLabel = exactKey,
 }: {
   restored: RestoredCoverage[];
   error?: string | null;
+  repoLabel?: RepoLabel;
 }) {
   if (error) {
     return (
@@ -256,6 +278,7 @@ export function RecordedCoverageInventory({
     <>
       <CoverageInventory
         coverage={current}
+        repoLabel={repoLabel}
         note="Recorded by the last ingest of each repo. Its registration and plugins were compared now; source inputs and everything else are as recorded, not newly validated."
       />
       {stale.length > 0 && (
@@ -268,7 +291,9 @@ export function RecordedCoverageInventory({
           <ul>
             {stale.map((repo) => (
               <li key={repo.repo}>
-                <strong>{repo.repo}</strong>{" "}
+                <strong title={repoLabel(repo.repo) === repo.repo ? undefined : repo.repo}>
+                  {repoLabel(repo.repo)}
+                </strong>{" "}
                 <code>{repo.inventory_hash.slice(0, 19)}</code>: stale, not
                 current. Its registration or plugins changed since it was
                 recorded (compared: {repo.compared.join(", ")}), so nothing is
