@@ -737,6 +737,31 @@ fn operation_limits_bound_the_working_set_and_never_raise_it() {
 }
 
 #[test]
+fn a_lowered_batch_splits_provider_calls_without_changing_vectors() {
+    // AC-1819 / #1653: the texts per provider call can be lowered from 1 up
+    // to the shipped batch, never raised; a smaller batch makes more calls
+    // and returns the same vectors.
+    let limits = OperationLimits::default();
+    assert_eq!(limits.batch_texts(), BATCH_COUNT);
+    assert_eq!(limits.with_batch_texts(0), None);
+    assert_eq!(limits.with_batch_texts(BATCH_COUNT + 1), None);
+    assert_eq!(limits.with_batch_texts(BATCH_COUNT), Some(limits));
+    let small = limits.with_batch_texts(3).unwrap();
+    assert_eq!(small.batch_texts(), 3);
+    let texts: Vec<String> = (0..7).map(|n| format!("text {n}")).collect();
+    let (_dir, cache, lease) = setup();
+    let whole = Scripted::new();
+    let wrapper = CachedProvider::within(&whole, cache.clone(), lease.clone(), limits).unwrap();
+    let expected = wrapper.embed(&texts).unwrap();
+    assert_eq!(whole.calls.load(Ordering::SeqCst), 1);
+    let (_dir, cache, lease) = setup();
+    let split = Scripted::new();
+    let wrapper = CachedProvider::within(&split, cache, lease, small).unwrap();
+    assert_eq!(wrapper.embed(&texts).unwrap(), expected);
+    assert_eq!(split.calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
 fn vscode_scale_plans_are_cached_and_reused_without_calls() {
     // AC-1507: a plan past the old 100k bound is embedded once, persisted
     // whole, and a reopened warm pass makes no embedding call. The whole-VSCode

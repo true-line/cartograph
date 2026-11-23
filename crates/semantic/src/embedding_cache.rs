@@ -36,6 +36,7 @@ pub const MAX_DIMENSIONS: usize = 4096;
 pub struct OperationLimits {
     max_rows: usize,
     max_vector_bytes: usize,
+    batch_texts: usize,
 }
 
 impl OperationLimits {
@@ -49,7 +50,23 @@ impl OperationLimits {
         .then_some(Self {
             max_rows,
             max_vector_bytes,
+            batch_texts: BATCH_COUNT,
         })
+    }
+
+    /// These limits sending at most `batch_texts` texts per provider call
+    /// (1 to [`BATCH_COUNT`], AC-1819), or `None`. A smaller batch keeps one
+    /// call on slow local hardware under its timeout; it never changes which
+    /// texts are embedded or the vectors kept.
+    pub fn with_batch_texts(self, batch_texts: usize) -> Option<Self> {
+        (1..=BATCH_COUNT).contains(&batch_texts).then_some(Self {
+            batch_texts,
+            ..self
+        })
+    }
+
+    pub fn batch_texts(self) -> usize {
+        self.batch_texts
     }
 
     pub fn max_rows(self) -> usize {
@@ -66,6 +83,7 @@ impl Default for OperationLimits {
         Self {
             max_rows: MAX_ROWS,
             max_vector_bytes: MAX_VECTOR_BYTES,
+            batch_texts: BATCH_COUNT,
         }
     }
 }
@@ -689,7 +707,7 @@ impl CachedProvider<'_> {
             let mut end = offset;
             let mut bytes = 0;
             while end < misses.len()
-                && end - offset < BATCH_COUNT
+                && end - offset < self.limits.batch_texts
                 && bytes + misses[end].1.len() <= BATCH_BYTES
             {
                 bytes += misses[end].1.len();
