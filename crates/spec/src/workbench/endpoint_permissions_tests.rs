@@ -944,7 +944,7 @@ admin.add_view(Reports(endpoint="reports"))
         .unwrap()
 }
 
-// AC-0856: a Python endpoint's guard reading names its caller in D1 §1.2,
+// AC-0856, AC-1603: a Python endpoint's guard reading names its caller in D1 §1.2,
 // in its user story and, by the guard's own name, in `security.md` and
 // `endpoint-permissions.md`.
 #[test]
@@ -1000,6 +1000,39 @@ fn python_callers_are_named_by_their_recovered_guards() {
             "{row}"
         );
     }
+    // AC-1603: each row cites the operations it shows, in the order shown.
+    let id_of = |method: &str, path: &str| {
+        let endpoint = endpoints
+            .iter()
+            .find(|n| n.props["method"] == method && n.props["path"] == path)
+            .unwrap();
+        crate::citation_id(&FactKey::Node {
+            id: endpoint.id.clone(),
+        })
+    };
+    let (rows, citations): (Vec<&str>, Vec<&str>) = rows
+        .iter()
+        .map(|row| {
+            let (head, cited) = row.trim_end_matches(" |").rsplit_once(" | ").unwrap();
+            (head, cited)
+        })
+        .unzip();
+    assert_eq!(
+        citations,
+        [
+            format!(
+                "{}, {}",
+                id_of("GET", "/api/coupon"),
+                id_of("POST", "/api/coupon")
+            ),
+            id_of("DELETE", "/api/aliases/<int:alias_id>"),
+            id_of("GET", "/api/health"),
+        ]
+    );
+    for id in citations.iter().flat_map(|cell| cell.split(", ")) {
+        assert!(d1.contains(id), "{id}");
+    }
+    let rows: Vec<String> = rows.iter().map(|row| format!("{row} |")).collect();
     assert_eq!(
         rows,
         [
