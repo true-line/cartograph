@@ -206,7 +206,8 @@ impl FrozenContext {
     /// complete graph at its pinned revision, or at a later one only when the
     /// complete-graph identity is unchanged; any other change is
     /// [`HostError::InputChanged`]. A scope-aware task compiles its held
-    /// scope facts, labeled as not the whole system. A complete-graph
+    /// scope facts, labeled as not the whole system even when its scope
+    /// happens to hold every current fact. A complete-graph
     /// preparation of a narrower scope has no held scope graph and refuses.
     fn artifact_basis(&self, state: &AppState) -> Result<(ArtifactGraph<'_>, bool), HostError> {
         let whole = self.ledger.scope_snapshot_id == self.ledger.graph_snapshot_id;
@@ -221,7 +222,7 @@ impl FrozenContext {
                     .map_err(scoped_graph_error)?;
                 Ok((std::borrow::Cow::Owned(read.graph), true))
             }
-            (ScopeFacts::Held(_), Some(_)) => Ok((std::borrow::Cow::Borrowed(&self.graph), whole)),
+            (ScopeFacts::Held(_), Some(_)) => Ok((std::borrow::Cow::Borrowed(&self.graph), false)),
             (ScopeFacts::Held(_), None) if whole => {
                 Ok((std::borrow::Cow::Borrowed(&self.graph), true))
             }
