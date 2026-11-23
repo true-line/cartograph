@@ -8,9 +8,9 @@
 #
 # They run on every push to main, on demand, and on a pull request that
 # changes this workflow or the Windows packaging inputs. The per-PR Windows
-# gate stays ci.yml's Windows job ownership. The installer is unsigned:
-# Authenticode signing and its fail-closed release posture are tracked on
-# #227.
+# gate stays ci.yml's Windows job ownership. The installer built here is
+# unsigned-dev: signing needs secrets, which no pull-request run reads
+# (windows-installer.yml, ADR-0093).
 name: Windows
 
 on:
@@ -23,6 +23,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/windows.yml
+      - .github/workflows/windows-installer.yml
+      - scripts/windows-sign.ps1
+      - scripts/signing-secrets.mjs
       - scripts/build-agent-runtime.mjs
       - scripts/build-mcp-relay.mjs
       - scripts/agent-runtime-node.json
@@ -166,14 +169,14 @@ jobs:
         # FILTER, when set, is the libtest name filter for the lane.
         run: cargo test --locked --no-fail-fast $PACKAGES -- $FILTER
 
-  # An unsigned NSIS installer with both sidecars, as an artifact for manual
-  # testing. It is never published: release.yml ships macOS only until the
-  # Windows signing posture exists (#227).
+  # The installer lives in windows-installer.yml. No secret is passed here,
+  # so pull requests and main build the visibly unsigned-dev installer; a
+  # signing caller has no pull-request trigger (#631, ADR-0093).
   installer:
-    name: Windows unsigned installer
+    name: Windows installer
     needs: policy
-    runs-on: windows-latest
-    timeout-minutes: 90
+    uses: ./.github/workflows/windows-installer.yml
+  REMOVED_INSTALLER_STEPS:
     steps:
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
