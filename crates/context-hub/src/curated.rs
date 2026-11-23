@@ -824,7 +824,7 @@ fn count(counts: &mut CuratedCounts, state: RecordState) {
 /// graph_content_hash, [(record_id, decision, state, reason)…],
 /// [(draft_id, decision, state, reason)…],
 /// [(finding_ref, decision, state, reason)…],
-/// [(attested_id, state, reason)…], assertion_decision_digest)`,
+/// [(attested_id, state, reason, attestations)…], assertion_decision_digest)`,
 /// records, drafts, findings and attested records each in identity order.
 pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, ProjectionError> {
     let mut reviewed: Vec<(&ReviewedProposal, ReviewDecision)> = input

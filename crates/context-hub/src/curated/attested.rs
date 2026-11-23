@@ -83,12 +83,16 @@ pub enum AttestedStanding {
     AgentAttestedUnconfirmed,
 }
 
-/// One attestation as a read prints it: ids only, never a name.
+/// One attestation as a read prints it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedContribution {
-    /// The contributor's `C-` id; its display name is in the project's
-    /// contributor table only.
+    /// The contributor's `C-` id.
     pub contributor_id: String,
+    /// An engineer's display name, resolved by the host from the project's
+    /// contributor table at read time; the stored record holds none
+    /// (ADR-0090 decision 4). `None` for an agent, which is named by role
+    /// and run.
+    pub display_name: Option<String>,
     /// Whether the contributor is an engineer; otherwise an agent.
     pub engineer: bool,
     /// What it did, such as `stated` or `confirmed`.
@@ -230,8 +234,14 @@ pub struct AttestedCounts {
     pub stale: usize,
 }
 
-/// `(record_id, state, reason)` as the revision takes it.
-pub(super) type RevisionAttested<'a> = (&'a str, AttestedState, AttestedStateReason);
+/// `(record_id, state, reason, attestations)` as the revision takes it: a
+/// read prints the attestations, so a new one gives a new revision.
+pub(super) type RevisionAttested<'a> = (
+    &'a str,
+    AttestedState,
+    AttestedStateReason,
+    &'a [AttestedContribution],
+);
 
 pub(super) struct AttestedProjection<'a> {
     pub(super) records: Vec<CuratedAttested>,
@@ -324,7 +334,12 @@ pub(super) fn project_attested<'a>(
                 (S::AgentAttestedUnconfirmed, R::AgentsOnly)
             }
         };
-        revision.push((record.record_id.as_str(), state, reason));
+        revision.push((
+            record.record_id.as_str(),
+            state,
+            reason,
+            record.attestations.as_slice(),
+        ));
         counts.projected += 1;
         *match state {
             S::Withdrawn => &mut counts.withdrawn,
