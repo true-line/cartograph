@@ -243,6 +243,16 @@ fn extraction_is_order_independent() {
     assert_eq!(extract(&id(), &files()), extract(&id(), &reversed));
 }
 
+fn replace(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let at = bytes
+        .windows(from.len())
+        .position(|window| window == from)
+        .expect("fixture holds the pattern");
+    let mut out = bytes.to_vec();
+    out[at..at + to.len()].copy_from_slice(to);
+    out
+}
+
 /// AC-1215: a file the reader cannot walk whole is one Gap naming why, and
 /// states no other fact.
 #[test]
@@ -255,6 +265,12 @@ fn unreadable_class_files_are_gaps() {
             "truncated",
         ),
         ("Tail.class", [LEDGER, b"x"].concat(), "trailing_bytes"),
+        (
+            // `accepts(java.time.Clock)` with its descriptor's `L` made `Q`.
+            "Descriptor.class",
+            replace(LEDGER, b"(Ljava/time/Clock;)V", b"(Qjava/time/Clock;)V"),
+            "descriptor",
+        ),
         (
             // An empty constant pool, then a class index into it.
             "Index.class",
@@ -448,4 +464,79 @@ fn a_class_shipped_twice_keeps_its_own_calls() {
             .filter(|edge| edge.label == "CALLS")
             .all(|edge| !edge.dst.contains("Ledger.Store.Store()")),
     );
+}
+
+/// AC-1215: a class file larger than the read limit is a `too_large` Gap
+/// whose evidence is the whole file's digest, read without holding it.
+#[test]
+fn an_oversized_class_file_is_a_gap_not_a_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = vec![0xca; MAX_CLASS_BYTES + 10];
+    write(dir.path(), "lib/Huge.class", &big);
+    let out = extract_dir(dir.path(), &id(), &mut |_| {}).unwrap();
+    assert_eq!(out.nodes.len(), 1, "{:#?}", out.nodes);
+    let gap = &out.nodes[0];
+    assert_eq!(gap.props["reason_code"], "too_large");
+    let prov: Provenance = serde_json::from_value(gap.props["prov"].clone()).unwrap();
+    let EvidenceBasis::Artifact { refs } = prov.basis() else {
+        panic!("artifact basis");
+    };
+    assert_eq!(refs[0].digest, digest(&big));
+    assert_eq!(
+        refs[0].at,
+        ArtifactLocator::Offset {
+            start: 0,
+            end: big.len() as u64
+        }
+    );
+}
+
+fn method(name: &str, descriptor: &str) -> class_file::Method {
+    class_file::Method {
+        access: 0,
+        name: name.into(),
+        descriptor: descriptor.into(),
+        span: (0, 0),
+        calls: Vec::new(),
+    }
+}
+
+/// AC-1215: overloads whose simple parameter spellings collide spell their
+/// classes in full, so each keeps its own Symbol.
+#[test]
+fn colliding_overloads_keep_their_own_names() {
+    let mut class = compiled("com/acme/Clock", None);
+    class.methods = vec![
+        method("at", "(Ljava/util/Date;)V"),
+        method("at", "(Ljava/sql/Date;)V"),
+        method("at", "(I)V"),
+        method("of", "(Lcom/acme/Outer$Date;)V"),
+    ];
+    assert_eq!(
+        method_names("Clock", &class),
+        vec![
+            Some("Clock.at(java.util.Date)".to_string()),
+            Some("Clock.at(java.sql.Date)".to_string()),
+            Some("Clock.at(int)".to_string()),
+            Some("Clock.of(Outer.Date)".to_string()),
+        ]
+    );
+}
+
+/// AC-1215: a class compiled from a Kotlin script (`.kts`) is left to the
+/// Kotlin adapter, which reads scripts too.
+#[test]
+fn a_kotlin_script_class_has_source() {
+    let paths = ["tools/migrate.kts".to_string()];
+    let read = |_: &str| Ok(b"package com.acme.tools\n\nprintln(1)\n".to_vec());
+    let sources = sources(&paths, &read);
+    assert!(has_source(
+        &sources,
+        &compiled("com/acme/tools/Migrate", Some("migrate.kts"))
+    ));
+    assert!(has_source(&sources, &compiled("tools/migrate", None)));
+    assert!(!has_source(
+        &sources,
+        &compiled("com/other/Migrate", Some("migrate.kts"))
+    ));
 }

@@ -2333,6 +2333,7 @@ fn extract_tree_packed(
             // Which classes have source is read from the same capture.
             let mut captured_sources = captured_lane_paths(primary, ".java");
             captured_sources.extend(captured_lane_paths(primary, ".kt"));
+            captured_sources.extend(captured_lane_paths(primary, ".kts"));
             adapters_artifact_jvm::extract_dir_from(
                 &jvm_id,
                 &captured_classes,
