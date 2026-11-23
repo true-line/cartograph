@@ -126,6 +126,7 @@ pub fn export_adapter_packet(body: &PacketBody) -> PacketResult<(String, String)
         lineage: PacketLineage::default(),
         freshness: PacketFreshness::default(),
         execution: work_packets::ExecutionState::Unoffered,
+        dispatch: None,
     };
     Ok((packet_id, export_markdown(&detail)?))
 }
