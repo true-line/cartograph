@@ -449,3 +449,41 @@ fn analyst20_worker_eight_obligations_offer_acquisition_then_finish() {
         }
     }
 }
+
+// AC-1433: rule-bearing suggestions name captured callables that own recovered
+// guarded exits, at most two per file, and each resolves as a source obligation.
+#[test]
+fn rule_bearing_sources_name_resolvable_rule_owners_capped_per_file() {
+    let provider = NextProvider::new(false);
+    let (base, _) = seven_target_base(&provider);
+    let state = base.base.app.state::<AppState>();
+    let sources =
+        crate::investigations::rule_sources::rule_bearing_sources(&state, None, None, 7).unwrap();
+    assert_eq!(sources.len(), 2, "one file contributes at most two owners");
+    for source in &sources {
+        assert!(source.owner.guarded_exits >= 1);
+        let agents::TaskFactKey::Node { id } = &source.fact else {
+            panic!("owners are node facts");
+        };
+        assert!(id.contains("#exact_") || id.contains("#oversized"), "{id}");
+        crate::investigations::inspection::resolve(
+            &state,
+            &source.fact,
+            &source.graph_snapshot_id,
+            &source.receipt_id,
+            source.range_index,
+        )
+        .unwrap();
+    }
+    let elsewhere: std::collections::BTreeSet<String> = ["no/such/file.ts".to_owned()].into();
+    assert!(
+        crate::investigations::rule_sources::rule_bearing_sources(
+            &state,
+            None,
+            Some(&elsewhere),
+            7
+        )
+        .unwrap()
+        .is_empty()
+    );
+}

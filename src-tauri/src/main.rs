@@ -9128,6 +9128,7 @@ pub fn run() {
             investigations::commands::cancel_investigation,
             investigations::commands::read_investigation_citation,
             investigations::artifact_reads_view::investigation_artifact_reads,
+            investigations::rule_sources::investigation_rule_bearing_sources,
             investigations::inspection::resolve_investigation_inspection_target,
             investigations::completion_choices::investigation_obligation_choices,
             investigations::completion_choices::resolve_investigation_source_obligation,
