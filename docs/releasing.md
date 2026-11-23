@@ -124,9 +124,23 @@ downloads the WebView2 bootstrapper on systems that lack WebView2; Windows 10
 1803 and later already have it. The Windows app does not carry Claude Code:
 only the macOS app stages it (AC-1424).
 
-The installer is not Authenticode signed, so SmartScreen warns on first run.
-Signing, timestamping and a fail-closed release posture like ADR-0016's are
-tracked on #227. Until they land, `release.yml` publishes macOS only.
+The installer is not Authenticode signed yet, so SmartScreen warns on first
+run. ADR-0093 sets the signing posture: Azure Artifact Signing, reached
+through GitHub OIDC so that no key or password is stored, timestamped and
+fail-closed like ADR-0016. `node scripts/signing-secrets.mjs windows` already
+classifies the credential set:
+
+| Secret | Value |
+|---|---|
+| `AZURE_TENANT_ID` | Tenant of the Artifact Signing account |
+| `AZURE_CLIENT_ID` | App registration with a federated credential for this repository's release workflow and the Artifact Signing Certificate Profile Signer role |
+| `ARTIFACT_SIGNING_ENDPOINT` | The account's regional endpoint, such as `https://eus.codesigning.azure.net` |
+| `ARTIFACT_SIGNING_ACCOUNT` | Artifact Signing account name |
+| `ARTIFACT_SIGNING_PROFILE` | Public-trust certificate profile name |
+
+With none of them the build is `unsigned-dev`, with all five it is `signed`,
+and a partial set fails closed. The workflow steps that sign are still to come
+(#227), so until they land `release.yml` publishes macOS only.
 
 ## Required GitHub secrets
 
