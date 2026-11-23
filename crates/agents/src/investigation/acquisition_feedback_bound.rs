@@ -72,6 +72,7 @@ pub(in crate::investigation) fn feedback_encoded_bound(
         entries.push(chosen);
     }
     let mut feedback = staged_finish::RefusalFeedback {
+        citation_drop: None,
         prose_correction: None,
         schema_version: 2,
         citation_correction: Some(CitationCorrection {
