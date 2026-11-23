@@ -212,7 +212,7 @@ pub fn definition_fingerprint() -> String {
     crate::source_basis::domain_hash(
         b"cartograph:draft-rules-definition:v1\0",
         format!(
-            "{DRAFT_RULES_ROLE}\0{}\0{WORKFLOW_FILE}\0{AUDITOR_SYSTEM}",
+            "{DRAFT_RULES_ROLE}\0{}\0{WORKFLOW_FILE}\0{AUDITOR_SYSTEM}\0{ROW_SELECTION}",
             section_compose::definition_fingerprint()
         )
         .as_bytes(),
@@ -283,12 +283,47 @@ fn separator(line: &str) -> bool {
     line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
+/// The Rule cell the spec compiler prints for an exit whose condition or
+/// outcome is outside its rendering rules (`spec`'s `NOT_STATED`): a Gap,
+/// with no rule to state.
+const NOT_STATED_PREFIX: &str = "Not stated in domain terms (Gap)";
+
+/// Bump when the rows [`partition`] keeps change; it is part of the role's
+/// definition fingerprint, so a draft records which selection it read.
+const ROW_SELECTION: &str = "rows@2:gap-skipped:repeats-dropped";
+
+/// Rule rows [`partition`] did not hand to the drafter (#1748).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Skipped {
+    /// Rows whose Rule cell is a Gap: nothing to state.
+    pub gap_rows: usize,
+    /// Rows whose rule an earlier row of the section already holds: the
+    /// same Rule cell, or no citable id an earlier row did not print. A
+    /// shared helper is printed under every capability that reaches it.
+    pub repeated_rows: usize,
+}
+
 /// Cut compiled section `text` into chunks of at most `max_rows` rule rows.
 /// A rule row is a table row printing at least one id in `citable`; a chunk
 /// repeats the area and capability headings and the table header its rows
 /// sit under, so it reads on its own.
 pub fn partition(text: &str, citable: &BTreeSet<String>, max_rows: usize) -> Vec<Chunk> {
+    partition_counted(text, citable, max_rows).0
+}
+
+/// [`partition`], leaving out the rows nothing can be drafted from, and
+/// saying how many: a Gap row, and a row repeating a rule an earlier row
+/// holds (#1748). Without this, each copy of a shared rule became its own
+/// claim and a Gap row a claim that states nothing.
+pub fn partition_counted(
+    text: &str,
+    citable: &BTreeSet<String>,
+    max_rows: usize,
+) -> (Vec<Chunk>, Skipped) {
     let max_rows = max_rows.max(1);
+    let mut skipped = Skipped::default();
+    let mut rules_seen: BTreeSet<String> = BTreeSet::new();
+    let mut ids_seen: BTreeSet<String> = BTreeSet::new();
     let mut blocks: Vec<Block> = Vec::new();
     let (mut area, mut capability, mut label): (Option<&str>, Option<&str>, Option<&str>) =
         (None, None, None);
@@ -319,6 +354,17 @@ pub fn partition(text: &str, citable: &BTreeSet<String>, max_rows: usize) -> Vec
                 .filter(|id| citable.contains(id))
                 .collect();
             if !ids.is_empty() {
+                let rule = rule_cell(line);
+                if rule.starts_with(NOT_STATED_PREFIX) {
+                    skipped.gap_rows += 1;
+                    continue;
+                }
+                let fresh = ids.iter().any(|id| !ids_seen.contains(id));
+                if !rules_seen.insert(norm(rule)) || !fresh {
+                    skipped.repeated_rows += 1;
+                    continue;
+                }
+                ids_seen.extend(ids.iter().cloned());
                 block.rows.push(Row {
                     text: line.to_owned(),
                     ids,
@@ -352,7 +398,7 @@ pub fn partition(text: &str, citable: &BTreeSet<String>, max_rows: usize) -> Vec
     if !parts.is_empty() {
         chunks.push(render(title, &parts));
     }
-    chunks
+    (chunks, skipped)
 }
 
 fn render(title: Option<&str>, parts: &[(&Block, &[Row])]) -> Chunk {
@@ -930,8 +976,13 @@ pub struct GatedInput<'a> {
 pub struct GatedStats {
     /// Chunks drafted.
     pub chunks: usize,
-    /// Rule rows in the section.
+    /// Rule rows in the section that were drafted.
     pub rows: usize,
+    /// Gap rows left out before drafting: nothing to state (#1748).
+    pub gap_rows_skipped: usize,
+    /// Rows left out before drafting because an earlier row holds the
+    /// same rule (#1748).
+    pub repeated_rows_skipped: usize,
     /// Rule rows cited by a kept claim.
     pub rows_covered: usize,
     /// Model calls, drafting and auditing.
@@ -1092,10 +1143,12 @@ pub fn run(
         .iter()
         .map(|fact| fact.citation_id.clone())
         .collect();
-    let chunks = partition(input.section, &citable, workflow.max_rows);
+    let (chunks, skipped) = partition_counted(input.section, &citable, workflow.max_rows);
     let mut stats = GatedStats {
         chunks: chunks.len(),
         rows: chunks.iter().map(|chunk| chunk.rows.len()).sum(),
+        gap_rows_skipped: skipped.gap_rows,
+        repeated_rows_skipped: skipped.repeated_rows,
         ..GatedStats::default()
     };
     let mut claims: Vec<Claim> = Vec::new();
