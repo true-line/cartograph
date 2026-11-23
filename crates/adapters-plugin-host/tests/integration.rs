@@ -1145,3 +1145,90 @@ fn host_computes_the_content_hash_and_keeps_valid_guest_spans() {
         (0, PROV_SOURCE.len() as u64)
     );
 }
+
+// AC-1069 (T-1069, #385): over a source capture a plugin is routed the
+// captured bytes of exactly the captured files it claims, in sorted order,
+// skipping vendored directories and other extensions: a claimed file edited
+// to one the plugin refuses, deleted or created in the checkout afterwards
+// changes no fact and no refusal.
+#[test]
+fn captured_claimed_files_are_routed_instead_of_the_checkout() {
+    use adapters_plugin_host::route::{claims, extract_captured_counted};
+
+    let claims_foo = vec!["foo".to_string()];
+    assert!(claims("src/b.foo", &claims_foo));
+    assert!(!claims("node_modules/dep/c.foo", &claims_foo));
+    assert!(!claims(".cartograph/adapters/plugin.foo", &claims_foo));
+    assert!(!claims("readme.md", &claims_foo));
+
+    let dir = foo_tree(&[("a.foo", "fine"), ("src/b.foo", "fine too")]);
+    let routed = |claimed: &adapters_plugin_host::route::ClaimedExtraction| {
+        (
+            node_ids(claimed)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            refused(claimed)
+                .into_iter()
+                .map(|(path, _)| path.to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let host = PluginHost::new().expect("engine");
+    let plugin = host
+        .load(REFUSING_ADAPTER, "t0.plugin-refusing")
+        .expect("text component loads");
+    let before = adapters_plugin_host::route::extract_claimed_counted(
+        &host,
+        &plugin,
+        dir.path(),
+        &claims_foo,
+        &source_id(),
+        PluginLimits::default(),
+    )
+    .expect("checkout routing succeeds");
+    let captured: std::collections::BTreeMap<String, Vec<u8>> = [
+        ("src/b.foo", "fine too"),
+        ("a.foo", "fine"),
+        ("readme.md", "Malformed"),
+        ("node_modules/dep/c.foo", "Malformed"),
+    ]
+    .into_iter()
+    .map(|(rel, source)| (rel.to_string(), source.as_bytes().to_vec()))
+    .collect();
+
+    // After capture: a refused edit, a deletion and a new claimed file.
+    std::fs::write(dir.path().join("a.foo"), "Malformed").unwrap();
+    std::fs::remove_file(dir.path().join("src/b.foo")).unwrap();
+    std::fs::write(dir.path().join("c.foo"), "fine").unwrap();
+    let paths: Vec<String> = captured.keys().cloned().collect();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let after = extract_captured_counted(
+        &host,
+        &plugin,
+        &paths,
+        &read,
+        &claims_foo,
+        &source_id(),
+        PluginLimits::default(),
+    )
+    .expect("captured routing succeeds");
+    assert_eq!(after.files_read, 2);
+    assert_eq!(routed(&after), routed(&before));
+    assert_eq!(after.facts.nodes, before.facts.nodes);
+    let live = adapters_plugin_host::route::extract_claimed_counted(
+        &host,
+        &plugin,
+        dir.path(),
+        &claims_foo,
+        &source_id(),
+        PluginLimits::default(),
+    )
+    .expect("checkout routing succeeds");
+    assert_ne!(routed(&live), routed(&before));
+}
