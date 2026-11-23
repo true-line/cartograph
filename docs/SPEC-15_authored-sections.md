@@ -18,7 +18,9 @@ graph hash do not change.
 Not in this specification: re-drafting on drift and the per-document stale
 list (#1749); target documents as evidence (#1750); the handoff bundle
 (#1752); any write to the base graph or the target; free-form chat; a new
-provider, tier or confidence label.
+provider, tier or confidence label. The one new label is *attested*
+(ADR-0090), defined under "Attested context" below; it is not a tier or a
+confidence.
 
 ## Terms
 
@@ -286,6 +288,39 @@ across 1.2, 1.3 and 1.5 with their source lines, the scoring protocol and
 `score.py`, which tabulates a reviewer's `scores.json`. No run has been
 scored, so AC-0670 is open and T-0670 stays reserved until a result is
 committed there.
+
+## Attested context (ADR-0090, #2463)
+
+Designed, not built. Slices AC-1071 to AC-1083 are listed in ADR-0090.
+
+- **Record.** An attested record answers one Gap slot or one section
+  address with a statement (at most 2,048 UTF-8 bytes), optional supporting
+  citations, the content hashes of the facts around its target when it was
+  recorded, and its attestations. Its citation id is `A-` and 16 lowercase
+  hex characters of its identity.
+- **Attestations.** An append-only history, each keyed by contributor id;
+  each contributor's latest sets the standing, and none changes the `A-` id. An
+  agent attestation names the role, its definition fingerprint, the model
+  and provider, the run or chat, and the directing engineer's contributor
+  id. An engineer attestation names the verb (`stated`, `confirmed`,
+  `disputed`, `withdrew`), the time and the conversation or investigation.
+  v1 holds one engineer profile per project. Contributor names and handles
+  live only in the project's app data and are never written to the target,
+  the repository or the base graph.
+- **Admission.** A drafting run may be admitted the eligible attested
+  records whose target is in its scope, each by its `A-` id. A claim may
+  cite them beside facts. A claim that cites one is an *attested claim*.
+- **Printing.** `verified-only` prints no attested claim and states per
+  section how many it left out. `best-effort` prints each attested claim
+  marked *attested* with every contributor and verb, in place of
+  `T3 / InferredWeak` for the attested part. A claim backed only by agents
+  is labelled *agent-attested, unconfirmed* with its contributing agents,
+  omitted and counted by `verified-only`, and never shown as engineer-backed
+  until an engineer states or confirms it. The fact index lists each cited
+  `A-` id, so an export still fails on a citation without a row.
+- **What does not change.** Nothing is written to the base graph, its hash
+  does not change, the Gap stays open and counted, and acceptance never
+  upgrades a tier.
 
 ## Open items
 
