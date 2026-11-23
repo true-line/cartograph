@@ -1185,6 +1185,8 @@ An authenticated next-prompt finish rejected for an unavailable citation retains
 - **Trace:** H4 · `agents` · ADR-0085 · T-1817
 - **AC-1818** Given `CARTOGRAPH_CAPACITY_TRACE` set in the app's environment, when a specialist proposes a source read, then the host writes one numeric `capacity_trace` line to standard error naming the call, the current payload bytes, the source range bytes and the input ceiling, followed by the certified choice and finish-only continuation sizes, the reserve above the current payload and the headroom left, or `refused` when the continuation could not be proven; the line holds no identifier, path or text, and without the variable nothing is written (#1653).
 - **Trace:** H4 · `app` · ADR-0085 · T-1818
+- **AC-1433** Given a recovered graph whose language adapters emitted `BusinessRule` guarded-exit facts, when a caller asks for rule-bearing sources (optionally limited to a closure of repository paths), then the host ranks the callables that own those rules by guarded throws, then guarded exits, then guarded effects, then path and id, takes at most two per file and at most 64 in total, skips an undecodable rule payload or an owner without a bound capture, and returns each owner's fact, counts, graph snapshot, receipt and first captured range, so that every entry resolves as a source obligation. The ranking reads graph metadata only; no source text or model is consulted (#1728).
+- **Trace:** H4 · `app` · ADR-0085 · T-1433
 
 
 - **AC-0573** New desktop `completion_start` tasks select the versioned
