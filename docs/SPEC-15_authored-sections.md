@@ -299,8 +299,13 @@ kind (AC-1075, `context_hub::curated::attested`). The tables live in the
 section draft store's file beside the finding curation reviews, and the
 export and the MCP curated read take every stored record into the
 projection, each engineer named from the contributor table at read time
-(AC-1077, part 1). Not built: drafts citing `A-` ids and their printing,
-capture paths and surfaces.
+(AC-1077, part 1). An accepted draft may cite an `A-` id; D1 prints the
+claim in `best-effort` with "`A-…` is attested: stated by …, confirmed by
+…" (or *agent-attested, unconfirmed* with the agents alone), counts it per
+section in `verified-only`, and the fact index lists each printed `A-` id
+in its own attested table; a `verified-only` index refuses one (AC-1077,
+part 2). Not built: admitting attested records to a drafting run, capture
+paths and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting
