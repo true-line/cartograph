@@ -961,7 +961,10 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   assert.match(caller, /uses: \.\/\.github\/workflows\/windows-installer\.yml\n(?! +secrets:)/u);
   assert.doesNotMatch(triggers(installer), /pull_request|workflow_dispatch/u);
   assert.match(installer, /^permissions:\n  contents: read\n/mu);
-  assert.match(installer, /    permissions:\n      contents: read\n      id-token: write\n/u);
+  assert.match(installer, /    permissions:\n      contents: read\n    outputs:/u);
+  assert.doesNotMatch(installer + caller, /id-token|federated-token/u);
+  // The account coordinates match the organization's Artifact Signing account.
+  assert.match(installer, /ARTIFACT_SIGNING_ENDPOINT: https:\/\/eus\.codesigning\.azure\.net\/\n +ARTIFACT_SIGNING_ACCOUNT: zts1\n +ARTIFACT_SIGNING_PROFILE: overlook\n/u);
   // Classify before compiling; compile with no signing input in scope.
   const classify = installer.indexOf('node scripts/signing-secrets.mjs windows');
   const compile = installer.indexOf('--no-bundle');
@@ -973,15 +976,15 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   // The signed path verifies every shipped binary, timestamp included.
   assert.match(installer, /\$signature\.Status -ne 'Valid' -or -not \$signature\.TimeStamperCertificate/u);
   assert.match(installer, /"name=Cartograph_\$\{version\}_x64_\$env:MODE"/u);
-  // release.yml is the one signing caller: it passes exactly the five
-  // secrets, grants id-token, and attaches the installer only when signed.
+  // release.yml is the one signing caller: it passes exactly the three
+  // service-principal secrets and attaches the installer only when signed.
   const release = readFileSync(path.join(dir, 'release.yml'), 'utf8');
   const windowsJob = release.split('\n  windows:\n')[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
   assert.match(windowsJob, /uses: \.\/\.github\/workflows\/windows-installer\.yml/u);
-  assert.match(windowsJob, /permissions:\n +contents: read\n +id-token: write\n/u);
+  assert.match(windowsJob, /permissions:\n +contents: read\n +uses:/u);
   assert.match(windowsJob, /ref: \$\{\{ needs\.validate\.outputs\.tag \}\}/u);
   assert.deepEqual([...windowsJob.matchAll(/secrets\.([A-Z_]+)/gu)].map((match) => match[1]),
-    ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'ARTIFACT_SIGNING_ENDPOINT', 'ARTIFACT_SIGNING_ACCOUNT', 'ARTIFACT_SIGNING_PROFILE']);
+    ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']);
   assert.doesNotMatch(windowsJob, /secrets: inherit/u);
   const attach = release.split('\n  publish-windows:\n')[1] ?? '';
   assert.match(attach, /if: needs\.windows\.outputs\.signing_mode == 'signed'/u);

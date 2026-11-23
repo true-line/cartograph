@@ -1,8 +1,9 @@
 # Authenticode-sign one file through Azure Artifact Signing (ADR-0093, #227).
 # Tauri's bundle.windows.signCommand calls this for each binary it packages;
 # windows-installer.yml calls it for the sidecars. It runs only after compilation, in a
-# step that already holds an Azure CLI session from GitHub OIDC, and reads
-# the tool paths the "Fetch Artifact Signing client" step wrote.
+# step whose environment holds the Azure service principal (the dlib signs in
+# through EnvironmentCredential), and reads the tool paths the "Fetch Artifact
+# Signing client" step wrote.
 param([Parameter(Mandatory = $true)][string] $Path)
 $ErrorActionPreference = 'Stop'
 foreach ($name in @('ARTIFACT_SIGNING_SIGNTOOL', 'ARTIFACT_SIGNING_DLIB', 'ARTIFACT_SIGNING_METADATA')) {

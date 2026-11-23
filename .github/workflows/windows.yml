@@ -171,13 +171,10 @@ jobs:
 
   # The installer lives in windows-installer.yml. No secret is passed here,
   # so pull requests and main build the visibly unsigned-dev installer; a
-  # signing caller has no pull-request trigger (#631, ADR-0093). A called
-  # job cannot exceed its caller's permissions, so this grants the id-token
-  # the reusable job declares; with no secret passed, nothing requests one.
+  # signing caller has no pull-request trigger (#631, ADR-0093).
   installer:
     name: Windows installer
     needs: policy
     permissions:
       contents: read
-      id-token: write
     uses: ./.github/workflows/windows-installer.yml
