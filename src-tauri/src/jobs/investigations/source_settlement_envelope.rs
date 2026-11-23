@@ -170,6 +170,10 @@ pub(in crate::jobs::investigations) fn envelope_with_authenticated_core(
                     ledger.clone(),
                     kind,
                     reason.clone(),
+                    // Size the widest closed discard record a terminal read
+                    // can keep (AC-1609).
+                    discard_records(kind)
+                        .then(InvestigationTerminalDiagnostic::widest_source_discard),
                     active_bound,
                     // Refusal rows are outside the settlement claim (#679).
                     None,

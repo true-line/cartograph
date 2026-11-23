@@ -181,6 +181,7 @@ impl JobStore {
             Some(input.candidate_ledger.clone()),
             kind,
             reason,
+            None,
             input.active_milliseconds,
             input.refusal,
         )?;

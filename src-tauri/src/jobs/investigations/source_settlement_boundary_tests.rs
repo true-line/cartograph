@@ -65,6 +65,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                 ledger.clone(),
                 kind,
                 reason.clone(),
+                None,
                 before.detail.usage.active_milliseconds + 1,
                 None,
             )
@@ -79,6 +80,7 @@ fn source_settlement_exact_stage_allocation_accepts_all_alternatives_and_one_les
                     ledger,
                     kind,
                     reason.clone(),
+                    None,
                     before.detail.usage.active_milliseconds + 1,
                     None,
                 )
@@ -403,6 +405,7 @@ fn source_settlement_cancelled_terminal_projections_match_reread_control() {
                 &fixture.f.step.step_id,
                 None,
                 kind,
+                None,
                 None,
                 before.detail.usage.active_milliseconds + 1,
                 None,
