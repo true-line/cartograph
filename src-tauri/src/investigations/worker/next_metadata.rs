@@ -189,10 +189,33 @@ impl<R: tauri::Runtime> Worker<'_, R> {
             CompletionInvestigationAction::Read(QualifiedInvestigationAction::SourceOrFinish(
                 _,
             )) => return Ok(false),
-            // Not decoded for any offered specialist until the host executes
-            // artifact reads (ADR-0089 step 2).
-            CompletionInvestigationAction::Read(QualifiedInvestigationAction::ReadArtifact(_))
-            | CompletionInvestigationAction::Finish(_) => {
+            // ADR-0089: one page of a compiled artifact from the frozen basis.
+            // Decoding already admitted the id and continuation shape; a stale
+            // continuation, a changed graph or a page over its limit stops.
+            CompletionInvestigationAction::Read(QualifiedInvestigationAction::ReadArtifact(
+                read,
+            )) => (
+                context
+                    .prepare_artifact_with_diagnostic(self.state, read)
+                    .map_err(|error| match error {
+                        ContextReadPreparationError::CumulativeQueryAndInventoryBytes => {
+                            Failure::Stop(InvestigationStopReason::HostLimitAt {
+                                phase: PreparationPhase::Metadata,
+                                limit: HostLimitKind::CumulativeQueryAndInventoryBytes,
+                            })
+                        }
+                        ContextReadPreparationError::QueryRejected(_)
+                        | ContextReadPreparationError::QueryBudget(_) => {
+                            Failure::from(HostError::InvalidInput)
+                                .preparation_at(PreparationPhase::Metadata)
+                        }
+                        ContextReadPreparationError::Host(error) => {
+                            Failure::from(error).preparation_at(PreparationPhase::Metadata)
+                        }
+                    })?,
+                ContextPreviewKind::Artifact,
+            ),
+            CompletionInvestigationAction::Finish(_) => {
                 return Err(Failure::Stop(InvestigationStopReason::InvalidResponse));
             }
         };

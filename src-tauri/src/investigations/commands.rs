@@ -1086,6 +1086,20 @@ mod policy_catalog_tests {
             !pinned,
             "Cloud runs where a Claude Code build is pinned, never on Intel Macs"
         );
+        // AC-1815: @30 starts exactly where @29 does.
+        for (mode, runtime) in [
+            (local, None),
+            (cloud, None),
+            (local, Some(&bare)),
+            (cloud, Some(&bare)),
+            (cloud, Some(&missing)),
+            (cloud, Some(&with_claude)),
+        ] {
+            assert_eq!(
+                refused(SpecialistId::DomainAnalystV30, mode, runtime),
+                refused(SpecialistId::DomainAnalystV29, mode, runtime)
+            );
+        }
     }
 
     // AC-0584 (#1757): the catalog, not the client, says which offered
@@ -1258,6 +1272,7 @@ mod policy_catalog_tests {
             SpecialistId::DomainAnalystV27,
             SpecialistId::DomainAnalystV28,
             SpecialistId::DomainAnalystV29,
+            SpecialistId::DomainAnalystV30,
         ] {
             assert_eq!(
                 available_specialists().contains(&role),
