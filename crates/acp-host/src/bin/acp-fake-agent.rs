@@ -1,7 +1,9 @@
 //! Scripted ACP agent for the dispatch tests. `ACP_FAKE_SCRIPT` picks the
 //! script: `work` (default) exercises reads, writes, permissions and an
 //! unoffered method, then ends its turn; `hang` waits for `session/cancel`;
-//! `exit` exits mid-turn.
+//! `exit` exits mid-turn; `flood` streams updates and ignores cancellation;
+//! `spawn` starts a `late` child that writes into the worktree after 1.5 s
+//! and then ignores cancellation.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
@@ -111,6 +113,11 @@ fn work(agent: &mut Agent, session: &str, cwd: &str) -> String {
 
 fn main() {
     let script = std::env::var("ACP_FAKE_SCRIPT").unwrap_or_else(|_| "work".into());
+    if script == "late" {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let _ = std::fs::write("late.txt", "written after the turn");
+        return;
+    }
     let mut agent = Agent {
         lines: std::io::stdin().lock().lines(),
         next_id: 0,
@@ -129,6 +136,21 @@ fn main() {
             Some("session/prompt") => {
                 match script.as_str() {
                     "exit" => std::process::exit(3),
+                    "flood" => loop {
+                        agent.say("s1", "still working");
+                    },
+                    "spawn" => {
+                        // Left running on purpose: the host must stop it.
+                        #[expect(clippy::zombie_processes, reason = "the host must stop it")]
+                        let _late = std::process::Command::new(std::env::current_exe().unwrap())
+                            .env("ACP_FAKE_SCRIPT", "late")
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .spawn()
+                            .unwrap();
+                        while agent.read().is_some() {}
+                        return;
+                    }
                     "hang" => {
                         while let Some(next) = agent.read() {
                             if next["method"] == "session/cancel" {

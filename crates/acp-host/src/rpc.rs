@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::time::Instant;
 
 /// ACP protocol version this host speaks.
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -19,6 +19,10 @@ const INVALID_PARAMS: i64 = -32602;
 const REFUSED: i64 = -32000;
 /// Longest line read from the agent.
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+/// Lines queued between the reader and the session loop. A full queue
+/// blocks the reader, so a fast agent waits on its own pipe instead of
+/// growing host memory.
+const QUEUED_LINES: usize = 64;
 
 pub(crate) struct SessionOutcome {
     pub stop: StopReason,
@@ -93,9 +97,15 @@ impl Session<'_> {
     fn call(&mut self, id: u64, method: &str, params: Value) -> Result<Value, Ended> {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
         loop {
-            let now = Instant::now();
-            let wait = self.deadline.saturating_duration_since(now);
-            let line = match self.lines.recv_timeout(wait) {
+            // The deadline is checked before every line, so an agent that
+            // keeps the queue full is still cancelled on time.
+            let wait = self.deadline.saturating_duration_since(Instant::now());
+            let received = if wait.is_zero() {
+                Err(RecvTimeoutError::Timeout)
+            } else {
+                self.lines.recv_timeout(wait)
+            };
+            let line = match received {
                 Ok(Incoming::Line(line)) => line,
                 Ok(Incoming::Eof) | Err(RecvTimeoutError::Disconnected) => {
                     return Err(Ended::Stop(StopReason::AgentExited));
@@ -287,7 +297,7 @@ impl Session<'_> {
 }
 
 fn spawn_reader(stdout: impl std::io::Read + Send + 'static) -> Receiver<Incoming> {
-    let (tx, rx) = channel();
+    let (tx, rx) = sync_channel(QUEUED_LINES);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
@@ -320,7 +330,11 @@ pub(crate) fn run_session(
     policy: &PathPolicy,
     limits: &Limits,
 ) -> std::io::Result<SessionOutcome> {
-    let mut child = Command::new(&agent.program)
+    let mut command = Command::new(&agent.program);
+    // Its own process group, so the whole tree can be stopped (unix).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
         .args(&agent.args)
         .envs(agent.env.iter().map(|(key, value)| (key, value)))
         .current_dir(cwd)
@@ -350,13 +364,30 @@ pub(crate) fn run_session(
         Ok(StopReason::Cancelled) if session.cancelled => StopReason::TimedOut,
         Ok(stop) | Err(Ended::Stop(stop)) => stop,
     };
+    // The turn is over: stop the tree while the agent is still its root
+    // (Windows finds descendants through a live parent), then close stdin.
+    kill_tree(&mut session.child);
     session.stdin = None;
-    let exit_by = Instant::now() + Duration::from_millis(500);
-    while session.child.try_wait().ok().flatten().is_none() && Instant::now() < exit_by {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = session.child.kill();
-    let _ = session.child.wait();
     session.out.stop = stop;
     Ok(session.out)
+}
+
+/// Stops the agent and every process it started: the process group on unix,
+/// the process tree on Windows, then the direct child.
+fn kill_tree(child: &mut Child) {
+    let pid = child.id().to_string();
+    #[cfg(unix)]
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }

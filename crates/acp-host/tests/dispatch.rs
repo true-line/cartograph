@@ -167,6 +167,43 @@ fn a_turn_past_its_limit_is_cancelled_and_commits_nothing() {
 }
 
 #[test]
+fn an_agent_that_floods_updates_is_still_stopped_at_its_limit() {
+    let f = fixture();
+    let agent = agent("flood");
+    let limits = Limits {
+        turn: Duration::from_millis(300),
+        cancel_grace: Duration::from_millis(200),
+        max_updates: 10,
+        ..Limits::default()
+    };
+    let started = std::time::Instant::now();
+    let submission = dispatch(&request(&f, &agent, limits)).unwrap();
+    assert_eq!(submission.stop, StopReason::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(submission.transcript.len(), 10);
+    assert!(submission.transcript_truncated);
+    assert_eq!(submission.head_rev, None);
+}
+
+#[test]
+fn processes_the_agent_started_are_stopped_with_it() {
+    let f = fixture();
+    let agent = agent("spawn");
+    let limits = Limits {
+        turn: Duration::from_millis(300),
+        cancel_grace: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    let submission = dispatch(&request(&f, &agent, limits)).unwrap();
+    assert_eq!(submission.stop, StopReason::TimedOut);
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        !submission.worktree.join("late.txt").exists(),
+        "a process the agent started outlived the dispatch"
+    );
+}
+
+#[test]
 fn an_agent_that_exits_mid_turn_commits_nothing() {
     let f = fixture();
     let agent = agent("exit");
