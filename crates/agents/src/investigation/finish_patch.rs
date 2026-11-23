@@ -476,13 +476,6 @@ impl VolatileFinish {
             }
         };
         let patch_entries = patches.len();
-        // New limitation prose, checked against the edits actually made.
-        let mut new_texts: Vec<String> = disclosures.clone();
-        for edit in &patches {
-            if let Edit::ReplaceLimitation { replace, .. } = edit {
-                new_texts.push(replace.clone());
-            }
-        }
         let mut edits = BTreeMap::new();
         let mut limitation_edits = BTreeMap::new();
         for edit in patches {
@@ -527,11 +520,17 @@ impl VolatileFinish {
         else {
             return Err(PatchRejection::InvalidShape);
         };
+        // Rows holding new limitation prose (replacements, then disclosures),
+        // at most MAX_LIMITATIONS indices.
+        let mut new_rows = Vec::new();
         if !limitation_edits.is_empty() {
             let mut kept = Vec::new();
             for (index, text) in std::mem::take(limitations).into_iter().enumerate() {
                 match limitation_edits.remove(&index) {
-                    Some(Edit::ReplaceLimitation { replace, .. }) => kept.push(replace),
+                    Some(Edit::ReplaceLimitation { replace, .. }) => {
+                        new_rows.push(kept.len());
+                        kept.push(replace);
+                    }
                     Some(_) => {}
                     None => kept.push(text),
                 }
@@ -546,6 +545,7 @@ impl VolatileFinish {
             }
             *limitations = kept;
         }
+        new_rows.extend(limitations.len()..limitations.len() + disclosures.len());
         limitations.extend(disclosures);
         if limitations.len() > MAX_LIMITATIONS {
             return Err(PatchRejection::InvalidShape);
@@ -589,8 +589,9 @@ impl VolatileFinish {
         }
         // Like `whole`, @29 only, so earlier roles keep their exact merges.
         if whole {
-            let texts: Vec<&str> = new_texts.iter().map(String::as_str).collect();
-            claims::check(&texts, &withdrawn, &patched)?;
+            // Read in place: the check owns no copy of the prose.
+            let texts = new_rows.iter().map(|row| limitations[*row].as_str());
+            claims::check(texts, &withdrawn, &patched)?;
         }
         // Applies the original finding, field and complete finish byte bounds.
         self.finish
