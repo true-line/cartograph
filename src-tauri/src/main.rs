@@ -5145,6 +5145,36 @@ fn capture_store_limits(
     })
 }
 
+/// The ACP agent command reviewed work packets are dispatched to, if any
+/// (ADR-0092).
+#[tauri::command]
+fn get_acp_agent(state: State<'_, AppState>) -> Result<Option<settings::AcpAgentCommand>, String> {
+    let store = state.settings.lock().map_err(|e| e.to_string())?;
+    store.acp_agent().map_err(|e| e.to_string())
+}
+
+/// Save the ACP agent command (its program must be an existing file), or
+/// clear it with `None` (ADR-0092).
+#[tauri::command]
+fn set_acp_agent(
+    command: Option<settings::AcpAgentCommand>,
+    state: State<'_, AppState>,
+) -> Result<Option<settings::AcpAgentCommand>, String> {
+    if let Some(command) = &command {
+        command.validate().map_err(|e| e.to_string())?;
+        if !std::path::Path::new(&command.program).is_file() {
+            return Err(format!(
+                "ACP agent command: {} is not a file",
+                command.program
+            ));
+        }
+    }
+    let mut store = state.settings.lock().map_err(|e| e.to_string())?;
+    store
+        .set_acp_agent(command.as_ref())
+        .map_err(|e| e.to_string())
+}
+
 /// The local completion model for new desktop investigations (#1643).
 #[tauri::command]
 fn get_local_model(state: State<'_, AppState>) -> Result<settings::LocalModelChoice, String> {
@@ -9138,6 +9168,8 @@ pub fn run() {
             work_packets::review_work_packet,
             work_packets::export_work_packet,
             work_packets::draft_adapter_work_packets,
+            work_packets::save_adapter_work_packet,
+            work_packets::dispatch_work_packet,
             export_save::save_export_file,
             spec_bundle_file::save_spec_bundle_export,
             manifest_draft::preview_system_manifest,
@@ -9236,6 +9268,8 @@ pub fn run() {
             set_run_limits,
             reset_run_limits,
             list_local_models,
+            get_acp_agent,
+            set_acp_agent,
             get_local_model,
             set_local_model,
             reset_local_model,

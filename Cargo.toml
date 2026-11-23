@@ -86,5 +86,6 @@ iac = { path = "crates/iac" }
 spec = { path = "crates/spec" }
 llm = { path = "crates/llm" }
 semantic = { path = "crates/semantic" }
+acp-host = { path = "crates/acp-host" }
 agents = { path = "crates/agents" }
 work-packets = { path = "crates/work-packets" }
