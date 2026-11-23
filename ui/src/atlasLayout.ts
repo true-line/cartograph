@@ -96,7 +96,7 @@ export function excludeBoundaryPlaceholders(snapshot: AtlasSnapshot): AtlasSnaps
  * File node ids that are the target of a `Tool --DEFINED_IN--> File` edge
  * (`crates/ingest/src/toolchain.rs`) — the toolchain's unconditional proof
  * that a File is config evidence for some Tool, independent of which File
- * node ultimately won the id (`src-tauri/src/main.rs`: "Config files an
+ * node ultimately won the id (`src-tauri/src/lib.rs`: "Config files an
  * adapter already owns … keep the adapter's richer File node; the
  * DEFINED_IN edge targets the same id either way"). A `.ts`-authored
  * config (`vite.config.ts`, …) is re-parsed by the TS adapter, whose own

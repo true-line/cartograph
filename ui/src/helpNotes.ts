@@ -7,7 +7,7 @@
 
 /** Where the repository lives (#1760). Every link the UI builds starts here,
  * so a move is a one-line change. The Rust shell holds the same value in
- * `src-tauri/src/main.rs` (`REPOSITORY_URL`). */
+ * `src-tauri/src/lib.rs` (`REPOSITORY_URL`). */
 export const REPOSITORY_URL = 'https://github.com/true-line/cartograph';
 
 /** Until the in-app Help surface (#154/#155) ships, deep links land on the

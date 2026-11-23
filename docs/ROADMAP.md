@@ -33,7 +33,7 @@ Implemented facts at the baseline commit, with the place to look.
 
 **Intake and stitching (V1).**
 - Intake is a typed path, a GitHub reference or a hand-written `cartograph.system.toml` (`ui/src/components/ConnectSurface.tsx:15-34`, dispatched at `ui/src/store.ts:1119`). No drop handler exists.
-- A system is ingested repo by repo, then `stitch_backings` and `relink_found_adrs` run (`src-tauri/src/main.rs:3857-3864`). Channels join across repos only because channel ids carry no repo namespace (`crates/events/src/lib.rs:178`).
+- A system is ingested repo by repo, then `stitch_backings` and `relink_found_adrs` run (`src-tauri/src/lib.rs`). Channels join across repos only because channel ids carry no repo namespace (`crates/events/src/lib.rs:178`).
 - Cross-repo HTTP is not stitched: `stitch_fetches` keeps only the calling repo's endpoints (`crates/events/src/lib.rs:294-300`), so a call to another repo's route ends as a Gap (`:343`).
 - T1 observations (Terraform state, Pulumi export, OTel traces) come only from a manifest (`crates/ingest/src/manifest.rs:39-53`). EventBridge channel identities cannot match today ([#573](https://github.com/true-line/cartograph/issues/573)).
 
