@@ -1113,3 +1113,103 @@ fn one_part_failing_does_not_end_a_gated_run() {
     assert!(watched.noted::<(), ()>(Ok(())).is_ok());
     assert!(!watched.last_call_failed());
 }
+
+/// An attested record for §1.3 of the system resting on `cap:checkout`, as
+/// the graph holds it, stated by the (placeholder) engineer. Returns its
+/// `A-` id and identity; `withdrawn` withdraws it afterwards.
+fn attested_for_capabilities(state: &AppState, withdrawn: bool) -> (String, String) {
+    use agents::attested::{
+        Attestation, AttestationSource, AttestedRecord, AttestedTarget, EngineerVerb,
+    };
+    let cited = BTreeSet::from([id("cap:checkout")]);
+    let recorded_hashes = {
+        let graph = state.graph.lock().unwrap();
+        let (nodes, edges) = graph.read_snapshot().unwrap();
+        spec::cited_fact_hashes(&nodes, &edges, &cited)
+    };
+    let drafts = state.drafts.lock().unwrap();
+    let store = drafts.attested();
+    // Placeholder contributor only (ADR-0090 decision 4).
+    let engineer = store.set_engineer("Placeholder Engineer", None).unwrap();
+    let says = |verb| Attestation::Engineer {
+        contributor: engineer.id.clone(),
+        verb,
+        at_ms: 1_700_000_000_000,
+        source: AttestationSource::Workbench,
+        reference: None,
+    };
+    let staged = store
+        .stage(AttestedRecord {
+            target: AttestedTarget::Section {
+                address: SectionAddress {
+                    catalogue_version: "1.0".into(),
+                    document: "D1".into(),
+                    section: "1.3".into(),
+                    scope: "system".into(),
+                },
+            },
+            statement: "Checkout is used by the shop staff only.".into(),
+            supporting: cited.into_iter().collect(),
+            recorded_hashes,
+            attestations: vec![says(EngineerVerb::Stated)],
+        })
+        .unwrap();
+    if withdrawn {
+        store
+            .attest(&staged.record_id, 1, says(EngineerVerb::Withdrew))
+            .unwrap();
+    }
+    (staged.citation_id, staged.record_id)
+}
+
+// AC-1077 (T-1077, ADR-0090 decision 6): a composition is handed the
+// attested records of its section and scope, and a claim citing one is
+// staged with the record's identity as the id's hash.
+#[test]
+fn a_composition_may_cite_an_attested_record_of_its_section() {
+    let (_dir, state) = state();
+    let (attested, identity) = attested_for_capabilities(&state, false);
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    let provider = Scripted {
+        reply: json!({"claims": [
+            {"statement": "Checkout takes an order for the shop staff.",
+             "claim_kind": "implemented_behavior",
+             "citation_ids": [id("cap:checkout"), attested.clone()]},
+        ]})
+        .to_string(),
+        prompts: Mutex::new(Vec::new()),
+    };
+    let composed = compose(
+        &state,
+        &provider,
+        &prepared,
+        None,
+        &|| CallDirective::Continue,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let prompt = provider.prompts.lock().unwrap().remove(0);
+    assert!(prompt.contains(&format!(
+        "{attested} | attested | Checkout is used by the shop staff only.\n"
+    )));
+    // Contributors are project data: the composer is not told them.
+    assert!(!prompt.contains("Placeholder Engineer"));
+
+    let (_, job) = crate::start_job(&state, "section-compose:D1:1.3:system:local").unwrap();
+    let outcome = stage(&state, &prepared, composed, job.id()).unwrap();
+    assert_eq!(outcome.claims, 1, "{outcome:?}");
+    let store = state.drafts.lock().unwrap();
+    let stored = store.for_job(job.id()).unwrap().unwrap();
+    assert_eq!(stored.draft.cited_hashes.get(&attested), Some(&identity));
+    assert!(stored.draft.cited_hashes.contains_key(&id("cap:checkout")));
+}
+
+#[test]
+fn a_withdrawn_attested_record_is_not_offered_to_a_composition() {
+    let (_dir, state) = state();
+    let (attested, _) = attested_for_capabilities(&state, true);
+    let prepared = prepare(&state, "1.0", "D1", "1.3", "system").unwrap();
+    assert!(!prepared.citable.contains(&attested));
+    assert!(!prepared.action.payload.prompt.contains("attested_records"));
+}
