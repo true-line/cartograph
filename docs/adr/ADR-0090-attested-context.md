@@ -1,6 +1,6 @@
 # ADR-0090 — Attested context fills evidence gaps, labelled as attested
 
-- **Status:** Proposed; coordinator review as the owner's delegate
+- **Status:** Accepted (coordinator, as the owner's delegate, 2026-11-23)
 - **Date:** 2026-11-23
 - **Deciders:** Cartograph owner (delegated); Claude implements
 - **Related:** #2463; #1748, #1749, #1750, #1752; ADR-0036; ADR-0058;
@@ -85,7 +85,8 @@ passed off as recovered fact.
    - `best-effort` prints it annotated as attested, with each contributor
      and verb (for example "stated by section-writer@1 (run …), confirmed by
      <engineer>"). An engineer is named by display name, an agent by role and
-     run.
+     run. An `agent-attested, unconfirmed` claim (decision 8) is printed with
+     that label and its contributing agents, never as engineer-backed.
    - The fact index of ADR-0058 decision 6 gains the attested records a
      document cites, under their `A-` ids, so the export still fails on a
      citation without a row (amends ADR-0064 decision 9).
@@ -104,14 +105,22 @@ passed off as recovered fact.
      ADR-0064 decision 8;
    - `eligible`: none of the above.
 
-   A record with only agent attestations and no engineer `stated` or
-   `confirmed` is not accepted and does not enter the projection. The
-   curated revision and policy move to version 4. They gain the attested
+   Agents may fill a gap with other agents, without an engineer. A record
+   whose attestations are all from agents, with no engineer `stated` or
+   `confirmed`, gets its own visible status, `agent-attested, unconfirmed`,
+   in place of `eligible` (the earlier states still apply first). It is
+   projected and admissible to drafters. `verified-only` omits it and counts
+   it; `best-effort` prints it with that label and its contributing agents.
+   It is never promoted to accepted, and never shown as engineer-backed,
+   until an engineer states or confirms it; an engineer `disputed` makes it
+   `disputed`. The curated revision and policy move to version 4. They gain the attested
    records with their state, so every reader sees one revision for all four
    kinds.
-9. **Three capture paths, one review.**
+9. **Four capture paths, one review.**
    - From an investigation or agent chat: an agent proposes and the engineer
      confirms.
+   - Between agents: one agent states and others attest, recorded as
+     `agent-attested, unconfirmed` until an engineer confirms.
    - From the Gaps register: the engineer states an answer.
    - Over MCP with the task grant (ADR-0066): staged as a proposal for
      review in the app, like drafts.

@@ -312,7 +312,10 @@ Designed, not built. Slices AC-1071 to AC-1083 are listed in ADR-0090.
 - **Printing.** `verified-only` prints no attested claim and states per
   section how many it left out. `best-effort` prints each attested claim
   marked *attested* with every contributor and verb, in place of
-  `T3 / InferredWeak` for the attested part. The fact index lists each cited
+  `T3 / InferredWeak` for the attested part. A claim backed only by agents
+  is labelled *agent-attested, unconfirmed* with its contributing agents,
+  omitted and counted by `verified-only`, and never shown as engineer-backed
+  until an engineer states or confirms it. The fact index lists each cited
   `A-` id, so an export still fails on a citation without a row.
 - **What does not change.** Nothing is written to the base graph, its hash
   does not change, the Gap stays open and counted, and acceptance never
