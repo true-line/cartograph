@@ -1358,6 +1358,48 @@ mod tests {
         );
     }
 
+    // AC-0881 (#2539): an Endpoint's recorded rate limit shows its figures
+    // and the status a request past it is refused with, so a rule stating
+    // the limit and its 429 citing only the Endpoint keeps its figures.
+    #[test]
+    fn a_rate_limited_endpoint_shows_its_limits_and_refusal_status() {
+        let endpoint = Node {
+            id: "ep:POST /api/alias/random/new".into(),
+            label: "Endpoint".into(),
+            props: json!({
+                "rate_limits": {
+                    "entries": [{
+                        "text": "ALIAS_LIMIT",
+                        "value": "100/day;50/hour;5/minute",
+                        "limits": [
+                            {"count": 100, "per": 1, "unit": "day"},
+                            {"count": 50, "per": 1, "unit": "hour"},
+                            {"count": 5, "per": 1, "unit": "minute"},
+                        ],
+                    }],
+                    "exceeded_status": 429,
+                    "prov": prov("views.py", "limit"),
+                },
+                "prov": prov("views.py", "ep"),
+            }),
+        };
+        let id = cite(&endpoint.id);
+        let text = CitedText::of(&[endpoint], &[], &[], &[id.clone()].into());
+        let cited = std::slice::from_ref(&id);
+        assert_eq!(
+            text.uncited_number(
+                "Creating a random alias accepts at most 100 a day, 50 an hour and 5 a minute; \
+                 requests past it are refused with status 429.",
+                cited
+            ),
+            None
+        );
+        assert_eq!(
+            text.uncited_number("It accepts at most 200 a day.", cited),
+            Some("200")
+        );
+    }
+
     // AC-1077 (ADR-0090 decision 6): a cited attested record shows what its
     // statement states, figures and terms alike, and nothing for a claim
     // that does not cite it.

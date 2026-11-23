@@ -7880,6 +7880,7 @@ def above():
         ])
     );
     assert_eq!(env["prov"]["confidence_tier"], "InferredStrong");
+    assert_eq!(env["exceeded_status"], 429);
     let paths: Vec<&str> = env["prov"]["evidence"]
         .as_array()
         .unwrap()
