@@ -10,10 +10,9 @@ license-file.workspace = true
 workspace = true
 
 # The application is the library; `src/bin/app.rs` only calls `app::run()`
-# (#1227, ADR-0088). Its tests are the library's unit tests. The library root
-# stays at `src/main.rs` until it can be moved to `src/lib.rs` as a rename.
+# (#1227, ADR-0088). Its tests are the library's unit tests.
 [lib]
-path = "src/main.rs"
+path = "src/lib.rs"
 doctest = false
 
 [[bin]]
