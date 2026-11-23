@@ -59,6 +59,8 @@ export interface ReconciliationView {
 
 export const RECONCILIATION_UNAVAILABLE =
   'Reconciliation history could not be read. No proposal or review was changed.';
+export const HISTORY_INCOMPLETE =
+  'The new result was recorded, but earlier results could not be read. Show results to read them again.';
 export const RECONCILE_FAILED =
   'The current recovery could not be read, so nothing was recorded. No proposal or review was changed.';
 
@@ -131,7 +133,7 @@ export const stateLabels: Record<ReconciliationState, string> = {
   changed: 'Changed since it was staged',
   missing: 'Missing from the current recovery',
   unverifiable: 'Could not be compared',
-  reconciliation_stale: 'Reconciled, but the recovery has moved since',
+  reconciliation_stale: 'The latest reconciliation is out of date: the recovery has moved since',
 };
 
 const reasonLabels: Record<string, string> = {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { useAppStore, type StagedProposal } from './store';
-import { RECONCILE_FAILED, requireReconciliationHistory } from './reconciliation';
+import { HISTORY_INCOMPLETE, RECONCILE_FAILED, requireReconciliationHistory } from './reconciliation';
 import { reconciliationHistory, reconciliationResult } from './reconciliationFixtures';
 
 const proposal = (id: string): StagedProposal => ({
@@ -55,7 +55,7 @@ describe('staged proposal reconciliation (AC-1074)', () => {
     expect(JSON.stringify(useAppStore.getState().escalation?.proposal)).toBe(immutable);
   });
 
-  it('keeps the new result when the follow-up read fails', async () => {
+  it('keeps the new result and says the rest is missing when the follow-up read fails', async () => {
     mockIPC((command) => {
       if (command === 'reconcile_staged') return reconciliationHistory('reconciled', [reconciliationResult('a')]);
       throw new Error('history unavailable');
@@ -64,7 +64,7 @@ describe('staged proposal reconciliation (AC-1074)', () => {
     await useAppStore.getState().reconcileStaged();
     const view = useAppStore.getState().escalation?.reconciliation;
     expect(view?.history?.results).toHaveLength(1);
-    expect(view?.error).toBeNull();
+    expect(view?.error).toBe(HISTORY_INCOMPLETE);
   });
 
   it('a failed reconcile shows no earlier result as current', async () => {

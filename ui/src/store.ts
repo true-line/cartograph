@@ -16,7 +16,7 @@ import type { SurfaceView } from './views';
 import type { EgressPreview } from './components/EgressConsentDialog';
 import type { ProjectEntry } from './components/ProjectsCard';
 import {
-  RECONCILE_FAILED, RECONCILIATION_UNAVAILABLE, MAX_RECONCILIATION_HISTORY,
+  HISTORY_INCOMPLETE, RECONCILE_FAILED, RECONCILIATION_UNAVAILABLE, MAX_RECONCILIATION_HISTORY,
   requireReconciliationHistory, type ReconciliationHistory, type ReconciliationView,
 } from './reconciliation';
 
@@ -2537,11 +2537,10 @@ async function readReconciliation(reconcile: boolean): Promise<void> {
     return;
   }
   // The job answers with its own result only; the earlier ones follow.
-  let history = recorded;
   try {
-    history = await readHistory();
+    update({ loading: false, reconciling: false, history: await readHistory() });
   } catch {
-    // The new result was recorded; show it alone rather than nothing.
+    // The new result was recorded: show it, and say the rest is missing.
+    update({ loading: false, reconciling: false, history: recorded, error: HISTORY_INCOMPLETE });
   }
-  update({ loading: false, reconciling: false, history });
 }

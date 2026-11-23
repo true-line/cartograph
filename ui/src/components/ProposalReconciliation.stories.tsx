@@ -36,7 +36,7 @@ export const StaleIsNotCurrent: Story = {
   args: { state: { ...VIEW, history: reconciliationHistory('reconciliation_stale', [reconciliationResult('a')]) } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByTestId('reconciliation-state')).toHaveTextContent('the recovery has moved since');
+    await expect(canvas.getByTestId('reconciliation-state')).toHaveTextContent('The latest reconciliation is out of date');
   },
 };
 
