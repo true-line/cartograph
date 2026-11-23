@@ -430,7 +430,10 @@ fn props(
     } else {
         ConfidenceTier::Confirmed
     };
-    let mut out = serde_json::json!({ "entries": entries });
+    // flask-limiter refuses a request past a limit with 429 Too Many
+    // Requests (`RateLimitExceeded`), so a rule stating the refusal cites
+    // the Endpoint for its status too (#2539).
+    let mut out = serde_json::json!({ "entries": entries, "exceeded_status": 429 });
     if resolved < limits.len() {
         out["partial"] = serde_json::json!(["limit_value_unresolved"]);
     }
