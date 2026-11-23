@@ -26,6 +26,7 @@ import type { SectionDocumentViewProps } from './SectionDocumentView';
 import { AreaExpertPanel } from './AreaExpertPanel';
 import { ArchitectureCanvas } from './ArchitectureCanvas';
 import type { AreaExpertPanelProps } from './AreaExpertPanel';
+import { AttestedRecords, type AttestedRecordsProps } from './AttestedRecords';
 
 export interface SpecWorkbenchProps {
   bundle: SpecBundle | null;
@@ -40,6 +41,9 @@ export interface SpecWorkbenchProps {
   sections?: Omit<SectionDocumentViewProps, 'curated' | 'onOpenCitation'>;
   /** Ask the expert of one subsystem area (#2057, AC-0932). */
   expert?: Omit<AreaExpertPanelProps, 'onOpenCitation'>;
+  /** Attested records (ADR-0090, AC-1081): shown apart from recovered
+   *  content, with the engineer's review. */
+  attested?: AttestedRecordsProps;
   pageSize?: number;
   mode: SpecExportMode;
   decisions: AssertionDecisionRecord[];
@@ -136,6 +140,7 @@ export function SpecWorkbench({
   onRefreshCurated,
   sections,
   expert,
+  attested,
   pageSize,
   mode,
   decisions,
@@ -264,6 +269,17 @@ export function SpecWorkbench({
                 setOpenedCitation(citationId);
               } : undefined}
             />
+          )}
+          {attested && (
+            <section className="card spec-attested">
+              <h3>Attested · {attested.records.length}</h3>
+              <p className="muted">
+                Stated by the engineer or by agents, not recovered from the system. The
+                best-effort export prints them with their label; verified-only leaves them out and
+                counts them.
+              </p>
+              <AttestedRecords {...attested} />
+            </section>
           )}
           {openedCitation && factIndex && selected?.id === factIndex.id && (
             <p className="curated-notice spec-opened-citation" role="status">

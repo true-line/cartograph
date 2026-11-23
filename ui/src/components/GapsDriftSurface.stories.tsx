@@ -219,6 +219,43 @@ export const DriftTab: Story = {
   },
 };
 
+// AC-1081 (T-1081): an attested answer is listed apart from the lanes with
+// its own label and contributors, and the Gap it answers stays counted.
+export const AttestedAnswerKeepsTheGapOpen: Story = {
+  args: {
+    attested: {
+      records: [
+        {
+          record_id: 'attested-v1:a1',
+          citation_id: 'A-00000000000000a1',
+          target: { kind: 'gap', gap_id: 'gap:inject', slot: 'callee' },
+          statement: 'The injected body is the content script entry.',
+          standing: 'agent_attested_unconfirmed',
+          label: 'agent-attested, unconfirmed',
+          attestation_count: 1,
+          contributors: [
+            { display_name: 'domain-analyst@29 (local/fixture)', kind: 'agent', verb: 'stated', run: 'investigation-1' },
+          ],
+        },
+      ],
+      onReview: fn(),
+    },
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('System gaps · 3')).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole('tab', { name: 'Attested answers · 1' }));
+    await expect(canvas.getByTestId('attested-label')).toHaveTextContent('agent-attested, unconfirmed');
+    await expect(canvas.getByTestId('attested-contributors')).toHaveTextContent(
+      'domain-analyst@29 (local/fixture) stated',
+    );
+    await userEvent.click(canvas.getByRole('button', { name: 'Confirm' }));
+    await expect(args.attested?.onReview).toHaveBeenCalled();
+    await userEvent.click(canvas.getByRole('tab', { name: 'Lanes' }));
+    await expect(canvas.getByText('System gaps · 3')).toBeInTheDocument();
+  },
+};
+
 /** A real-scale register shape: hundreds of instances, a handful of causes. */
 const SCALE_GAPS: SpecAssertion[] = [
   ...Array.from({ length: 300 }, (_, index) => ({
