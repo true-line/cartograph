@@ -310,8 +310,13 @@ citable facts, with their label and statement and no contributor, and a
 claim citing one records the record's identity as the id's hash. Two
 records sharing one `A-` id fail the projection (AC-1077, part 3). The
 gated §1.5 workflow drafts them after the rule rows, one row per record,
-and gates each claim against the record's statement. Not built: capture
-paths and surfaces.
+and gates each claim against the record's statement. The engineer's
+capture paths are app commands, never MCP tools: setting the project's one
+engineer, answering an open Gap from the Gaps register (engineer-backed,
+with hashes from the current graph; the Gap stays a Gap), and confirming,
+disputing or withdrawing a stored record at the attestation count read
+(AC-1079, part 1). Not built: agent proposals from investigations and
+chat, MCP staging, and surfaces.
 
 - **Record.** An attested record answers one Gap slot or one section
   address with a statement (at most 2,048 UTF-8 bytes), optional supporting
