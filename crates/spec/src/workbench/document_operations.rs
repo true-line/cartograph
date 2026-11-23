@@ -383,8 +383,12 @@ fn operations_and_limits(
         }
         listed.push(format!("{} ({citation})", Literal(NodeName(endpoint))));
         if let Some((text, unresolved, _)) = rate_limits(endpoint, mode) {
-            let mut rule =
-                format!("The operation accepts {text}; requests past it are refused with 429.");
+            // The rule names its operation: two operations sharing one limit
+            // state two rules, which the drafter's repeated-rule check keeps.
+            let mut rule = format!(
+                "{} accepts {text}; requests past it are refused with 429.",
+                NodeName(endpoint)
+            );
             if unresolved {
                 rule.push_str(" A declared limit's value is not resolved.");
             }
@@ -665,7 +669,7 @@ def ping():
             .expect("the operation is listed with its id");
         assert!(
             limits.contains(&format!(
-                "| POST /api/alias/new | The operation accepts at most 100 a day, 5 a minute (the \
+                "| POST /api/alias/new | POST /api/alias/new accepts at most 100 a day, 5 a minute (the \
                  default; the environment variable ALIAS\\_LIMIT replaces it); requests past it \
                  are refused with 429. | rate limit declared on the handler | {listed} |"
             )),

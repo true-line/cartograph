@@ -781,3 +781,25 @@ fn the_drafter_reads_the_rules_guidance() {
     assert!(model.prompts[0].contains("<rules_guidance>\nState the rules of each operation"));
     assert!(model.prompts[0].find("<rules_guidance>") < model.prompts[0].find("<section>"));
 }
+
+// AC-1608 (#2539): two operations sharing one rate limit are two rules: each
+// limit row names its operation, so the repeated-rule check keeps both.
+#[test]
+fn two_operations_sharing_a_limit_are_both_drafted() {
+    let mut text = two_capabilities(0, 0, 99);
+    for (n, route) in [(101, "POST /api/a"), (102, "POST /api/b")] {
+        text.push_str(&format!(
+            "| {route} | {route} accepts at most 10 a minute; requests past it are refused with \
+             429. | rate limit declared on the handler | {} |\n",
+            id(n)
+        ));
+    }
+    let (chunks, skipped) = partition_counted(&text, &citable_all(), 10);
+    assert_eq!(skipped.repeated_rows, 0);
+    let rows: Vec<&str> = chunks
+        .iter()
+        .flat_map(|c| c.rows.iter().map(|r| r.text.as_str()))
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].contains("POST /api/a accepts") && rows[1].contains("POST /api/b accepts"));
+}
