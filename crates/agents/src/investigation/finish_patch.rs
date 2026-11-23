@@ -39,6 +39,9 @@ pub enum PatchRejection {
     Capacity,
     UnsupportedRefusal,
     AdmissionRejected,
+    /// @29 (AC-1434): new limitation prose claims a finding was withdrawn or
+    /// replaced when the merge did not do so.
+    UnsupportedEditClaim,
 }
 
 /// Text-free measurements only; this is not an admission verdict.
@@ -517,11 +520,17 @@ impl VolatileFinish {
         else {
             return Err(PatchRejection::InvalidShape);
         };
+        // Rows holding new limitation prose (replacements, then disclosures),
+        // at most MAX_LIMITATIONS indices.
+        let mut new_rows = Vec::new();
         if !limitation_edits.is_empty() {
             let mut kept = Vec::new();
             for (index, text) in std::mem::take(limitations).into_iter().enumerate() {
                 match limitation_edits.remove(&index) {
-                    Some(Edit::ReplaceLimitation { replace, .. }) => kept.push(replace),
+                    Some(Edit::ReplaceLimitation { replace, .. }) => {
+                        new_rows.push(kept.len());
+                        kept.push(replace);
+                    }
                     Some(_) => {}
                     None => kept.push(text),
                 }
@@ -536,6 +545,7 @@ impl VolatileFinish {
             }
             *limitations = kept;
         }
+        new_rows.extend(limitations.len()..limitations.len() + disclosures.len());
         limitations.extend(disclosures);
         if limitations.len() > MAX_LIMITATIONS {
             return Err(PatchRejection::InvalidShape);
@@ -549,14 +559,19 @@ impl VolatileFinish {
             kept_count: 0,
         };
         let mut flagged_merged_indices = Vec::new();
+        let (mut withdrawn, mut patched) = (BTreeSet::new(), BTreeSet::new());
         for (index, finding) in std::mem::take(findings).into_iter().enumerate() {
             let retained_index = findings.len();
             match edits.remove(&index) {
                 Some(Edit::Replace { replace, .. }) => {
                     findings.push(replace);
                     counts.patched_count += 1;
+                    patched.insert(index);
                 }
-                Some(_) => counts.withdrawn_count += 1,
+                Some(_) => {
+                    counts.withdrawn_count += 1;
+                    withdrawn.insert(index);
+                }
                 None => {
                     findings.push(finding);
                     counts.kept_count += 1;
@@ -571,6 +586,12 @@ impl VolatileFinish {
         counts.finding_count = findings.len();
         if findings.is_empty() {
             return Err(PatchRejection::EmptyResult);
+        }
+        // Like `whole`, @29 only, so earlier roles keep their exact merges.
+        if whole {
+            // Read in place: the check owns no copy of the prose.
+            let texts = new_rows.iter().map(|row| limitations[*row].as_str());
+            claims::check(texts, &withdrawn, &patched)?;
         }
         // Applies the original finding, field and complete finish byte bounds.
         self.finish
@@ -796,6 +817,9 @@ pub fn workspace_bytes() -> Option<usize> {
         4 * 64, // two SHA-256 identities in each of two basis owners
     ])
 }
+
+#[path = "finish_patch_claims.rs"]
+mod claims;
 
 #[cfg(test)]
 #[path = "finish_patch_tests.rs"]
