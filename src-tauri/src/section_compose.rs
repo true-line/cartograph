@@ -1488,8 +1488,9 @@ pub(crate) fn compose_gated_by_area(
             scope: scope.clone(),
             ..compiled.address.clone()
         };
+        let watched = Watched::new(provider);
         let outcome = match prepared(&compiled, address, area.clone(), &text, true) {
-            Ok(prepared) => compose_gated(state, provider, &prepared, check, job_id),
+            Ok(prepared) => compose_gated(state, &watched, &prepared, check, job_id),
             // The rest of an arranged section may print no fact at all.
             Err(reason) if reason == "no_citable_fact" && !whole => continue,
             Err(reason) => Err(reason),
@@ -1505,7 +1506,8 @@ pub(crate) fn compose_gated_by_area(
             }
             Err(error) => error,
         };
-        match after_failure(drafts.iter().any(staged), check()) {
+        let provider_failed = watched.last_call_failed();
+        match after_failure(drafts.iter().any(staged), provider_failed, check()) {
             // Nothing was staged yet: the run failed as a whole.
             AfterFailure::Fail => return Err(error),
             // Drafts of earlier areas are already staged under this job, so
@@ -1548,14 +1550,96 @@ enum AfterFailure {
     Next,
 }
 
-/// A cancel or lost ownership (`directive`, read after the failure) ends
-/// the run, which fails as a whole when nothing was `staged_any`; any other
-/// failure, such as a provider error, is the failing part's alone (#1748).
-fn after_failure(staged_any: bool, directive: CallDirective) -> AfterFailure {
-    match (directive, staged_any) {
-        (CallDirective::Continue, _) => AfterFailure::Next,
-        (_, false) => AfterFailure::Fail,
-        (_, true) => AfterFailure::Stop,
+/// A failure whose last model call failed (`provider_failed`) while the
+/// job goes on (`directive`, read after the failure) is the failing part's
+/// alone (#1748). A cancel, lost ownership or host failure (the graph, the
+/// draft store) ends the run, which fails as a whole when nothing was
+/// `staged_any`.
+fn after_failure(
+    staged_any: bool,
+    provider_failed: bool,
+    directive: CallDirective,
+) -> AfterFailure {
+    match (directive, provider_failed, staged_any) {
+        (CallDirective::Continue, true, _) => AfterFailure::Next,
+        (_, _, false) => AfterFailure::Fail,
+        (_, _, true) => AfterFailure::Stop,
+    }
+}
+
+/// A provider that remembers whether its last model call failed, so a gated
+/// run by area tells a model failure from a host one (#1748).
+struct Watched<'a> {
+    inner: &'a dyn LlmProvider,
+    last_failed: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> Watched<'a> {
+    fn new(inner: &'a dyn LlmProvider) -> Self {
+        Self {
+            inner,
+            last_failed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn last_call_failed(&self) -> bool {
+        self.last_failed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn noted<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
+        self.last_failed
+            .store(result.is_err(), std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+}
+
+impl LlmProvider for Watched<'_> {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn locality(&self) -> Locality {
+        self.inner.locality()
+    }
+    fn capabilities(&self) -> llm::ProviderCaps {
+        self.inner.capabilities()
+    }
+    fn embed(&self, batch: &[String]) -> Result<Vec<llm::Embedding>, llm::ProviderError> {
+        self.inner.embed(batch)
+    }
+    fn embedding_cache_identity(
+        &self,
+    ) -> Result<Option<llm::EmbeddingIdentity>, llm::ProviderError> {
+        self.inner.embedding_cache_identity()
+    }
+    fn embedding_model_id(&self) -> String {
+        self.inner.embedding_model_id()
+    }
+    fn completion_model_id(&self) -> String {
+        self.inner.completion_model_id()
+    }
+    fn complete(
+        &self,
+        request: &llm::ProviderCompletionRequest,
+    ) -> Result<llm::Completion, llm::ProviderError> {
+        self.noted(self.inner.complete(request))
+    }
+    fn supports_bounded_response_schema(&self) -> bool {
+        self.inner.supports_bounded_response_schema()
+    }
+    fn bounded_profile(
+        &self,
+    ) -> Result<llm::bounded::ProviderProfile, llm::bounded::BoundedCallError> {
+        self.inner.bounded_profile()
+    }
+    fn complete_bounded(
+        &self,
+        request: &llm::bounded::AuthorizedBoundedCompletion,
+        control: &llm::bounded::CompletionControl<'_>,
+    ) -> Result<llm::bounded::BoundedCompletion, llm::bounded::BoundedCallError> {
+        self.noted(self.inner.complete_bounded(request, control))
+    }
+    fn proxy_credential(&self) -> Option<llm::UpstreamCredential> {
+        self.inner.proxy_credential()
     }
 }
 
