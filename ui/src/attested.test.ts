@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
-import { answersOf, contributorLine, loadAttested, reviewActions, reviewAttested, setEngineer } from './attested';
+import { answersOf, contributorLine, loadAllAttested, loadAttested, reviewActions, reviewAttested, setEngineer } from './attested';
 import type { AttestedContributor, AttestedView } from './attested';
 
 // AC-1081 (T-1081): what the surfaces offer the engineer, and the host calls.
@@ -52,9 +52,24 @@ describe('attested records', () => {
     await reviewAttested(page.items[0], 'confirmed', 'gaps_register');
     await setEngineer('Placeholder Engineer');
     expect(calls).toEqual([
-      ['list_attested_records', { limit: 100, before: null }],
+      ['list_attested_records', { limit: 50, before: null }],
       ['review_attested_record', { recordId: 'attested-v1:a1', expectedCount: 1, verb: 'confirmed', source: 'gaps_register', reference: null }],
       ['set_attested_engineer', { displayName: 'Placeholder Engineer', handle: null }],
     ]);
+  });
+
+  it('reads every page within the host limit, following its cursor', async () => {
+    const asked: unknown[] = [];
+    const older = { ...view([agent('stated')]), record_id: 'attested-v1:a0' };
+    mockIPC((command, args) => {
+      if (command !== 'list_attested_records') return null;
+      asked.push(args);
+      return (args as { before: number | null }).before === null
+        ? { items: [view([agent('stated')])], next_before: 7 }
+        : { items: [older], next_before: null };
+    });
+    const all = await loadAllAttested();
+    expect(asked).toEqual([{ limit: 50, before: null }, { limit: 50, before: 7 }]);
+    expect(all.map((r) => r.record_id)).toEqual(['attested-v1:a1', 'attested-v1:a0']);
   });
 });

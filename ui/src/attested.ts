@@ -31,10 +31,24 @@ export interface AttestedViewPage { items: AttestedView[]; next_before: number |
 export type ReviewVerb = 'confirmed' | 'disputed' | 'withdrew';
 export type AttestationSource = 'gaps_register' | 'workbench';
 
-const PAGE = 100;
+/** The host's page limit (`MAX_ATTESTED_PAGE_ITEMS`). */
+const PAGE = 50;
 
 export function loadAttested(before: number | null = null): Promise<AttestedViewPage> {
   return invokeOr<AttestedViewPage>('list_attested_records', { items: [], next_before: null }, { limit: PAGE, before });
+}
+
+/** Every record of the project, newest first, following the host's cursor
+ *  so an older record stays listed and reviewable. */
+export async function loadAllAttested(): Promise<AttestedView[]> {
+  const records: AttestedView[] = [];
+  let before: number | null = null;
+  for (;;) {
+    const page: AttestedViewPage = await loadAttested(before);
+    records.push(...page.items);
+    if (page.next_before === null || page.next_before === before || page.items.length === 0) return records;
+    before = page.next_before;
+  }
 }
 
 /** The engineer's review, made at the count the surface read. */
@@ -108,10 +122,10 @@ export function useAttested(active: boolean, source: AttestationSource): Atteste
   // A newer read wins over one still in flight.
   const load = useCallback(() => {
     const mine = ++generation.current;
-    loadAttested()
-      .then((page) => {
+    loadAllAttested()
+      .then((all) => {
         if (mine !== generation.current) return;
-        setRecords(page.items);
+        setRecords(all);
         setError(null);
       })
       .catch((caught: unknown) => {
