@@ -26,8 +26,6 @@ pub(super) mod metadata_admission;
 #[path = "context_paged.rs"]
 mod paged;
 
-// The worker dispatches artifact reads in the next ADR-0089 slice.
-#[cfg_attr(not(test), allow(dead_code))]
 #[path = "context_artifacts.rs"]
 pub(super) mod artifacts;
 
@@ -204,7 +202,6 @@ pub(super) enum PreparedContextReadKind {
     Query,
     Inventory,
     /// A compiled-artifact page (ADR-0089).
-    #[cfg_attr(not(test), allow(dead_code))]
     Artifact,
 }
 

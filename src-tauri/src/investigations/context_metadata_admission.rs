@@ -30,8 +30,7 @@ impl FrozenContext {
         let kind = match prepared.kind() {
             PreparedContextReadKind::Query => ContextPreviewKind::Query,
             PreparedContextReadKind::Inventory => ContextPreviewKind::Inventory,
-            // Artifact pages have no metadata admission yet (ADR-0089 step 3).
-            PreparedContextReadKind::Artifact => return Err(HostError::InvalidInput.into()),
+            PreparedContextReadKind::Artifact => ContextPreviewKind::Artifact,
         };
         if self.policy.profile() != INVESTIGATION_V2_POLICY.profile()
             || (prepared.kind() == PreparedContextReadKind::Query) != prepared.guards.is_some()

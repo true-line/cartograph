@@ -983,8 +983,8 @@ impl<R: tauri::Runtime> Worker<'_, R> {
                     CompletionInvestigationAction::Read(
                         QualifiedInvestigationAction::SourceOrFinish(action),
                     ) => (Some(action), None, hash),
-                    // Not decoded for any offered specialist until the host
-                    // executes artifact reads (ADR-0089 step 2).
+                    // Only @30 decodes it, and only on the next-prompt
+                    // metadata path (ADR-0089).
                     CompletionInvestigationAction::Read(
                         QualifiedInvestigationAction::ReadArtifact(_),
                     ) => return Err(Failure::Stop(InvestigationStopReason::InvalidResponse)),

@@ -143,3 +143,35 @@ fn page_next(raw: &str) -> Option<usize> {
         .unwrap()
         .next_offset
 }
+
+// AC-1815: the agent core's artifact list is exactly the MCP-readable
+// catalogue without the artifacts an investigation cannot compile from its
+// frozen graph, and every listed artifact compiles from a small graph.
+#[test]
+fn investigation_artifacts_are_the_graph_only_readable_catalogue() {
+    let excluded = [
+        crate::mcp_reads::curated_read::ARTIFACT_ID,
+        crate::mcp_reads::curated_read::JSON_ARTIFACT_ID,
+        "d1-product-specification",
+        "bundle-manifest",
+        "coverage",
+        "coverage-index",
+        "user-stories",
+    ];
+    let expected: Vec<_> = crate::mcp_reads::artifacts::readable_catalog()
+        .into_iter()
+        .map(|artifact| artifact.id)
+        .filter(|id| !excluded.contains(id))
+        .collect();
+    assert_eq!(
+        expected,
+        agents::investigation::INVESTIGATION_ARTIFACT_IDS.to_vec()
+    );
+    let fixture = Fixture::new(4);
+    let complete = fixture.state.graph.lock().unwrap().read_snapshot().unwrap();
+    let limits = fixture.prepare(&request()).unwrap().graph_limits;
+    for id in agents::investigation::INVESTIGATION_ARTIFACT_IDS {
+        assert!(investigation_readable(id));
+        assert_eq!(compile_frozen(&complete, limits, id).unwrap().id, id);
+    }
+}
