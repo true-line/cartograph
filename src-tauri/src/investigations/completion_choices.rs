@@ -198,6 +198,35 @@ pub(crate) fn recorded_obligations_for_test<R: tauri::Runtime>(
     Ok((choices.graph_snapshot_id, choices.context_id, obligations))
 }
 
+/// Test-only: the source obligation the desktop resolves for `fact`'s
+/// first captured range at `snapshot`, as a dispatch pins a selection, for
+/// the manual pilot harnesses (AC-1083).
+#[cfg(test)]
+pub(crate) fn source_obligation_for_test(
+    state: &AppState,
+    fact: &TaskFactKey,
+    snapshot: &str,
+) -> Result<Obligation, String> {
+    let (target, _guard, _) = inspection::resolve_with_receipt_typed_bounded(
+        state,
+        fact,
+        snapshot,
+        None,
+        0,
+        SnapshotReadLimits::investigation(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let mut obligation = Obligation::Source {
+        obligation_id: String::new(),
+        target: Box::new(target),
+    };
+    let identity = obligation.content_id().map_err(|error| error.to_string())?;
+    if let Obligation::Source { obligation_id, .. } = &mut obligation {
+        *obligation_id = identity;
+    }
+    Ok(obligation)
+}
+
 #[tauri::command]
 pub(crate) async fn investigation_obligation_choices(
     scope: InvestigationScope,

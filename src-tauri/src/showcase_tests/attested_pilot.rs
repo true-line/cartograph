@@ -14,7 +14,9 @@
 //!    `"hops"` (default 2), unless `CARTOGRAPH_PILOT_INVESTIGATION` names a
 //!    completed run of a copied profile. The harness builds the completion
 //!    request the desktop's dispatch would: the Gap's neighbourhood as the
-//!    scope, every recorded inventory as an obligation, and the current
+//!    scope, every recorded inventory as an obligation, a source obligation
+//!    on the code the Gap is about (the first fact touching the Gap that
+//!    has a captured range, or `"source_fact"`, a node id), and the current
 //!    context. Writing it is the operator's consent to the run's steps.
 //! 3. `findings.json` (written): the run and its findings.
 //! 4. `answer.json` (read): `{"finding_id", "gap_id", "slot"}`, the finding
@@ -109,6 +111,50 @@ struct Ask {
     question: String,
     specialist_id: Option<String>,
     hops: Option<u32>,
+    source_fact: Option<String>,
+}
+
+/// The source obligation on the code the Gap is about: `ask.source_fact`,
+/// or else the first fact touching the Gap, the Gap itself first, whose
+/// captured range resolves. Without it a run may finish on its inventories
+/// alone and never read that code.
+fn gap_source_obligation(
+    state: &AppState,
+    ask: &Ask,
+    snapshot: &str,
+) -> agents::investigation::Obligation {
+    let candidates: Vec<String> = match &ask.source_fact {
+        Some(fact) => vec![fact.clone()],
+        None => {
+            let graph = state.graph.lock().unwrap();
+            let (_, edges) = graph.read_snapshot().unwrap();
+            let mut ids = vec![ask.gap_id.clone()];
+            for edge in &edges {
+                let other = if edge.src == ask.gap_id {
+                    &edge.dst
+                } else if edge.dst == ask.gap_id {
+                    &edge.src
+                } else {
+                    continue;
+                };
+                if !ids.contains(other) {
+                    ids.push(other.clone());
+                }
+            }
+            ids
+        }
+    };
+    let mut refusals = Vec::new();
+    for id in &candidates {
+        let fact = agents::TaskFactKey::Node { id: id.clone() };
+        match crate::investigations::completion_choices::source_obligation_for_test(
+            state, &fact, snapshot,
+        ) {
+            Ok(obligation) => return obligation,
+            Err(refusal) => refusals.push(format!("{id}: {refusal}")),
+        }
+    }
+    panic!("no source range for the Gap's code: {refusals:?}")
 }
 
 /// The completion request the desktop's dispatch builds for `ask` on the
@@ -133,7 +179,7 @@ fn completion_request(
         anchor: ask.gap_id.clone(),
         hops: ask.hops.unwrap_or(2),
     };
-    let (graph, context, obligations) =
+    let (graph, context, mut obligations) =
         crate::investigations::completion_choices::recorded_obligations_for_test(
             app.handle(),
             &scope,
@@ -143,6 +189,7 @@ fn completion_request(
         !obligations.is_empty(),
         "no recorded inventory in the Gap's scope"
     );
+    obligations.push(gap_source_obligation(&app.state::<AppState>(), ask, &graph));
     StagedObligationRequest {
         schema_version: if v2 { 7 } else { 4 },
         request_nonce: format!("attested-pilot-{}", std::process::id()),
