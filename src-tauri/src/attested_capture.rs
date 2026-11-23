@@ -12,7 +12,9 @@
 //! - [`engineer_attest`] lets the engineer confirm, dispute or withdraw a
 //!   stored record at the attestation count they read. Confirming is what
 //!   makes an agent's record engineer-backed.
-//! - [`attested_records`] lists the stored records, newest first.
+//! - [`attested_views`] lists the stored records, newest first, as the
+//!   Gaps register and the Spec Workbench show them: label and
+//!   contributors by name (AC-1081).
 //! - [`propose_from_finding`] takes a finding of a completed investigation
 //!   or chat as its agent's answer to a Gap: `agent-attested, unconfirmed`
 //!   until the engineer confirms it. The same content from another agent
@@ -21,10 +23,12 @@
 //! Recorded hashes always come from the current graph, so a record made
 //! here goes stale as soon as a fact it rests on changes.
 
+use agents::attested::Standing;
 use agents::attested::{
     Attestation, AttestationSource, AttestedRecord, AttestedTarget, EngineerVerb,
 };
-use agents::attested_store::{AttestedPage, Contributor, StoredAttested};
+use agents::attested_store::{Contributor, ContributorKind, StoredAttested};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use tauri::Manager;
 
@@ -166,17 +170,93 @@ pub(crate) fn engineer_attest(
         .map_err(|e| e.to_string())
 }
 
-/// Stored records, newest first.
-pub(crate) fn attested_records(
+/// One contributor's attestation as the app shows it. The name comes from
+/// the project's contributor table at read time and never leaves the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AttestedContributorView {
+    pub(crate) display_name: String,
+    pub(crate) kind: ContributorKind,
+    /// The attestation's verb, such as `stated` or `confirmed`.
+    pub(crate) verb: String,
+    /// The producing run, for an agent.
+    pub(crate) run: Option<String>,
+}
+
+/// A stored record as the Gaps register and the Spec Workbench show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AttestedView {
+    pub(crate) record_id: String,
+    pub(crate) citation_id: String,
+    pub(crate) target: AttestedTarget,
+    pub(crate) statement: String,
+    pub(crate) standing: Standing,
+    /// The label every surface prints: `attested`, `agent-attested,
+    /// unconfirmed`, `disputed` or `withdrawn`.
+    pub(crate) label: &'static str,
+    /// The count a review is made at.
+    pub(crate) attestation_count: u64,
+    /// Every attestation, oldest first.
+    pub(crate) contributors: Vec<AttestedContributorView>,
+}
+
+/// One page of [`AttestedView`]s, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AttestedViewPage {
+    pub(crate) items: Vec<AttestedView>,
+    pub(crate) next_before: Option<u64>,
+}
+
+/// The stored records with their labels and contributors by name.
+pub(crate) fn attested_views(
     state: &crate::AppState,
     limit: usize,
     before: Option<u64>,
-) -> Result<AttestedPage, String> {
+) -> Result<AttestedViewPage, String> {
     let drafts = state.drafts.lock().map_err(|e| e.to_string())?;
-    drafts
-        .attested()
-        .list(limit, before)
-        .map_err(|e| e.to_string())
+    let store = drafts.attested();
+    let page = store.list(limit, before).map_err(|e| e.to_string())?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for stored in page.items {
+        let mut contributors = Vec::with_capacity(stored.record.attestations.len());
+        for attestation in &stored.record.attestations {
+            let contributor = store
+                .contributor(attestation.contributor())
+                .map_err(|e| e.to_string())?
+                .ok_or("unknown_contributor")?;
+            let (verb, run) = match attestation {
+                Attestation::Agent { verb, run, .. } => (word(verb)?, Some(run.clone())),
+                Attestation::Engineer { verb, .. } => (word(verb)?, None),
+            };
+            contributors.push(AttestedContributorView {
+                display_name: contributor.display_name,
+                kind: contributor.kind,
+                verb,
+                run,
+            });
+        }
+        items.push(AttestedView {
+            attestation_count: stored.attestation_count(),
+            record_id: stored.record_id,
+            citation_id: stored.citation_id,
+            target: stored.record.target,
+            statement: stored.record.statement,
+            standing: stored.standing,
+            label: stored.standing.label(),
+            contributors,
+        });
+    }
+    Ok(AttestedViewPage {
+        items,
+        next_before: page.next_before,
+    })
+}
+
+/// A verb's wire word.
+fn word(verb: &impl Serialize) -> Result<String, String> {
+    serde_json::to_value(verb)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| "unknown_verb".to_owned())
 }
 
 /// The finding `finding_id` of the completed investigation
@@ -357,16 +437,17 @@ pub(crate) async fn review_attested_record(
     .await
 }
 
-/// The stored attested records, newest first.
+/// The stored attested records, newest first, with their labels and
+/// contributors by name.
 #[tauri::command]
 pub(crate) async fn list_attested_records(
     limit: usize,
     before: Option<u64>,
     app: tauri::AppHandle,
-) -> Result<AttestedPage, String> {
+) -> Result<AttestedViewPage, String> {
     crate::off_ui_thread(move || {
         let state = app.state::<crate::AppState>();
-        attested_records(&state, limit, before)
+        attested_views(&state, limit, before)
     })
     .await
 }

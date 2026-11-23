@@ -176,9 +176,23 @@ fn the_engineer_confirms_an_agents_record_and_withdraws_it_at_the_count_read() {
     let withdrawn = review(2, EngineerVerb::Withdrew).unwrap();
     assert_eq!(withdrawn.standing, Standing::Withdrawn);
 
-    let page = attested_records(&state, 10, None).unwrap();
+    // AC-1081: the surfaces read the label and each contributor by name.
+    let page = attested_views(&state, 10, None).unwrap();
     assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].attestation_count(), 3);
+    let view = &page.items[0];
+    assert_eq!(view.attestation_count, 3);
+    assert_eq!(view.label, "withdrawn");
+    assert_eq!(
+        view.contributors
+            .iter()
+            .map(|c| (c.display_name.as_str(), c.verb.as_str(), c.run.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("gap-filler@1 (local/fixture)", "stated", Some("run:1")),
+            (ENGINEER, "confirmed", None),
+            (ENGINEER, "withdrew", None),
+        ]
+    );
 }
 
 // The engineer's answer with the content an agent already stated is
