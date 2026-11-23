@@ -26,6 +26,7 @@ pub(super) fn project(
                 | (SpecialistId::DomainAnalystV28, "domain-analyst@28")
                 | (SpecialistId::DomainAnalystV29, "domain-analyst@29")
                 | (SpecialistId::DomainAnalystV30, "domain-analyst@30")
+                | (SpecialistId::DomainAnalystV31, "domain-analyst@31")
         )
         || task.detail.summary.cancel_requested
     {
@@ -193,6 +194,7 @@ mod tests {
             Ok(Err(FinishDecision::Refused {
                 assessment: vec![],
                 feedback: agents::investigation::staged_finish::RefusalFeedback {
+                    citation_drop: None,
                     schema_version: 6,
                     citation_correction: None,
                     unmet: vec![],
