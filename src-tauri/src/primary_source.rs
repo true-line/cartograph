@@ -2016,6 +2016,7 @@ impl PrimarySourceStore {
             None,
             CaptureLimits::default(),
             captured::MAX_VISITED_ENTRIES,
+            CallerSelections::default(),
         )
     }
 
@@ -2026,6 +2027,7 @@ impl PrimarySourceStore {
     /// change what a citation means. A selected path that is not a regular
     /// blob of that commit, or a missing object, fails the recovery; there is
     /// no fallback to the checkout. Local folders keep a working-tree capture.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_at(
         &self,
         source: &RegisteredSource,
@@ -2034,7 +2036,9 @@ impl PrimarySourceStore {
         commit: Option<&str>,
         limits: CaptureLimits,
         max_visited_entries: usize,
+        callers: CallerSelections<'_>,
     ) -> Result<PrimaryInput, String> {
+        let api_docs = callers.api_docs;
         // A managed clone's commit is captured whenever the TS pass runs,
         // including for Pulumi infrastructure alone (AC-1022).
         let wanted = layers.is_empty()
@@ -2051,6 +2055,7 @@ impl PrimarySourceStore {
                 starts_captured: false,
                 toolchain_captured: false,
                 documents_captured: false,
+                api_doc_paths: None,
                 _guard: None,
             });
         }
@@ -2133,11 +2138,14 @@ impl PrimarySourceStore {
             })
             .ok();
         let toolchain = ingest::toolchain::toolchain_paths(root).ok();
+        // The declared API references and their config (AC-1067), listed by
+        // the caller, who knows the manifest's declarations.
         let readers: Vec<String> = environments
             .iter()
             .chain(&starts)
             .chain(&toolchain)
             .flatten()
+            .chain(api_docs.into_iter().flatten())
             .cloned()
             .collect();
         // Droppable groups, in the order they are kept: shipped JVM class
@@ -2167,13 +2175,20 @@ impl PrimarySourceStore {
             }
         }
         let documents_captured = kept == groups.len();
-        if capture.is_none() && (environments.is_some() || starts.is_some() || toolchain.is_some())
+        if capture.is_none()
+            && (environments.is_some()
+                || starts.is_some()
+                || toolchain.is_some()
+                || api_docs.is_some())
         {
             capture = capture_paths(&with(&readers)).ok();
         }
         let environments_captured = capture.is_some() && environments.is_some();
         let starts_captured = capture.is_some() && starts.is_some();
         let toolchain_captured = capture.is_some() && toolchain.is_some();
+        let api_doc_paths = api_docs
+            .filter(|_| capture.is_some())
+            .map(<[String]>::to_vec);
         if capture.is_none() && !lanes.is_empty() {
             capture = capture_paths(&with(&[])).ok();
         }
@@ -2191,6 +2206,7 @@ impl PrimarySourceStore {
             starts_captured,
             toolchain_captured,
             documents_captured,
+            api_doc_paths,
             _guard: Some(guard),
         })
     }
@@ -2329,6 +2345,17 @@ impl RetainedReceipts {
     }
 }
 
+/// Selections only the caller can list, because they depend on what the
+/// caller knows of the source: they join the reader selections tried beside
+/// the lanes.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CallerSelections<'a> {
+    /// The declared API references and their config (AC-1067), from the
+    /// repository config and the system manifest; `None` when their load
+    /// names a gap.
+    pub api_docs: Option<&'a [String]>,
+}
+
 pub struct PrimaryInput {
     pub capture: Option<Capture>,
     /// Symlinks the capture did not follow, reported in coverage (#1229).
@@ -2346,6 +2373,10 @@ pub struct PrimaryInput {
     /// (AC-1065); when it does not, documents and found ADRs are read from
     /// the checkout.
     pub documents_captured: bool,
+    /// The declared API references and their config the capture holds
+    /// (AC-1067); `None` when it does not hold them, and their loader reads
+    /// the checkout.
+    pub api_doc_paths: Option<Vec<String>>,
     _guard: Option<RetentionGuard>,
 }
 
