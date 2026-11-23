@@ -21,6 +21,9 @@
 //! 7. `verified-only/`, `best-effort/`, `after.json` and `pilot.json`
 //!    (written). The pass bar's checks are in `pilot.json`; the run fails
 //!    after writing it when one does not hold.
+//!
+//! A copied profile is used only with its completed run named, since its
+//! saved local provider settings would bypass the provider set here.
 use super::*;
 use agents::attested::{AttestationSource, EngineerVerb, Standing};
 use agents::investigation::{InvestigationStatus, StartInvestigationRequest};
@@ -205,6 +208,12 @@ fn showcase_attested_pilot() {
     let investigation = match std::env::var("CARTOGRAPH_PILOT_INVESTIGATION") {
         Ok(id) => id,
         Err(_) => {
+            // A copied profile's saved local model, context window or port
+            // would build its own provider past the one set here.
+            assert!(
+                copied.is_none(),
+                "with CARTOGRAPH_PILOT_PROFILE, name its completed run in CARTOGRAPH_PILOT_INVESTIGATION"
+            );
             let request: StartInvestigationRequest = await_file(&output, "request.json", wait);
             state.investigations.set_test_provider(
                 request.provider_mode,
@@ -374,6 +383,7 @@ fn showcase_attested_pilot() {
     let verified = &printed["verified-only"];
     let checks = serde_json::json!({
         "drafted_claims_citing_the_record": drafted_citing,
+        "this_run_drafted_a_claim_citing_the_record": drafted_citing > 0,
         "best_effort_prints_the_record": best.contains(&citation),
         "best_effort_names_the_engineer": best.contains(&engineer.display_name),
         "best_effort_names_the_agent_run": best.contains(&investigation),
