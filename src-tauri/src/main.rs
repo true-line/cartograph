@@ -8514,7 +8514,8 @@ fn python_limits(state: &AppState) -> Result<adapters_lang_python::PythonLimits,
 }
 
 /// Rows and vector MiB one semantic preview's embedding operation may hold
-/// (#1653, AC-1807), from the saved operator limits.
+/// (#1653, AC-1807), and the texts per embedding call (AC-1819), from the
+/// saved operator limits.
 fn semantic_operation_limits(
     state: &AppState,
 ) -> Result<semantic::embedding_cache::OperationLimits, String> {
@@ -8530,7 +8531,10 @@ fn semantic_operation_limits(
         .checked_mul(1024 * 1024)
         .and_then(|bytes| usize::try_from(bytes).ok())
         .ok_or("Semantic vector bound overflows.")?;
+    let batch = usize::try_from(limit(operator_limits::SEMANTIC_EMBEDDING_BATCH_TEXTS)?)
+        .map_err(|error| error.to_string())?;
     semantic::embedding_cache::OperationLimits::within(rows, bytes)
+        .and_then(|limits| limits.with_batch_texts(batch))
         .ok_or_else(|| "Saved semantic limits are outside the cache's bounds.".to_string())
 }
 
@@ -12688,6 +12692,22 @@ export function queueOrder() {
         assert_eq!(
             super::semantic_operation_limits(&state).unwrap(),
             OperationLimits::within(65_536, 256 << 20).unwrap()
+        );
+        // AC-1819: a saved embedding batch reaches the preview with them.
+        state
+            .settings
+            .lock()
+            .unwrap()
+            .set_operator_limit(
+                crate::operator_limits::SEMANTIC_EMBEDDING_BATCH_TEXTS,
+                Some(16),
+            )
+            .unwrap();
+        assert_eq!(
+            super::semantic_operation_limits(&state).unwrap(),
+            OperationLimits::within(65_536, 256 << 20)
+                .and_then(|limits| limits.with_batch_texts(16))
+                .unwrap()
         );
     }
 

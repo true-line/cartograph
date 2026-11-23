@@ -59,6 +59,9 @@ pub const PYTHON_LOCKFILE_MAX_MIB: &str = "python_lockfile_max_mib";
 pub const SEMANTIC_OPERATION_MAX_ROWS: &str = "semantic_operation_max_rows";
 pub const SEMANTIC_OPERATION_MAX_VECTOR_MIB: &str = "semantic_operation_max_vector_mib";
 
+/// Texts one embedding call to the model provider may carry (AC-1819).
+pub const SEMANTIC_EMBEDDING_BATCH_TEXTS: &str = "semantic_embedding_batch_texts";
+
 /// Seconds and output tokens one cloud gap escalation may take (AC-1806).
 pub const CLOUD_CALL_TIMEOUT_SECONDS: &str = "cloud_call_timeout_seconds";
 pub const CLOUD_CALL_MAX_OUTPUT_TOKENS: &str = "cloud_call_max_output_tokens";
@@ -217,6 +220,14 @@ pub const REGISTRY: &[LimitSpec] = &[
         max: (semantic::embedding_cache::MAX_VECTOR_BYTES as u64) / MIB,
         advanced: true,
         description: "MiB of vectors one semantic preview may hold. The pass peaks near twice this in memory; a plan past it fails instead.",
+    },
+    LimitSpec {
+        key: SEMANTIC_EMBEDDING_BATCH_TEXTS,
+        default: semantic::embedding_cache::BATCH_COUNT as u64,
+        min: 1,
+        max: semantic::embedding_cache::BATCH_COUNT as u64,
+        advanced: false,
+        description: "Texts sent to the embedding model in one call. Lower it when a slow local model times out on semantic previews; more, smaller calls embed the same texts.",
     },
     LimitSpec {
         key: CLOUD_CALL_TIMEOUT_SECONDS,
@@ -550,6 +561,18 @@ mod tests {
         assert!(at(|key| key.min).is_some());
         assert!(at(|key| key.max + 1).is_none());
         assert!(rows.advanced && mib.advanced);
+        // AC-1819: the batch key defaults to the shipped batch, lowers it
+        // to one text at least, and is offered outside the advanced section.
+        let batch = spec(SEMANTIC_EMBEDDING_BATCH_TEXTS).unwrap();
+        let limits = OperationLimits::default();
+        assert_eq!(
+            limits.with_batch_texts(batch.default as usize),
+            Some(limits)
+        );
+        assert_eq!((batch.default, batch.min), (batch.max, 1));
+        assert!(limits.with_batch_texts(batch.min as usize).is_some());
+        assert!(limits.with_batch_texts(batch.max as usize + 1).is_none());
+        assert!(!batch.advanced);
     }
 
     // AC-1806 / #1653: the cloud call keys default to the provider's shipped
