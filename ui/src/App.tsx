@@ -226,6 +226,8 @@ export default function App() {
     loadStagedProposals,
     openStagedProposal,
     assessStagedBasis,
+    loadReconciliation,
+    reconcileStaged,
   } = useAppStore();
   // The state the host gave each accepted record (AC-0655), for the proposal
   // history and the open review dialog.
@@ -1330,6 +1332,8 @@ export default function App() {
           onDecide={(decision) => void decideProposal(decision)}
           onClose={closeResolution}
           onAssessBasis={() => void assessStagedBasis()}
+          onLoadReconciliation={() => void loadReconciliation()}
+          onReconcile={() => void reconcileStaged()}
           onWithdraw={() => void withdrawProposal()}
           onResolveAgain={(gapId) => void openResolution(gapId)}
         />

@@ -5,6 +5,7 @@ import type { EgressPreview } from './EgressConsentDialog';
 import { EgressConsentDialog } from './EgressConsentDialog';
 import { TierBadge } from './TierBadge';
 import { ProposalBasisAssessment } from './ProposalBasisAssessment';
+import { ProposalReconciliation } from './ProposalReconciliation';
 import { TaskEvidence } from './TaskEvidence';
 
 export interface ResolutionStrategyModalProps {
@@ -18,6 +19,10 @@ export interface ResolutionStrategyModalProps {
   onDecide: (decision: 'accepted' | 'rejected') => void;
   onClose: () => void;
   onAssessBasis?: () => void;
+  /** Read the open proposal's reconciliation results (AC-1074). */
+  onLoadReconciliation?: () => void;
+  /** Reconcile the open proposal against the current recovery (AC-1074). */
+  onReconcile?: () => void;
   /** Reject an accepted record, withdrawing it from curated content. */
   onWithdraw?: () => void;
   /** Run the record's Gap again on the current source, for a new proposal. */
@@ -38,6 +43,8 @@ export function ResolutionStrategyModal({
   onDecide,
   onClose,
   onAssessBasis,
+  onLoadReconciliation,
+  onReconcile,
   onWithdraw,
   onResolveAgain,
 }: ResolutionStrategyModalProps) {
@@ -190,6 +197,11 @@ export function ResolutionStrategyModal({
             <ProposalBasisAssessment
               state={state.basisAssessment?.proposalId === proposal.proposal_id ? state.basisAssessment : undefined}
               onAssess={onAssessBasis}
+            />
+            <ProposalReconciliation
+              state={state.reconciliation?.proposalId === proposal.proposal_id ? state.reconciliation : undefined}
+              onLoad={onLoadReconciliation}
+              onReconcile={onReconcile}
             />
             {state.decided ? (
               <p className="consent-status" data-testid="decision-recorded">
