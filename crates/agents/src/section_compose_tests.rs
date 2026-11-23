@@ -82,6 +82,9 @@ fn the_request_carries_the_section_the_facts_and_a_closed_citation_schema() {
     // A stated route rests on a cited fact that shows it (#2328).
     assert!(SYSTEM.contains("a route you state must be one a fact you cite shows"));
     assert!(SYSTEM.contains("A number, count or version you state must appear in a fact you cite"));
+    // AC-1340 (T-1340, #1752 re-check 12): no unstated framing or operation.
+    assert!(SYSTEM.contains("Add no describing word or purpose no cited fact states"));
+    assert!(SYSTEM.contains("name an operation only when a fact you cite names it"));
     // Areas the section lists are followed, not reinvented.
     assert!(
         guidance("1.3")

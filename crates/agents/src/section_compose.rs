@@ -60,7 +60,10 @@ concrete statements in domain terms: what the system offers, to whom, under whic
 conditions, with which limits, orderings, statuses and messages. Group related facts \
 into one statement; do not restate each table row. Every statement rests only on the \
 facts it cites: name no screen, actor, channel or behaviour that none of them \
-names. Never write a file path, a file name or a code identifier (a function, \
+names. Add no describing word or purpose no cited fact states (core, main, largest, \
+legacy, signed-in, end users, or what an operation is for), and name an operation only \
+when a fact you cite names it or it is an everyday operation (viewing, listing, creating, \
+changing, removing) on what a cited capability manages. Never write a file path, a file name or a code identifier (a function, \
 class, module or variable name): those stay in the citations. URL routes, HTTP methods \
 and statuses, field names and user-facing messages are part of the observable contract \
 and may be stated, but a route you state must be one a fact you cite shows: cite its \
