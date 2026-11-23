@@ -9,6 +9,7 @@
   index)
 - **Supersedes:** AC-0740's promise that the file is byte for byte the JSON
   the Workbench built before #1582
+- **Amended:** 2026-11-23, v3 (Amendment 1)
 
 ## Context
 
@@ -113,6 +114,32 @@ read by people, by scripts, and by the agents a handoff feeds.
   3. The host streams v2, and the UI preview builds v2, with the fixtures
      updated together.
   4. REA and VSCode measurements, and the recorded budget.
+
+## Amendment 1: v3, a rendered artifact carried once (2026-11-23)
+
+- **Status:** Accepted (coordinator as the owner's delegate, 2026-11-23).
+- **Why:** step 4 measured REA at 1,018 MB for v1 and 883 MB for v2, only
+  13% smaller. `fact-index.md` (152 MB) and `fact-index.json` (224 MB),
+  added by ADR-0058 after #1582 was measured, were 45% of the v2 file. The
+  JSON is the serialized fact index, and the Markdown is rendered from the
+  same index.
+- **Decision:**
+  - The writer writes `"schema": "cartograph.spec-bundle-file/v3"`, which is
+    v2 plus one rule. An artifact that is a rendering of another artifact
+    in the bundle is written in `files` as `{"rendered_from": "<file
+    name>"}` instead of its content. Today that is only `fact-index.md`,
+    rendered from `fact-index.json`, and only when the bundle holds both.
+  - The spec crate's reader renders it and refuses the file if the
+    rendering is not the content the artifact's `content_id` was computed
+    over. The reader stays the documented way to load a file, and it reads
+    v1, v2 and v3.
+  - The three register JSON indexes (`gap_register.json`,
+    `rule-evidence.json`, `US-TM.json`) stay as content. They are compiled
+    from the graph and are not renderings of their small Markdown twins.
+  - A v2 file never names a rendering.
+- **Measured (REA verified-only, 2026-11-22 bundle):** v1 1,018 MB, v2
+  883 MB, v3 729 MB (72% of v1). The v3 file reads back to the identical
+  bundle, so the 152 MB Markdown index renders byte for byte.
 
 ## Alternatives
 
