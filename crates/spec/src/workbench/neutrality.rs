@@ -351,6 +351,29 @@ impl CitedText {
         })
     }
 
+    /// The first platform `statement` names that no fact of `citations`
+    /// names, if any (AC-1342): "Android", "iOS" or "macOS" said of a
+    /// subsystem whose facts name no platform. Re-check 13 staged such a
+    /// claim ("An Android application is part of the system's scope") on
+    /// facts that named only an Activity subsystem and a main-activity
+    /// screen, and the reviewer kept it.
+    pub fn uncited_platform<'a>(
+        &self,
+        statement: &'a str,
+        citations: &[String],
+    ) -> Option<&'a str> {
+        let shown: BTreeSet<String> = citations
+            .iter()
+            .filter_map(|id| self.by_citation.get(id))
+            .flat_map(|text| plain_words(text))
+            .map(|word| word.to_lowercase())
+            .collect();
+        plain_words(statement).find(|word| {
+            let word = word.to_lowercase();
+            PLATFORMS.contains(&word.as_str()) && !shown.contains(&word)
+        })
+    }
+
     /// Whether `statement` asserts endpoints or routes, by naming them,
     /// spelling a route or an HTTP method, without citing an Endpoint fact
     /// (#2349, #2371).
@@ -460,6 +483,20 @@ const STOPWORDS: &str = "\
     our out over own same she should so some such than that the their them then there these \
     they this those through to too under until up upon us very via was we were what when \
     where which while who whom why will with within without would you your";
+
+/// Operating systems and device platforms a claim may name only when a cited
+/// fact names them (AC-1342). "Windows" is left out: it is also an everyday
+/// word for screens.
+const PLATFORMS: &[&str] = &[
+    "android", "ios", "ipados", "iphone", "ipad", "macos", "linux", "watchos", "tvos",
+];
+
+/// The words of `text`, split on every character that is not a letter or
+/// digit, as written.
+fn plain_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+}
 
 /// The stemmed, lower-case words of `text` ([`pieces`]).
 fn words(text: &str) -> Vec<String> {
@@ -1154,6 +1191,52 @@ mod tests {
         assert_eq!(
             claim_terms("Systems refresh an idToken (F-1)."),
             ["refresh", "token"]
+        );
+    }
+
+    /// AC-1342 (T-1342): a platform a statement names must be named by a
+    /// fact it cites (#1752 re-check 13).
+    #[test]
+    fn a_platform_must_be_named_by_a_cited_fact() {
+        let activity = Node {
+            id: "subsystem:activity".into(),
+            label: "Subsystem".into(),
+            props: json!({"name": "Activity (app)", "screen": "MainActivity"}),
+        };
+        let ios = Node {
+            id: "subsystem:ios".into(),
+            label: "Subsystem".into(),
+            props: json!({"name": "iOS share extension"}),
+        };
+        let ids = |node: &Node| {
+            citation_id(&FactKey::Node {
+                id: node.id.clone(),
+            })
+        };
+        let (a, i) = (ids(&activity), ids(&ios));
+        let cited: BTreeSet<String> = [a.clone(), i.clone()].into();
+        let text = CitedText::of(&[activity, ios], &[], &[], &cited);
+        let a = std::slice::from_ref(&a);
+        let i = std::slice::from_ref(&i);
+        let android = "An Android application is part of the system's scope.";
+        assert_eq!(text.uncited_platform(android, a), Some("Android"));
+        assert_eq!(
+            text.uncited_platform("A mobile app shows the main activity.", a),
+            None
+        );
+        // Named by the cited fact, in any case.
+        assert_eq!(
+            text.uncited_platform("An IOS share extension adds aliases.", i),
+            None
+        );
+        assert_eq!(
+            text.uncited_platform("It runs on iOS and macOS.", i),
+            Some("macOS")
+        );
+        // Screens are windows, not a platform.
+        assert_eq!(
+            text.uncited_platform("Settings open in two windows.", a),
+            None
         );
     }
 
