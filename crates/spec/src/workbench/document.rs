@@ -1093,12 +1093,15 @@ pub(super) fn d1(
     )?;
 
     // A draft may cite a derived Capability or Actor this document prints
-    // (#2040), so the included stories are looked up beside the base facts.
+    // (#2040), or an area it prints (#2511), so the included stories and the
+    // kept concept Subsystems are looked up beside the base facts.
     let citable: Vec<&Node> = match knowledge {
         Some(knowledge) => nodes
             .iter()
             .copied()
             .chain(knowledge.included.iter().map(|story| story.node))
+            .chain(knowledge.file_areas.values().copied())
+            .chain(knowledge.areas.values().copied())
             .collect(),
         None => nodes.to_vec(),
     };
