@@ -9,9 +9,13 @@
 //!
 //! 1. `gaps.json` (written): every open Gap, with the hash and counts in
 //!    `before.json`.
-//! 2. `request.json` (read): the analyst's start request, unless
-//!    `CARTOGRAPH_PILOT_INVESTIGATION` names a completed run of a copied
-//!    profile. Writing it is the operator's consent to the run's steps.
+//! 2. `request.json` (read): `{"gap_id", "question"}`, with optional
+//!    `"specialist_id"` (default: the domain analyst's current version) and
+//!    `"hops"` (default 2), unless `CARTOGRAPH_PILOT_INVESTIGATION` names a
+//!    completed run of a copied profile. The harness builds the completion
+//!    request the desktop's dispatch would: the Gap's neighbourhood as the
+//!    scope, every recorded inventory as an obligation, and the current
+//!    context. Writing it is the operator's consent to the run's steps.
 //! 3. `findings.json` (written): the run and its findings.
 //! 4. `answer.json` (read): `{"finding_id", "gap_id", "slot"}`, the finding
 //!    the operator proposes as the agent's answer. The engineer is recorded
@@ -26,7 +30,10 @@
 //! saved local provider settings would bypass the provider set here.
 use super::*;
 use agents::attested::{AttestationSource, EngineerVerb, Standing};
-use agents::investigation::{InvestigationStatus, StartInvestigationRequest};
+use agents::investigation::{
+    InvestigationProviderMode, InvestigationScope, InvestigationStatus, ObligationEnvelope,
+    SpecialistId, SpecialistRole, StagedObligationRequest,
+};
 
 /// Wait for the operator's file `name` in `output` and parse it. A file
 /// still being written is read again.
@@ -94,16 +101,87 @@ fn measure(state: &AppState) -> (serde_json::Value, Vec<serde_json::Value>) {
     )
 }
 
+/// The operator's choice of the analyst's run.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ask {
+    gap_id: String,
+    question: String,
+    specialist_id: Option<String>,
+    hops: Option<u32>,
+}
+
+/// The completion request the desktop's dispatch builds for `ask` on the
+/// local lane: the policy its version selects, the Gap's neighbourhood,
+/// every recorded inventory of that scope and the current context.
+fn completion_request(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    ask: &Ask,
+) -> StagedObligationRequest {
+    let specialist: SpecialistId = match &ask.specialist_id {
+        Some(id) => serde_json::from_value(serde_json::json!(id)).expect("a known specialist"),
+        None => agents::investigation::current_specialist(SpecialistRole::DomainAnalyst)
+            .expect("a current domain analyst"),
+    };
+    let v2 = specialist.uses_policy_selection();
+    let profile = if v2 {
+        "investigation-v2"
+    } else {
+        "investigation-v1"
+    };
+    let scope = InvestigationScope::Neighborhood {
+        anchor: ask.gap_id.clone(),
+        hops: ask.hops.unwrap_or(2),
+    };
+    let (graph, context, obligations) =
+        crate::investigations::completion_choices::recorded_obligations_for_test(
+            app.handle(),
+            &scope,
+        )
+        .expect("the Gap's scope has choices");
+    assert!(
+        !obligations.is_empty(),
+        "no recorded inventory in the Gap's scope"
+    );
+    StagedObligationRequest {
+        schema_version: if v2 { 7 } else { 4 },
+        request_nonce: format!("attested-pilot-{}", std::process::id()),
+        specialist_id: serde_json::to_value(specialist)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        obligations: ObligationEnvelope {
+            schema_version: if v2 { 2 } else { 1 },
+            contract: format!(
+                "investigation-completion-obligations@{}",
+                if v2 { 2 } else { 1 }
+            ),
+            obligations,
+        },
+        inspection_requirements: None,
+        question: ask.question.clone(),
+        scope,
+        provider_mode: InvestigationProviderMode::Local,
+        limit_profile: profile.into(),
+        expected_graph_revision: Some(graph),
+        expected_context_id: context,
+        conversation_id: None,
+        parent_id: None,
+    }
+}
+
 /// Start the analyst's run and wait for it to end, approving each step it
 /// asks consent for: the operator consented by writing `request.json`.
 fn run_analyst(
     app: &tauri::App<tauri::test::MockRuntime>,
-    request: StartInvestigationRequest,
+    request: StagedObligationRequest,
     wait: u64,
 ) -> String {
     let state = app.state::<AppState>();
     let summary =
-        crate::investigations::commands::start_for_test(request, app.handle().clone()).unwrap();
+        crate::investigations::commands::start_completion_for_test(request, app.handle().clone())
+            .unwrap_or_else(|refusal| panic!("the analyst's run was refused: {refusal}"));
     let id = summary.investigation_id;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
     loop {
@@ -214,9 +292,15 @@ fn showcase_attested_pilot() {
                 copied.is_none(),
                 "with CARTOGRAPH_PILOT_PROFILE, name its completed run in CARTOGRAPH_PILOT_INVESTIGATION"
             );
-            let request: StartInvestigationRequest = await_file(&output, "request.json", wait);
+            let ask: Ask = await_file(&output, "request.json", wait);
+            let request = completion_request(&app, &ask);
+            write_json(
+                &output,
+                "start.json",
+                &serde_json::to_value(&request).unwrap(),
+            );
             state.investigations.set_test_provider(
-                request.provider_mode,
+                InvestigationProviderMode::Local,
                 std::sync::Arc::new(
                     llm::openai_compatible::OpenAiCompatibleProvider::new(
                         &url,
