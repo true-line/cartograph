@@ -14,6 +14,12 @@ const message = (error: unknown): string => {
   if (code === 'unavailable_evidence') return 'Selected evidence is unavailable. Inspect the selection and retained evidence.';
   if (code === 'storage_failure') return 'The local packet store could not complete this operation.';
   if (code === 'invalid_input') return 'Packet input is invalid. Check required supplied values and evidence references.';
+  if (code === 'not_reviewed') return 'Only a reviewed packet can be dispatched. Mark it reviewed first.';
+  if (code === 'unpinned_revision') return 'This packet does not name exactly one source pinned to a commit, so it cannot be dispatched.';
+  if (code === 'agent_not_configured') return 'No ACP agent is configured. Set one under Configure → ACP agent, then dispatch again.';
+  if (code === 'agent_unavailable') return 'The configured ACP agent could not be started. Check its program path under Configure → ACP agent.';
+  if (code === 'already_dispatched') return 'This packet already has a dispatch worktree. Review or remove its branch before dispatching again.';
+  if (code === 'dispatch_failed') return 'The dispatch could not prepare its worktree. Nothing was recorded.';
   return failure?.message ?? (typeof error === 'string' ? error : JSON.stringify(error));
 };
 interface WorkPacketState {
@@ -29,6 +35,7 @@ interface WorkPacketState {
   generate: (request: GeneratePacketRequest) => Promise<void>;
   review: (decision: 'reviewed' | 'changes_requested', note: string) => Promise<void>;
   assess: () => Promise<void>; exportPacket: () => Promise<void>;
+  dispatch: () => Promise<void>;
 }
 export const useWorkPacketStore = create<WorkPacketState>((set, get) => {
   const run = async (operation: () => Promise<void>) => {
@@ -122,6 +129,16 @@ export const useWorkPacketStore = create<WorkPacketState>((set, get) => {
       const assessed = await invokeOr<PacketDetail | null>('assess_work_packet', null, { packetId: detail.packet_id });
       if (!assessed) throw new Error('Freshness assessment unavailable.');
       set({ detail: assessed });
+    }),
+    dispatch: () => run(async () => {
+      const detail = get().detail;
+      if (!detail) return;
+      set({ notice: 'Dispatching to the configured ACP agent. This runs until its turn ends.' });
+      const dispatched = await invokeOr<PacketDetail | null>('dispatch_work_packet', null, { packetId: detail.packet_id });
+      if (!dispatched || dispatched.packet_id !== detail.packet_id) throw new Error('Dispatch requires the local core.');
+      set({ detail: dispatched, notice: dispatched.dispatch?.head_revision
+        ? `Dispatched. The agent's work is on local branch ${dispatched.dispatch.branch}; review it before merging.`
+        : 'Dispatched. The agent made no commit.' });
     }),
     exportPacket: () => {
       const priorNotice = get().notice;
