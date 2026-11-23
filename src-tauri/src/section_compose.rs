@@ -70,6 +70,8 @@ pub(crate) struct Prepared {
 struct HandedAttested {
     /// Its identity: the hash a draft citing it records.
     identity: String,
+    /// `attested`, or `agent-attested, unconfirmed`.
+    label: String,
     /// Its statement: what a claim citing it is checked against.
     statement: String,
 }
@@ -527,6 +529,7 @@ fn prepared(
         .map(|record| {
             let handed = HandedAttested {
                 identity: record.record_id.clone(),
+                label: record.printed_label().unwrap_or_default().to_owned(),
                 statement: record.statement.clone(),
             };
             (record.citation_id.clone(), handed)
@@ -1470,6 +1473,17 @@ pub(crate) fn compose_gated(
         check,
         job_id,
     };
+    // The attested records the section was handed are drafted after its
+    // rule rows (ADR-0090 decision 6).
+    let attested: Vec<ComposeAttested> = prepared
+        .attested
+        .iter()
+        .map(|(id, handed)| ComposeAttested {
+            citation_id: id.clone(),
+            label: handed.label.clone(),
+            statement: handed.statement.clone(),
+        })
+        .collect();
     let outcome = gated_compose::run(
         &workflow,
         &GatedInput {
@@ -1477,6 +1491,7 @@ pub(crate) fn compose_gated(
             title: prepared.title,
             section: &prepared.text,
             facts: &prepared.facts,
+            attested: &attested,
         },
         &mut model,
         &names_source,

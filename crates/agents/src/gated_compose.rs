@@ -24,6 +24,11 @@
 //! 4. **assemble** (deterministic): kept claims in chunk order; a statement
 //!    drafted again word for word is one claim citing the rows of both.
 //!
+//! Attested records handed to the section (ADR-0090 decision 6) are drafted
+//! after the rule rows, as chunks of their own: one row per record, its
+//! `A-` id the row's citation, so every check reads the record's statement
+//! as it reads a rule row.
+//!
 //! The stage parameters and gate checks are read from the declarative
 //! workflow file `workflows/draft-rules.workflow.json`, so the same file
 //! can drive another runtime. Nothing here calls a provider: the host passes
@@ -31,7 +36,7 @@
 //! gate reads only data the chunk prints and the model's own reply, so a
 //! prescription never carries anything the model has not seen.
 
-use crate::section_compose::{self, ComposeFact, ComposeInput};
+use crate::section_compose::{self, ComposeAttested, ComposeFact, ComposeInput};
 use crate::section_draft::{
     Claim, ClaimKind, MAX_CITATIONS, MAX_CLAIMS, SectionAddress, SectionDraftFinish,
 };
@@ -432,6 +437,45 @@ fn render(title: Option<&str>, parts: &[(&Block, &[Row])]) -> Chunk {
         text.push('\n');
     }
     Chunk { text, rows }
+}
+
+/// The heading of a chunk of attested records.
+pub const ATTESTED_HEADING: &str = "### Attested records";
+
+/// Chunks of at most `max_rows` of `attested`, in order, under the
+/// section's `##` title of `text`: one table row per record, citing its
+/// `A-` id (ADR-0090 decision 6).
+pub fn attested_chunks(text: &str, attested: &[ComposeAttested], max_rows: usize) -> Vec<Chunk> {
+    let title = text.lines().find(|line| line.starts_with("## "));
+    attested
+        .chunks(max_rows.max(1))
+        .map(|records| {
+            let mut text = String::new();
+            if let Some(title) = title {
+                text.push_str(title);
+                text.push_str("\n\n");
+            }
+            text.push_str(ATTESTED_HEADING);
+            text.push_str("\n\n| Label | Statement | Citation |\n|---|---|---|\n");
+            let rows: Vec<Row> = records
+                .iter()
+                .map(|record| Row {
+                    text: format!(
+                        "| {} | {} | {} |",
+                        record.label,
+                        record.statement.replace('|', "\\|"),
+                        record.citation_id
+                    ),
+                    ids: vec![record.citation_id.clone()],
+                })
+                .collect();
+            for row in &rows {
+                text.push_str(&row.text);
+                text.push('\n');
+            }
+            Chunk { text, rows }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------- gate
@@ -981,6 +1025,8 @@ pub struct GatedInput<'a> {
     pub section: &'a str,
     /// The citable facts.
     pub facts: &'a [ComposeFact],
+    /// The attested records handed to the section, drafted after its rows.
+    pub attested: &'a [ComposeAttested],
 }
 
 /// What a run did.
@@ -1155,7 +1201,12 @@ pub fn run(
         .iter()
         .map(|fact| fact.citation_id.clone())
         .collect();
-    let (chunks, skipped) = partition_counted(input.section, &citable, workflow.max_rows);
+    let (mut chunks, skipped) = partition_counted(input.section, &citable, workflow.max_rows);
+    chunks.extend(attested_chunks(
+        input.section,
+        input.attested,
+        workflow.max_rows,
+    ));
     let mut stats = GatedStats {
         chunks: chunks.len(),
         rows: chunks.iter().map(|chunk| chunk.rows.len()).sum(),
@@ -1178,13 +1229,19 @@ pub fn run(
             .filter(|fact| ids.contains(&fact.citation_id))
             .cloned()
             .collect();
+        let attested: Vec<ComposeAttested> = input
+            .attested
+            .iter()
+            .filter(|record| ids.contains(&record.citation_id))
+            .cloned()
+            .collect();
         let compose = ComposeInput {
             address: input.address,
             title: input.title,
             section: &chunk.text,
             facts: &facts,
             groups: &[],
-            attested: &[],
+            attested: &attested,
         };
         let base = section_compose::action(&compose, String::new());
         let base_prompt = section_compose::prompt_with(&compose, workflow.max_claims);
