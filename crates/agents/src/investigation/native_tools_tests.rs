@@ -263,3 +263,55 @@ fn insufficient_evidence_needs_one_query_first() {
     current.queries.push(query());
     read_before_finish(&current, &insufficient).unwrap();
 }
+
+// AC-1815 (ADR-0089): only @30's exploration schema offers read_artifact,
+// right after the inventory read; its call decodes as the bounded action for
+// the @30 surface and stays a legacy action elsewhere.
+#[test]
+fn analyst30_offers_read_artifact_as_a_native_tool() {
+    let names = |role| {
+        let (schema, _) =
+            response_schema::visible_projection(role, Some(response_schema::CHOICE.to_owned()))
+                .unwrap();
+        tool_definitions_from_schema(&schema.unwrap()).unwrap()
+    };
+    let old = names(SpecialistId::DomainAnalystV29);
+    assert!(old.iter().all(|tool| tool.name != "read_artifact"));
+    let tools = names(SpecialistId::DomainAnalystV30);
+    let order: Vec<_> = tools.iter().map(|tool| tool.name).collect();
+    let inventory = order
+        .iter()
+        .position(|name| *name == "read_coverage_inventory")
+        .unwrap();
+    assert_eq!(order[inventory + 1], "read_artifact");
+    assert_eq!(order.len(), old.len() + 1);
+    let ctx = format!("context-v2:{}", "a".repeat(64));
+    let raw = action_from_tool_call(
+        &tools,
+        "read_artifact",
+        &json!({"artifact_id":"gap-register-index","offset":0,"max_bytes":4096}),
+        &ctx,
+    )
+    .unwrap();
+    let on = QualifiedReadSurface {
+        artifact_reads: true,
+    };
+    let decoded = CompletionInvestigationAction::decode_detailed_surface(&raw, &ctx, on)
+        .map_err(|failure| failure.error)
+        .unwrap();
+    let CompletionInvestigationAction::Read(QualifiedInvestigationAction::ReadArtifact(read)) =
+        decoded
+    else {
+        panic!("{decoded:?}")
+    };
+    assert_eq!(read.artifact_id, "gap-register-index");
+    assert_eq!(read.expected_content_id, None);
+    assert!(CompletionInvestigationAction::decode_detailed(&raw, &ctx).is_err());
+    // Finish-only and pending-choice schemas offer no artifact read.
+    let (finish, _) = response_schema::visible_projection(
+        SpecialistId::DomainAnalystV30,
+        Some(response_schema::FINISH.to_owned()),
+    )
+    .unwrap();
+    assert!(!finish.unwrap().contains("read_artifact"));
+}

@@ -5,12 +5,44 @@ use super::{InvestigationError, MAX_QUERY_BYTES};
 use context_hub::coverage::CoverageProof;
 use serde::{Deserialize, Serialize};
 
-/// Longest catalogue id the agent core admits. The host checks membership in
-/// the readable artifact catalogue; the core only checks the id's shape.
+/// Longest catalogue id the agent core admits.
 pub const MAX_ARTIFACT_ID_BYTES: usize = 64;
 /// Largest content offset a read may name. Compiled artifacts are bounded far
 /// below this by the host's compile limits.
 pub const MAX_ARTIFACT_OFFSET: usize = 64 * 1024 * 1024;
+
+/// The compiled artifacts an in-app investigation may read (ADR-0089, AC-1815):
+/// the MCP-readable catalogue without the artifacts that need inputs an
+/// investigation does not freeze (the curated review, the D1 document, the
+/// coverage projections, the bundle manifest and user stories). The host
+/// pins this list to its catalogue; an id outside it is an invalid action the
+/// model can correct, not a host refusal.
+pub const INVESTIGATION_ARTIFACT_IDS: [&str; 24] = [
+    "us-tm",
+    "us-tm-index",
+    "flow-dossiers",
+    "topology",
+    "data-model",
+    "adrs",
+    "gap-register",
+    "gap-register-index",
+    "drift-register",
+    "security-view",
+    "toolchain",
+    "test-arrangements",
+    "journeys",
+    "rule-evidence",
+    "rule-evidence-index",
+    "endpoint-permissions",
+    "pipelines",
+    "configuration",
+    "external",
+    "environments",
+    "documentation-evidence",
+    "endpoint-inventory",
+    "architecture",
+    "architecture-dsl",
+];
 
 /// One requested page of one compiled artifact at the frozen basis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +65,7 @@ impl InvestigationArtifactRead {
     /// first read starts at offset zero.
     pub fn validate_shape(&self) -> bool {
         artifact_id(&self.artifact_id)
+            && INVESTIGATION_ARTIFACT_IDS.contains(&self.artifact_id.as_str())
             && (1..=MAX_QUERY_BYTES).contains(&self.max_bytes)
             && self.offset <= MAX_ARTIFACT_OFFSET
             && match &self.expected_content_id {

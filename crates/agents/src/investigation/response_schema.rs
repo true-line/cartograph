@@ -113,16 +113,43 @@ pub(super) fn visible_projection(
     if !role.uses_visible_action_schema() {
         return Ok((selected, None));
     }
-    let visible: Value = serde_json::from_str(
+    let mut visible: Value = serde_json::from_str(
         selected
             .as_deref()
             .ok_or(InvestigationError::InvalidInput)?,
     )
     .map_err(|_| InvestigationError::InvalidInput)?;
+    if role.uses_artifact_reads() {
+        offer_artifact_reads(&mut visible)?;
+    }
     drop(selected);
     let transport = String::from_utf8(bounded_bytes(&visible, MAX_INPUT_BYTES)?)
         .map_err(|_| InvestigationError::InvalidInput)?;
     Ok((Some(transport), Some(visible)))
+}
+
+/// The `read_artifact` action (ADR-0089), offered wherever the choice schema
+/// offers `read_coverage_inventory`: an exploration turn, never a pending
+/// acquisition choice, a finish-only turn or a finish patch. The host checks
+/// the id against its catalogue as well.
+const READ_ARTIFACT_ACTION: &str = r#"{"type":"object","properties":{"type":{"const":"read_artifact"},"context_id":{"type":"string"},"artifact_id":{"enum":[]},"expected_content_id":{"anyOf":[{"type":"null"},{"type":"string","minLength":1,"maxLength":96}]},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1,"maximum":32768}},"required":["type","context_id","artifact_id","expected_content_id","offset","max_bytes"],"additionalProperties":false}"#;
+
+fn offer_artifact_reads(schema: &mut Value) -> Result<(), InvestigationError> {
+    let Some(actions) = schema.get_mut("anyOf").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let Some(inventory) = actions
+        .iter()
+        .position(|action| action["properties"]["type"]["const"] == "read_coverage_inventory")
+    else {
+        return Ok(());
+    };
+    let mut action: Value =
+        serde_json::from_str(READ_ARTIFACT_ACTION).map_err(|_| InvestigationError::InvalidInput)?;
+    action["properties"]["artifact_id"]["enum"] =
+        serde_json::json!(super::artifact_reads::INVESTIGATION_ARTIFACT_IDS);
+    actions.insert(inventory + 1, action);
+    Ok(())
 }
 
 /// Install the @28 copy at `turn_progress.response_schema`, after the stable
