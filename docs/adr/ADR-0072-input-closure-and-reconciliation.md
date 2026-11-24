@@ -601,6 +601,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    parses with, not only the contract's: the schedule reader adds
    `tree-sitter-python`, the entry-point reader the TypeScript, Java,
    Kotlin, Rust and YAML grammars, each exact in the ingest manifest.
+   *As built (AC-1536, toolchain reader):* producer-keyed
+   (`Grammar::Toolchain`, `tool-primary-v1:`/`tool-primary-v2:`,
+   `t0.toolchain/declared-v2`), pinning the `toml` and `serde_json`
+   parsers exactly. Each detector reads only its own file, so the closure
+   is the capture's `Enumeration` under `toolchain-walk-v1` and each
+   captured config file the reader read. Env files, which no capture
+   retains, are still read from the checkout; their facts cite no captured
+   file and get no receipt, and a `Tool` proven by both an env file and a
+   captured file would leave the receipts `cross_file_input_unbound`.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
