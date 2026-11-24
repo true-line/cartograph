@@ -2958,23 +2958,45 @@ fn extract_tree_packed(
                     .filter(|entry| ingest::environments::is_environment_file(&entry.path))
                     .map(|entry| entry.path.clone())
                     .collect();
-                ingest::environments::extract_from_capture(
-                    root,
+                let (environment_facts, capture_reads) =
+                    ingest::environments::extract_from_capture_reading(
+                        root,
+                        &captured,
+                        &|path| {
+                            capture
+                                .file(path)
+                                .map(|file| file.bytes().to_vec())
+                                .map_err(|_| {
+                                    std::io::Error::other(
+                                        "captured environment file is unavailable",
+                                    )
+                                })
+                        },
+                        &environment_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+                // The facts are established on the reader's closure only
+                // when the captured files alone decided them (AC-1530).
+                let (published_nodes, published_edges) =
+                    publication_view(&environment_facts.nodes, &environment_facts.edges);
+                let stage = adapters_lang_ts::captured::stage_environment_receipts(
+                    capture,
                     &captured,
-                    &|path| {
-                        capture
-                            .file(path)
-                            .map(|file| file.bytes().to_vec())
-                            .map_err(|_| {
-                                std::io::Error::other("captured environment file is unavailable")
-                            })
-                    },
-                    &environment_id,
-                )
+                    &adapters_lang_ts::SourceId { repo, commit },
+                    (&published_nodes, &published_edges),
+                    capture_reads.bound.then_some(capture_reads.read.as_slice()),
+                );
+                admit_surviving_lane_receipts(
+                    &environment_facts.nodes,
+                    &environment_facts.edges,
+                    stage,
+                    receipts,
+                );
+                environment_facts
             }
-            _ => ingest::environments::extract_dir(root, &environment_id),
-        }
-        .map_err(|e| e.to_string())?;
+            _ => ingest::environments::extract_dir(root, &environment_id)
+                .map_err(|e| e.to_string())?,
+        };
         layers.environments = LayerSummary {
             files: environment_facts.files,
             nodes: distinct_node_count(&environment_facts.nodes),

@@ -37,6 +37,10 @@ pub const TF_MODULE_WALK_POLICY: &str = "tf-module-walk-v1";
 /// AC-1528): the captured selection of workflow files and Dockerfiles,
 /// which the reader reads alone.
 pub const PIPELINE_WALK_POLICY: &str = "pipeline-walk-v1";
+/// The walk policy an environment reader closure records (ADR-0072 slice
+/// 9, AC-1530): the captured environment selection, which decides the
+/// reader's facts alone when the reader reports them bound to it.
+pub const ENVIRONMENT_WALK_POLICY: &str = "environment-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -118,6 +122,7 @@ pub fn terraform_walk_closure(
         TF_MODULE_WALK_POLICY,
         capture,
         files,
+        &[],
         repo_key,
     )
 }
@@ -136,18 +141,42 @@ pub fn pipeline_walk_closure(
         PIPELINE_WALK_POLICY,
         capture,
         files,
+        &[],
+        repo_key,
+    )
+}
+
+/// The input closure of an environment fact (ADR-0072 slice 9, AC-1530):
+/// the capture's enumeration under [`ENVIRONMENT_WALK_POLICY`] and the
+/// retained bytes of every environment file in `files` the capture holds,
+/// and of each file of `files` the reader `read` under another grammar (an
+/// environment-named TS or config file keeps its own lane, but its bytes
+/// are still an input of the reader's facts).
+pub fn environment_walk_closure(
+    capture: &source_capture::Capture,
+    files: &[String],
+    read: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    lane_walk_closure(
+        Grammar::Environment,
+        ENVIRONMENT_WALK_POLICY,
+        capture,
+        files,
+        read,
         repo_key,
     )
 }
 
 /// A walk closure over `grammar`'s captured files: the capture's
-/// enumeration under `walk_policy` and each of `files` of that grammar the
-/// capture holds, under the grammar's contract-v4 pins.
+/// enumeration under `walk_policy` and each of `files` of that grammar, or
+/// among `also`, the capture holds, under the grammar's contract-v4 pins.
 fn lane_walk_closure(
     grammar: Grammar,
     walk_policy: &str,
     capture: &source_capture::Capture,
     files: &[String],
+    also: &[String],
     repo_key: &str,
 ) -> Result<super::InputClosureV1, CapturedError> {
     let current = contract(4, grammar)?;
@@ -160,7 +189,7 @@ fn lane_walk_closure(
         if inputs.len() > super::MAX_CLOSURE_INPUTS {
             return Err(CapturedError::Limit("closure inputs"));
         }
-        if Grammar::for_path(path) == grammar
+        if (Grammar::for_path(path) == grammar || also.contains(path))
             && let Ok(file) = capture.file(path)
         {
             inputs.push(super::ClosureInput::CapturedFile {
@@ -224,6 +253,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
                 parser_package_legacy: &[],
             });
         }
+        (4, Grammar::Environment) => {
+            return Ok(Contract {
+                prefix: "env-primary-v2:",
+                producer: "t0.environments/declared-v2",
+                domain: b"cartograph:env-primary-receipt:v2\0",
+                grammar_package: YAML_GRAMMAR_PACKAGE,
+                parser_package: PARSER_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
         _ => {}
     }
     let lane = match grammar {
@@ -281,6 +320,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             prefix: "pipe-primary-v1:",
             producer: "t0.pipeline/declared-v1",
             domain: b"cartograph:pipe-primary-receipt:v1\0",
+            grammar_package: YAML_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        // Compose, kustomize, Kubernetes, Helm and settings files, read by
+        // the environment reader (AC-1530).
+        Grammar::Environment => Some(Contract {
+            prefix: "env-primary-v1:",
+            producer: "t0.environments/declared-v1",
+            domain: b"cartograph:env-primary-receipt:v1\0",
             grammar_package: YAML_GRAMMAR_PACKAGE,
             parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
@@ -432,6 +481,9 @@ pub enum Grammar {
     /// Workflow files and Dockerfiles, as the pipeline reader selects them,
     /// read by it (AC-1528).
     Pipeline,
+    /// Files the environment reader selects that no language or pipeline
+    /// grammar claims, read by it (AC-1530).
+    Environment,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -450,15 +502,17 @@ impl Grammar {
                 | Self::Kotlin
                 | Self::Terraform
                 | Self::Pipeline
+                | Self::Environment
                 | Self::ObservedInput
         )
     }
 
     /// A grammar whose receipts have contract v4, with an input closure
     /// state: TypeScript (slice 5), Terraform (slice 9, AC-1526) and
-    /// pipelines (AC-1528).
+    /// pipelines (AC-1528) and environments (AC-1530).
     pub(super) fn has_v4(self) -> bool {
-        !self.provenance_only() || matches!(self, Self::Terraform | Self::Pipeline)
+        !self.provenance_only()
+            || matches!(self, Self::Terraform | Self::Pipeline | Self::Environment)
     }
 
     /// The grammar a receipt citing `file` is minted under: an observation
@@ -488,6 +542,8 @@ impl Grammar {
             Self::Terraform
         } else if ingest::pipelines::is_pipeline_file(path) {
             Self::Pipeline
+        } else if environment_path(path) {
+            Self::Environment
         } else {
             Self::Tsx
         }
@@ -1102,7 +1158,8 @@ fn validate_file(file: &CaptureFileRef, repo: &str, config: bool) -> Result<(), 
             || file.path.ends_with(".kt")
             || file.path.ends_with(".kts")
             || file.path.ends_with(".tf")
-            || ingest::pipelines::is_pipeline_file(&file.path))
+            || ingest::pipelines::is_pipeline_file(&file.path)
+            || environment_path(&file.path))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
@@ -1757,6 +1814,14 @@ impl Receipt {
             && edge_digest(edge).is_ok_and(|digest| digest == self.content.fact_digest)
             && self.matches_inventory(&edge.props)
     }
+}
+
+/// An environment reader file that no TS source, config or other grammar
+/// claims (AC-1530): such a file keeps its own lane.
+fn environment_path(path: &str) -> bool {
+    ingest::environments::is_environment_file(path)
+        && !super::supported(path)
+        && !super::is_config_path(path)
 }
 
 /// `receipt` with its last range's role set to `role` (index 0), re-signed,

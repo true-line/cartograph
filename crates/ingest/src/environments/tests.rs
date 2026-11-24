@@ -1415,3 +1415,83 @@ fn helmfile_named_values_files_are_captured() {
     assert_eq!(serialized(&after), before);
     assert_ne!(serialized(&extract_in(dir.path())), before);
 }
+
+/// [`extract_from_capture_reading`] over `files` written under a fresh
+/// checkout, with the environment selection captured as written.
+fn captured_reading(files: &[(&str, &str)]) -> (EnvironmentExtraction, CaptureReads) {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), files);
+    let paths = environment_paths(dir.path()).unwrap();
+    let captured: std::collections::BTreeMap<String, Vec<u8>> = paths
+        .iter()
+        .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+        .collect();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let out = extract_from_capture_reading(dir.path(), &keys, &read, &id).unwrap();
+    assert_eq!(
+        serialized(&out.0),
+        serialized(&extract_from_capture(dir.path(), &keys, &read, &id).unwrap())
+    );
+    out
+}
+
+// AC-1530: over a capture, the environment reader's facts are bound to the
+// captured files when the captured selection alone, as listing and bytes,
+// yields the same facts and opens nothing else; the files it opened are
+// reported.
+#[test]
+fn capture_reads_report_facts_bound_to_the_captured_files() {
+    let (facts, reads) = captured_reading(&[
+        ("compose.yaml", "services:\n  web:\n    image: nginx\n"),
+        (
+            "k8s/kustomization.yaml",
+            "resources:\n  - deployment.yaml\n",
+        ),
+        (
+            "k8s/deployment.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+        ),
+        ("src/main.rs", "fn main() {}\n"),
+    ]);
+    assert!(!facts.nodes.is_empty());
+    assert!(reads.bound, "{reads:?}");
+    assert_eq!(
+        reads.read,
+        [
+            "compose.yaml",
+            "k8s/deployment.yaml",
+            "k8s/kustomization.yaml"
+        ]
+    );
+}
+
+// AC-1530: a Compose `env_file` is checked in the checkout, which no
+// capture holds, and a kustomization resource that names a directory
+// holding only uncaptured files is resolved against the checkout listing:
+// neither reader run is bound to the captured files.
+#[test]
+fn capture_reads_are_unbound_when_the_checkout_decides_a_fact() {
+    let (_, env) = captured_reading(&[
+        (
+            "compose.yaml",
+            "services:\n  web:\n    image: nginx\n    env_file: web.env\n",
+        ),
+        ("web.env", "A=1\n"),
+    ]);
+    assert!(!env.bound, "{env:?}");
+    let (_, listed) = captured_reading(&[
+        ("k8s/kustomization.yaml", "resources:\n  - ../vendor\n"),
+        ("vendor/README.md", "notes\n"),
+    ]);
+    assert!(!listed.bound, "{listed:?}");
+}

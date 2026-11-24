@@ -803,6 +803,68 @@ pub fn extract_from_capture(
     Ok(extract_walked(&walked, &Source { read, len: &len }, id))
 }
 
+/// What [`extract_from_capture_reading`] found about where its facts come
+/// from (ADR-0072 slice 9, AC-1530).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureReads {
+    /// True when the facts are a function of the captured files alone: the
+    /// reader, given only the captured selection as its listing and only
+    /// their bytes, reads no other file and emits the same facts.
+    pub bound: bool,
+    /// The captured files that reading opened, in path order.
+    pub read: Vec<String>,
+}
+
+/// [`extract_from_capture`], and whether its facts depend on anything but
+/// the captured files (AC-1530). The checkout listing decides which
+/// directories exist, which files a kustomization or helmfile names are
+/// present, and which env files are readable, so the reader runs again over
+/// the captured selection alone: when that run opens no file outside it and
+/// its facts equal the checkout-listed run's, nothing else decided them.
+pub fn extract_from_capture_reading(
+    root: &Path,
+    captured: &[String],
+    captured_read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+) -> std::io::Result<(EnvironmentExtraction, CaptureReads)> {
+    let listed = extract_from_capture(root, captured, captured_read, id)?;
+    let held: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
+    let opened = std::cell::RefCell::new(BTreeSet::new());
+    let outside = std::cell::Cell::new(false);
+    let read = |rel: &str| {
+        if held.contains(rel) {
+            opened.borrow_mut().insert(rel.to_string());
+            captured_read(rel)
+        } else {
+            outside.set(true);
+            Err(std::io::Error::other("outside the captured selection"))
+        }
+    };
+    let len = |rel: &str| read(rel).map(|bytes| bytes.len() as u64);
+    let walked: Vec<source_walk::WalkedFile> = held
+        .iter()
+        .map(|rel| source_walk::WalkedFile {
+            rel: rel.to_string(),
+            path: root.join(rel),
+            name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+        })
+        .collect();
+    let alone = extract_walked(
+        &walked,
+        &Source {
+            read: &read,
+            len: &len,
+        },
+        id,
+    );
+    let bound = !outside.get()
+        && alone.nodes == listed.nodes
+        && alone.edges == listed.edges
+        && alone.files == listed.files;
+    let read = opened.into_inner().into_iter().collect();
+    Ok((listed, CaptureReads { bound, read }))
+}
+
 fn walk(root: &Path) -> std::io::Result<Vec<source_walk::WalkedFile>> {
     source_walk::files(
         root,
