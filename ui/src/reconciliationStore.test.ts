@@ -109,4 +109,13 @@ describe('staged proposal reconciliation (AC-1074)', () => {
     expect(requireReconciliationHistory(reconciliationHistory('reconciliation_stale'), 'proposal:fixture').state)
       .toBe('reconciliation_stale');
   });
+
+  it('reads a result recorded for a v3 proposal (AC-1086)', () => {
+    const v3 = { ...reconciliationResult('a'), proposal_schema_version: 3 as const };
+    expect(requireReconciliationHistory(reconciliationHistory('reconciled', [v3]), 'proposal:fixture')
+      .results[0].result.proposal_schema_version).toBe(3);
+    const unknown = { ...reconciliationResult('a'), proposal_schema_version: 4 } as unknown as typeof v3;
+    expect(() => requireReconciliationHistory(reconciliationHistory('reconciled', [unknown]), 'proposal:fixture'))
+      .toThrow();
+  });
 });
