@@ -584,10 +584,10 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    (`t0.schedules/declared-v2`). Over a capture the reader lists and reads
    only the capture, so its closure is the capture's `Enumeration` under
    `schedule-walk-v1` and each captured file it read; a probed location
-   the capture lacks is the enumeration's answer. A proven Python
+   the capture lacks is the enumeration's answer. A recognized Python
    dispatch enters a function only when the Python adapter emitted it, so
-   the facts are established only when reading with no symbols gives the
-   same facts; otherwise `cross_file_input_unbound`.
+   the facts are established only when no dispatch asked for an adapter
+   symbol, whatever the answer; otherwise `cross_file_input_unbound`.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
