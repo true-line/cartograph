@@ -7,6 +7,7 @@ import { investigationPolicy, obligationEnvelope, validObligationChoices, validO
 import { invokeOr } from '../tauri';
 import type { InvestigationFollowUpContext, InvestigationObligation, InvestigationObligationChoices, InvestigationProviderMode, InvestigationScope, SpecialistId } from '../investigationTypes';
 import { composerScope, investigationScopeLabel, investigationScopeValid } from '../investigationTypes';
+import { isQuickDispatchKey } from '../shortcuts';
 
 
 export interface InvestigationQuickDispatchProps {
@@ -142,8 +143,7 @@ export function InvestigationQuickDispatch({ fallbackEnabled, openRequest, follo
         if (!inline || insideInline) { event.preventDefault(); close(); }
         return;
       }
-      if (event.altKey || event.ctrlKey || event.shiftKey || !event.metaKey) return;
-      if (event.code === 'Space' || (event.key.toLowerCase() === 'j' && fallbackEnabled)) {
+      if (isQuickDispatchKey(event, fallbackEnabled)) {
         event.preventDefault();
         blockedParent.current = true;
         if (onStandalone) onStandalone(); else openDialog();
