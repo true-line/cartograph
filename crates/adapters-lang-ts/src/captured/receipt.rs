@@ -122,6 +122,7 @@ pub fn terraform_walk_closure(
         TF_MODULE_WALK_POLICY,
         capture,
         files,
+        &[],
         repo_key,
     )
 }
@@ -140,16 +141,21 @@ pub fn pipeline_walk_closure(
         PIPELINE_WALK_POLICY,
         capture,
         files,
+        &[],
         repo_key,
     )
 }
 
 /// The input closure of an environment fact (ADR-0072 slice 9, AC-1530):
 /// the capture's enumeration under [`ENVIRONMENT_WALK_POLICY`] and the
-/// retained bytes of every environment file in `files` the capture holds.
+/// retained bytes of every environment file in `files` the capture holds,
+/// and of each file of `files` the reader `read` under another grammar (an
+/// environment-named TS or config file keeps its own lane, but its bytes
+/// are still an input of the reader's facts).
 pub fn environment_walk_closure(
     capture: &source_capture::Capture,
     files: &[String],
+    read: &[String],
     repo_key: &str,
 ) -> Result<super::InputClosureV1, CapturedError> {
     lane_walk_closure(
@@ -157,18 +163,20 @@ pub fn environment_walk_closure(
         ENVIRONMENT_WALK_POLICY,
         capture,
         files,
+        read,
         repo_key,
     )
 }
 
 /// A walk closure over `grammar`'s captured files: the capture's
-/// enumeration under `walk_policy` and each of `files` of that grammar the
-/// capture holds, under the grammar's contract-v4 pins.
+/// enumeration under `walk_policy` and each of `files` of that grammar, or
+/// among `also`, the capture holds, under the grammar's contract-v4 pins.
 fn lane_walk_closure(
     grammar: Grammar,
     walk_policy: &str,
     capture: &source_capture::Capture,
     files: &[String],
+    also: &[String],
     repo_key: &str,
 ) -> Result<super::InputClosureV1, CapturedError> {
     let current = contract(4, grammar)?;
@@ -181,7 +189,7 @@ fn lane_walk_closure(
         if inputs.len() > super::MAX_CLOSURE_INPUTS {
             return Err(CapturedError::Limit("closure inputs"));
         }
-        if Grammar::for_path(path) == grammar
+        if (Grammar::for_path(path) == grammar || also.contains(path))
             && let Ok(file) = capture.file(path)
         {
             inputs.push(super::ClosureInput::CapturedFile {

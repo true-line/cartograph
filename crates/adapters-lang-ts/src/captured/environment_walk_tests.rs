@@ -10,6 +10,8 @@ const REPO: &str = "local/src_11111111111111111111111111111111";
 const COMPOSE: &str = "compose.yaml";
 const KUSTOMIZATION: &str = "k8s/kustomization.yaml";
 const DEPLOYMENT: &str = "k8s/deployment.yaml";
+/// An environment-named JS file: the reader reads it, the TS lane keeps it.
+const SETTINGS: &str = "config/environments/production.js";
 
 /// Capture a Compose file, a kustomization, a manifest and a TS file, read
 /// the environments from the capture, and stage their receipts.
@@ -31,7 +33,9 @@ fn walk(root: &Path, image: &str) -> Vec<MintedReceipt> {
     )
     .unwrap();
     std::fs::write(root.join("app.ts"), "export const a = 1;\n").unwrap();
-    let paths: Vec<String> = [COMPOSE, DEPLOYMENT, KUSTOMIZATION, "app.ts"]
+    std::fs::create_dir_all(root.join("config/environments")).unwrap();
+    std::fs::write(root.join(SETTINGS), "module.exports = {};\n").unwrap();
+    let paths: Vec<String> = [COMPOSE, DEPLOYMENT, KUSTOMIZATION, SETTINGS, "app.ts"]
         .map(String::from)
         .to_vec();
     let capture = capture_working_tree(
@@ -62,6 +66,7 @@ fn walk(root: &Path, image: &str) -> Vec<MintedReceipt> {
     )
     .unwrap();
     assert!(reads.bound, "{reads:?}");
+    assert!(reads.read.contains(&SETTINGS.to_string()), "{reads:?}");
     assert!(!facts.nodes.is_empty());
     let id = SourceId {
         repo: REPO,
@@ -93,7 +98,8 @@ fn walk(root: &Path, image: &str) -> Vec<MintedReceipt> {
 // AC-1530: the environment reader's facts over a capture, reported bound to
 // the captured files, get contract-v4 Environment receipts established on
 // one closure: the capture's enumeration under `environment-walk-v1` and
-// each captured environment file. Unbound facts carry
+// each captured environment file, and the environment-named JS file the
+// reader read, though its own receipts stay in the TS lane. Unbound facts carry
 // `cross_file_input_unbound`. A change to one file changes the closure but
 // not another file's facts.
 #[test]
@@ -135,6 +141,7 @@ fn environment_receipts_are_established_on_the_reader_closure() {
         [
             "enumeration environment-walk-v1".to_string(),
             format!("file {COMPOSE}"),
+            format!("file {SETTINGS}"),
             format!("file {DEPLOYMENT}"),
             format!("file {KUSTOMIZATION}"),
         ]
