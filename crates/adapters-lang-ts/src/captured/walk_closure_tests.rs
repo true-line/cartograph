@@ -215,3 +215,72 @@ fn a_config_read_unbound_leaves_decided_receipts_unestablished() {
     );
     assert!(file.input_closure().is_none());
 }
+
+/// The receipt of the edge out of `path` whose destination starts with
+/// `prefix`.
+fn decided_edge<'a>(
+    receipts: &'a [MintedReceipt],
+    path: &str,
+    prefix: &str,
+) -> Option<&'a MintedReceipt> {
+    receipts.iter().find(|receipt| {
+        receipt.file().path == path
+            && matches!(receipt.fact_key(), FactKey::Edge { destination, .. }
+                if destination.starts_with(prefix))
+    })
+}
+
+// AC-1096: a cross-file call the walk resolves as parsed has a CALLS
+// receipt, and an unresolved one a receipt for its Gap edge, both
+// established on the caller's walk closure; resolving the call replaces
+// the Gap edge's receipt with the CALLS edge's.
+#[test]
+fn walk_decided_call_edges_are_established_on_the_walk_closure() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(
+        root,
+        "rule.ts",
+        &format!("import {{ missing }} from './lib';\n{RULE}"),
+    );
+    let receipts = walk(root);
+    let gap = decided_edge(&receipts, "rule.ts", "gap:call:").expect("a Gap edge receipt");
+    assert_eq!(
+        walk_record(gap),
+        walk_record(decided(&receipts, "file:", "rule.ts").unwrap())
+    );
+    write(
+        root,
+        "lib.ts",
+        "export function missing() { return false; }\n",
+    );
+    let resolved = walk(root);
+    assert!(decided_edge(&resolved, "rule.ts", "gap:call:").is_none());
+    let target = format!("sym:{REPO}@lib.ts#missing");
+    let call = decided_edge(&resolved, "rule.ts", &target).expect("a CALLS receipt");
+    assert!(
+        matches!(call.fact_key(), FactKey::Edge { label, destination, .. }
+        if label == "CALLS" && *destination == target)
+    );
+    assert_eq!(
+        walk_record(call),
+        walk_record(decided(&resolved, "file:", "rule.ts").unwrap())
+    );
+    // Two calls to one target are one CALLS fact: one receipt, the one
+    // whose complete edge completion kept.
+    write(
+        root,
+        "twice.ts",
+        "import { missing } from './lib';\nexport function twice() { missing(); return missing(); }\n",
+    );
+    let twice = walk(root);
+    let calls = twice
+        .iter()
+        .filter(|receipt| {
+            receipt.file().path == "twice.ts"
+                && matches!(receipt.fact_key(), FactKey::Edge { destination, .. }
+                    if *destination == target)
+        })
+        .count();
+    assert_eq!(calls, 1);
+}

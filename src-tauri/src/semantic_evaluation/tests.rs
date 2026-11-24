@@ -108,9 +108,10 @@ fn captured_graph_with_source(
     };
     (dir, state, nodes, edges, selector)
 }
-// AC-0274/0277: ordinary captured extraction can anchor an unresolved call
-// without retroactively inventing a receipt for its CALLS fact. (The Gap and
-// File nodes carry the producer's own receipts since AC-1019.)
+// AC-0274/0277: ordinary captured extraction anchors an unresolved call on
+// the actual capture, not on per-fact receipts. (The Gap and File nodes carry
+// the producer's own receipts since AC-1019, and the Gap's CALLS edge its
+// own since AC-1096; observation never invents one.)
 #[test]
 fn host_corpus_observation_uses_actual_capture_without_per_fact_receipts() {
     let (_dir, state, nodes, edges, selector) = captured_graph();
@@ -125,7 +126,7 @@ fn host_corpus_observation_uses_actual_capture_without_per_fact_receipts() {
         graph
             .current_source_binding(&core_graph::source::FactKey::from_edge(call))
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let observed = source::observe(
         &state,
