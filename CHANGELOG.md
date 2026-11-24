@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.80.0
+
+### Minor Changes
+
+- 87e6747: Releases now include a Windows installer, `Cartograph_<version>_x64_signed-setup.exe`. The installer, the app and both sidecars are Authenticode signed through Azure Artifact Signing and timestamped, so SmartScreen and enterprise policy can attribute them to a verified publisher. An unsigned Windows build is never published (#227, ADR-0093).
+
 ## 0.79.1
 
 ### Patch Changes
