@@ -1286,15 +1286,18 @@ fn extract_captured_dir_packed_with_policy(
         }
     }
     drop(current);
-    // Facts completion emitted itself that cite one TS file (Pulumi
-    // references, among others) are stated on the same walk closure, file
-    // by file, when that file's parse is proven (AC-1098).
+    // Facts completion emitted itself (Pulumi references, re-export and
+    // inherited calls) are stated on their primary file's walk closure,
+    // file by file, when every file they cite has a proven parse (AC-1098,
+    // AC-1520).
     let mut current = None;
     for receipt in emitted {
         if !matching(&receipt) {
             continue;
         }
-        let proven = !unproven.contains(&receipt.file().path);
+        let proven = std::iter::once(receipt.file())
+            .chain(receipt.other_files())
+            .all(|file| !unproven.contains(&file.path));
         let receipt = state_completed(receipt, proven, walk.as_deref(), id.repo, &mut current)?;
         if charge.admit(&receipt, receipts.len(), budget) {
             receipts.push(receipt);
@@ -1312,9 +1315,10 @@ fn extract_captured_dir_packed_with_policy(
 /// Receipt candidates for the facts directory completion appended past
 /// `held` (nodes, edges), skipping any fact already `receipted`. Each is
 /// minted against the captured TS file its first evidence entry cites, file
-/// by file in path order, and staged within `budget` as it is minted. A TS
-/// receipt binds one file, so a fact whose evidence also cites another file
-/// (a barrel, a `package.json`) gets none, as does one that does not fit.
+/// by file in path order, binding each other captured source file it cites
+/// (a barrel, a base class; AC-1520), and staged within `budget` as it is
+/// minted. A fact citing an uncaptured file or a config such as
+/// `package.json`, or that does not fit, gets none.
 fn completion_receipts(
     capture: &Capture,
     id: &SourceId,
@@ -1378,12 +1382,13 @@ fn completion_receipts(
             }
             let Ok(fact) = fact else { continue };
             let receipt = match &fact {
-                Fact::Node(node) => Receipt::for_node(file, id, node),
-                Fact::Edge(edge) => Receipt::for_edge(file, id, edge),
+                Fact::Node(node) => Receipt::for_node_in(file, Some(capture), id, node),
+                Fact::Edge(edge) => Receipt::for_edge_in(file, Some(capture), id, edge),
             };
             let Ok(receipt) = receipt
                 .and_then(|receipt| {
-                    if measure_source {
+                    // A receipt citing other files is not measured (AC-1039).
+                    if measure_source && receipt.other_files().is_empty() {
                         receipt.with_source_sizes(file)
                     } else {
                         Ok(receipt)
