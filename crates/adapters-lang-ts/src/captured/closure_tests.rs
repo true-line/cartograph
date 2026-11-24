@@ -4,12 +4,21 @@ fn source() -> SourceId {
     SourceId::new("src_00000000000000000000000000000001").unwrap()
 }
 
+fn capture_id() -> String {
+    format!("capture-v1:{}", "c".repeat(64))
+}
+
+/// A 64-hex digest named by `seed`.
+fn hex(seed: &str) -> String {
+    core_prov::content_hash(seed.as_bytes())
+}
+
 fn file(path: &str, digest: &str) -> CaptureFileRef {
     CaptureFileRef {
         source_id: source(),
-        capture_id: "capture-v1:fixture".into(),
+        capture_id: capture_id(),
         path: path.into(),
-        digest: digest.into(),
+        digest: hex(digest),
         byte_len: 12,
     }
 }
@@ -49,7 +58,7 @@ fn captured(path: &str, digest: &str) -> ClosureInput {
 fn upstream(id: &str, closure: ClosureRef) -> ClosureInput {
     ClosureInput::UpstreamFact {
         fact: FactKey::Node { id: id.into() },
-        fact_digest: "digest".into(),
+        fact_digest: format!("node-v1:{}", hex(id)),
         closure,
     }
 }
@@ -145,7 +154,7 @@ fn the_decoder_rejects_every_second_encoding() {
 fn an_absent_path_needs_its_enumeration() {
     let absent = ClosureInput::AbsentFromEnumeration {
         source_id: source(),
-        capture_id: "capture-v1:fixture".into(),
+        capture_id: capture_id(),
         path: "tsconfig.json".into(),
     };
     let alone = InputClosureV1::new(
@@ -159,7 +168,7 @@ fn an_absent_path_needs_its_enumeration() {
         absent,
         ClosureInput::Enumeration {
             source_id: source(),
-            capture_id: "capture-v1:fixture".into(),
+            capture_id: capture_id(),
             walk_policy: "walk-v1".into(),
         },
     ]);
@@ -209,6 +218,55 @@ fn an_incomplete_upstream_is_a_gap_and_a_fact_is_never_its_own_upstream() {
         )],
     );
     assert!(malformed.is_err());
+}
+
+// AC-1078: every binding names what a receipt would: a versioned capture id,
+// a full-file digest, a selected path and a bounded length; an upstream fact
+// carries its key and its complete fact digest.
+#[test]
+fn malformed_bindings_are_refused() {
+    let build = |input: ClosureInput| {
+        InputClosureV1::new(
+            "t0.adapter-ts/direct-lexical-v4",
+            packages(),
+            parameters(),
+            vec![input],
+        )
+    };
+    let mut bad = vec![];
+    for edit in [
+        (|f: &mut CaptureFileRef| f.capture_id = "x".into()) as fn(&mut CaptureFileRef),
+        |f| f.digest = "d1".into(),
+        |f| f.path = "../escape.ts".into(),
+        |f| f.byte_len = source_capture::MAX_FILE_BYTES + 1,
+    ] {
+        let mut file = file("a.ts", "d1");
+        edit(&mut file);
+        bad.push(ClosureInput::CapturedFile { file });
+    }
+    bad.push(ClosureInput::UpstreamFact {
+        fact: FactKey::Node {
+            id: "node:a".into(),
+        },
+        fact_digest: "digest".into(),
+        closure: ClosureRef::NotEstablished,
+    });
+    bad.push(ClosureInput::UpstreamFact {
+        fact: FactKey::Node {
+            id: "node:a".into(),
+        },
+        fact_digest: format!("edge-v1:{}", hex("a")),
+        closure: ClosureRef::NotEstablished,
+    });
+    bad.push(ClosureInput::UpstreamFact {
+        fact: FactKey::Node { id: String::new() },
+        fact_digest: format!("node-v1:{}", hex("a")),
+        closure: ClosureRef::NotEstablished,
+    });
+    for input in bad {
+        assert!(build(input.clone()).is_err(), "accepted {input:?}");
+    }
+    assert!(build(captured("a.ts", "d1")).is_ok());
 }
 
 // AC-1078: a closure over more inputs than the bound is refused, never cut.

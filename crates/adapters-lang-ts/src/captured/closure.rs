@@ -319,8 +319,13 @@ impl InputClosureV1 {
 
     fn validate_input(&self, input: &ClosureInput) -> Result<(), CapturedError> {
         let text = |value: &str| !value.is_empty() && value.len() <= MAX_TEXT_BYTES;
+        // A file binding names retained bytes as receipts do: a versioned
+        // capture id, a full-file digest, a selected path and a bounded length.
         let file_ok = |file: &CaptureFileRef| {
-            text(&file.capture_id) && text(&file.path) && text(&file.digest)
+            hex_with_prefix(&file.capture_id, "capture-v1:")
+                && hex_with_prefix(&file.digest, "")
+                && file.byte_len <= source_capture::MAX_FILE_BYTES
+                && super::valid_path(&file.path)
         };
         let valid = match input {
             ClosureInput::CapturedFile { file } | ClosureInput::External { file, .. } => {
@@ -331,14 +336,15 @@ impl InputClosureV1 {
                 capture_id,
                 walk_policy,
                 ..
-            } => text(capture_id) && text(walk_policy),
+            } => hex_with_prefix(capture_id, "capture-v1:") && text(walk_policy),
             // Absence is relative to an enumeration this closure binds.
             ClosureInput::AbsentFromEnumeration {
                 source_id,
                 capture_id,
                 path,
             } => {
-                text(path)
+                hex_with_prefix(capture_id, "capture-v1:")
+                    && super::valid_path(path)
                     && self.inputs.iter().any(|other| {
                         matches!(other, ClosureInput::Enumeration {
                             source_id: s, capture_id: c, ..
@@ -346,11 +352,26 @@ impl InputClosureV1 {
                     })
             }
             ClosureInput::UpstreamFact {
+                fact,
                 fact_digest,
                 closure,
-                ..
             } => {
-                text(fact_digest)
+                // The fact key and its complete digest, as graph facts carry
+                // them, so a consumer can match the binding to the fact bytes.
+                let (ids, prefix) = match fact {
+                    FactKey::Node { id } => (vec![id.as_str()], "node-v1:"),
+                    FactKey::Edge {
+                        source,
+                        label,
+                        destination,
+                    } => (
+                        vec![source.as_str(), label.as_str(), destination.as_str()],
+                        "edge-v1:",
+                    ),
+                };
+                ids.iter()
+                    .all(|id| text(id) && !id.chars().any(char::is_control))
+                    && hex_with_prefix(fact_digest, prefix)
                     && match closure {
                         ClosureRef::Established { closure_id } => is_closure_id(closure_id),
                         ClosureRef::NotEstablished => true,
@@ -367,7 +388,12 @@ impl InputClosureV1 {
 
 /// Whether `value` is a well-formed closure id.
 pub fn is_closure_id(value: &str) -> bool {
-    value.strip_prefix(CLOSURE_ID_PREFIX).is_some_and(|hex| {
+    hex_with_prefix(value, CLOSURE_ID_PREFIX)
+}
+
+/// `prefix` followed by 64 lowercase hex digits.
+fn hex_with_prefix(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|hex| {
         hex.len() == 64
             && hex
                 .bytes()
