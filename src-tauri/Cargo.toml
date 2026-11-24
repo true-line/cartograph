@@ -24,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-rfd = "0.17"
+rfd = "0.18"
 tempfile = "3"
 # Checks the bundled Claude Code against its pinned sha256 (AC-1424).
 sha2 = "0.11.1"

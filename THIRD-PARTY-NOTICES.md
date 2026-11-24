@@ -15,7 +15,7 @@ Cartograph bundles the following Rust crates. Each is used under the terms of
 its respective license, reproduced below. This list is generated from the
 dependency lockfile by `cargo about`; do not edit by hand.
 
-- Apache License 2.0 (275 crate(s))
+- Apache License 2.0 (276 crate(s))
 - MIT License (74 crate(s))
 - Unicode License v3 (19 crate(s))
 - BSD 3-Clause "New" or "Revised" License (9 crate(s))
@@ -4593,9 +4593,9 @@ Used by:
 - postcard 1.1.3 — https://github.com/jamesmunns/postcard
 - rayon-core 1.13.0 — https://github.com/rayon-rs/rayon
 - rayon 1.12.0 — https://github.com/rayon-rs/rayon
-- regex-automata 0.4.18 — https://github.com/rust-lang/regex
-- regex-syntax 0.8.11 — https://github.com/rust-lang/regex
-- regex 1.13.1 — https://github.com/rust-lang/regex
+- regex-automata 0.4.19 — https://github.com/rust-lang/regex
+- regex-syntax 0.8.12 — https://github.com/rust-lang/regex
+- regex 1.13.2 — https://github.com/rust-lang/regex
 - ring 0.17.14 — https://github.com/briansmith/ring
 - rustc-demangle 0.1.28 — https://github.com/rust-lang/rustc-demangle
 - rustix-linux-procfs 0.1.1 — https://github.com/sunfishcode/rustix-linux-procfs
@@ -6550,6 +6550,7 @@ Used by:
 - objc2-core-foundation 0.3.2 — https://github.com/madsmtm/objc2
 - objc2-exception-helper 0.1.1 — https://github.com/madsmtm/objc2
 - objc2-quartz-core 0.3.2 — https://github.com/madsmtm/objc2
+- objc2-uniform-type-identifiers 0.3.2 — https://github.com/madsmtm/objc2
 - objc2-web-kit 0.3.2 — https://github.com/madsmtm/objc2
 - pin-project-lite 0.2.17 — https://github.com/taiki-e/pin-project-lite
 - proc-macro2 1.0.106 — https://github.com/dtolnay/proc-macro2
@@ -6572,12 +6573,12 @@ Used by:
 - syn 2.0.118 — https://github.com/dtolnay/syn
 - syn 3.0.9 — https://github.com/dtolnay/syn
 - sync_wrapper 1.0.2 — https://github.com/Actyx/sync_wrapper
-- tauri-codegen 2.7.4 — https://github.com/tauri-apps/tauri
-- tauri-macros 2.7.4 — https://github.com/tauri-apps/tauri
-- tauri-runtime-wry 2.12.3 — https://github.com/tauri-apps/tauri
-- tauri-runtime 2.12.2 — https://github.com/tauri-apps/tauri
-- tauri-utils 2.10.2 — https://github.com/tauri-apps/tauri
-- tauri 2.12.5 — https://github.com/tauri-apps/tauri
+- tauri-codegen 2.7.6 — https://github.com/tauri-apps/tauri
+- tauri-macros 2.7.6 — https://github.com/tauri-apps/tauri
+- tauri-runtime-wry 2.12.5 — https://github.com/tauri-apps/tauri
+- tauri-runtime 2.12.4 — https://github.com/tauri-apps/tauri
+- tauri-utils 2.10.4 — https://github.com/tauri-apps/tauri
+- tauri 2.12.7 — https://github.com/tauri-apps/tauri
 - thiserror-impl 1.0.69 — https://github.com/dtolnay/thiserror
 - thiserror-impl 2.0.21 — https://github.com/dtolnay/thiserror
 - thiserror 1.0.69 — https://github.com/dtolnay/thiserror
@@ -6996,8 +6997,8 @@ THE SOFTWARE.
 ## MIT License
 
 Used by:
-- libsqlite3-sys 0.39.1 — https://github.com/rusqlite/rusqlite
-- rusqlite 0.41.1 — https://github.com/rusqlite/rusqlite
+- libsqlite3-sys 0.40.0 — https://github.com/rusqlite/rusqlite
+- rusqlite 0.43.0 — https://github.com/rusqlite/rusqlite
 
 ```
 Copyright (c) 2014 The rusqlite developers
@@ -7701,7 +7702,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- rfd 0.17.2 — https://github.com/PolyMeilex/rfd
+- rfd 0.18.0 — https://github.com/PolyMeilex/rfd
 
 ```
 MIT License
@@ -9796,7 +9797,7 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
-## @tauri-apps/api 2.12.4
+## @tauri-apps/api 2.12.5
 
 License: Apache-2.0 OR MIT
 
@@ -10060,7 +10061,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## material-symbols 0.48.3
+## material-symbols 0.49.0
 
 License: Apache-2.0
 
