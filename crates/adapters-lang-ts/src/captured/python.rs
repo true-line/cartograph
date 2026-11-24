@@ -332,6 +332,26 @@ pub fn stage_toolchain_receipts(
     )
 }
 
+/// Declared API reference receipts (AC-1538): `read` holds the captured
+/// documents and config the loader read, and `bound` is whether they alone
+/// declared the references. A system manifest's declarations are outside
+/// the capture, so its receipts are `external_input_unbound`.
+pub fn stage_api_doc_receipts(
+    capture: &source_capture::Capture,
+    read: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    bound: bool,
+) -> ReceiptStage {
+    let closure = if bound {
+        super::api_docs_walk_closure(capture, read, id.repo)
+            .map_err(|_| ClosureGapReason::LimitExceeded)
+    } else {
+        Err(ClosureGapReason::ExternalInputUnbound)
+    };
+    stage_walk_receipts(Grammar::ApiDocs, closure, capture, read, id, (nodes, edges))
+}
+
 /// Stage `grammar`'s receipts for `files`, each established on `closure`
 /// or carrying its reason.
 fn stage_walk_receipts(

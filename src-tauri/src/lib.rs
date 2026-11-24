@@ -2642,10 +2642,19 @@ fn extract_tree_packed(
     // A capture that holds the declared API references is read in place of
     // the checkout (AC-1067).
     let captured_api_docs = primary.filter(|_| reads.api_docs_captured);
+    // A system manifest's declarations are outside the capture (AC-1538).
+    let manifest_declared = !api_docs.is_empty();
+    // The captured files the loader read: the declared documents and their
+    // config, the closure of the documented-route receipts (AC-1538).
+    let api_doc_reads = std::cell::RefCell::new(std::collections::BTreeSet::new());
     let read_api_doc = |rel: &str| {
-        captured_api_docs
+        let bytes = captured_api_docs
             .and_then(|capture| capture.file(rel).ok())
-            .map(|file| file.bytes().to_vec())
+            .map(|file| file.bytes().to_vec());
+        if bytes.is_some() {
+            api_doc_reads.borrow_mut().insert(rel.to_string());
+        }
+        bytes
     };
     let api_docs = load_api_docs_at(
         root,
@@ -2692,6 +2701,17 @@ fn extract_tree_packed(
         .map_err(pack_err)?;
     let (contract_facts, contract_files) =
         extract_repo_contracts(repo, commit, api_docs, declared_api_docs, &facts)?;
+    if let Some(capture) = captured_api_docs {
+        stage_api_doc_receipts(
+            capture,
+            &api_doc_reads.into_inner().into_iter().collect::<Vec<_>>(),
+            &adapters_lang_ts::SourceId { repo, commit },
+            &contract_facts,
+            &unplaceholdered_set(&facts, "File")?,
+            !manifest_declared,
+            receipts,
+        );
+    }
     reads.contracts = ingest::coverage::ProducerCount {
         files: contract_files,
         nodes: distinct_node_count(&contract_facts.nodes),
@@ -3279,6 +3299,49 @@ fn extract_repo_contracts(
         }),
         files,
     ))
+}
+
+/// Producer-keyed ApiDocs receipts for the facts a captured API reference
+/// decides alone (AC-1538): its `DocumentedRoute`s, their `DOCUMENTED_IN`
+/// edges and its File, unless an adapter's File supersedes it, established
+/// on the captured files the loader `read` when they alone declared the
+/// references (`bound`). A contract `Drift` or `Gap` also weighs the
+/// recovered Endpoints, which no captured document decides, so it is not
+/// receipted.
+fn stage_api_doc_receipts(
+    capture: &source_capture::Capture,
+    read: &[String],
+    id: &adapters_lang_ts::SourceId<'_>,
+    contract_facts: &spec::ContractFacts,
+    known_files: &std::collections::BTreeSet<String>,
+    bound: bool,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
+) {
+    let kept: Vec<core_graph::Node> = contract_facts
+        .nodes
+        .iter()
+        .filter(|node| match node.label.as_str() {
+            "DocumentedRoute" => true,
+            "File" => !known_files.contains(&node.id),
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    let edges: Vec<core_graph::Edge> = contract_facts
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "DOCUMENTED_IN" && edge.src.starts_with("doc-route:"))
+        .cloned()
+        .collect();
+    let (published_nodes, published_edges) = publication_view(&kept, &edges);
+    let stage = adapters_lang_ts::captured::stage_api_doc_receipts(
+        capture,
+        read,
+        id,
+        (&published_nodes, &published_edges),
+        bound,
+    );
+    admit_surviving_lane_receipts(&kept, &edges, stage, receipts);
 }
 
 fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {

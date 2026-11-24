@@ -4621,6 +4621,125 @@ fn declared_api_references_are_read_from_the_capture() {
     assert!(live.contains("/api/other"), "{live}");
 }
 
+// AC-1538: the host's documented routes over a captured API reference get
+// producer-keyed receipts established on the reference and config the
+// loader read, and the receipts bind the facts it publishes; a contract
+// Drift, which weighs recovered Endpoints, is not receipted.
+#[test]
+fn documented_routes_are_established_on_the_loader_closure() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join(".cartograph")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/api.md"), "#### GET /api/items\n").unwrap();
+    std::fs::write(
+        root.join(ingest::api_docs::API_DOCS_REL_PATH),
+        "[[doc]]\npath = \"docs/api.md\"\n",
+    )
+    .unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let limits = ingest::api_docs::ApiDocLimits::default();
+    let selection = ingest::api_docs::api_doc_paths(source.root(), &[], limits).unwrap();
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &layers,
+            None,
+            source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            crate::primary_source::CallerSelections {
+                api_docs: Some(&selection),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                api_docs_captured: true,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+    };
+    assert!(
+        extraction
+            .nodes
+            .iter()
+            .any(|node| node.label == "Drift" && node.props.to_string().contains("/api/items")),
+        "the undocumented route drifts"
+    );
+    let minted: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.id().starts_with("apidoc-primary-v2:"))
+        .collect();
+    assert!(
+        minted
+            .iter()
+            .any(|receipt| format!("{:?}", receipt.fact_key()).contains("doc-route:")),
+        "{:?}",
+        minted.iter().map(|r| r.fact_key()).collect::<Vec<_>>()
+    );
+    assert!(
+        minted
+            .iter()
+            .all(|receipt| !format!("{:?}", receipt.fact_key()).contains("drift:")),
+        "a Drift is not receipted"
+    );
+    let record = minted[0].input_closure().expect("an established closure");
+    assert_eq!(
+        record.parameters.walk_policy,
+        adapters_lang_ts::captured::API_DOCS_WALK_POLICY
+    );
+    let files: BTreeSet<&str> = record
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            adapters_lang_ts::captured::ClosureInput::CapturedFile { file } => {
+                Some(file.path.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        files,
+        BTreeSet::from(["docs/api.md", ingest::api_docs::API_DOCS_REL_PATH])
+    );
+    let published = crate::primary_source::matching_bindings(&extraction, &receipts);
+    for receipt in &minted {
+        assert_eq!(receipt.input_closure(), Some(record));
+        assert!(
+            published
+                .iter()
+                .any(|binding| binding.receipt_id == receipt.id())
+        );
+    }
+}
+
 // AC-1055: the Python observed-infrastructure pass reads the same captured
 // bytes as the Python lane, so a checkout edit after capture changes neither.
 #[test]

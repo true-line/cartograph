@@ -54,6 +54,10 @@ pub const ENTRY_POINT_WALK_POLICY: &str = "entry-point-walk-v1";
 /// AC-1536): the capture's listing and the captured config files the
 /// toolchain reader read.
 pub const TOOLCHAIN_WALK_POLICY: &str = "toolchain-walk-v1";
+/// The walk policy a declared API reference closure records (ADR-0072
+/// slice 9, AC-1538): the capture's listing and the captured documents and
+/// config the API reference loader read.
+pub const API_DOCS_WALK_POLICY: &str = "api-docs-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -236,6 +240,24 @@ pub fn toolchain_walk_closure(
     )
 }
 
+/// The input closure of a documented route (ADR-0072 slice 9, AC-1538):
+/// the capture's enumeration under [`API_DOCS_WALK_POLICY`] and the
+/// retained bytes of every file in `read`, whatever its path selects.
+pub fn api_docs_walk_closure(
+    capture: &source_capture::Capture,
+    read: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    lane_walk_closure(
+        Grammar::ApiDocs,
+        API_DOCS_WALK_POLICY,
+        capture,
+        read,
+        read,
+        repo_key,
+    )
+}
+
 /// A walk closure over `grammar`'s captured files: the capture's
 /// enumeration under `walk_policy` and each of `files` of that grammar, or
 /// among `also`, the capture holds, under the grammar's contract-v4 pins.
@@ -352,6 +374,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
                 parser_package_legacy: &[],
             });
         }
+        (4, Grammar::ApiDocs) => {
+            return Ok(Contract {
+                prefix: "apidoc-primary-v2:",
+                producer: "t0.api-contract/declared-v2",
+                domain: b"cartograph:apidoc-primary-receipt:v2\0",
+                grammar_package: TOML_PACKAGE,
+                parser_package: JSON_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
         (4, Grammar::Environment) => {
             return Ok(Contract {
                 prefix: "env-primary-v2:",
@@ -449,6 +481,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             prefix: "tool-primary-v1:",
             producer: "t0.toolchain/declared-v1",
             domain: b"cartograph:tool-primary-receipt:v1\0",
+            grammar_package: TOML_PACKAGE,
+            parser_package: JSON_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        // Declared API references and their config, read by the API
+        // reference loader (AC-1538): Markdown, OpenAPI JSON and TOML.
+        Grammar::ApiDocs => Some(Contract {
+            prefix: "apidoc-primary-v1:",
+            producer: "t0.api-contract/declared-v1",
+            domain: b"cartograph:apidoc-primary-receipt:v1\0",
             grammar_package: TOML_PACKAGE,
             parser_package: JSON_PACKAGE,
             parser_package_legacy: &[],
@@ -559,9 +601,9 @@ const KOTLIN_GRAMMAR_PACKAGE: &str = "tree-sitter-kotlin-ng@1.1.0";
 const TERRAFORM_PARSER_PACKAGE: &str = "hcl-edit@0.9.8";
 // The pipeline reader's exact YAML grammar pin (crates/ingest).
 const YAML_GRAMMAR_PACKAGE: &str = "tree-sitter-yaml@0.7.2";
-// The toolchain reader's exact TOML and JSON parser pins (crates/ingest and
-// the workspace manifest); `toolchain_pins_match_the_manifests` keeps them
-// in step.
+// The toolchain reader's and API reference loader's exact TOML and JSON
+// parser pins (crates/ingest and the workspace manifest);
+// `toolchain_pins_match_the_manifests` keeps them in step.
 const TOML_PACKAGE: &str = "toml@1.1.6";
 const JSON_PACKAGE: &str = "serde_json@1.0.154";
 // Observation inputs are JSON documents (state, Pulumi) or JSON lines
@@ -632,6 +674,10 @@ pub enum Grammar {
     /// Dockerfiles, workflows and Terraform files, whichever lane their
     /// paths select.
     Toolchain,
+    /// Facts a declared API reference decides alone (AC-1538), chosen by
+    /// the producer as [`Self::Schedule`] is: a documented route cites a
+    /// Markdown or OpenAPI JSON document, whichever lane its path selects.
+    ApiDocs,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -654,6 +700,7 @@ impl Grammar {
                 | Self::Schedule
                 | Self::EntryPoint
                 | Self::Toolchain
+                | Self::ApiDocs
                 | Self::ObservedInput
         )
     }
@@ -661,7 +708,8 @@ impl Grammar {
     /// A grammar whose receipts have contract v4, with an input closure
     /// state: TypeScript (slice 5), Terraform (slice 9, AC-1526) and
     /// pipelines (AC-1528), environments (AC-1530), schedules (AC-1532) and
-    /// entry points (AC-1534) and the toolchain (AC-1536).
+    /// entry points (AC-1534), the toolchain (AC-1536) and declared API
+    /// references (AC-1538).
     pub(super) fn has_v4(self) -> bool {
         !self.provenance_only()
             || matches!(
@@ -672,15 +720,19 @@ impl Grammar {
                     | Self::Schedule
                     | Self::EntryPoint
                     | Self::Toolchain
+                    | Self::ApiDocs
             )
     }
 
     /// A grammar chosen by the producer that minted the receipt, not by the
     /// cited file's path (AC-1532): its receipts may cite any captured
-    /// source file. Entry points (AC-1534) and the toolchain (AC-1536) are
-    /// too.
+    /// source file. Entry points (AC-1534), the toolchain (AC-1536) and
+    /// declared API references (AC-1538) are too.
     pub(super) fn producer_keyed(self) -> bool {
-        matches!(self, Self::Schedule | Self::EntryPoint | Self::Toolchain)
+        matches!(
+            self,
+            Self::Schedule | Self::EntryPoint | Self::Toolchain | Self::ApiDocs
+        )
     }
 
     /// The further grammars a lane's reader parses with, beyond the
