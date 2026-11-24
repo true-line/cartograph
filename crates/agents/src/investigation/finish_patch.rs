@@ -65,6 +65,24 @@ impl PatchBasis {
         Self::from_refusal_for(record, finding_count, false)
     }
 
+    /// The basis a role's refusal yields. A role whose capacity gaps the host
+    /// discloses (AC-1444) asks the model for none, and a refusal that flags
+    /// nothing else needs a whole answer.
+    pub fn from_refusal_for_role(
+        record: &RefusalRecord,
+        finding_count: usize,
+        role: SpecialistId,
+    ) -> Result<Self, PatchRejection> {
+        let mut basis = Self::from_refusal_for(record, finding_count, role.patches_whole_finish())?;
+        if role.uses_host_capacity_disclosure() {
+            basis.capacity_gaps.clear();
+            if basis.flagged_indices.is_empty() && basis.flagged_limitations.is_empty() {
+                return Err(PatchRejection::UnsupportedRefusal);
+            }
+        }
+        Ok(basis)
+    }
+
     /// As [`Self::from_refusal`]. With `limitations` (@29 only), a location
     /// wholly inside top-level limitations flags those limitations instead of
     /// sending the model back to a whole-answer rewrite.

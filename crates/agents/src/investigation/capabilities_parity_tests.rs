@@ -23,7 +23,7 @@ fn table_rows_follow_enum_order_and_ids() {
 #[test]
 fn every_capability_matches_the_legacy_predicates() {
     for id in SpecialistId::all() {
-        let legacy: [(Capability, bool); 25] = [
+        let legacy: [(Capability, bool); 26] = [
             (C::CompactDisclosure, legacy_uses_compact_disclosure(id)),
             (C::TurnProgress, legacy_uses_turn_progress(id)),
             (
@@ -89,6 +89,7 @@ fn every_capability_matches_the_legacy_predicates() {
                     SpecialistId::DomainAnalystV29
                         | SpecialistId::DomainAnalystV30
                         | SpecialistId::DomainAnalystV31
+                        | SpecialistId::DomainAnalystV32
                 ),
             ),
             // ADR-0089: new with @30.
@@ -96,18 +97,31 @@ fn every_capability_matches_the_legacy_predicates() {
                 C::ArtifactReads,
                 matches!(
                     id,
-                    SpecialistId::DomainAnalystV30 | SpecialistId::DomainAnalystV31
+                    SpecialistId::DomainAnalystV30
+                        | SpecialistId::DomainAnalystV31
+                        | SpecialistId::DomainAnalystV32
                 ),
             ),
             // #2478: new with @31.
             (
                 C::UnacquiredCitationDrop,
-                id == SpecialistId::DomainAnalystV31,
+                matches!(
+                    id,
+                    SpecialistId::DomainAnalystV31 | SpecialistId::DomainAnalystV32
+                ),
             ),
             // #2522: new with @31.
             (
                 C::RunCapacityExclusions,
-                id == SpecialistId::DomainAnalystV31,
+                matches!(
+                    id,
+                    SpecialistId::DomainAnalystV31 | SpecialistId::DomainAnalystV32
+                ),
+            ),
+            // #1728 (AC-1444): new with @32.
+            (
+                C::HostCapacityDisclosure,
+                id == SpecialistId::DomainAnalystV32,
             ),
         ];
         for (capability, expected) in legacy {
@@ -176,6 +190,7 @@ fn legacy_uses_compact_disclosure(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -225,6 +240,7 @@ fn legacy_uses_turn_progress(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -277,6 +293,7 @@ fn legacy_uses_coverage_qualification(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -320,6 +337,7 @@ fn legacy_uses_completion_obligations(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -356,6 +374,7 @@ fn legacy_uses_policy_selection(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -390,6 +409,7 @@ fn legacy_uses_query_history_disclosure(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -422,6 +442,7 @@ fn legacy_uses_next_prompt_admission(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV11
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
@@ -472,6 +493,7 @@ fn legacy_version(id: SpecialistId) -> u32 {
         SpecialistId::DomainAnalystV29 => 29,
         SpecialistId::DomainAnalystV30 => 30,
         SpecialistId::DomainAnalystV31 => 31,
+        SpecialistId::DomainAnalystV32 => 32,
     }
 }
 
@@ -489,6 +511,7 @@ fn legacy_prompt_generation(id: SpecialistId) -> u32 {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     ) {
         return 14;
     }
@@ -532,6 +555,7 @@ fn legacy_prompt_generation(id: SpecialistId) -> u32 {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     ) {
         return 10;
     }
@@ -560,6 +584,7 @@ fn legacy_uses_combined_finish_feedback(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -571,6 +596,7 @@ fn legacy_uses_finish_patch(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -581,6 +607,7 @@ fn legacy_uses_visible_action_schema(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -595,6 +622,7 @@ fn legacy_uses_exact_source_reservation(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -624,6 +652,7 @@ fn legacy_uses_acquisition_choices(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
             | SpecialistId::EvidenceAuditorV14
@@ -648,6 +677,7 @@ fn legacy_uses_exact_node_queries(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
             | SpecialistId::EvidenceAuditorV12
             | SpecialistId::EvidenceAuditorV13
             | SpecialistId::EvidenceAuditorV14
@@ -669,6 +699,7 @@ fn legacy_uses_capacity_exclusions(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -687,6 +718,7 @@ fn legacy_uses_finish_feedback_witness(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -707,6 +739,7 @@ fn legacy_uses_typed_citation_correction(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -725,6 +758,7 @@ fn only_current_versions_and_named_exceptions_are_offered() {
             S::DomainAnalystV29,
             S::DomainAnalystV30,
             S::DomainAnalystV31,
+            S::DomainAnalystV32,
         ]);
     }
     let offered = offered_specialists();
@@ -743,6 +777,7 @@ fn only_current_versions_and_named_exceptions_are_offered() {
                     | S::DomainAnalystV29
                     | S::DomainAnalystV30
                     | S::DomainAnalystV31
+                    | S::DomainAnalystV32
             ),
             "{:?} is offered without being current or a named exception",
             row.id
@@ -785,6 +820,7 @@ fn legacy_uses_local_finish_generation(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }
 
@@ -798,5 +834,6 @@ fn legacy_uses_finding_withholding(id: SpecialistId) -> bool {
             | SpecialistId::DomainAnalystV29
             | SpecialistId::DomainAnalystV30
             | SpecialistId::DomainAnalystV31
+            | SpecialistId::DomainAnalystV32
     )
 }

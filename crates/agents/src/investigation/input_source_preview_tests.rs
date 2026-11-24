@@ -1732,6 +1732,124 @@ fn analyst26_bare_finish_fields_are_versioned_and_position_complete() {
     }
 }
 
+// AC-1444: with its only source read excluded for capacity, an @31 finish that
+// does not name the gap is refused for it; the same @32 finish is accepted
+// with a host-written limitation and the obligation reported as disclosed.
+#[test]
+fn analyst32_accepts_a_finish_whose_capacity_gap_the_host_discloses() {
+    let policy = &INVESTIGATION_V2_POLICY;
+    for role in [
+        SpecialistId::DomainAnalystV31,
+        SpecialistId::DomainAnalystV32,
+    ] {
+        let (f, raw, _, _) = source_fixture(role, "bounded source");
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let offered = derive_source_choices(&f, &[], &f.ledger);
+        let refused = offered
+            .entries()
+            .iter()
+            .map(|entry| {
+                let value = serde_json::to_value(&entry.action).unwrap();
+                core_prov::content_hash(&bounded_bytes(&value, MAX_ACTION_BYTES).unwrap())
+            })
+            .collect();
+        let exhausted = offered
+            .with_capacity_obligations(&contract, &f.metadata, &f.ledger, &refused, policy)
+            .unwrap();
+        assert!(exhausted.capacity_exhausted());
+        let gap = exhausted.capacity_excluded_obligations().to_vec();
+        assert_eq!(gap.len(), 1);
+        let input = build_source(&f, &raw, &[], role, CompletionCallMode::Choice)
+            .with_acquisition_choices(std::sync::Arc::new(exhausted))
+            .unwrap();
+        let disclosure = input
+            .seal_disclosure_with_policy(&prepare(&input), policy)
+            .unwrap()
+            .unwrap();
+        let bound = input
+            .acquisition_choices
+            .as_ref()
+            .unwrap()
+            .bind_completion_disclosure(
+                "source-preview-task",
+                "current:1",
+                &contract,
+                &f.metadata,
+                input.ledger(),
+                &disclosure,
+                None,
+                policy,
+            )
+            .unwrap();
+        let citation = input.ledger().citations[0].citation_id.clone();
+        let finish = staged_finish::StagedFinish {
+            schema_version: 1,
+            outcome: staged_finish::CompletionOutcome::Supported,
+            narrative: None,
+            action: InvestigationAction::Finish {
+                findings: vec![ProposedInvestigationFinding {
+                    claim_kind: InvestigationClaimKind::InferredInterpretation,
+                    title: "Candidate interpretation".into(),
+                    statement: "A candidate interpretation requires a source check.".into(),
+                    citation_ids: vec![citation],
+                    limitations: vec!["Only selected material was considered.".into()],
+                }],
+                knowledge_completeness: KnowledgeCompleteness::Partial,
+                limitations: vec!["Only selected material was considered.".into()],
+            },
+        };
+        let decision = bound
+            .admit_finish(
+                &input,
+                &f.request,
+                &finish,
+                &[],
+                None,
+                "2026-11-24T00:00:00Z".into(),
+            )
+            .unwrap();
+        if role == SpecialistId::DomainAnalystV31 {
+            let Err(staged_finish::FinishDecision::Refused { feedback, .. }) = decision else {
+                panic!("@31 must refuse an unnamed capacity gap")
+            };
+            assert!(feedback.prose_correction.is_none());
+            assert_eq!(feedback.unmet.len(), 1);
+            assert_eq!(
+                feedback.unmet[0].reason,
+                staged_finish::RefusalReason::ExcludedByCapacity
+            );
+            continue;
+        }
+        let result = decision
+            .ok()
+            .expect("@32 accepts; the host discloses the gap");
+        let name = staged_finish::capacity_name(&gap[0]);
+        assert_eq!(
+            result.limitations,
+            vec![
+                "Only selected material was considered.".to_string(),
+                format!("{name}: {}", staged_finish::HOST_CAPACITY_DISCLOSURE),
+            ]
+        );
+        let completion = result.completion.as_ref().unwrap();
+        assert_eq!(
+            completion.outcome,
+            staged_finish::CompletionOutcome::Supported
+        );
+        let observed = completion
+            .assessment
+            .iter()
+            .find(|item| item.obligation_id == gap[0])
+            .unwrap();
+        assert!(observed.capacity_disclosed && observed.unmet.is_none() && !observed.acquired);
+    }
+}
+
 // AC-1443: a read refused for capacity leaves its obligation unattempted, so
 // attempts never complete. The forced finish still gets the finish allowance.
 #[test]

@@ -126,6 +126,15 @@ fn receipt_family(frozen: &str, saved: SpecialistId, role: &str) -> Result<&'sta
         }
         return Ok("request7-specialist13-prompt12-disclosure6-result7");
     }
+    if frozen == "domain-analyst@32" || saved == SpecialistId::DomainAnalystV32 {
+        if frozen != "domain-analyst@32"
+            || saved != SpecialistId::DomainAnalystV32
+            || role != "analyst"
+        {
+            return Err("Host capacity disclosure receipt identity mismatch.".into());
+        }
+        return Ok("request7-specialist32-prompt14-disclosure6-result7");
+    }
     if frozen == "domain-analyst@31" || saved == SpecialistId::DomainAnalystV31 {
         if frozen != "domain-analyst@31"
             || saved != SpecialistId::DomainAnalystV31
@@ -699,7 +708,20 @@ mod tests {
             .unwrap(),
             "request7-specialist31-prompt14-disclosure6-result7"
         );
+        // AC-1444 (#1728): so has @32.
+        assert_eq!(
+            receipt_family(
+                "domain-analyst@32",
+                SpecialistId::DomainAnalystV32,
+                "analyst"
+            )
+            .unwrap(),
+            "request7-specialist32-prompt14-disclosure6-result7"
+        );
         for (frozen, saved, role) in [
+            ("domain-analyst@32", "domain-analyst@31", "analyst"),
+            ("domain-analyst@31", "domain-analyst@32", "analyst"),
+            ("domain-analyst@32", "domain-analyst@32", "auditor"),
             ("domain-analyst@31", "domain-analyst@29", "analyst"),
             ("domain-analyst@29", "domain-analyst@31", "analyst"),
             ("domain-analyst@31", "domain-analyst@31", "auditor"),

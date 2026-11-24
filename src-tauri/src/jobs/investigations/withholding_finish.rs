@@ -27,6 +27,7 @@ pub(super) fn project(
                 | (SpecialistId::DomainAnalystV29, "domain-analyst@29")
                 | (SpecialistId::DomainAnalystV30, "domain-analyst@30")
                 | (SpecialistId::DomainAnalystV31, "domain-analyst@31")
+                | (SpecialistId::DomainAnalystV32, "domain-analyst@32")
         )
         || task.detail.summary.cancel_requested
     {

@@ -22,7 +22,6 @@ impl CorrectionMode {
         finding_count: usize,
         role: SpecialistId,
     ) -> Result<Self, InvestigationStoreError> {
-        let limitations = role.patches_whole_finish();
         if record.refusal_count != 1
             || finding_count > 12
             || record
@@ -34,19 +33,17 @@ impl CorrectionMode {
         }
         // Eligibility must not depend on a caller-supplied count: a forged
         // smaller count cannot downgrade a finding-local refusal to fallback.
-        Ok(
-            match PatchBasis::from_refusal_for(record, 12, limitations) {
-                Ok(_) => Self::Patch {
-                    basis: PatchBasis::from_refusal_for(record, finding_count, limitations)
-                        .map_err(|_| InvestigationStoreError::Invalid)?,
-                },
-                Err(_) => Self::WholeAnswer {
-                    finish_hash: record.finish_hash.clone(),
-                    refusal_hash: record.refusal_id.clone(),
-                    finding_count,
-                },
+        Ok(match PatchBasis::from_refusal_for_role(record, 12, role) {
+            Ok(_) => Self::Patch {
+                basis: PatchBasis::from_refusal_for_role(record, finding_count, role)
+                    .map_err(|_| InvestigationStoreError::Invalid)?,
             },
-        )
+            Err(_) => Self::WholeAnswer {
+                finish_hash: record.finish_hash.clone(),
+                refusal_hash: record.refusal_id.clone(),
+                finding_count,
+            },
+        })
     }
     fn finding_count(&self) -> usize {
         match self {
@@ -536,6 +533,7 @@ mod tests {
             SpecialistId::DomainAnalystV29,
             SpecialistId::DomainAnalystV30,
             SpecialistId::DomainAnalystV31,
+            SpecialistId::DomainAnalystV32,
         ] {
             task.detail.summary.specialist_id = role;
             for phase in [

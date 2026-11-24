@@ -565,6 +565,25 @@ fn disclose_named(
         }
     }
 }
+/// AC-1444: one host-written limitation per capacity-excluded obligation the
+/// finish does not already name, while the limitation bound has room. A gap
+/// left without room stays unmet and is refused as before.
+fn host_capacity_disclosures(limitations: &mut Vec<String>, unmet: &[FeedbackEntry]) {
+    for entry in unmet {
+        let name = capacity_name(&entry.obligation_id);
+        if entry.reason != RefusalReason::ExcludedByCapacity
+            || limitations.iter().any(|text| text.contains(name))
+        {
+            continue;
+        }
+        if limitations.len() >= finish_patch::MAX_LIMITATIONS {
+            return;
+        }
+        limitations.push(format!("{name}: {HOST_CAPACITY_DISCLOSURE}"));
+    }
+}
+/// The fixed text after a capacity gap's name in a host-written limitation.
+pub const HOST_CAPACITY_DISCLOSURE: &str = "the host did not supply this required source because it did not fit the remaining prompt capacity; it was not read.";
 pub const CAPACITY_NAME_CHARS: usize = 12;
 /// The prefix a limitation uses to name a capacity-excluded obligation.
 pub fn capacity_name(obligation_id: &str) -> &str {
@@ -831,6 +850,7 @@ pub(super) fn admit_finish_with_locator(
                     | "domain-analyst@29"
                     | "domain-analyst@30"
                     | "domain-analyst@31"
+                    | "domain-analyst@32"
             ) && consistency.is_some() =>
         {
             match input.validate_correction_prose(finish, model.as_deref()) {
@@ -940,7 +960,10 @@ pub(super) fn admit_finish_with_locator(
         // correction (choice mode only); every other non-offered id, in any
         // mode, gets one drop-only correction under the same single repair.
         Err(InvestigationError::InvalidCitation)
-            if request.specialist_id == "domain-analyst@31" =>
+            if matches!(
+                request.specialist_id.as_str(),
+                "domain-analyst@31" | "domain-analyst@32"
+            ) =>
         {
             citation_correction = input.typed_citation_correction(
                 disclosure,
@@ -985,6 +1008,7 @@ pub(super) fn admit_finish_with_locator(
                         | "domain-analyst@29"
                         | "domain-analyst@30"
                         | "domain-analyst@31"
+                        | "domain-analyst@32"
                 ) && !observation.attempted
                     && !observation.acquired
                     && reason == RefusalReason::NotAttempted
@@ -1045,6 +1069,7 @@ pub(super) fn admit_finish_with_locator(
             | "domain-analyst@29"
             | "domain-analyst@30"
             | "domain-analyst@31"
+            | "domain-analyst@32"
     ) && consistency.is_some()
         && citation_correction.is_none()
         && citation_drop.is_none()
@@ -1064,9 +1089,19 @@ pub(super) fn admit_finish_with_locator(
     // Refusals keep the derived assessment so replay re-derives them exactly;
     // only an accepted @29 candidate carries disclosed capacity exclusions.
     let mut accepted = assessment.clone();
+    let mut admitted = admitted;
+    // AC-1444: @32 never asks the model to name a capacity gap. The host
+    // appends the limitation itself, so model prose about an unread source
+    // cannot get the answer refused.
+    if request.specialist_id == "domain-analyst@32"
+        && finish.outcome == CompletionOutcome::Supported
+        && let Some(result) = &mut admitted
+    {
+        host_capacity_disclosures(&mut result.limitations, &unmet);
+    }
     if matches!(
         request.specialist_id.as_str(),
-        "domain-analyst@29" | "domain-analyst@30" | "domain-analyst@31"
+        "domain-analyst@29" | "domain-analyst@30" | "domain-analyst@31" | "domain-analyst@32"
     ) && finish.outcome == CompletionOutcome::Supported
         && let Some(result) = &admitted
     {

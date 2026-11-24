@@ -125,3 +125,44 @@ fn only_a_supported_result_that_names_the_gap_carries_a_disclosure() {
             .is_err()
     );
 }
+
+// AC-1444: the host names each capacity gap the finish left unnamed, within
+// the limitation bound, and the named gaps then count as disclosed.
+#[test]
+fn the_host_discloses_unnamed_capacity_gaps_within_the_limitation_bound() {
+    let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+    let entry = |id: &str, reason| FeedbackEntry {
+        obligation_id: id.into(),
+        kind: "source".into(),
+        reason,
+    };
+    let unmet = vec![
+        entry(&a, RefusalReason::ExcludedByCapacity),
+        entry(&b, RefusalReason::ExcludedByCapacity),
+        entry(&c, RefusalReason::NotAttempted),
+    ];
+    let mut limitations = vec![
+        "Other paths were not read.".to_string(),
+        format!("{} was not read (capacity).", capacity_name(&b)),
+    ];
+    host_capacity_disclosures(&mut limitations, &unmet);
+    assert_eq!(
+        limitations,
+        vec![
+            "Other paths were not read.".to_string(),
+            format!("{} was not read (capacity).", capacity_name(&b)),
+            format!("{}: {HOST_CAPACITY_DISCLOSURE}", capacity_name(&a)),
+        ],
+        "one line for the unnamed gap; a named gap and another reason add none"
+    );
+    assert!(limitations[2].len() <= 512);
+    let mut assessment = vec![excluded(&a), excluded(&b), excluded(&c)];
+    disclose_named(&mut assessment, &limitations, &[a.clone(), b.clone()]);
+    assert!(assessment[0].capacity_disclosed && assessment[1].capacity_disclosed);
+    assert!(!assessment[2].capacity_disclosed);
+    // A full limitation list takes no host line; the gap stays unmet.
+    let mut full = vec!["x".to_string(); finish_patch::MAX_LIMITATIONS];
+    host_capacity_disclosures(&mut full, &unmet);
+    assert_eq!(full.len(), finish_patch::MAX_LIMITATIONS);
+    assert!(full.iter().all(|text| text == "x"));
+}

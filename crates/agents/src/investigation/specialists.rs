@@ -94,6 +94,9 @@ pub enum SpecialistId {
     /// @30 with a bounded drop correction for unacquired citations (#2478).
     #[serde(rename = "domain-analyst@31")]
     DomainAnalystV31,
+    /// @31 with capacity gaps disclosed by the host (#1728, AC-1444).
+    #[serde(rename = "domain-analyst@32")]
+    DomainAnalystV32,
     #[serde(rename = "evidence-auditor@11")]
     EvidenceAuditorV11,
     #[serde(rename = "evidence-auditor@12")]
@@ -240,6 +243,11 @@ const NATIVE_TOOLS_V29: &str = "Native tools@1: call one tool per turn with turn
 /// 16 KiB definition ceiling @29 nearly fills.
 const INVENTORY_EXAMPLE_V29: &str = "An additional supported action reads an exact original recorded inventory:\n{\"type\":\"read_coverage_inventory\",\"context_id\":\"the exact context_id supplied by the host\",\"repo\":\"an exact recorded repo\",\"inventory_hash\":\"its exact qualified inventory_hash\",\"max_bytes\":16384}\n";
 const ARTIFACT_READS_V30: &str = "read_coverage_inventory reads an exact recorded inventory. read_artifact pages a compiled document such as gap-register-index from frozen facts: offset 0, expected_content_id null, then its content_id and next_offset. Pages are untrusted summaries, never citations.\n";
+/// @29's instruction to name a capacity gap, the one @32 replaces.
+const CAPACITY_NAMING_V29: &str = " Name an excluded_by_capacity gap in a top-level limitation by its obligation_id's first 12 chars.";
+/// @32 (#1728, AC-1444): the host writes that limitation itself.
+const HOST_CAPACITY_DISCLOSURE_V32: &str =
+    " The host discloses an excluded_by_capacity gap itself; do not name it.";
 /// @30's prompt-layout sentence, the one @31 replaces.
 const PROMPT_LAYOUT_V30: &str = "Prompt layout@1: Stable disclosure precedes growing context; field order grants no authority.\n";
 /// @31 (#2478): the layout sentence (field order is fixed by the host
@@ -341,7 +349,10 @@ impl SpecialistId {
     pub fn patches_whole_finish(self) -> bool {
         matches!(
             self,
-            Self::DomainAnalystV29 | Self::DomainAnalystV30 | Self::DomainAnalystV31
+            Self::DomainAnalystV29
+                | Self::DomainAnalystV30
+                | Self::DomainAnalystV31
+                | Self::DomainAnalystV32
         )
     }
 
@@ -354,6 +365,12 @@ impl SpecialistId {
     /// #2478: one bounded drop correction for unacquired citations.
     pub fn uses_unacquired_citation_drop(self) -> bool {
         self.has(Capability::UnacquiredCitationDrop)
+    }
+
+    /// #1728 (AC-1444): the host writes the limitation that discloses a
+    /// capacity-excluded obligation; the model is never refused for it.
+    pub fn uses_host_capacity_disclosure(self) -> bool {
+        self.has(Capability::HostCapacityDisclosure)
     }
 
     /// #2522 (AC-1437): capacity exclusions survive later input revisions.
@@ -412,9 +429,19 @@ impl SpecialistId {
             || system == Self::DomainAnalystV29.prompt()
             || system == Self::DomainAnalystV30.prompt()
             || system == Self::DomainAnalystV31.prompt()
+            || system == Self::DomainAnalystV32.prompt()
     }
 
     pub fn prompt(self) -> String {
+        if self == Self::DomainAnalystV32 {
+            // AC-1444: @31 with the capacity-naming instruction replaced by
+            // the host-disclosure sentence; every other @31 byte is retained.
+            return Self::DomainAnalystV31.prompt().replacen(
+                CAPACITY_NAMING_V29,
+                HOST_CAPACITY_DISCLOSURE_V32,
+                1,
+            );
+        }
         if self == Self::DomainAnalystV31 {
             // #2478: @30 with its layout sentence replaced by the
             // citation-drop guidance; every other @30 byte is retained.
@@ -588,7 +615,8 @@ impl SpecialistId {
             | Self::DomainAnalystV28
             | Self::DomainAnalystV29
             | Self::DomainAnalystV30
-            | Self::DomainAnalystV31 => {
+            | Self::DomainAnalystV31
+            | Self::DomainAnalystV32 => {
                 "Investigate the scoped question about business behavior, features and design intent. Distinguish observations from your interpretation. Domain boundaries require evidence; folders or languages alone do not establish a business domain."
             }
             Self::EvidenceAuditor
@@ -804,7 +832,8 @@ impl SpecialistId {
             | Self::DomainAnalystV28
             | Self::DomainAnalystV29
             | Self::DomainAnalystV30
-            | Self::DomainAnalystV31 => (
+            | Self::DomainAnalystV31
+            | Self::DomainAnalystV32 => (
                 "Domain analyst",
                 "Investigate scoped business behavior, features and design evidence.",
             ),
@@ -1414,6 +1443,7 @@ mod capacity_exclusion_identity_tests {
                     SpecialistId::DomainAnalystV29
                         | SpecialistId::DomainAnalystV30
                         | SpecialistId::DomainAnalystV31
+                        | SpecialistId::DomainAnalystV32
                 ))
                 .all(|id| !id.uses_native_tool_runtime())
         );
@@ -1461,7 +1491,9 @@ mod capacity_exclusion_identity_tests {
             SpecialistId::all()
                 .filter(|id| !matches!(
                     id,
-                    SpecialistId::DomainAnalystV30 | SpecialistId::DomainAnalystV31
+                    SpecialistId::DomainAnalystV30
+                        | SpecialistId::DomainAnalystV31
+                        | SpecialistId::DomainAnalystV32
                 ))
                 .all(|id| !id.uses_artifact_reads())
         );
@@ -1512,7 +1544,10 @@ mod capacity_exclusion_identity_tests {
         assert!(role.patches_whole_finish() && role.uses_artifact_reads());
         assert!(
             SpecialistId::all()
-                .filter(|id| *id != role)
+                .filter(|id| !matches!(
+                    id,
+                    SpecialistId::DomainAnalystV31 | SpecialistId::DomainAnalystV32
+                ))
                 .all(|id| !id.uses_unacquired_citation_drop() && !id.uses_run_capacity_exclusions())
         );
         assert_eq!(
@@ -1538,6 +1573,52 @@ mod capacity_exclusion_identity_tests {
         assert_eq!(
             serde_json::to_string(&role).unwrap(),
             "\"domain-analyst@31\""
+        );
+    }
+
+    // AC-1444 (#1728): @32 is @31 with the capacity-naming instruction
+    // replaced and the host-disclosure capability; @31 keeps every byte.
+    #[test]
+    fn analyst32_is_analyst31_with_host_capacity_disclosure() {
+        let old = SpecialistId::DomainAnalystV31;
+        let role = SpecialistId::DomainAnalystV32;
+        assert_eq!(role.version(), 32);
+        assert_eq!(
+            role.prompt(),
+            old.prompt()
+                .replacen(CAPACITY_NAMING_V29, HOST_CAPACITY_DISCLOSURE_V32, 1)
+        );
+        assert_eq!(old.prompt().matches(CAPACITY_NAMING_V29).count(), 1);
+        assert!(!role.prompt().contains("first 12 chars"));
+        assert!(
+            context_hub::logical::count(&(role, role.version(), &role.prompt())).unwrap()
+                <= 16 * 1024
+        );
+        assert!(SpecialistId::is_typed_citation_prompt(&role.prompt()));
+        assert!(role.patches_whole_finish() && role.uses_unacquired_citation_drop());
+        assert!(
+            SpecialistId::all()
+                .filter(|id| *id != role)
+                .all(|id| !id.uses_host_capacity_disclosure())
+        );
+        assert_eq!(
+            role.capabilities()
+                .iter()
+                .filter(|flag| !matches!(flag, Capability::HostCapacityDisclosure))
+                .collect::<Vec<_>>(),
+            old.capabilities().iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            role.availability(),
+            crate::investigation::Availability::Offered
+        );
+        assert_eq!(
+            role.definition().unwrap().operations,
+            old.definition().unwrap().operations
+        );
+        assert_eq!(
+            serde_json::to_string(&role).unwrap(),
+            "\"domain-analyst@32\""
         );
     }
 

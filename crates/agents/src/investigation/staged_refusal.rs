@@ -171,6 +171,7 @@ impl RefusalRecord {
                     | "domain-analyst@29"
                     | "domain-analyst@30"
                     | "domain-analyst@31"
+                    | "domain-analyst@32"
             ))
             || (matches!(
                 request.specialist_id.as_str(),
@@ -182,6 +183,7 @@ impl RefusalRecord {
                     | "domain-analyst@29"
                     | "domain-analyst@30"
                     | "domain-analyst@31"
+                    | "domain-analyst@32"
             ) && self.feedback.prose_correction.is_some()
                 && !combined)
         {
@@ -229,11 +231,15 @@ impl RefusalRecord {
                     | "domain-analyst@29"
                     | "domain-analyst@30"
                     | "domain-analyst@31"
+                    | "domain-analyst@32"
             ))
             || request.limit_profile != policy.profile()
-            // #2478: the drop-only correction is @31's alone.
+            // #2478: the drop-only correction is @31's and @32's alone.
             || (self.feedback.citation_drop.is_some()
-                && request.specialist_id != "domain-analyst@31")
+                && !matches!(
+                    request.specialist_id.as_str(),
+                    "domain-analyst@31" | "domain-analyst@32"
+                ))
             || ((self.feedback.citation_correction.is_some()
                 || self.feedback.prose_correction.is_some())
                 && !matches!(
@@ -252,6 +258,7 @@ impl RefusalRecord {
                         | "domain-analyst@29"
                         | "domain-analyst@30"
                         | "domain-analyst@31"
+                        | "domain-analyst@32"
                 ))
         {
             return Err(InvestigationError::InvalidInput);
