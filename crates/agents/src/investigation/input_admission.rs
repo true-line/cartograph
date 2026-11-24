@@ -1477,7 +1477,9 @@ impl InvestigationInput {
             if state
                 .acquisition
                 .as_ref()
-                .is_some_and(|stamp| stamp.finish_policy_complete)
+                // AC-1443: a capacity-exhausted run is finish-only for good, so
+                // its finish gets the same allowance as a completed one.
+                .is_some_and(|stamp| stamp.finish_policy_complete || stamp.capacity_exhausted)
             {
                 policy.output_tokens_for_mode(state.mode)
             } else {

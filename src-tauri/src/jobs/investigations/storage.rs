@@ -731,7 +731,7 @@ pub(super) fn validate_step(
                         !policy.local_finish_generation()
                             || s.acquisition
                                 .as_ref()
-                                .is_some_and(|a| a.finish_policy_complete)
+                                .is_some_and(|a| a.finish_policy_complete || a.capacity_exhausted)
                     })
                     .map_or(
                         agents::investigation::staged_refusal::CompletionCallMode::Choice,
