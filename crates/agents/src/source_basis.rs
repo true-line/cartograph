@@ -216,6 +216,7 @@ fn receipt(value: &str) -> bool {
     prefixed(value, "ts-primary-v1:")
         || prefixed(value, "ts-primary-v2:")
         || prefixed(value, "ts-primary-v3:")
+        || prefixed(value, "ts-primary-v4:")
         || prefixed(value, "py-primary-v1:")
         || prefixed(value, "go-primary-v1:")
         || prefixed(value, "java-primary-v1:")

@@ -29,7 +29,7 @@ pub(super) fn present<'de, D: Deserializer<'de>>(
 
 impl ReceiptSourceSizes {
     pub(super) fn validate(&self, content: &Content) -> Result<(), CapturedError> {
-        if content.schema_version != 3
+        if !super::compact_version(content.schema_version)
             || self.schema_version != 1
             || self.object_digest != content.file.digest
             || self.redactor.is_empty()
@@ -71,7 +71,9 @@ impl Receipt {
     /// receipt, whose missing measurements require conservative admission.
     pub fn with_source_sizes(self, file: &CapturedFile) -> Result<Self, CapturedError> {
         self.validate()?;
-        if self.content.schema_version != 3 || file.reference() != &self.content.file {
+        if !super::compact_version(self.content.schema_version)
+            || file.reference() != &self.content.file
+        {
             return Err(CapturedError::Invalid("receipt size file binding"));
         }
         let ranges = self

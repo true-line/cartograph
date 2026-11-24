@@ -2,7 +2,7 @@ use super::*;
 
 const CODE: &[u8] = b"function run(input:any){ const base = input.enabled; const ready = base === false; if (ready) return false; }";
 
-fn captured_rule_receipt() -> (Node, Receipt) {
+pub(super) fn captured_rule_receipt() -> (Node, Receipt) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("source.ts"), CODE).unwrap();
     let source = source_capture::SourceId::new("src_11111111111111111111111111111111").unwrap();
@@ -44,7 +44,7 @@ fn as_v2(v3: &Receipt) -> Receipt {
     }
 }
 
-fn sign_wire(mut wire: serde_json::Value, version: u32) -> String {
+pub(super) fn sign_wire(mut wire: serde_json::Value, version: u32) -> String {
     let contract = contract(version, Grammar::Tsx).unwrap();
     let mut input = contract.domain.to_vec();
     input.extend(serde_json::to_vec(&canonical(wire["content"].clone())).unwrap());

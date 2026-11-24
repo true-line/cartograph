@@ -70,7 +70,8 @@ impl InvestigationInspectionTarget {
                 })
             || !self
                 .receipt_id
-                .strip_prefix("ts-primary-v3:")
+                .strip_prefix("ts-primary-v4:")
+                .or_else(|| self.receipt_id.strip_prefix("ts-primary-v3:"))
                 .or_else(|| self.receipt_id.strip_prefix("ts-primary-v2:"))
                 .or_else(|| self.receipt_id.strip_prefix("ts-primary-v1:"))
                 .or_else(|| self.receipt_id.strip_prefix("py-primary-v1:"))

@@ -35,8 +35,8 @@ pub use observed::mint_observed_receipts;
 mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_OTHER_FILES, MAX_RECEIPT_RANGES, MintedHeader,
-    MintedReceipt, RangeRole, Receipt, ReceiptRange, ReceiptSourceSizes, fact_match_workspace,
-    fact_match_workspace_bytes, is_input_source,
+    MintedReceipt, RangeRole, Receipt, ReceiptClosure, ReceiptRange, ReceiptSourceSizes,
+    fact_match_workspace, fact_match_workspace_bytes, is_input_source,
 };
 
 /// Maximum directory entries examined, including excluded entries.

@@ -193,7 +193,7 @@ impl MintedReceipt {
                 other_files: self.other_files.to_vec(),
                 source_sizes: self.source_sizes.clone(),
                 source_scope: SourceScope::PrimarySourceOnly,
-                input_closure: InputClosure::InputClosureNotEstablished,
+                input_closure: InputClosure::LEGACY,
             },
         })
     }

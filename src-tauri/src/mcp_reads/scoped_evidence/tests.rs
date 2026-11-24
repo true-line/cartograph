@@ -481,7 +481,8 @@ fn scoped_target_preserves_canonical_v1_v2_v3_receipt_history() {
     let f = Fixture::new();
     let original = f.describe().target;
     assert!(original.receipt_id.starts_with("ts-primary-v3:"));
-    for version in [1, 2, 3] {
+    // v4 carries an input closure state (AC-1080).
+    for version in [1, 2, 3, 4] {
         let mut target = original.clone();
         target.receipt_id = format!("ts-primary-v{version}:{}", "a".repeat(64));
         target.target_id = target.content_id().unwrap();
@@ -490,7 +491,7 @@ fn scoped_target_preserves_canonical_v1_v2_v3_receipt_history() {
         target.target_id = target.content_id().unwrap();
         assert_eq!(target.validate().unwrap_err(), ReadError::InvalidRequest);
     }
-    for prefix in ["ts-primary-v0:", "ts-primary-v4:", "other:"] {
+    for prefix in ["ts-primary-v0:", "ts-primary-v5:", "other:"] {
         let mut target = original.clone();
         target.receipt_id = format!("{prefix}{}", "a".repeat(64));
         target.target_id = target.content_id().unwrap();
