@@ -74,10 +74,25 @@ fn clone_fetches_only_the_default_branch() {
     let dir = tempfile::tempdir().unwrap();
     let url = bare_fixture(dir.path());
     let bare = dir.path().join("fixture.git");
-    let head = git2::Repository::open_bare(&bare)
-        .unwrap()
-        .refname_to_id("refs/heads/main")
-        .unwrap();
+    let source = git2::Repository::open_bare(&bare).unwrap();
+    let head = source.refname_to_id("refs/heads/main").unwrap();
+    // The deep branch points at its own commit, so cloning it by mistake
+    // fails the SHA assertion instead of passing by accident.
+    let other = {
+        let parent = source.find_commit(head).unwrap();
+        let signature = git2::Signature::now("t", "t@t").unwrap();
+        source
+            .commit(
+                None,
+                &signature,
+                &signature,
+                "other",
+                &parent.tree().unwrap(),
+                &[&parent],
+            )
+            .unwrap()
+    };
+    assert_ne!(other, head);
     // libgit2 reads the fixture's own refs through the local transport, so
     // its path must stay under MAX_PATH (260, counting ".lock") while the
     // clone's longer refs/remotes path would not: size the name to fit.
@@ -96,7 +111,11 @@ fn clone_fetches_only_the_default_branch() {
     let mut refs = std::fs::read_to_string(&packed)
         .unwrap_or_default()
         .replace(" sorted", "");
-    refs.push_str(&format!("{head} refs/heads/{deep}\n"));
+    refs.push_str(&format!("{other} refs/heads/{deep}\n"));
+    // A branch sharing HEAD's commit and sorting before `main`: a default
+    // branch guessed by commit (the local transport has no HEAD symref)
+    // would pick it, and the remote-ref assertion below would catch that.
+    refs.push_str(&format!("{head} refs/heads/a-same-commit\n"));
     std::fs::write(&packed, refs).unwrap();
     let dest = dir.path().join("clones");
     std::fs::create_dir(&dest).unwrap();
