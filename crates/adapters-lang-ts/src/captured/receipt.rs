@@ -33,6 +33,10 @@ pub const TS_DIRECTORY_WALK_POLICY: &str = "source-walk-v2";
 /// 9, AC-1526): the captured `.tf` selection, plus each local module
 /// directory the walk lists, which must hold the captured files alone.
 pub const TF_MODULE_WALK_POLICY: &str = "tf-module-walk-v1";
+/// The walk policy a pipeline reader closure records (ADR-0072 slice 9,
+/// AC-1528): the captured selection of workflow files and Dockerfiles,
+/// which the reader reads alone.
+pub const PIPELINE_WALK_POLICY: &str = "pipeline-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -109,17 +113,54 @@ pub fn terraform_walk_closure(
     files: &[String],
     repo_key: &str,
 ) -> Result<super::InputClosureV1, CapturedError> {
-    let current = contract(4, Grammar::Terraform)?;
+    lane_walk_closure(
+        Grammar::Terraform,
+        TF_MODULE_WALK_POLICY,
+        capture,
+        files,
+        repo_key,
+    )
+}
+
+/// The input closure of a pipeline fact (ADR-0072 slice 9, AC-1528): the
+/// capture's enumeration under [`PIPELINE_WALK_POLICY`] and the retained
+/// bytes of every pipeline file in `files` the capture holds. The reader
+/// reads nothing else over a capture, so every fact it emits shares it.
+pub fn pipeline_walk_closure(
+    capture: &source_capture::Capture,
+    files: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    lane_walk_closure(
+        Grammar::Pipeline,
+        PIPELINE_WALK_POLICY,
+        capture,
+        files,
+        repo_key,
+    )
+}
+
+/// A walk closure over `grammar`'s captured files: the capture's
+/// enumeration under `walk_policy` and each of `files` of that grammar the
+/// capture holds, under the grammar's contract-v4 pins.
+fn lane_walk_closure(
+    grammar: Grammar,
+    walk_policy: &str,
+    capture: &source_capture::Capture,
+    files: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    let current = contract(4, grammar)?;
     let mut inputs = vec![super::ClosureInput::Enumeration {
         source_id: capture.manifest().source_id.clone(),
         capture_id: capture.id().to_string(),
-        walk_policy: TF_MODULE_WALK_POLICY.into(),
+        walk_policy: walk_policy.into(),
     }];
     for path in files {
         if inputs.len() > super::MAX_CLOSURE_INPUTS {
             return Err(CapturedError::Limit("closure inputs"));
         }
-        if Grammar::for_path(path) == Grammar::Terraform
+        if Grammar::for_path(path) == grammar
             && let Ok(file) = capture.file(path)
         {
             inputs.push(super::ClosureInput::CapturedFile {
@@ -127,12 +168,14 @@ pub fn terraform_walk_closure(
             });
         }
     }
+    let mut packages = vec![current.grammar_package.to_string()];
+    packages.push(current.parser_package.into());
     super::InputClosureV1::new(
         current.producer,
-        vec![current.grammar_package.into()],
+        packages,
         super::ClosureParameters {
             repo_key: repo_key.into(),
-            walk_policy: TF_MODULE_WALK_POLICY.into(),
+            walk_policy: walk_policy.into(),
             layer_hints: Vec::new(),
             grammar_rule: TS_GRAMMAR_RULE.into(),
         },
@@ -160,15 +203,28 @@ struct Contract {
 /// every TypeScript receipt. Terraform receipts also exist under v4, v3's
 /// compact form with an input closure state (AC-1526).
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
-    if (version, grammar) == (4, Grammar::Terraform) {
-        return Ok(Contract {
-            prefix: "tf-primary-v2:",
-            producer: "t0.adapter-iac/direct-lexical-v2",
-            domain: b"cartograph:tf-primary-receipt:v2\0",
-            grammar_package: TERRAFORM_PARSER_PACKAGE,
-            parser_package: TERRAFORM_PARSER_PACKAGE,
-            parser_package_legacy: &[],
-        });
+    match (version, grammar) {
+        (4, Grammar::Terraform) => {
+            return Ok(Contract {
+                prefix: "tf-primary-v2:",
+                producer: "t0.adapter-iac/direct-lexical-v2",
+                domain: b"cartograph:tf-primary-receipt:v2\0",
+                grammar_package: TERRAFORM_PARSER_PACKAGE,
+                parser_package: TERRAFORM_PARSER_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
+        (4, Grammar::Pipeline) => {
+            return Ok(Contract {
+                prefix: "pipe-primary-v2:",
+                producer: "t0.pipeline/declared-v2",
+                domain: b"cartograph:pipe-primary-receipt:v2\0",
+                grammar_package: YAML_GRAMMAR_PACKAGE,
+                parser_package: PARSER_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
+        _ => {}
     }
     let lane = match grammar {
         Grammar::Python => Some(Contract {
@@ -217,6 +273,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             domain: b"cartograph:tf-primary-receipt:v1\0",
             grammar_package: TERRAFORM_PARSER_PACKAGE,
             parser_package: TERRAFORM_PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        // Workflow files and Dockerfiles, read by the pipeline reader
+        // (AC-1528); Dockerfiles are read by the reader's own scanner.
+        Grammar::Pipeline => Some(Contract {
+            prefix: "pipe-primary-v1:",
+            producer: "t0.pipeline/declared-v1",
+            domain: b"cartograph:pipe-primary-receipt:v1\0",
+            grammar_package: YAML_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
         Grammar::ObservedInput => Some(Contract {
@@ -313,6 +379,8 @@ const KOTLIN_GRAMMAR_PACKAGE: &str = "tree-sitter-kotlin-ng@1.1.0";
 // The Terraform adapter's exact HCL parser pin (crates/iac): `hcl-edit` is
 // both its grammar and its parser.
 const TERRAFORM_PARSER_PACKAGE: &str = "hcl-edit@0.9.8";
+// The pipeline reader's exact YAML grammar pin (crates/ingest).
+const YAML_GRAMMAR_PACKAGE: &str = "tree-sitter-yaml@0.7.2";
 // Observation inputs are JSON documents (state, Pulumi) or JSON lines
 // (OTLP), cited by the byte spans the T1 producers record (ADR-0079).
 const OBSERVED_INPUT_FORMAT: &str = "json/jsonl";
@@ -361,6 +429,9 @@ pub enum Grammar {
     Kotlin,
     /// `.tf` files, parsed by the Terraform adapter (AC-1053).
     Terraform,
+    /// Workflow files and Dockerfiles, as the pipeline reader selects them,
+    /// read by it (AC-1528).
+    Pipeline,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -378,14 +449,16 @@ impl Grammar {
                 | Self::Rust
                 | Self::Kotlin
                 | Self::Terraform
+                | Self::Pipeline
                 | Self::ObservedInput
         )
     }
 
     /// A grammar whose receipts have contract v4, with an input closure
-    /// state: TypeScript (slice 5) and Terraform (slice 9, AC-1526).
+    /// state: TypeScript (slice 5), Terraform (slice 9, AC-1526) and
+    /// pipelines (AC-1528).
     pub(super) fn has_v4(self) -> bool {
-        !self.provenance_only() || self == Self::Terraform
+        !self.provenance_only() || matches!(self, Self::Terraform | Self::Pipeline)
     }
 
     /// The grammar a receipt citing `file` is minted under: an observation
@@ -413,6 +486,8 @@ impl Grammar {
             Self::Kotlin
         } else if path.ends_with(".tf") {
             Self::Terraform
+        } else if ingest::pipelines::is_pipeline_file(path) {
+            Self::Pipeline
         } else {
             Self::Tsx
         }
@@ -1026,7 +1101,8 @@ fn validate_file(file: &CaptureFileRef, repo: &str, config: bool) -> Result<(), 
             || file.path.ends_with(".rs")
             || file.path.ends_with(".kt")
             || file.path.ends_with(".kts")
-            || file.path.ends_with(".tf"))
+            || file.path.ends_with(".tf")
+            || ingest::pipelines::is_pipeline_file(&file.path))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
