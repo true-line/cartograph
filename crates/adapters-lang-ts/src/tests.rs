@@ -2585,10 +2585,19 @@ fn directory_closure_is_identical_over_lists_and_store() {
         &id(),
         &index,
         &known_files,
+        &mut crate::Probes::default(),
     )
     .unwrap();
     let mut store = FactStore::from_facts(nodes.clone(), edges).unwrap();
-    close_directory(&mut store, dir.path(), &id(), &index, &known_files).unwrap();
+    close_directory(
+        &mut store,
+        dir.path(),
+        &id(),
+        &index,
+        &known_files,
+        &mut crate::Probes::default(),
+    )
+    .unwrap();
     assert_eq!(
         store.into_facts().unwrap(),
         (list_nodes.clone(), list_edges)
