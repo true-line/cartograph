@@ -429,6 +429,14 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    direct-lexical digest and closure ID unchanged; a mutation that enrichment
    does see gives `enrichment_changed_fact`; v1 to v3 receipts are
    byte-identical after migration; closure and receipt persist atomically.
+   *As built (AC-1078, AC-1080):* `InputClosureV1` lives in
+   `adapters_lang_ts::captured::closure`; file bindings, fact keys and fact
+   digests are validated as receipts validate them. On the wire a v4
+   receipt's `input_closure` is internally tagged by `state`
+   (`established` with `closure_id`, or `input_closure_not_established`
+   with `reasons`); v1 to v3 keep the bare legacy string. A producer mints
+   v4 from a freshly minted v3 TypeScript receipt with
+   `Receipt::with_closure`; lane receipts stay v3.
 6. **TS walk closure** (directory completion). Enumeration and probe binding,
    and receipts for directory-proven facts. *Tests:* adding the target of a
    previously unresolved import changes the closure and the fact; adding an
