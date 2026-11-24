@@ -95,20 +95,20 @@ fn mint_lane_receipts_in(
     edges: &[Edge],
 ) -> Result<Vec<MintedReceipt>, CapturedError> {
     let path = &file.reference().path;
-    if Grammar::for_path(path) != grammar || !valid_path(path) {
+    if (Grammar::for_path(path) != grammar && !grammar.producer_keyed()) || !valid_path(path) {
         return Err(CapturedError::Invalid("unsupported captured path"));
     }
-    super::receipt::validate_identity(file.reference(), id.repo)?;
+    super::receipt::validate_lane_identity(grammar, file.reference(), id.repo)?;
     let mut header = None;
     let mut receipts = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let minted = nodes
         .iter()
-        .map(|node| Receipt::for_node_in(file, capture, id, node))
+        .map(|node| Receipt::for_node_as(grammar, file, capture, id, node))
         .chain(
             edges
                 .iter()
-                .map(|edge| Receipt::for_edge_in(file, capture, id, edge)),
+                .map(|edge| Receipt::for_edge_as(grammar, file, capture, id, edge)),
         );
     for receipt in minted {
         let Ok(receipt) = receipt
@@ -244,6 +244,35 @@ pub fn stage_environment_receipts(
         closure,
         capture,
         files,
+        id,
+        (nodes, edges),
+    )
+}
+
+/// Schedule reader receipts (AC-1532), staged as
+/// [`stage_environment_receipts`] stages an environment's: each fact cites
+/// a file among `read`, the captured files the reader opened, and is
+/// established on the reader's closure ([`super::schedule_walk_closure`])
+/// when the reader reported its facts `bound` to them, and
+/// `cross_file_input_unbound` otherwise.
+pub fn stage_schedule_receipts(
+    capture: &source_capture::Capture,
+    read: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    bound: bool,
+) -> ReceiptStage {
+    let closure = if bound {
+        super::schedule_walk_closure(capture, read, id.repo)
+            .map_err(|_| ClosureGapReason::LimitExceeded)
+    } else {
+        Err(ClosureGapReason::CrossFileInputUnbound)
+    };
+    stage_walk_receipts(
+        Grammar::Schedule,
+        closure,
+        capture,
+        read,
         id,
         (nodes, edges),
     )
