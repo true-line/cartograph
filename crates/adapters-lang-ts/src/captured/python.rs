@@ -352,6 +352,32 @@ pub fn stage_api_doc_receipts(
     stage_walk_receipts(Grammar::ApiDocs, closure, capture, read, id, (nodes, edges))
 }
 
+/// Found-ADR receipts (AC-1540): `read` holds the captured decision
+/// records the reader read. An ADR node is decided by its record alone, so
+/// it is established on the closure; a `DECIDES` edge exists only when its
+/// target is a recovered fact, which no record decides, so it is
+/// `cross_file_input_unbound`.
+pub fn stage_adr_receipts(
+    capture: &source_capture::Capture,
+    read: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+) -> ReceiptStage {
+    let closure = super::adr_walk_closure(capture, read, id.repo)
+        .map_err(|_| ClosureGapReason::LimitExceeded);
+    let mut stage = stage_walk_receipts(Grammar::Adr, closure, capture, read, id, (nodes, &[]));
+    let unbound = stage_walk_receipts(
+        Grammar::Adr,
+        Err(ClosureGapReason::CrossFileInputUnbound),
+        capture,
+        read,
+        id,
+        (&[], edges),
+    );
+    stage.extend(unbound.into_receipts());
+    stage
+}
+
 /// Stage `grammar`'s receipts for `files`, each established on `closure`
 /// or carrying its reason.
 fn stage_walk_receipts(
