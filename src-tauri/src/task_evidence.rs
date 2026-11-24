@@ -27,6 +27,39 @@ use planning::{MAX_CANDIDATES, MAX_REQUESTS, TaskPlan};
 const CHANGED: &str = "Task evidence changed during preparation; refresh and prepare it again.";
 const INVALID: &str = "Task source selection is invalid; no source was substituted.";
 
+/// The closure state of the receipt a captured range was read from, copied
+/// as it is, never computed here (ADR-0072): a v1 to v3 receipt records the
+/// legacy state, a v4 receipt its own.
+fn task_input_closure(
+    closure: Option<&adapters_lang_ts::captured::ReceiptClosure>,
+) -> agents::TaskInputClosure {
+    use adapters_lang_ts::captured::{ClosureGapReason as Gap, ReceiptClosure};
+    use agents::{TaskClosureGap as Task, TaskInputClosure};
+    match closure {
+        None => TaskInputClosure::LEGACY,
+        Some(ReceiptClosure::Established { closure_id }) => TaskInputClosure::Established {
+            closure_id: closure_id.as_str().into(),
+        },
+        Some(ReceiptClosure::InputClosureNotEstablished { reasons }) => {
+            TaskInputClosure::NotEstablished {
+                reasons: reasons
+                    .iter()
+                    .map(|reason| match reason {
+                        Gap::ProducerNotParticipating => Task::ProducerNotParticipating,
+                        Gap::CrossFileInputUnbound => Task::CrossFileInputUnbound,
+                        Gap::ExternalInputUnbound => Task::ExternalInputUnbound,
+                        Gap::RemoteReference => Task::RemoteReference,
+                        Gap::UpstreamClosureIncomplete => Task::UpstreamClosureIncomplete,
+                        Gap::EnrichmentChangedFact => Task::EnrichmentChangedFact,
+                        Gap::CacheReuseUnproven => Task::CacheReuseUnproven,
+                        Gap::LimitExceeded => Task::LimitExceeded,
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
 pub(crate) fn task_fact(fact: &FactKey) -> TaskFactKey {
     match fact {
         FactKey::Node { id } => TaskFactKey::Node { id: id.clone() },
@@ -605,7 +638,7 @@ fn assemble_from_snapshot(
                     byte_end: range.captured.byte_end,
                 },
                 scope: PrimarySourceScope::PrimarySourceOnly,
-                input_closure: agents::TaskInputClosure::LEGACY,
+                input_closure: task_input_closure(receipt.closure()),
             };
             (text, origin)
         } else {
@@ -673,8 +706,9 @@ fn assemble_from_snapshot(
         candidates,
     };
     let validation_report = selection_report.clone();
+    // Schema 3 records each read receipt's own closure state (AC-1088).
     let basis = TaskSourceBasisV2 {
-        schema_version: 2,
+        schema_version: 3,
         graph_snapshot_id: snapshot.id().into(),
         selected_facts: selected.into_values().collect(),
         evidence: origins,

@@ -468,6 +468,10 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    `prepared-agent-task:v3` and stages under `proposal-stage:v3`. Nothing
    prepares a schema-3 basis yet; the host copies receipt states in the next
    slice.
+   *As built (AC-1088):* host task preparation now always records schema 3
+   and copies `Receipt::closure()` onto each captured origin, so new stages
+   are v3; the curated projection reads v3 like v2. A reconciliation
+   result's `ReconciledOrigin.input_closure` still records the legacy state.
 6. **TS walk closure** (directory completion). Enumeration and probe binding,
    and receipts for directory-proven facts. *Tests:* adding the target of a
    previously unresolved import changes the closure and the fact; adding an

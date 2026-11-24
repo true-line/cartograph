@@ -98,6 +98,9 @@ pub const ASSERTION_DECISION_DIGEST_PREFIX: &str = "curated-assertion-decisions-
 
 /// The staged record version whose evidence can be captured primary source.
 const CAPTURED_RECORD_VERSION: u32 = 2;
+/// Version 3 carries its receipts' closure states (ADR-0072, AC-1088) and
+/// is otherwise read as version 2.
+const CLOSURE_RECORD_VERSION: u32 = 3;
 
 /// Which view a read reports (DR-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +140,8 @@ pub struct RecordEvidence {
 pub struct ReviewedProposal {
     /// Stage identity of the record.
     pub record_id: String,
-    /// Staging envelope version: 1 is legacy, 2 carries a source basis.
+    /// Staging envelope version: 1 is legacy, 2 carries a source basis, 3 also
+    /// its receipts' closure states.
     pub schema_version: u32,
     /// Gap the proposal would fill.
     pub gap_id: String,
@@ -676,11 +680,15 @@ fn unverified(
 fn unverified_origin(record: &ReviewedProposal) -> Option<StateReason> {
     match record.schema_version {
         1 => Some(StateReason::LegacyRecord),
-        CAPTURED_RECORD_VERSION if record.evidence.is_empty() => Some(StateReason::NoEvidence),
-        CAPTURED_RECORD_VERSION if record.evidence.iter().any(|item| !item.captured) => {
+        CAPTURED_RECORD_VERSION | CLOSURE_RECORD_VERSION if record.evidence.is_empty() => {
+            Some(StateReason::NoEvidence)
+        }
+        CAPTURED_RECORD_VERSION | CLOSURE_RECORD_VERSION
+            if record.evidence.iter().any(|item| !item.captured) =>
+        {
             Some(StateReason::EvidenceNotCaptured)
         }
-        CAPTURED_RECORD_VERSION => None,
+        CAPTURED_RECORD_VERSION | CLOSURE_RECORD_VERSION => None,
         _ => Some(StateReason::UnsupportedRecordVersion),
     }
 }
