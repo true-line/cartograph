@@ -612,6 +612,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    captured file and get no receipt, and a `Tool` proven by both an env
    file and a captured file would leave the receipts
    `cross_file_input_unbound`.
+   *As built (AC-1538, API reference loader):* producer-keyed
+   (`Grammar::ApiDocs`, `apidoc-primary-v1:`/`apidoc-primary-v2:`,
+   `t0.api-contract/declared-v2`), pinning the same `toml` and
+   `serde_json` parsers. A `DocumentedRoute`, its `DOCUMENTED_IN` edge and
+   the reference's File are decided by the captured reference alone, so
+   their closure is the capture's `Enumeration` under `api-docs-walk-v1`
+   and each captured document and config the loader read. A contract
+   `Drift` or `Gap` also weighs the recovered Endpoints, an upstream
+   input no captured document decides, so it is not receipted.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
