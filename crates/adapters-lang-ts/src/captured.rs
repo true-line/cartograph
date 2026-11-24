@@ -36,7 +36,8 @@ mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_OTHER_FILES, MAX_RECEIPT_RANGES, MintedHeader,
     MintedReceipt, RangeRole, Receipt, ReceiptClosure, ReceiptRange, ReceiptSourceSizes,
-    fact_match_workspace, fact_match_workspace_bytes, is_input_source,
+    TS_GRAMMAR_RULE, TS_WALK_POLICY, direct_lexical_closure, fact_match_workspace,
+    fact_match_workspace_bytes, is_input_source,
 };
 
 /// Maximum directory entries examined, including excluded entries.
@@ -169,6 +170,9 @@ struct AttestedParse {
     attestation: Attestation,
     /// The commit the parse's evidence names.
     commit: String,
+    /// The input closure the parse was made under (ADR-0072): reuse proves
+    /// a closure only when it is this one.
+    closure_id: String,
     /// The extraction with its facts moved to `facts`.
     extraction: Extraction,
     facts: FactStore,
@@ -187,6 +191,7 @@ impl AttestedParse {
     fn pack(
         attestation: Attestation,
         commit: &str,
+        closure_id: String,
         extraction: &Extraction,
         direct: DirectFacts,
     ) -> Result<Self, CapturedError> {
@@ -210,6 +215,7 @@ impl AttestedParse {
         Ok(Self {
             attestation,
             commit: commit.to_owned(),
+            closure_id,
             extraction: shell,
             facts,
             direct: PackedDirect {
@@ -805,8 +811,11 @@ pub fn extract_captured_dir_packed(
 /// [`extract_captured_dir_packed`] reusing the attested parse of each file
 /// whose retained bytes and producer inputs are unchanged since `cache` was
 /// filled (ADR-0087, #438). Reused files are not parsed; their receipts
-/// are minted afresh over this capture, so facts, receipts and omissions
-/// equal a cold walk's. The statistics count reused, parsed and deleted
+/// are minted afresh over this capture, so facts, cited spans and omissions
+/// equal a cold walk's. A reused parse proves its input closure only when it
+/// was made under that exact closure; otherwise its rule and
+/// declaration receipts are `cache_reuse_unproven` where a cold walk's are
+/// established (ADR-0072 slice 5). The statistics count reused, parsed and deleted
 /// files, and `cache` ends holding exactly this walk's parses. A failed
 /// walk leaves it empty.
 pub fn extract_captured_dir_packed_cached(
@@ -843,8 +852,8 @@ struct ReceiptBudget {
 }
 
 /// Retained memory of admitted receipts (#725): each receipt's own bytes, and
-/// each shared file header once, charged with the first receipt admitted
-/// under it. Charged headers are held until the charge is dropped, so a freed
+/// each shared file header and input closure record once, charged with the
+/// first receipt admitted under it. Charged headers are held until the charge is dropped, so a freed
 /// header's address can never be reused by another uncharged header. Each
 /// held header also charges one map entry; B-tree node overhead beyond that
 /// is excluded.
@@ -852,6 +861,9 @@ struct ReceiptBudget {
 struct Charge {
     bytes: usize,
     headers: BTreeMap<usize, Arc<MintedHeader>>,
+    /// Shared input closure records, each charged once at its canonical
+    /// size, like headers (AC-1084).
+    closures: BTreeMap<usize, Arc<InputClosureV1>>,
 }
 
 impl Charge {
@@ -865,7 +877,17 @@ impl Charge {
         } else {
             header.retained_bytes() + std::mem::size_of::<(usize, Arc<MintedHeader>)>()
         };
-        let bytes = receipt.retained_bytes() + shared;
+        let record = receipt
+            .shared_input_closure()
+            .filter(|record| !self.closures.contains_key(&(Arc::as_ptr(record) as usize)));
+        let record_bytes = record.map_or(0, |record| {
+            std::mem::size_of::<InputClosureV1>()
+                + std::mem::size_of::<(usize, Arc<InputClosureV1>)>()
+                + record
+                    .canonical_bytes()
+                    .map_or(MAX_CLOSURE_BYTES, |bytes| bytes.len())
+        });
+        let bytes = receipt.retained_bytes() + shared + record_bytes;
         if self.bytes + bytes > budget.bytes || held == budget.receipts {
             return false;
         }
@@ -873,6 +895,10 @@ impl Charge {
         self.headers
             .entry(key)
             .or_insert_with(|| Arc::clone(header));
+        if let Some(record) = record {
+            self.closures
+                .insert(Arc::as_ptr(record) as usize, Arc::clone(record));
+        }
         true
     }
 }
@@ -996,15 +1022,18 @@ fn extract_captured_dir_packed_with_policy(
                 .as_deref()
                 .and_then(Option::as_ref)
                 .filter(|prior| prior.attestation == attestation);
-            // `keep` is whether a reused parse was made at this commit.
-            let (extraction, direct, keep) = match prior {
+            let record = direct_lexical_closure(file.reference(), id.repo)?;
+            // `keep` is whether a reused parse was made at this commit;
+            // `made_under` is the closure the parse was made under.
+            let (extraction, direct, keep, made_under) = match prior {
                 Some(prior) => {
                     let (extraction, direct) = prior.unpack(id.commit)?;
-                    (extraction, direct, Some(prior.commit == id.commit))
+                    let keep = Some(prior.commit == id.commit);
+                    (extraction, direct, keep, prior.closure_id.clone())
                 }
                 None => {
                     let (extraction, direct) = parse_file(file, id, registries)?;
-                    (extraction, direct, None)
+                    (extraction, direct, None, record.closure_id.clone())
                 }
             };
             drop(slot);
@@ -1016,12 +1045,20 @@ fn extract_captured_dir_packed_with_policy(
                 file_declarations,
                 measure_source,
             );
+            // A fresh parse's direct-lexical facts are a function of this
+            // file's bytes alone. A reused parse proves that only when it was
+            // made under this exact closure (ADR-0072); a commit retarget
+            // reads no input.
+            let proven = made_under == record.closure_id;
+            let closure = proven.then(|| Arc::new(record));
+            let receipts = establish(receipts, closure)?;
             // A parse reused at its own commit is moved on as it is; any
             // other is packed afresh for the next walk.
             let attested = if retain && keep != Some(true) {
                 Some(AttestedParse::pack(
                     attestation,
                     id.commit,
+                    made_under,
                     &extraction,
                     direct,
                 )?)
@@ -1156,6 +1193,42 @@ fn extract_captured_dir_packed_with_policy(
     Ok((extraction, store, receipts, stats))
 }
 
+/// Record `receipts`' closure states under contract v4 (ADR-0072 slice 5).
+/// A rule or declaration is established by `closure`, its file's own, or is
+/// `cache_reuse_unproven` when a reused parse does not prove it. A
+/// completion-decided receipt depends on other files of the walk and is
+/// `cross_file_input_unbound`.
+fn establish(
+    receipts: FileReceipts,
+    closure: Option<Arc<InputClosureV1>>,
+) -> Result<FileReceipts, CapturedError> {
+    let direct = match &closure {
+        Some(closure) => ReceiptClosure::Established {
+            closure_id: closure.closure_id.clone(),
+        },
+        None => ReceiptClosure::InputClosureNotEstablished {
+            reasons: vec![ClosureGapReason::CacheReuseUnproven],
+        },
+    };
+    let completed = ReceiptClosure::InputClosureNotEstablished {
+        reasons: vec![ClosureGapReason::CrossFileInputUnbound],
+    };
+    let with = |receipts: Vec<MintedReceipt>,
+                state: &ReceiptClosure,
+                record: Option<&Arc<InputClosureV1>>| {
+        receipts
+            .into_iter()
+            .map(|receipt| receipt.with_closure(state.clone(), record.cloned()))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    Ok(FileReceipts {
+        rules: with(receipts.rules, &direct, closure.as_ref())?,
+        declarations: with(receipts.declarations, &direct, closure.as_ref())?,
+        completed: with(receipts.completed, &completed, None)?,
+        omitted_declarations: receipts.omitted_declarations,
+    })
+}
+
 fn retain_matching(receipts: &mut Vec<impl Citable>, extraction: &Extraction) {
     let matching = matcher(extraction);
     receipts.retain(|receipt| matching(receipt));
@@ -1248,3 +1321,5 @@ fn matcher<R: Citable>(extraction: &Extraction) -> impl Fn(&R) -> bool + '_ {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod v4_lane_tests;
