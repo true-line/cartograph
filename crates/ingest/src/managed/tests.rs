@@ -292,6 +292,27 @@ fn managed_origins_normalize_urls_and_validate_missing_stored_mirrors() {
     ] {
         assert_eq!(parse_managed_origin(value).unwrap(), expected);
     }
+    // AC-0141 / AC-0001: pasted browser and hand-typed forms normalize too —
+    // no scheme, http, www, a repo view path, GitHub's own readme suffixes.
+    for value in [
+        "github.com/acme/shop",
+        "www.github.com/acme/shop",
+        "http://github.com/acme/shop",
+        "https://www.github.com/acme/shop.git",
+        "HTTPS://GITHUB.COM/acme/shop",
+        "https://github.com/acme/shop/tree/main",
+        "https://github.com/acme/shop/blob/main/src/lib.rs",
+        "github.com/acme/shop/issues",
+        "https://github.com/acme/shop?tab=readme-ov-file",
+        "https://github.com/acme/shop#readme",
+        "https://github.com/acme/shop/",
+        "https://github.com/acme/shop)",
+        "<https://github.com/acme/shop>",
+        "`acme/shop`",
+        "\u{feff}https://github.com/acme/shop\u{200b}",
+    ] {
+        assert_eq!(parse_managed_origin(value).unwrap(), expected, "{value}");
+    }
     assert_eq!(expected.key, "github:acme/shop");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("space # percent% ü.git");
@@ -321,6 +342,12 @@ fn managed_origins_normalize_urls_and_validate_missing_stored_mirrors() {
         "file:///tmp/repo.git#fragment",
         "file://user:password@localhost/tmp/repo.git",
         "acme/shop/extra",
+        "acme/shop/tree/main",
+        "https://github.com/acme/shop/extra",
+        "https://github.com/acme/shop?tab=x&token=secret",
+        "https://github.com/acme/shop#token=secret",
+        "https://github.com.evil.example/acme/shop",
+        "C:\\Users\\me\\shop",
         "https://github.com/acme/sh\nop",
     ] {
         let error = parse_managed_origin(invalid).unwrap_err();
