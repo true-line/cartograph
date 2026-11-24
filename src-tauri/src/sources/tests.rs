@@ -482,3 +482,35 @@ fn registry_rejects_invalid_inputs_without_creating_registrations() {
     }
     assert!(registry.list().unwrap().is_empty());
 }
+
+// AC-0141 / AC-0001: a refused managed origin echoes the input and says what
+// to enter instead, never the bare "unsupported or unavailable".
+#[test]
+fn refused_managed_origin_echoes_input_and_expected_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let mut registry = SourceRegistry::open(app_data.join("state.db"), &app_data).unwrap();
+    let error = registry
+        .reserve_managed("gitlab.com/acme/shop")
+        .unwrap_err();
+    assert!(error.contains("\"gitlab.com/acme/shop\""), "{error}");
+    assert!(error.contains("https://github.com/owner/repo"), "{error}");
+    for path in [
+        "C:\\Users\\me\\shop",
+        "D:/code/shop",
+        "/home/me/shop",
+        "~/shop",
+        "\\\\server\\share",
+    ] {
+        let error = registry.reserve_managed(path).unwrap_err();
+        assert!(error.contains("Local folder"), "{path}: {error}");
+    }
+    let error = registry
+        .reserve_managed("file:///no/such/mirror.git")
+        .unwrap_err();
+    assert!(error.starts_with("Local mirror"), "{error}");
+    let source = registry
+        .reserve_managed("github.com/simple-login/app?tab=readme-ov-file")
+        .unwrap();
+    assert_eq!(source.repo_key, "simple-login/app");
+}

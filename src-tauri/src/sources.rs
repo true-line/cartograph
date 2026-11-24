@@ -31,6 +31,48 @@ const META_SCHEMA: &str = "CREATE TABLE source_registry_meta (singleton INTEGER 
 const SOURCE_SCHEMA: &str = "CREATE TABLE registered_sources (source_id TEXT PRIMARY KEY NOT NULL, repo_key TEXT NOT NULL UNIQUE, root TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('local', 'managed')), origin_key TEXT UNIQUE, clone_url TEXT, github_repo TEXT, ready INTEGER NOT NULL CHECK (ready IN (0, 1)), CHECK ((kind = 'local' AND origin_key IS NULL AND clone_url IS NULL AND github_repo IS NULL AND ready = 1) OR (kind = 'managed' AND origin_key IS NOT NULL AND clone_url IS NOT NULL))) STRICT";
 const SELECT_SOURCE: &str = "SELECT source_id, repo_key, root, display_name, kind, origin_key, clone_url, github_repo, ready FROM registered_sources";
 
+/// The recovery error for an origin `parse_managed_origin` refused. It
+/// echoes what was entered (trimmed, bounded) and names the accepted forms,
+/// so a typo or a local path under the GitHub source is fixable in place.
+fn managed_origin_error(input: &str) -> String {
+    let trimmed = input.trim();
+    let shown: String = trimmed
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    let shown = if trimmed.chars().count() > 200 {
+        format!("{shown}…")
+    } else {
+        shown
+    };
+    let bytes = trimmed.as_bytes();
+    let local_path = trimmed.starts_with(['/', '\\', '~', '.'])
+        || (bytes.len() >= 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes
+                .get(2)
+                .copied()
+                .is_none_or(|c| matches!(c, b'\\' | b'/')));
+    if trimmed
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("file:"))
+    {
+        format!("Local mirror \"{shown}\" was not found or is not a folder.")
+    } else if local_path {
+        format!(
+            "\"{shown}\" looks like a local folder, not a GitHub repository. \
+             Choose \"Local folder\" as the source to recover it."
+        )
+    } else {
+        format!(
+            "\"{shown}\" is not a GitHub repository address. Enter \
+             https://github.com/owner/repo, git@github.com:owner/repo or owner/repo."
+        )
+    }
+}
+
 fn storage_error(_: rusqlite::Error) -> String {
     // SQLite errors can include corrupt schema text. Do not expose that text.
     STORE_ERROR.into()
@@ -266,8 +308,7 @@ impl SourceRegistry {
 
     pub fn reserve_managed(&mut self, url: &str) -> Result<RegisteredSource, String> {
         bounded_text(url, MAX_ORIGIN_BYTES)?;
-        let origin = parse_managed_origin(url)
-            .map_err(|_| "Managed source origin is unsupported or unavailable".to_string())?;
+        let origin = parse_managed_origin(url).map_err(|_| managed_origin_error(url))?;
         origin.validate().map_err(|_| INVALID_STATE.to_string())?;
         bounded_text(&origin.display_name, MAX_DISPLAY_BYTES)?;
         let tx = self
