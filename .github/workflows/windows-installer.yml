@@ -14,6 +14,11 @@ on:
         required: false
         type: string
         default: ''
+      arch:
+        description: Installer architecture, x64 or arm64. arm64 is cross-built on x64, then installed and checked on a Windows ARM64 runner.
+        required: false
+        type: string
+        default: x64
     secrets:
       AZURE_TENANT_ID:
         required: false
@@ -42,7 +47,15 @@ jobs:
     outputs:
       signing_mode: ${{ steps.installer.outputs.mode }}
       artifact_name: ${{ steps.installer.outputs.name }}
+    env:
+      ARCH: ${{ inputs.arch }}
+      TRIPLE: ${{ inputs.arch == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
     steps:
+      - name: Check installer architecture
+        shell: pwsh
+        run: |
+          if ($env:ARCH -notin @('x64', 'arm64')) { throw "Unsupported installer architecture '$env:ARCH'" }
+
       - name: Checkout exact validation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -72,13 +85,13 @@ jobs:
         with:
           task: Install pinned Windows Rust toolchain
           executable: rustup.exe
-          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--target","x86_64-pc-windows-msvc"]'
+          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal","--target","${{ env.TRIPLE }}"]'
           timeout-seconds: '300'
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: windows-installer
+          key: windows-installer${{ inputs.arch == 'arm64' && '-arm64' || '' }}
           cache-bin: "false"
 
       # npm is a .cmd script on Windows, which only a shell can start, so the
@@ -123,11 +136,11 @@ jobs:
       - name: Compile app and sidecars without signing inputs
         shell: pwsh
         run: |
-          node scripts/build-mcp-relay.mjs
+          node scripts/build-mcp-relay.mjs $env:TRIPLE
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/build-agent-runtime.mjs x86_64-pc-windows-msvc
+          node scripts/build-agent-runtime.mjs $env:TRIPLE
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npx tauri build --target x86_64-pc-windows-msvc --no-bundle --config src-tauri/tauri.windows-bundle.conf.json
+          npx tauri build --target $env:TRIPLE --no-bundle --config src-tauri/tauri.windows-bundle.conf.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The signing client is pinned by version and sha256; signtool comes
@@ -193,10 +206,10 @@ jobs:
         # Both copies: the externalBin sources the bundler packages, and the
         # release-directory copies the compile step already placed.
         run: |
-          foreach ($sidecar in @('target/mcp-relay/cartograph-mcp-x86_64-pc-windows-msvc.exe',
-              'target/agent-runtime/cartograph-agent-x86_64-pc-windows-msvc.exe',
-              'target/x86_64-pc-windows-msvc/release/cartograph-mcp.exe',
-              'target/x86_64-pc-windows-msvc/release/cartograph-agent.exe')) {
+          foreach ($sidecar in @("target/mcp-relay/cartograph-mcp-$env:TRIPLE.exe",
+              "target/agent-runtime/cartograph-agent-$env:TRIPLE.exe",
+              "target/$env:TRIPLE/release/cartograph-mcp.exe",
+              "target/$env:TRIPLE/release/cartograph-agent.exe")) {
             ./scripts/windows-sign.ps1 -Path $sidecar
           }
 
@@ -216,7 +229,7 @@ jobs:
         run: |
           $configs = @('--config', 'src-tauri/tauri.windows-bundle.conf.json')
           if ($env:SIGN_CONFIG) { $configs += @('--config', $env:SIGN_CONFIG) }
-          npx tauri bundle --target x86_64-pc-windows-msvc --bundles nsis @configs
+          npx tauri bundle --target $env:TRIPLE --bundles nsis @configs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify installer and sidecars
@@ -225,13 +238,29 @@ jobs:
         env:
           MODE: ${{ steps.signing.outputs.mode }}
         run: |
-          $bundle = 'target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $bundle = "target/$env:TRIPLE/release/bundle/nsis"
           $setup = @(Get-ChildItem -Path $bundle -Filter '*-setup.exe')
           if ($setup.Count -ne 1) { throw "Expected one NSIS installer in $bundle, found $($setup.Count)" }
-          $relay = 'target/x86_64-pc-windows-msvc/release/cartograph-mcp.exe'
-          $agent = 'target/x86_64-pc-windows-msvc/release/cartograph-agent.exe'
+          $relay = "target/$env:TRIPLE/release/cartograph-mcp.exe"
+          $agent = "target/$env:TRIPLE/release/cartograph-agent.exe"
           foreach ($sidecar in @($relay, $agent)) {
             if (-not (Test-Path $sidecar)) { throw "Missing sidecar $sidecar" }
+          }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          "name=Cartograph_${version}_$($env:ARCH)_$env:MODE" >> $env:GITHUB_OUTPUT
+          "mode=$env:MODE" >> $env:GITHUB_OUTPUT
+          "path=$($setup[0].FullName)" >> $env:GITHUB_OUTPUT
+          # An x64 runner cannot run ARM64 code: the verify-arm64 job installs
+          # and checks that installer natively. Here, check what is signed.
+          if ($env:ARCH -ne 'x64') {
+            foreach ($binary in @($setup[0].FullName, $relay, $agent)) {
+              $signature = Get-AuthenticodeSignature $binary
+              "${binary}: $($signature.Status)"
+              if ($env:MODE -eq 'signed' -and ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate)) {
+                throw "$binary is not validly signed and timestamped"
+              }
+            }
+            exit 0
           }
           # AC-1427: the agent runtime starts and announces itself.
           $ready = '' | & $agent | Select-Object -First 1
@@ -258,10 +287,6 @@ jobs:
               throw "$binary is not validly signed and timestamped"
             }
           }
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          "name=Cartograph_${version}_x64_$env:MODE" >> $env:GITHUB_OUTPUT
-          "mode=$env:MODE" >> $env:GITHUB_OUTPUT
-          "path=$($setup[0].FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Upload installer
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -270,3 +295,59 @@ jobs:
           path: ${{ steps.installer.outputs.path }}
           if-no-files-found: error
           retention-days: 14
+
+  # The ARM64 installer from the job above, installed silently on a native
+  # Windows ARM64 runner. The same checks as x64: the agent runtime announces
+  # itself, and on the signed path every installed binary is signed and
+  # timestamped. A failure here fails the call, so release.yml attaches nothing.
+  verify-arm64:
+    name: Windows ARM64 installer check
+    needs: installer
+    if: inputs.arch == 'arm64'
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Download installer
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.installer.outputs.artifact_name }}
+          path: installer
+
+      - name: Install and verify on ARM64
+        shell: pwsh
+        env:
+          MODE: ${{ needs.installer.outputs.signing_mode }}
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne 'ARM64') { throw "Expected an ARM64 runner, found $env:PROCESSOR_ARCHITECTURE" }
+          $setup = @(Get-ChildItem -Path installer -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { throw "Expected one NSIS installer, found $($setup.Count)" }
+          $installed = Join-Path $env:RUNNER_TEMP 'cartograph-installed'
+          $install = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S', "/D=$installed" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Silent install failed with exit code $($install.ExitCode)" }
+          foreach ($name in @('cartograph-mcp.exe', 'cartograph-agent.exe')) {
+            if (-not (Test-Path (Join-Path $installed $name))) { throw "The installer did not install $name" }
+          }
+          $payload = @(Get-ChildItem -Path $installed -Filter '*.exe' | ForEach-Object FullName)
+          if ($payload.Count -lt 3) { throw "Expected the app and both sidecars in $installed, found $($payload.Count) executables" }
+          # IMAGE_FILE_MACHINE_ARM64 (0xAA64): native ARM64, not emulated x64.
+          foreach ($binary in $payload) {
+            $bytes = [System.IO.File]::ReadAllBytes($binary)
+            $machine = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3c) + 4)
+            if ($machine -ne 0xAA64 -and (Split-Path $binary -Leaf) -notlike 'uninstall*') {
+              throw "$binary is not an ARM64 image (machine 0x$($machine.ToString('X4')))"
+            }
+          }
+          # AC-1427: the installed agent runtime starts and announces itself.
+          $ready = '' | & (Join-Path $installed 'cartograph-agent.exe') | Select-Object -First 1
+          "agent runtime: $ready"
+          if ($ready -notmatch '"type":"ready"') { throw 'The agent runtime did not print its ready line' }
+          $binaries = @($setup[0].FullName) + $payload
+          foreach ($binary in $binaries) {
+            $signature = Get-AuthenticodeSignature $binary
+            "${binary}: $($signature.Status)"
+            if ($env:MODE -eq 'signed' -and ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate)) {
+              throw "$binary is not validly signed and timestamped"
+            }
+          }

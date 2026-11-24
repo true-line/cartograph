@@ -834,7 +834,7 @@ test('every job runs on GitHub-hosted runners except release packaging', () => {
     if (/secrets\.[A-Z]/u.test(workflow)) {
       assert.doesNotMatch(triggers(workflow), /pull_request/u, `${name}: secrets with a PR trigger`);
     }
-    const hosted = /runs-on: (ubuntu|windows|macos)-latest$/u;
+    const hosted = /runs-on: ((ubuntu|windows|macos)-latest|windows-11-arm)$/u;
     const packaging = /runs-on: \[self-hosted, macOS, ARM64\]$/u;
     for (const [line] of workflow.matchAll(/^\s*runs-on:.*$/gmu)) {
       if ((name === 'package.yml' || name === 'scheduled.yml') && packaging.test(line)) {
@@ -970,20 +970,31 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   const compile = installer.indexOf('--no-bundle');
   assert.ok(classify > 0 && compile > classify);
   const compileStep = installer.slice(installer.lastIndexOf('- name:', compile), compile);
-  assert.doesNotMatch(compileStep, /secrets\.|env:/u);
+  assert.doesNotMatch(compileStep, /secrets\.|\n +env:\n/u);
+  // The job-level env names only the architecture, never a secret.
+  assert.match(installer, /    env:\n      ARCH: \$\{\{ inputs\.arch \}\}\n      TRIPLE: [^\n]*\n    steps:/u);
   assert.match(installer, /\$sha256 = '35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a'/u);
-  assert.match(installer, /npx tauri bundle --target x86_64-pc-windows-msvc --bundles nsis/u);
+  assert.match(installer, /npx tauri bundle --target \$env:TRIPLE --bundles nsis/u);
+  assert.match(installer, /TRIPLE: \$\{\{ inputs\.arch == 'arm64' && 'aarch64-pc-windows-msvc' \|\| 'x86_64-pc-windows-msvc' \}\}/u);
+  // ARM64 is cross-built, then installed and checked on a native ARM64 runner.
+  const verify = installer.split('\n  verify-arm64:\n')[1] ?? '';
+  assert.match(verify, /if: inputs\.arch == 'arm64'\n +runs-on: windows-11-arm\n/u);
+  assert.match(verify, /-ArgumentList '\/S', "\/D=\$installed" -Wait -PassThru/u);
+  assert.match(verify, /\$signature\.Status -ne 'Valid' -or -not \$signature\.TimeStamperCertificate/u);
+  assert.match(verify, /"type":"ready"/u);
+  assert.doesNotMatch(verify, /secrets\./u);
+  assert.match(caller, /uses: \.\/\.github\/workflows\/windows-installer\.yml\n +with:\n +arch: arm64\n?$/u);
   // The signed path verifies every shipped binary, timestamp included.
   assert.match(installer, /\$signature\.Status -ne 'Valid' -or -not \$signature\.TimeStamperCertificate/u);
   // ...as installed: the target copy of app.exe stays unsigned after bundling.
   assert.match(installer, /-ArgumentList '\/S', "\/D=\$installed" -Wait -PassThru/u);
   assert.match(installer, /\$binaries = @\(\$setup\[0\]\.FullName\) \+ \$payload/u);
   assert.doesNotMatch(installer, /release\/app\.exe/u);
-  assert.match(installer, /"name=Cartograph_\$\{version\}_x64_\$env:MODE"/u);
+  assert.match(installer, /"name=Cartograph_\$\{version\}_\$\(\$env:ARCH\)_\$env:MODE"/u);
   // release.yml is the one signing caller: it passes exactly the three
   // service-principal secrets and attaches the installer only when signed.
   const release = readFileSync(path.join(dir, 'release.yml'), 'utf8');
-  const windowsJob = release.split('\n  windows:\n')[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
+  const windowsJob = release.split('\n  windows:\n')[1]?.split(/\n  [a-z][a-z0-9-]*:\n/u)[0] ?? '';
   assert.match(windowsJob, /uses: \.\/\.github\/workflows\/windows-installer\.yml/u);
   assert.match(windowsJob, /permissions:\n +contents: read\n +uses:/u);
   assert.match(windowsJob, /ref: \$\{\{ needs\.validate\.outputs\.tag \}\}/u);
@@ -994,7 +1005,14 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   // the signed installer; a Windows failure never holds the macOS release.
   assert.doesNotMatch(release, /\n  publish-windows:\n/u);
   const publishJob = release.split('\n  publish:\n')[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
-  assert.match(publishJob, /needs:\n +- validate\n +- build\n +- windows\n/u);
+  assert.match(publishJob, /needs:\n +- validate\n +- build\n +- windows\n +- windows-arm64\n/u);
+  const arm64Job = release.split('\n  windows-arm64:\n')[1]?.split(/\n  [a-z][a-z0-9-]*:\n/u)[0] ?? '';
+  assert.match(arm64Job, /uses: \.\/\.github\/workflows\/windows-installer\.yml\n +with:\n +ref: \$\{\{ needs\.validate\.outputs\.tag \}\}\n +arch: arm64\n/u);
+  assert.deepEqual([...arm64Job.matchAll(/secrets\.([A-Z_]+)/gu)].map((match) => match[1]),
+    ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']);
+  assert.match(publishJob, /if: needs\.windows-arm64\.result == 'success' && needs\.windows-arm64\.outputs\.signing_mode == 'signed'/u);
+  assert.match(publishJob, /mv "\$\{found\[0\]\}" "dist\/Cartograph_\$\{VERSION\}_arm64_signed-setup\.exe"/u);
+  assert.ok(publishJob.indexOf('arm64_signed-setup.exe') < publishJob.indexOf('gh release create'));
   assert.match(publishJob, /if: \$\{\{ !cancelled\(\) && needs\.validate\.result == 'success' && needs\.build\.result == 'success' \}\}/u);
   assert.match(publishJob, /if: needs\.windows\.result == 'success' && needs\.windows\.outputs\.signing_mode == 'signed'/u);
   assert.match(publishJob, /mv "\$\{found\[0\]\}" "dist\/Cartograph_\$\{VERSION\}_x64_signed-setup\.exe"/u);
