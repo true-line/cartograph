@@ -1221,6 +1221,16 @@ fn extract_captured_dir_packed_with_policy(
         }
         kept
     });
+    // Recharge what is still held, so a dropped receipt's bytes, header and
+    // closure leave room for the receipts minted after completion.
+    charge = Charge::default();
+    let unlimited = ReceiptBudget {
+        bytes: usize::MAX,
+        receipts: usize::MAX,
+    };
+    for (index, receipt) in receipts.iter().enumerate() {
+        charge.admit(receipt, index, unlimited);
+    }
     let declared: Vec<bool> = declarations.iter().map(&matching).collect();
     let decided: Vec<bool> = completed
         .iter()
