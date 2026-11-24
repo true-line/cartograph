@@ -510,9 +510,16 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    completion keeps the one it emitted unchanged, on the same walk
    closure. A call resolved through a re-export, a base class or an
    interface is emitted with other files' evidence and keeps no receipt.
-   Other directory-proven facts with no receipt today (routes, Pulumi
-   edges, service-worker registrations, GraphQL target tests) are the
-   remaining slice 6 work.
+   *As built (AC-1098):* completion only edits held facts in place and
+   appends new ones, so each fact it appends that no parse receipted is
+   minted after completion against the TS file its evidence cites, and
+   stated like that file's decided receipts. A TS receipt binds one file,
+   so only facts whose evidence lies in one file qualify (Pulumi
+   references, for example). Facts that also cite a barrel or a
+   `package.json` (re-export calls, Next API routes, package `mod:` nodes),
+   and facts completion edits in place (service-worker registrations),
+   still have none. Binding them needs a multi-file TS receipt contract;
+   that is the remaining slice 6 work.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
