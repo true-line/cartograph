@@ -35,7 +35,7 @@ fn prov(start: u64, end: u64, fact: &str) -> serde_json::Value {
 /// Capture a declared Markdown reference, its config and a TS file, and
 /// stage receipts for the reference's File, its route and their edge, as
 /// the contract extractor emits them.
-fn walk(root: &Path, heading: &str) -> (Vec<MintedReceipt>, Vec<String>) {
+fn walk(root: &Path, heading: &str, bound: bool) -> (Vec<MintedReceipt>, Vec<String>) {
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::create_dir_all(root.join(".cartograph")).unwrap();
     let text = format!("# API\n\n{heading}\n");
@@ -85,7 +85,8 @@ fn walk(root: &Path, heading: &str) -> (Vec<MintedReceipt>, Vec<String>) {
         repo: REPO,
         commit: "workdir",
     };
-    let receipts = stage_api_doc_receipts(&capture, &read, &id, (&nodes, &edges)).into_receipts();
+    let receipts =
+        stage_api_doc_receipts(&capture, &read, &id, (&nodes, &edges), bound).into_receipts();
     (receipts, read)
 }
 
@@ -97,7 +98,7 @@ fn walk(root: &Path, heading: &str) -> (Vec<MintedReceipt>, Vec<String>) {
 #[test]
 fn api_doc_receipts_are_established_on_the_loader_closure() {
     let directory = tempfile::tempdir().unwrap();
-    let (before, _) = walk(directory.path(), "## GET /orders");
+    let (before, _) = walk(directory.path(), "## GET /orders", true);
     assert_eq!(
         before.len(),
         3,
@@ -141,11 +142,29 @@ fn api_doc_receipts_are_established_on_the_loader_closure() {
         format!("file {DOC}"),
     ];
     assert_eq!(inputs, expected);
-    let (after, _) = walk(directory.path(), "## GET  /orders");
+    let (after, _) = walk(directory.path(), "## GET  /orders", true);
     assert_ne!(
         after[0].input_closure().unwrap().closure_id,
         record.closure_id
     );
+}
+
+// AC-1538: a reference a system manifest declares is decided by a
+// declaration outside the capture, so its receipts are
+// `external_input_unbound`.
+#[test]
+fn manifest_declared_references_are_externally_unbound() {
+    let directory = tempfile::tempdir().unwrap();
+    let (receipts, _) = walk(directory.path(), "## GET /orders", false);
+    assert_eq!(receipts.len(), 3);
+    for receipt in &receipts {
+        assert_eq!(
+            receipt.closure(),
+            Some(&ReceiptClosure::InputClosureNotEstablished {
+                reasons: vec![ClosureGapReason::ExternalInputUnbound]
+            })
+        );
+    }
 }
 
 // AC-1538: the API reference grammar is chosen by the producer, never by a
