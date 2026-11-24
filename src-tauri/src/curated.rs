@@ -94,6 +94,10 @@ pub(crate) struct CuratedReview {
     /// By record identity, with the store revision the assessment's graph
     /// read observed (`None` when that read failed).
     assessments: BTreeMap<String, (BasisAssessment, Option<StoreRevision>)>,
+    /// By accepted record identity, the latest reconciliation result id the
+    /// read took (`None` when there was none). A record whose results could
+    /// not be read is not listed (AC-1076).
+    reconciled: BTreeMap<String, Option<String>>,
     /// Where [`project`] keeps what the documents' compile said of the
     /// decisions no stored fact carries: the application's when [`gather`]
     /// made this review, and otherwise one that starts empty.
@@ -546,12 +550,20 @@ impl ReviewSource for AppState {
     }
 
     fn unchanged(&self, review: &CuratedReview) -> Result<bool, CuratedFailure> {
-        let records = {
+        let (records, reconciled) = {
             let store = self
                 .proposals
                 .lock()
                 .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
-            reviewed_records(&store)?
+            // A record reconciled again since the read would project another
+            // result (AC-1076).
+            let mut reconciled = true;
+            for (id, latest) in &review.reconciled {
+                let now = reconcile::latest_result_id(&store, id)
+                    .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
+                reconciled &= &now == latest;
+            }
+            (reviewed_records(&store)?, reconciled)
         };
         let later = {
             let store = self
@@ -560,7 +572,7 @@ impl ReviewSource for AppState {
                 .map_err(|_| CuratedFailure::ReviewsUnavailable)?;
             reviewed_in_draft_store(&store)?
         };
-        Ok(review.same_records(&records, &later))
+        Ok(reconciled && review.same_records(&records, &later))
     }
 }
 
@@ -674,6 +686,7 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         Err(failure) => return CuratedReview::failed(failure),
     };
     let mut assessments = BTreeMap::new();
+    let mut reconciled = BTreeMap::new();
     // One graph copy and one snapshot identity for all of them (#1834).
     let mut observed = assessment::SharedObservation::default();
     let accepted = proposals
@@ -686,7 +699,10 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         // other is assessed as before (ADR-0072 slice 4, AC-1076).
         let reconciliation =
             match reconcile::curated_reconciliation(state, &record.record_id, &mut observed) {
-                Ok(reconciliation) => reconciliation,
+                Ok((latest, reconciliation)) => {
+                    reconciled.insert(record.record_id.clone(), latest);
+                    reconciliation
+                }
                 // Its results could not be read. Not eligible, and listed.
                 Err(_) => {
                     assessments.insert(record.record_id.clone(), (BasisAssessment::Failed, None));
@@ -720,6 +736,7 @@ pub(crate) fn gather(state: &AppState) -> CuratedReview {
         findings: read.findings,
         attested: read.attested,
         assessments,
+        reconciled,
         settled: Arc::clone(&state.curated_settled),
     }
 }

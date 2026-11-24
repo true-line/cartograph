@@ -336,3 +336,21 @@ fn a_stale_reconciliation_falls_back_to_the_assessment() {
     assert!(!row.contains("reconciliation"), "{row}");
     assert!(row.contains("graph changed"), "{row}");
 }
+
+// AC-1076: an MCP read's recheck sees a record reconciled again after its
+// projection read the earlier result.
+#[test]
+fn reconciling_again_after_a_read_fails_its_recheck() {
+    use crate::curated::ReviewSource;
+    let fixture = fixture();
+    let (state, id) = (&fixture.state, &fixture.staged.proposal_id);
+    accept(state, id);
+    let never = state.gather();
+    assert!(state.unchanged(&never).unwrap());
+    reconcile(state, id, 1).unwrap();
+    assert!(!state.unchanged(&never).unwrap());
+    let read = state.gather();
+    assert!(state.unchanged(&read).unwrap());
+    reconcile(state, id, 2).unwrap();
+    assert!(!state.unchanged(&read).unwrap());
+}
