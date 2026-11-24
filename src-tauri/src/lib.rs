@@ -2696,6 +2696,14 @@ fn extract_tree_packed(
             spec::UnreadAdrReason::NotUtf8 => reads.adr_not_utf8.push(unread.path),
         }
     }
+    if let Some(capture) = primary.filter(|_| reads.documents_captured) {
+        stage_adr_receipts(
+            capture,
+            &adapters_lang_ts::SourceId { repo, commit },
+            &adr_read.facts,
+            receipts,
+        );
+    }
     facts
         .extend(adr_read.facts.nodes, adr_read.facts.edges)
         .map_err(pack_err)?;
@@ -3342,6 +3350,33 @@ fn stage_api_doc_receipts(
         bound,
     );
     admit_surviving_lane_receipts(&kept, &edges, stage, receipts);
+}
+
+/// Producer-keyed Adr receipts for a captured repository's found ADRs
+/// (AC-1540), on the decision records the reader read: each ADR node's own
+/// record. An ADR is established on them; a `DECIDES` edge, which exists
+/// only for a recovered target, is not.
+fn stage_adr_receipts(
+    capture: &source_capture::Capture,
+    id: &adapters_lang_ts::SourceId<'_>,
+    adr_facts: &spec::AdrFacts,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
+) {
+    let read: Vec<String> = adr_facts
+        .nodes
+        .iter()
+        .filter_map(|node| node.props["path"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (published_nodes, published_edges) = publication_view(&adr_facts.nodes, &adr_facts.edges);
+    let stage = adapters_lang_ts::captured::stage_adr_receipts(
+        capture,
+        &read,
+        id,
+        (&published_nodes, &published_edges),
+    );
+    admit_surviving_lane_receipts(&adr_facts.nodes, &adr_facts.edges, stage, receipts);
 }
 
 fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {

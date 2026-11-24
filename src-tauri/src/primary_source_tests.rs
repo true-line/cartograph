@@ -4158,6 +4158,106 @@ fn documents_and_found_adrs_are_read_from_the_capture() {
     assert!(live.contains("Payments") && live.contains("0002-late"));
 }
 
+// AC-1540: the host's found ADRs over a captured documentation walk get
+// producer-keyed receipts established on the decision records read, and
+// the receipts bind the facts it publishes; a DECIDES edge, which exists
+// only for a recovered target, is receipted but not established.
+#[test]
+fn found_adrs_are_established_on_the_record_closure() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let target = format!("file:{}@source.ts", source.repo_key);
+    std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+    std::fs::write(
+        root.join("docs/adr/0001-orders.md"),
+        format!("# 1. Orders\n\nGoverns: `{target}`\n"),
+    )
+    .unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.documents_captured);
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                documents_captured: true,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+    };
+    assert!(
+        extraction
+            .edges
+            .iter()
+            .any(|edge| edge.label == "DECIDES" && edge.dst == target),
+        "the record decides the file"
+    );
+    let minted: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.id().starts_with("adr-primary-v2:"))
+        .collect();
+    let adr = minted
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), core_graph::FactKey::Node { .. }))
+        .expect("the ADR is receipted");
+    let record = adr.input_closure().expect("an established closure");
+    assert_eq!(
+        record.parameters.walk_policy,
+        adapters_lang_ts::captured::ADR_WALK_POLICY
+    );
+    let files: BTreeSet<&str> = record
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            adapters_lang_ts::captured::ClosureInput::CapturedFile { file } => {
+                Some(file.path.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(files, BTreeSet::from(["docs/adr/0001-orders.md"]));
+    let decides = minted
+        .iter()
+        .find(|receipt| matches!(receipt.fact_key(), core_graph::FactKey::Edge { .. }))
+        .expect("the DECIDES edge is receipted");
+    assert_eq!(decides.input_closure(), None);
+    let published = crate::primary_source::matching_bindings(&extraction, &receipts);
+    for receipt in &minted {
+        assert!(
+            published
+                .iter()
+                .any(|binding| binding.receipt_id == receipt.id()),
+            "{}",
+            receipt.id()
+        );
+    }
+}
+
 // AC-1065: a documentation selection that does not fit beside the readers
 // is dropped first: the readers and lanes keep their capture and only the
 // documentation walk reads the checkout.
