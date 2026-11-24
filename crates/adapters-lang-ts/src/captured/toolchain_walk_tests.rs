@@ -161,3 +161,80 @@ fn the_toolchain_grammar_is_producer_keyed() {
         assert_ne!(Grammar::for_path(path), Grammar::Toolchain);
     }
 }
+
+// AC-1536: a tool proven by a file's name alone (a pip requirements file,
+// a Maven POM, a lockfile) cites the whole captured file, so its `Tool`,
+// `DEFINED_IN` edge and `File` all get established receipts.
+#[test]
+fn presence_only_tools_are_receipted_on_the_whole_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let paths: Vec<String> = ["requirements.txt", "pom.xml", "yarn.lock"]
+        .map(String::from)
+        .to_vec();
+    for path in &paths {
+        std::fs::write(root.join(path), "content\n").unwrap();
+    }
+    let capture = capture_working_tree(
+        root,
+        &CaptureSourceId::new(SOURCE).unwrap(),
+        &paths,
+        CaptureLimits::default(),
+    )
+    .unwrap();
+    let read = |path: &str| {
+        capture
+            .file(path)
+            .map(|file| file.bytes().to_vec())
+            .map_err(|_| std::io::Error::other("not captured"))
+    };
+    let (facts, reads) = ingest::toolchain::extract_from_capture_reading(
+        root,
+        &paths,
+        &read,
+        &ingest::toolchain::SourceId {
+            repo: REPO,
+            commit: "workdir",
+        },
+        &std::collections::BTreeSet::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let mut read_paths = reads.read.clone();
+    read_paths.sort();
+    let mut expected = paths.clone();
+    expected.sort();
+    assert_eq!(read_paths, expected);
+    let id = SourceId {
+        repo: REPO,
+        commit: "workdir",
+    };
+    let receipts = stage_toolchain_receipts(
+        &capture,
+        &reads.read,
+        &id,
+        (&facts.nodes, &facts.edges),
+        reads.bound,
+    )
+    .into_receipts();
+    for node in &facts.nodes {
+        assert!(
+            receipts.iter().any(|receipt| receipt.matches_node(node)),
+            "{} has no receipt",
+            node.id
+        );
+    }
+    for edge in &facts.edges {
+        assert!(
+            receipts.iter().any(|receipt| receipt.matches_edge(edge)),
+            "{} -> {} has no receipt",
+            edge.src,
+            edge.dst
+        );
+    }
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.input_closure().is_some())
+    );
+}

@@ -1166,12 +1166,22 @@ fn extract_walked(
         files: config_files.len() as u64,
         ..Default::default()
     };
-    let evidence = |path: &str, start: u64, end: u64| EvidenceRef {
-        repo: id.repo.to_string(),
-        path: path.to_string(),
-        byte_start: start,
-        byte_end: end,
-        commit_sha: id.commit.to_string(),
+    // A tool proven by a file's name alone (a lockfile, `requirements.txt`,
+    // `pom.xml`, a code-authored config) cites the whole file: its presence
+    // is the proof, and an empty span would cite no bytes (AC-1536).
+    let evidence = |path: &str, start: u64, end: u64| {
+        let end = if (start, end) == (0, 0) {
+            config_files.get(path).copied().unwrap_or(0)
+        } else {
+            end
+        };
+        EvidenceRef {
+            repo: id.repo.to_string(),
+            path: path.to_string(),
+            byte_start: start,
+            byte_end: end,
+            commit_sha: id.commit.to_string(),
+        }
     };
     for (rel, len) in &config_files {
         // Env files get no evidence span: a span is a readable window into
