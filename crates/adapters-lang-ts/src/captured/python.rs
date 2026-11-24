@@ -84,7 +84,7 @@ fn mint_lane_file_receipts(
 
 /// As [`mint_lane_file_receipts`]; with `capture`, a fact whose evidence also
 /// cites other captured files of the same grammar is bound to each (AC-1039).
-pub(super) fn mint_lane_receipts_in(
+fn mint_lane_receipts_in(
     grammar: Grammar,
     file: &CapturedFile,
     capture: Option<&source_capture::Capture>,

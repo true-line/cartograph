@@ -1215,7 +1215,15 @@ fn extract_captured_dir_packed_with_policy(
         .chain(completed.iter().map(|(receipt, _)| receipt))
         .map(|receipt| receipt.fact_key().clone())
         .collect();
-    let emitted = completion_receipts(capture, id, &store, held, &receipted, budget);
+    let emitted = completion_receipts(
+        capture,
+        id,
+        &store,
+        held,
+        &receipted,
+        budget,
+        measure_source,
+    );
     drop(receipted);
     let matching = packed_matcher(&store);
     receipts.retain(|receipt| matching(receipt));
@@ -1304,10 +1312,9 @@ fn extract_captured_dir_packed_with_policy(
 /// Receipt candidates for the facts directory completion appended past
 /// `held` (nodes, edges), skipping any fact already `receipted`. Each is
 /// minted against the captured TS file its first evidence entry cites, file
-/// by file in path order, and staged within `budget`. A TS receipt binds one
-/// file, so a fact whose evidence also cites another file (a barrel, a
-/// `package.json`) gets none, as does one that does not fit. Facts are
-/// decoded one file at a time.
+/// by file in path order, and staged within `budget` as it is minted. A TS
+/// receipt binds one file, so a fact whose evidence also cites another file
+/// (a barrel, a `package.json`) gets none, as does one that does not fit.
 fn completion_receipts(
     capture: &Capture,
     id: &SourceId,
@@ -1315,6 +1322,7 @@ fn completion_receipts(
     (nodes, edges): (usize, usize),
     receipted: &std::collections::BTreeSet<FactKey>,
     budget: ReceiptBudget,
+    measure_source: bool,
 ) -> Vec<MintedReceipt> {
     let mut by_file: BTreeMap<String, (Vec<usize>, Vec<usize>)> = BTreeMap::new();
     let primary = |props: &serde_json::Value| {
@@ -1353,25 +1361,38 @@ fn completion_receipts(
         let Ok(file) = capture.file(&path) else {
             continue;
         };
-        let decoded_nodes: Vec<Node> = node_slots
-            .iter()
-            .filter_map(|&index| store.nodes()[index].unpack().ok())
-            .collect();
-        let decoded_edges: Vec<Edge> = edge_slots
-            .iter()
-            .filter_map(|&index| store.edges()[index].unpack().ok())
-            .collect();
-        let Ok(minted) = python::mint_lane_receipts_in(
-            Grammar::for_path(&path),
-            file,
-            None,
-            id,
-            &decoded_nodes,
-            &decoded_edges,
-        ) else {
-            continue;
-        };
-        for receipt in minted {
+        // Each fact is decoded, minted and admitted in turn, so a file of
+        // many emitted facts holds no more receipts than the budget admits.
+        let mut header = None;
+        let facts = node_slots
+            .into_iter()
+            .map(|index| store.nodes()[index].unpack().map(Fact::Node))
+            .chain(
+                edge_slots
+                    .into_iter()
+                    .map(|index| store.edges()[index].unpack().map(Fact::Edge)),
+            );
+        for fact in facts {
+            if staged.len() == budget.receipts {
+                return staged;
+            }
+            let Ok(fact) = fact else { continue };
+            let receipt = match &fact {
+                Fact::Node(node) => Receipt::for_node(file, id, node),
+                Fact::Edge(edge) => Receipt::for_edge(file, id, edge),
+            };
+            let Ok(receipt) = receipt
+                .and_then(|receipt| {
+                    if measure_source {
+                        receipt.with_source_sizes(file)
+                    } else {
+                        Ok(receipt)
+                    }
+                })
+                .and_then(|receipt| MintedReceipt::compact(receipt, &mut header))
+            else {
+                continue;
+            };
             // A key completion emitted twice keeps the receipt minted first;
             // the walk's matching keeps it only if it is the fact held.
             if seen.insert(receipt.fact_key().clone())
