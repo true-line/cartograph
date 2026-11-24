@@ -95,7 +95,9 @@ impl ScopedEvidenceTarget {
             || prefixed(&self.receipt_id, "tf-primary-v1:")
             || prefixed(&self.receipt_id, "tf-primary-v2:")
             || prefixed(&self.receipt_id, "pipe-primary-v1:")
-            || prefixed(&self.receipt_id, "pipe-primary-v2:");
+            || prefixed(&self.receipt_id, "pipe-primary-v2:")
+            || prefixed(&self.receipt_id, "env-primary-v1:")
+            || prefixed(&self.receipt_id, "env-primary-v2:");
         let receipt_kind = if observed {
             prefixed(&self.receipt_id, "obs-input-v1:")
         } else {

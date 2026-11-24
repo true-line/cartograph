@@ -5501,6 +5501,120 @@ fn pipeline_facts_are_established_on_the_reader_closure() {
     }
 }
 
+// AC-1530: the environment reader's facts over a capture get Environment
+// receipts established on the reader's closure when the captured files
+// alone decide them; a Compose `env_file`, read from the checkout, leaves
+// them `cross_file_input_unbound`.
+#[test]
+fn environment_facts_are_established_on_the_reader_closure() {
+    for (compose, bound) in [
+        ("services:\n  web:\n    image: nginx\n", true),
+        (
+            "services:\n  web:\n    image: nginx\n    env_file: web.env\n",
+            false,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let app_data = directory(dir.path(), "private");
+        let root = directory(dir.path(), "mixed");
+        std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+        std::fs::write(root.join("compose.yaml"), compose).unwrap();
+        // An env file names an environment the checkout decides, so only
+        // the unbound case has one.
+        if !bound {
+            std::fs::write(root.join("web.env"), "A=1\n").unwrap();
+        }
+        let state = app_state(&app_data);
+        let source = register_local_source(&state, &root).unwrap();
+        let layers = vec!["client".to_string()];
+        let input = state
+            .primary_sources
+            .prepare(&source, source.root(), &layers)
+            .unwrap();
+        assert!(input.environments_captured);
+        let capture = input.capture.as_ref().unwrap();
+        let mut receipts = Vec::new();
+        let (extraction, _, _) = {
+            let mut caches = state.extraction_caches.lock().unwrap();
+            let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+            extract_tree_with_primary(
+                source.root(),
+                &source.repo_key,
+                "workdir",
+                &layers,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                None,
+                None,
+                &[],
+                cache,
+                &[],
+                &mut |_| {},
+                Some(capture),
+                &mut receipts,
+                &mut crate::ProducerReads {
+                    environments_captured: input.environments_captured,
+                    ..crate::ProducerReads::default()
+                },
+            )
+            .unwrap()
+        };
+        let environment: Vec<_> = receipts
+            .iter()
+            .filter(|receipt| receipt.file().path == "compose.yaml")
+            .collect();
+        assert!(!environment.is_empty());
+        let published = crate::primary_source::matching_bindings(&extraction, &receipts);
+        for minted in &environment {
+            assert!(
+                minted.id().starts_with("env-primary-v2:"),
+                "{}",
+                minted.id()
+            );
+            assert!(
+                published
+                    .iter()
+                    .any(|binding| binding.receipt_id == minted.id())
+            );
+        }
+        if bound {
+            let file = capture.file("compose.yaml").unwrap();
+            let record = environment[0]
+                .input_closure()
+                .expect("an established closure");
+            assert_eq!(
+                record.parameters.walk_policy,
+                adapters_lang_ts::captured::ENVIRONMENT_WALK_POLICY
+            );
+            let files: Vec<_> = record
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    adapters_lang_ts::captured::ClosureInput::CapturedFile { file } => Some(file),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(files, [file.reference()]);
+            assert!(
+                environment
+                    .iter()
+                    .all(|minted| minted.input_closure() == Some(record))
+            );
+        } else {
+            assert!(environment.iter().all(|minted| {
+                minted.closure()
+                    == Some(
+                        &adapters_lang_ts::captured::ReceiptClosure::InputClosureNotEstablished {
+                            reasons: vec![
+                                adapters_lang_ts::captured::ClosureGapReason::CrossFileInputUnbound,
+                            ],
+                        },
+                    )
+            }));
+        }
+    }
+}
+
 // AC-1037: a fact the Java directory join builds, a Spring endpoint composed
 // from the class and method mappings of one captured file, gets a Java
 // receipt bound to its final form and citing both mapping spans.
