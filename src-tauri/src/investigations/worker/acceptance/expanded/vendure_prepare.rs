@@ -384,13 +384,16 @@ fn captured_analyst_lane(
             | "domain-analyst@28"
             | "domain-analyst@29"
             | "domain-analyst@31"
+            | "domain-analyst@32"
     ) {
         return Err("unsupported captured analyst specialist".into());
     }
     // ADR-0085: the tool-calling lane (@29, and @31 on it) is local until the
     // Claude lane lands.
-    if matches!(specialist, "domain-analyst@29" | "domain-analyst@31")
-        && mode != InvestigationProviderMode::Local
+    if matches!(
+        specialist,
+        "domain-analyst@29" | "domain-analyst@31" | "domain-analyst@32"
+    ) && mode != InvestigationProviderMode::Local
     {
         return Err("tool-calling analyst is local only".into());
     }
@@ -402,6 +405,7 @@ fn captured_analyst_lane(
                 | "domain-analyst@28"
                 | "domain-analyst@29"
                 | "domain-analyst@31"
+                | "domain-analyst@32"
         ) || mode != InvestigationProviderMode::Local)
     {
         return Err("invalid local finish policy lane".into());
@@ -433,6 +437,10 @@ fn captured_analyst_lane_admits_analyst28_like_analyst27() {
     captured_analyst_lane("domain-analyst@31", false, Local).unwrap();
     captured_analyst_lane("domain-analyst@31", true, Local).unwrap();
     assert!(captured_analyst_lane("domain-analyst@31", false, Cloud).is_err());
+    // AC-1444 (#1728): and @32.
+    captured_analyst_lane("domain-analyst@32", false, Local).unwrap();
+    captured_analyst_lane("domain-analyst@32", true, Local).unwrap();
+    assert!(captured_analyst_lane("domain-analyst@32", false, Cloud).is_err());
     for role in [
         "domain-analyst@30",
         "domain-analyst@16",

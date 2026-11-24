@@ -1108,6 +1108,11 @@ mod policy_catalog_tests {
                 refused(SpecialistId::DomainAnalystV31, mode, runtime),
                 refused(SpecialistId::DomainAnalystV29, mode, runtime)
             );
+            // AC-1444: and @32.
+            assert_eq!(
+                refused(SpecialistId::DomainAnalystV32, mode, runtime),
+                refused(SpecialistId::DomainAnalystV29, mode, runtime)
+            );
         }
     }
 
@@ -1283,6 +1288,7 @@ mod policy_catalog_tests {
             SpecialistId::DomainAnalystV29,
             SpecialistId::DomainAnalystV30,
             SpecialistId::DomainAnalystV31,
+            SpecialistId::DomainAnalystV32,
         ] {
             assert_eq!(
                 available_specialists().contains(&role),
