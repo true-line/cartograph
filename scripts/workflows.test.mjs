@@ -975,6 +975,10 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   assert.match(installer, /npx tauri bundle --target x86_64-pc-windows-msvc --bundles nsis/u);
   // The signed path verifies every shipped binary, timestamp included.
   assert.match(installer, /\$signature\.Status -ne 'Valid' -or -not \$signature\.TimeStamperCertificate/u);
+  // ...as installed: the target copy of app.exe stays unsigned after bundling.
+  assert.match(installer, /-ArgumentList '\/S', "\/D=\$installed" -Wait -PassThru/u);
+  assert.match(installer, /\$binaries = @\(\$setup\[0\]\.FullName\) \+ \$payload/u);
+  assert.doesNotMatch(installer, /release\/app\.exe/u);
   assert.match(installer, /"name=Cartograph_\$\{version\}_x64_\$env:MODE"/u);
   // release.yml is the one signing caller: it passes exactly the three
   // service-principal secrets and attaches the installer only when signed.

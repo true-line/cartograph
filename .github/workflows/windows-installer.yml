@@ -237,9 +237,20 @@ jobs:
           $ready = '' | & $agent | Select-Object -First 1
           "agent runtime: $ready"
           if ($ready -notmatch '"type":"ready"') { throw 'The agent runtime did not print its ready line' }
+          # Check what ships: install silently and read the installed files.
+          # tauri bundle signs app.exe before packaging it, then leaves the
+          # target copy unsigned, so that copy proves nothing.
+          $installed = Join-Path $env:RUNNER_TEMP 'cartograph-installed'
+          $install = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S', "/D=$installed" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Silent install failed with exit code $($install.ExitCode)" }
+          foreach ($name in @('cartograph-mcp.exe', 'cartograph-agent.exe')) {
+            if (-not (Test-Path (Join-Path $installed $name))) { throw "The installer did not install $name" }
+          }
+          $payload = @(Get-ChildItem -Path $installed -Filter '*.exe' | ForEach-Object FullName)
+          if ($payload.Count -lt 3) { throw "Expected the app and both sidecars in $installed, found $($payload.Count) executables" }
           # ADR-0093: on the signed path every shipped binary has a valid,
           # timestamped Authenticode signature, or nothing is uploaded.
-          $binaries = @($setup[0].FullName, 'target/x86_64-pc-windows-msvc/release/app.exe', $relay, $agent)
+          $binaries = @($setup[0].FullName) + $payload
           foreach ($binary in $binaries) {
             $signature = Get-AuthenticodeSignature $binary
             "${binary}: $($signature.Status)"
