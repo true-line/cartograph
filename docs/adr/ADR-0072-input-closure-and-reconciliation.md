@@ -496,6 +496,18 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    read is retained with those bytes. An existing imported asset is not
    retained and an allowlist may lead completion into installed packages,
    so either leaves them unbound. The selection lists a root `vercel.json`.
+   *As built (AC-1094):* when both are bound, a completion-decided File,
+   TestCase or Gap receipt of a proven parse is established on its file's
+   walk closure (walk policy `source-walk-v2`): the `Enumeration` of the
+   capture, which binds every retained file and so every other file of the
+   walk, the file's `CapturedFile`, each bound config and root file read,
+   and an `AbsentFromEnumeration` per path looked up and not found. One
+   record per file is shared by its decided receipts. Otherwise the reason
+   stays `cross_file_input_unbound`, or `cache_reuse_unproven` for a parse
+   reused under another closure, or `limit_exceeded` past the closure bound.
+   Directory-proven facts with no receipt today (CALLS, routes, Pulumi
+   edges) still have none; giving them receipts is the remaining slice 6
+   work.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and

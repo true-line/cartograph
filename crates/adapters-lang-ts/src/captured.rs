@@ -37,8 +37,8 @@ mod receipt;
 pub use receipt::{
     Citable, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_OTHER_FILES, MAX_RECEIPT_RANGES, MintedHeader,
     MintedReceipt, RangeRole, Receipt, ReceiptClosure, ReceiptRange, ReceiptSourceSizes,
-    TS_GRAMMAR_RULE, TS_WALK_POLICY, direct_lexical_closure, fact_match_workspace,
-    fact_match_workspace_bytes, is_input_source,
+    TS_DIRECTORY_WALK_POLICY, TS_GRAMMAR_RULE, TS_WALK_POLICY, direct_lexical_closure,
+    directory_walk_closure, fact_match_workspace, fact_match_workspace_bytes, is_input_source,
 };
 
 /// Maximum directory entries examined, including excluded entries.
@@ -590,6 +590,9 @@ struct FileReceipts {
     completed: Vec<MintedReceipt>,
     /// Declarations never minted because this file reached its own bound.
     omitted_declarations: u64,
+    /// Whether this file's parse is proven for this capture: fresh, or
+    /// reused under this exact closure (ADR-0072 slice 5).
+    proven: bool,
 }
 
 const FILE_DECLARATIONS: ReceiptBudget = ReceiptBudget {
@@ -753,6 +756,7 @@ fn mint_file(
         declarations,
         completed,
         omitted_declarations,
+        proven: false,
     }
 }
 
@@ -1143,7 +1147,7 @@ fn extract_captured_dir_packed_with_policy(
             }
             for receipt in file_receipts.completed {
                 if staged_completed.admit(&receipt, completed.len(), budget) {
-                    completed.push(receipt);
+                    completed.push((receipt, file_receipts.proven));
                 }
             }
             store.extend_packed(
@@ -1212,11 +1216,24 @@ fn extract_captured_dir_packed_with_policy(
         }
     }
     drop(staged_completed);
-    for receipt in completed {
-        if matching(&receipt) && charge.admit(&receipt, receipts.len(), budget) {
+    // A completion-decided receipt is established on the walk's closure
+    // only when completion's configs and lookups are bound to the capture
+    // (ADR-0072 slice 6); one closure per file, shared by its receipts.
+    // A file's decided receipts are contiguous, so only the current file's
+    // record is held here; an admitted receipt keeps its own, which the
+    // budget charges.
+    let walk = walk_inputs(capture, &stats);
+    let mut current = None;
+    for (receipt, proven) in completed {
+        if !matching(&receipt) {
+            continue;
+        }
+        let receipt = state_completed(receipt, proven, walk.as_deref(), id.repo, &mut current)?;
+        if charge.admit(&receipt, receipts.len(), budget) {
             receipts.push(receipt);
         }
     }
+    drop(current);
     drop(matching);
     // Installed only once every fallible step has succeeded.
     if let Some(cache) = cache {
@@ -1342,6 +1359,85 @@ fn bind_probes(capture: &Capture, probes: &super::Probes) -> ProbeBinding {
     ProbeBinding::Bound { absent, read }
 }
 
+/// The inputs every completion-decided fact of this walk shares, when its
+/// configs and lookups are bound: the capture's enumeration, each config
+/// and root file read, and each path looked up and absent.
+fn walk_inputs(capture: &Capture, stats: &IncrementalStats) -> Option<Vec<ClosureInput>> {
+    let (ConfigBinding::Bound(configs), ProbeBinding::Bound { absent, read }) =
+        (&stats.resolution_configs, &stats.completion_probes)
+    else {
+        return None;
+    };
+    let source_id = capture.manifest().source_id.clone();
+    let capture_id = capture.id().to_string();
+    let mut inputs = vec![ClosureInput::Enumeration {
+        source_id: source_id.clone(),
+        capture_id: capture_id.clone(),
+        walk_policy: TS_DIRECTORY_WALK_POLICY.into(),
+    }];
+    inputs.extend(
+        configs
+            .iter()
+            .chain(read)
+            .map(|file| ClosureInput::CapturedFile { file: file.clone() }),
+    );
+    inputs.extend(
+        absent
+            .iter()
+            .map(|path| ClosureInput::AbsentFromEnumeration {
+                source_id: source_id.clone(),
+                capture_id: capture_id.clone(),
+                path: path.clone(),
+            }),
+    );
+    Some(inputs)
+}
+
+/// Record a completion-decided receipt's closure state: established on its
+/// file's walk closure when the walk's inputs are bound and its parse is
+/// proven; `cache_reuse_unproven` for a parse that is not;
+/// `cross_file_input_unbound` when completion read what the capture does
+/// not bind; `limit_exceeded` when the closure would pass its bound.
+fn state_completed(
+    receipt: MintedReceipt,
+    proven: bool,
+    walk: Option<&[ClosureInput]>,
+    repo_key: &str,
+    current: &mut Option<(String, Option<Arc<InputClosureV1>>)>,
+) -> Result<MintedReceipt, CapturedError> {
+    let gap = |reason| ReceiptClosure::InputClosureNotEstablished {
+        reasons: vec![reason],
+    };
+    if !proven {
+        return receipt.with_closure(gap(ClosureGapReason::CacheReuseUnproven), None);
+    }
+    let Some(walk) = walk else {
+        return receipt.with_closure(gap(ClosureGapReason::CrossFileInputUnbound), None);
+    };
+    let file = receipt.file().clone();
+    let record = match current {
+        Some((path, record)) if *path == file.path => record.clone(),
+        _ => {
+            let record = match directory_walk_closure(&file, repo_key, walk.to_vec()) {
+                Ok(record) => Some(Arc::new(record)),
+                Err(CapturedError::Limit(_)) => None,
+                Err(error) => return Err(error),
+            };
+            *current = Some((file.path.clone(), record.clone()));
+            record
+        }
+    };
+    match record {
+        Some(record) => receipt.with_closure(
+            ReceiptClosure::Established {
+                closure_id: record.closure_id.clone(),
+            },
+            Some(record),
+        ),
+        None => receipt.with_closure(gap(ClosureGapReason::LimitExceeded), None),
+    }
+}
+
 /// The root file directory completion reads besides its resolution configs.
 const PROBED_ROOT_FILE: &str = "vercel.json";
 
@@ -1353,8 +1449,8 @@ fn is_config_path(path: &str) -> bool {
 /// Record `receipts`' closure states under contract v4 (ADR-0072 slice 5).
 /// A rule or declaration is established by `closure`, its file's own, or is
 /// `cache_reuse_unproven` when a reused parse does not prove it. A
-/// completion-decided receipt depends on other files of the walk and is
-/// `cross_file_input_unbound`.
+/// completion-decided receipt depends on other files of the walk, so its
+/// state is decided after completion ([`state_completed`]).
 fn establish(
     receipts: FileReceipts,
     closure: Option<Arc<InputClosureV1>>,
@@ -1367,9 +1463,6 @@ fn establish(
             reasons: vec![ClosureGapReason::CacheReuseUnproven],
         },
     };
-    let completed = ReceiptClosure::InputClosureNotEstablished {
-        reasons: vec![ClosureGapReason::CrossFileInputUnbound],
-    };
     let with = |receipts: Vec<MintedReceipt>,
                 state: &ReceiptClosure,
                 record: Option<&Arc<InputClosureV1>>| {
@@ -1381,8 +1474,9 @@ fn establish(
     Ok(FileReceipts {
         rules: with(receipts.rules, &direct, closure.as_ref())?,
         declarations: with(receipts.declarations, &direct, closure.as_ref())?,
-        completed: with(receipts.completed, &completed, None)?,
+        completed: receipts.completed,
         omitted_declarations: receipts.omitted_declarations,
+        proven: closure.is_some(),
     })
 }
 
@@ -1484,3 +1578,5 @@ mod probe_binding_tests;
 mod tests;
 #[cfg(test)]
 mod v4_lane_tests;
+#[cfg(test)]
+mod walk_closure_tests;
