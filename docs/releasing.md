@@ -159,9 +159,10 @@ secrets, so pull requests and main stay `unsigned-dev` (#631).
 
 `release.yml` is the one signing caller. Its `windows` job builds the
 installer from the release tag beside the macOS package, passing exactly the
-three secrets. When the build is `signed`,
-`publish-windows` attaches it to the release the macOS job published as
-`Cartograph_<version>_x64_signed-setup.exe`. An `unsigned-dev` Windows build
+three secrets. Releases are immutable once published, so `publish` waits
+for the Windows job and, when its build is `signed`, creates the release with
+the installer as `Cartograph_<version>_x64_signed-setup.exe` beside the macOS
+assets. An `unsigned-dev` Windows build
 is never published, and a Windows failure never holds the macOS release.
 Until the three secrets are added to this repository, releases therefore
 carry macOS assets only.

@@ -990,13 +990,15 @@ test('Windows installer signs only for a secret-passing caller and fails closed 
   assert.deepEqual([...windowsJob.matchAll(/secrets\.([A-Z_]+)/gu)].map((match) => match[1]),
     ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']);
   assert.doesNotMatch(windowsJob, /secrets: inherit/u);
-  const attach = release.split('\n  publish-windows:\n')[1] ?? '';
-  assert.match(attach, /if: needs\.windows\.outputs\.signing_mode == 'signed'/u);
-  assert.match(attach, /- publish\n/u);
-  assert.match(attach, /gh release upload "\$TAG" "dist\/Cartograph_\$\{VERSION\}_x64_signed-setup\.exe" --clobber/u);
-  // The macOS publish job neither waits on nor uploads the Windows build.
-  const macPublish = release.split('\n  publish:\n')[1]?.split('\n  publish-windows:\n')[0] ?? '';
-  assert.doesNotMatch(macPublish, /windows/u);
+  // Releases are immutable once published, so the one create call carries
+  // the signed installer; a Windows failure never holds the macOS release.
+  assert.doesNotMatch(release, /\n  publish-windows:\n/u);
+  const publishJob = release.split('\n  publish:\n')[1]?.split(/\n  [a-z][a-z-]*:\n/u)[0] ?? '';
+  assert.match(publishJob, /needs:\n +- validate\n +- build\n +- windows\n/u);
+  assert.match(publishJob, /if: \$\{\{ !cancelled\(\) && needs\.validate\.result == 'success' && needs\.build\.result == 'success' \}\}/u);
+  assert.match(publishJob, /if: needs\.windows\.result == 'success' && needs\.windows\.outputs\.signing_mode == 'signed'/u);
+  assert.match(publishJob, /mv "\$\{found\[0\]\}" "dist\/Cartograph_\$\{VERSION\}_x64_signed-setup\.exe"/u);
+  assert.ok(publishJob.indexOf('x64_signed-setup.exe') < publishJob.indexOf('gh release create'));
   const sign = readFileSync(path.join(root, 'scripts/windows-sign.ps1'), 'utf8');
   assert.match(sign, /\/fd SHA256 \/tr 'http:\/\/timestamp\.acs\.microsoft\.com' \/td SHA256/u);
 });
