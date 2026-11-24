@@ -443,6 +443,22 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    shared header, and deleted with the last; v4 rows use the compact header
    form, whose `input_closure` is the legacy string for v3 and the closure
    state for v4.
+   *As built (AC-1084):* the captured directory lane mints v4. A rule or
+   declaration of a freshly parsed file is established on that file's
+   closure (walk policy `source-walk-v1`, grammar rule
+   `grammar-by-path-v1`, no layer hints). A cached parse records the
+   closure it was made under and reuses it only for that exact
+   `closure_id`, so an unchanged capture's receipts equal a cold walk's;
+   any other reuse is `cache_reuse_unproven`. A completion-decided File, TestCase or Gap
+   receipt is `cross_file_input_unbound`. A fact enrichment changes keeps
+   no receipt at all, as before, so `enrichment_changed_fact` is not
+   minted. Every `CaptureFileRef` carries its capture id, so a closure id
+   changes with any recapture; the test therefore holds the fact, its spans
+   and the closure's inputs fixed apart from that identity. The
+   single-file lane still mints v3. Each established compact receipt
+   carries its file's record (one shared allocation per file, charged once
+   against the extraction receipt budget), so the store retains it with the
+   receipt without a separate hand-off.
 6. **TS walk closure** (directory completion). Enumeration and probe binding,
    and receipts for directory-proven facts. *Tests:* adding the target of a
    previously unresolved import changes the closure and the fact; adding an

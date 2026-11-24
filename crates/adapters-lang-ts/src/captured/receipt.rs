@@ -21,6 +21,42 @@ const MAX_ID_BYTES: usize = 4096;
 const MAX_REPO_BYTES: usize = 256;
 const RECEIPT_SCHEMA_VERSION: u32 = 3;
 
+/// The source-walk policy version the TypeScript lanes record in an input
+/// closure (ADR-0072).
+pub const TS_WALK_POLICY: &str = "source-walk-v1";
+/// The grammar selection rule an input closure records: by file path, as
+/// [`Grammar`] selects it.
+pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
+
+/// The input closure of a direct-lexical TypeScript fact of `file`
+/// (ADR-0072 slice 5): its retained bytes under contract v4's pins, the
+/// registered repository key and the fixed walk and grammar rules. The fact
+/// reads no other input; the TypeScript lane takes no layer hints.
+pub fn direct_lexical_closure(
+    file: &CaptureFileRef,
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    let grammar = Grammar::for_file(file);
+    if grammar.provenance_only() {
+        return Err(CapturedError::Invalid("receipt contract"));
+    }
+    let current = contract(4, grammar)?;
+    super::InputClosureV1::new(
+        current.producer,
+        vec![
+            current.grammar_package.into(),
+            current.parser_package.into(),
+        ],
+        super::ClosureParameters {
+            repo_key: repo_key.into(),
+            walk_policy: TS_WALK_POLICY.into(),
+            layer_hints: Vec::new(),
+            grammar_rule: TS_GRAMMAR_RULE.into(),
+        },
+        vec![super::ClosureInput::CapturedFile { file: file.clone() }],
+    )
+}
+
 struct Contract {
     prefix: &'static str,
     producer: &'static str,

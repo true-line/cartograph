@@ -353,3 +353,52 @@ fn a_v4_store_migrates_to_v5() {
         2 * receipts.len()
     );
 }
+
+// AC-1084: the directory lane's v4 receipts are retained with the closure
+// records they carry, in one transaction, and read back byte for byte; the
+// full receipts alone, which carry no record, are refused.
+#[test]
+fn the_directory_lane_retains_its_receipts_with_their_closures() {
+    let (directory, source, capture, _, _) = fixture();
+    let (_, receipts, _) = captured::extract_captured_dir(
+        &directory.path().join("target"),
+        &adapters_lang_ts::SourceId {
+            repo: &source.repo_key,
+            commit: "workdir",
+        },
+        &capture,
+        adapters_fw::events::Registries::builtin(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let records: std::collections::BTreeMap<_, _> = receipts
+        .iter()
+        .filter_map(|receipt| receipt.input_closure())
+        .map(|record| (record.closure_id.clone(), record.clone()))
+        .collect();
+    assert!(!records.is_empty());
+    let full: Vec<Receipt> = receipts
+        .iter()
+        .map(|receipt| receipt.to_receipt().unwrap())
+        .collect();
+    let store_directory = tempfile::tempdir().unwrap();
+    let mut store = ReceiptStore::open(&store_directory.path().join("receipts.sqlite")).unwrap();
+    let share = store.capacity;
+    assert!(
+        store
+            .persist_within(&capture, &source, &full, &[], share)
+            .is_err()
+    );
+    assert_eq!(count(&store, "receipts"), 0);
+    let retained = store
+        .persist_within(&capture, &source, &receipts, &[], share)
+        .unwrap();
+    assert_eq!(retained.ids.len(), receipts.len());
+    assert_eq!(count(&store, "input_closures"), records.len() as i64);
+    for (receipt, full) in receipts.iter().zip(&full) {
+        assert_eq!(&store.get(receipt.id()).unwrap(), full);
+    }
+    for (closure_id, record) in &records {
+        assert_eq!(&store.closure(closure_id).unwrap(), record);
+    }
+}

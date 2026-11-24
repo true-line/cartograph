@@ -1371,6 +1371,21 @@ struct ReceiptClosureRow {
     new_payload: Option<String>,
 }
 
+/// `closure`'s canonical JSON, once it is proven its own canonical record
+/// for `source` (AC-1082).
+fn closure_payload(
+    source: &RegisteredSource,
+    closure: &captured::InputClosureV1,
+) -> Result<String, String> {
+    let bytes = closure.canonical_bytes().map_err(storage_error)?;
+    if captured::InputClosureV1::decode(&bytes).map_err(storage_error)? != *closure
+        || closure.parameters.repo_key != source.repo_key
+    {
+        return Err(storage_error("input closure"));
+    }
+    String::from_utf8(bytes).map_err(storage_error)
+}
+
 /// Index `closures` by id after proving each is its own canonical record
 /// for `source` (AC-1082).
 fn supplied_closures<'a>(
@@ -1379,22 +1394,17 @@ fn supplied_closures<'a>(
 ) -> Result<std::collections::BTreeMap<&'a str, (&'a captured::InputClosureV1, String)>, String> {
     let mut supplied = std::collections::BTreeMap::new();
     for closure in closures {
-        let bytes = closure.canonical_bytes().map_err(storage_error)?;
-        if captured::InputClosureV1::decode(&bytes).map_err(storage_error)? != *closure
-            || closure.parameters.repo_key != source.repo_key
-        {
-            return Err(storage_error("input closure"));
-        }
-        let payload = String::from_utf8(bytes).map_err(storage_error)?;
+        let payload = closure_payload(source, closure)?;
         supplied.insert(closure.closure_id.as_str(), (closure, payload));
     }
     Ok(supplied)
 }
 
 /// The closure `receipt` names as established, if any: already stored for
-/// this source, or supplied with the batch when it has no gap and does not
-/// name this receipt's own fact upstream. A receipt naming a closure
-/// neither holds is refused, never retained without it.
+/// this source, or supplied with the batch or carried by the receipt
+/// (AC-1084) when it has no gap and does not name this receipt's own fact
+/// upstream. A receipt naming a closure none of them holds is refused,
+/// never retained without it.
 fn receipt_closure(
     tx: &Connection,
     source: &RegisteredSource,
@@ -1434,9 +1444,15 @@ fn receipt_closure(
             new_payload: None,
         }));
     }
-    let (closure, payload) = supplied
-        .get(closure_id.as_str())
-        .ok_or_else(|| storage_error("receipt input closure missing"))?;
+    let carried;
+    let (closure, payload) = match (supplied.get(closure_id.as_str()), receipt.input_closure()) {
+        (Some((closure, payload)), _) => (*closure, payload),
+        (None, Some(closure)) if closure.closure_id == *closure_id => {
+            carried = closure_payload(source, closure)?;
+            (closure, &carried)
+        }
+        _ => return Err(storage_error("receipt input closure missing")),
+    };
     if !closure.gaps().is_empty() {
         return Err(storage_error("receipt input closure not established"));
     }
@@ -2567,6 +2583,18 @@ impl PrimarySourceStore {
         source: &RegisteredSource,
         receipts: &[impl Citable],
     ) -> Result<RetainedReceipts, String> {
+        self.persist_with_closures(input, source, receipts, &[])
+    }
+
+    /// [`Self::persist`], also supplying the input closure records that full
+    /// receipts name but do not carry (AC-1084).
+    pub fn persist_with_closures(
+        &self,
+        input: &PrimaryInput,
+        source: &RegisteredSource,
+        receipts: &[impl Citable],
+        closures: &[captured::InputClosureV1],
+    ) -> Result<RetainedReceipts, String> {
         self.storage.verify()?;
         if let Some(capture) = &input.capture {
             // The capture guard is held through receipt admission so the
@@ -2586,7 +2614,7 @@ impl PrimarySourceStore {
                 source_share(store.capacity.0, weight, total),
                 source_share(store.capacity.1, weight, total),
             );
-            store.persist_within(capture, source, receipts, &[], share)
+            store.persist_within(capture, source, receipts, closures, share)
         } else if !receipts.is_empty() {
             Err(storage_error("uncaptured receipts"))
         } else {

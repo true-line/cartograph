@@ -61,7 +61,7 @@ impl Fixture {
             repo: &source.repo_key,
             commit: "workdir",
         };
-        let (extraction, receipts) = if understated.is_some() {
+        let (extraction, receipts, closures) = if understated.is_some() {
             let (extraction, receipts, stats) = adapters_lang_ts::captured::extract_captured_dir(
                 &root,
                 &id,
@@ -72,6 +72,15 @@ impl Fixture {
             .unwrap();
             assert!(stats.omitted_rule_receipts.is_empty());
             assert!(stats.omitted_declaration_receipts.is_empty());
+            // Directory receipts carry their input closure records (AC-1084);
+            // the full receipts below are stored with them.
+            let closures = receipts
+                .iter()
+                .filter_map(|r| r.input_closure().cloned())
+                .map(|closure| (closure.closure_id.clone(), closure))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .collect::<Vec<_>>();
             let receipts = receipts
                 .iter()
                 .map(|r| r.to_receipt().unwrap())
@@ -81,12 +90,13 @@ impl Fixture {
                     assert!(receipt.source_sizes(index).unwrap().is_some());
                 }
             }
-            (extraction, receipts)
+            (extraction, receipts, closures)
         } else {
             adapters_lang_ts::captured::extract_file(
                 input.capture.as_ref().unwrap().file("rule.ts").unwrap(),
                 &id,
             )
+            .map(|(extraction, receipts)| (extraction, receipts, Vec::new()))
             .unwrap()
         };
         let receipts = if let Some(understated) = understated {
@@ -105,7 +115,7 @@ impl Fixture {
         };
         state
             .primary_sources
-            .persist(&input, &source, &receipts)
+            .persist_with_closures(&input, &source, &receipts, &closures)
             .unwrap();
         let bindings = crate::primary_source::matching_bindings(&extraction, &receipts);
         crate::load_into_graph_with_bindings(
@@ -533,9 +543,15 @@ fn understated_receipt(
         range["original"] = 0.into();
         range["redacted"] = 0.into();
     }
-    let mut bytes = b"cartograph:ts-primary-receipt:v3\0".to_vec();
+    let version = if receipt.id().starts_with("ts-primary-v4:") {
+        4
+    } else {
+        3
+    };
+    let mut bytes = format!("cartograph:ts-primary-receipt:v{version}\0").into_bytes();
     bytes.extend(serde_json::to_vec(&canonical(wire["content"].clone())).unwrap());
-    wire["receipt_id"] = format!("ts-primary-v3:{}", core_prov::content_hash(&bytes)).into();
+    wire["receipt_id"] =
+        format!("ts-primary-v{version}:{}", core_prov::content_hash(&bytes)).into();
     adapters_lang_ts::captured::Receipt::from_json(&serde_json::to_string(&wire).unwrap()).unwrap()
 }
 

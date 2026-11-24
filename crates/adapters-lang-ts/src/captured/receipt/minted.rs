@@ -43,7 +43,8 @@ impl MintedHeader {
 /// cited file, `0` for the header's file and `n` for `other_files[n - 1]`.
 type Span = (RangeRole, u32, u64, u64, u32);
 
-/// A freshly minted v3 receipt in compact form.
+/// A freshly minted v3 receipt, or one under contract v4 with its closure
+/// state, in compact form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintedReceipt {
     receipt_id: String,
@@ -54,6 +55,11 @@ pub struct MintedReceipt {
     /// Further captured files the spans cite (AC-1039), in path order.
     other_files: Box<[CaptureFileRef]>,
     source_sizes: Option<super::ReceiptSourceSizes>,
+    /// The closure state of a contract-v4 receipt; `None` under v3.
+    closure: Option<super::ReceiptClosure>,
+    /// The record an established closure state names, shared by every
+    /// receipt of its file, so the host retains it with them (AC-1084).
+    input_closure: Option<Arc<super::super::InputClosureV1>>,
 }
 
 impl MintedReceipt {
@@ -138,7 +144,35 @@ impl MintedReceipt {
             fact_digest: content.fact_digest,
             spans,
             other_files: content.other_files.into_boxed_slice(),
+            closure: None,
+            input_closure: None,
         })
+    }
+
+    /// This freshly minted v3 receipt under contract v4 with `closure`, as
+    /// [`Receipt::with_closure`]: same fact and spans, a new identity. An
+    /// established state carries exactly the record it names.
+    pub(in crate::captured) fn with_closure(
+        mut self,
+        closure: super::ReceiptClosure,
+        record: Option<Arc<super::super::InputClosureV1>>,
+    ) -> Result<Self, CapturedError> {
+        let named = match &closure {
+            super::ReceiptClosure::Established { closure_id } => Some(closure_id),
+            super::ReceiptClosure::InputClosureNotEstablished { .. } => None,
+        };
+        if self.closure.is_some() || named != record.as_ref().map(|record| &record.closure_id) {
+            return Err(CapturedError::Invalid("receipt input closure"));
+        }
+        self.receipt_id = self.to_receipt()?.with_closure(closure.clone())?.receipt_id;
+        self.closure = Some(closure);
+        self.input_closure = record;
+        Ok(self)
+    }
+
+    /// The input closure record this receipt's established state names.
+    pub fn input_closure(&self) -> Option<&super::super::InputClosureV1> {
+        self.input_closure.as_deref()
     }
 
     /// The captured file a span's slot names.
@@ -152,11 +186,15 @@ impl MintedReceipt {
     /// The complete receipt this carrier stands for.
     pub fn to_receipt(&self) -> Result<Receipt, CapturedError> {
         let header = &*self.header;
-        let current = contract(RECEIPT_SCHEMA_VERSION, Grammar::for_file(&header.file))?;
+        let (schema_version, input_closure) = match &self.closure {
+            None => (RECEIPT_SCHEMA_VERSION, InputClosure::LEGACY),
+            Some(closure) => (4, InputClosure::Closure(closure.clone())),
+        };
+        let current = contract(schema_version, Grammar::for_file(&header.file))?;
         Ok(Receipt {
             receipt_id: self.receipt_id.clone(),
             content: Content {
-                schema_version: RECEIPT_SCHEMA_VERSION,
+                schema_version,
                 source_id: header.file.source_id.clone(),
                 repo_key: header.repo_key.clone(),
                 file: header.file.clone(),
@@ -193,9 +231,14 @@ impl MintedReceipt {
                 other_files: self.other_files.to_vec(),
                 source_sizes: self.source_sizes.clone(),
                 source_scope: SourceScope::PrimarySourceOnly,
-                input_closure: InputClosure::LEGACY,
+                input_closure,
             },
         })
+    }
+
+    /// The closure state of a contract-v4 receipt; `None` under v3.
+    pub fn closure(&self) -> Option<&super::ReceiptClosure> {
+        self.closure.as_ref()
     }
 
     /// Serialize the complete receipt, as [`Receipt::to_json`] would.
@@ -273,6 +316,21 @@ impl MintedReceipt {
                 .source_sizes
                 .as_ref()
                 .map_or(0, |sizes| sizes.heap_bytes())
+            + match &self.closure {
+                None => 0,
+                Some(super::ReceiptClosure::Established { closure_id }) => closure_id.capacity(),
+                Some(super::ReceiptClosure::InputClosureNotEstablished { reasons }) => {
+                    reasons.capacity() * size_of::<super::super::ClosureGapReason>()
+                }
+            }
+    }
+
+    /// The closure record this receipt shares with the other receipts of its
+    /// file, for once-per-record accounting.
+    pub(in crate::captured) fn shared_input_closure(
+        &self,
+    ) -> Option<&Arc<super::super::InputClosureV1>> {
+        self.input_closure.as_ref()
     }
 
     fn matches_inventory(&self, props: &serde_json::Value) -> bool {
@@ -334,6 +392,9 @@ pub trait Citable {
     fn to_json(&self) -> Result<String, CapturedError>;
     /// The input closure state of a contract-v4 receipt; `None` before v4.
     fn closure(&self) -> Option<&super::ReceiptClosure>;
+    /// The record an established closure state names, when the producer
+    /// handed it over with the receipt; a host retains it with the receipt.
+    fn input_closure(&self) -> Option<&super::super::InputClosureV1>;
     /// Full content/range match against a node.
     fn matches_node(&self, node: &Node) -> bool;
     /// Full content/range match against an edge.
@@ -368,6 +429,10 @@ impl Citable for Receipt {
     fn closure(&self) -> Option<&super::ReceiptClosure> {
         Receipt::closure(self)
     }
+    /// A full receipt carries no record; its host supplies it.
+    fn input_closure(&self) -> Option<&super::super::InputClosureV1> {
+        None
+    }
     fn matches_node(&self, node: &Node) -> bool {
         Receipt::matches_node(self, node)
     }
@@ -401,9 +466,11 @@ impl Citable for MintedReceipt {
     fn to_json(&self) -> Result<String, CapturedError> {
         MintedReceipt::to_json(self)
     }
-    /// Minted receipts are the current v3 contract, which records none.
     fn closure(&self) -> Option<&super::ReceiptClosure> {
-        None
+        MintedReceipt::closure(self)
+    }
+    fn input_closure(&self) -> Option<&super::super::InputClosureV1> {
+        MintedReceipt::input_closure(self)
     }
     fn matches_node(&self, node: &Node) -> bool {
         MintedReceipt::matches_node(self, node)
