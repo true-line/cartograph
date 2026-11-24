@@ -98,7 +98,7 @@ pub(crate) fn fixture() -> PreparedAgentTask {
                         byte_end: task.evidence[0].text.len() as u64,
                     },
                     scope: PrimarySourceScope::PrimarySourceOnly,
-                    input_closure: InputClosureStatus::InputClosureNotEstablished,
+                    input_closure: TaskInputClosure::LEGACY,
                 },
             },
             TaskEvidenceOrigin {

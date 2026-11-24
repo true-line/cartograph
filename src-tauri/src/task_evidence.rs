@@ -605,7 +605,7 @@ fn assemble_from_snapshot(
                     byte_end: range.captured.byte_end,
                 },
                 scope: PrimarySourceScope::PrimarySourceOnly,
-                input_closure: InputClosureStatus::InputClosureNotEstablished,
+                input_closure: agents::TaskInputClosure::LEGACY,
             };
             (text, origin)
         } else {
