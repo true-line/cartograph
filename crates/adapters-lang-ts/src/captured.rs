@@ -578,6 +578,12 @@ pub fn extract_file_with_source_sizes(
     Ok((extraction, receipts))
 }
 
+/// A completion-decided fact of one file.
+enum Fact {
+    Node(Node),
+    Edge(Edge),
+}
+
 /// One file's receipts, split by admission priority. Rule receipts keep their
 /// original hard bounds; declaration receipts only use the remaining budget.
 struct FileReceipts {
@@ -585,7 +591,8 @@ struct FileReceipts {
     /// Declarations in fact-key order.
     declarations: Vec<MintedReceipt>,
     /// Supporting File/TestCase receipts in fact-key order, then
-    /// unresolved-call Gap receipts in call order (AC-1019). For the
+    /// unresolved-call Gap receipts in call order (AC-1019), then each
+    /// pending call's CALLS and Gap edge in call order (AC-1096). For the
     /// directory lane only: a single file has no completion to decide them.
     completed: Vec<MintedReceipt>,
     /// Declarations never minted because this file reached its own bound.
@@ -738,13 +745,34 @@ fn mint_file(
         .pending_calls
         .iter()
         .filter_map(|pending| pending.gap_node.unpack().ok());
+    // A pending call's outcome is decided by the walk: its CALLS edge when
+    // the target is found as parsed, else its Gap edge (ADR-0072 slice 6).
+    // Both are minted here and completion keeps only the one emitted
+    // unchanged; a call resolved through a re-export, a base or an
+    // interface is emitted with other evidence and keeps no receipt.
+    let calls = extraction.pending_calls.iter().flat_map(|pending| {
+        [&pending.resolved_edge, &pending.gap_edge]
+            .into_iter()
+            .filter_map(|edge| edge.unpack().ok())
+    });
     let mut completed = Vec::new();
-    for node in direct.supporting.values().cloned().chain(gaps) {
+    let facts = direct
+        .supporting
+        .values()
+        .cloned()
+        .chain(gaps)
+        .map(Fact::Node)
+        .chain(calls.map(Fact::Edge));
+    for fact in facts {
         let held = declarations.len() + completed.len();
         if held == file_declarations.receipts {
             break;
         }
-        let Ok(receipt) = mint(Receipt::for_node(file, id, &node)) else {
+        let receipt = match &fact {
+            Fact::Node(node) => Receipt::for_node(file, id, node),
+            Fact::Edge(edge) => Receipt::for_edge(file, id, edge),
+        };
+        let Ok(receipt) = mint(receipt) else {
             continue;
         };
         if charge.admit(&receipt, held, file_declarations) {
