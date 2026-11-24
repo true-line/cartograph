@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { IS_MAC } from '../shortcuts';
 import { SURFACES, type SurfaceDef, type SurfaceView } from '../views';
 
 /** Eight stable surface shortcuts, with routed destinations and Help. */
@@ -14,8 +15,7 @@ export interface CommandPaletteProps {
   onNavigate: (view: SurfaceView) => void;
 }
 
-const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
-const MOD = isMac ? '⌘' : 'Ctrl+';
+const MOD = IS_MAC ? '⌘' : 'Ctrl+';
 
 /** ⌘K palette: centered 520px overlay listing all eight surfaces with icon,
  *  hint, and shortcut tag. Esc closes; arrows + Enter are keyboard-first

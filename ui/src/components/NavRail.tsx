@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { IS_MAC } from '../shortcuts';
 import { SURFACES, type SurfaceView } from '../views';
 
 export interface NavRailProps {
@@ -43,7 +44,7 @@ export function NavRail({ active, onNavigate, onOpenPalette, knownUnreadSavedRes
       <button
         type="button"
         className="nav-btn nav-palette"
-        title="Command palette (⌘K)"
+        title={`Command palette (${IS_MAC ? '⌘K' : 'Ctrl+K'})`}
         aria-label="Command palette"
         onClick={onOpenPalette}
       >
