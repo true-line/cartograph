@@ -332,6 +332,8 @@ pub trait Citable {
     fn captured_spans(&self) -> Box<dyn Iterator<Item = CaptureSpanRef> + '_>;
     /// Canonical receipt JSON.
     fn to_json(&self) -> Result<String, CapturedError>;
+    /// The input closure state of a contract-v4 receipt; `None` before v4.
+    fn closure(&self) -> Option<&super::ReceiptClosure>;
     /// Full content/range match against a node.
     fn matches_node(&self, node: &Node) -> bool;
     /// Full content/range match against an edge.
@@ -362,6 +364,9 @@ impl Citable for Receipt {
     }
     fn to_json(&self) -> Result<String, CapturedError> {
         Receipt::to_json(self)
+    }
+    fn closure(&self) -> Option<&super::ReceiptClosure> {
+        Receipt::closure(self)
     }
     fn matches_node(&self, node: &Node) -> bool {
         Receipt::matches_node(self, node)
@@ -395,6 +400,10 @@ impl Citable for MintedReceipt {
     }
     fn to_json(&self) -> Result<String, CapturedError> {
         MintedReceipt::to_json(self)
+    }
+    /// Minted receipts are the current v3 contract, which records none.
+    fn closure(&self) -> Option<&super::ReceiptClosure> {
+        None
     }
     fn matches_node(&self, node: &Node) -> bool {
         MintedReceipt::matches_node(self, node)
