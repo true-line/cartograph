@@ -575,6 +575,19 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    the same facts, they share one closure (the capture's `Enumeration`
    under `environment-walk-v1` and each captured environment file).
    Otherwise they are `cross_file_input_unbound`.
+   *As built (AC-1532, schedule reader):* the first producer-keyed
+   grammar. A schedule cites crontabs, YAML files and the scripts they
+   run, whichever lane their paths select, so `Grammar::Schedule` is named
+   by the producer and recorded in the receipt and its compact header;
+   such a receipt may cite any captured source file but never an
+   observation input. Contracts `sched-primary-v1:`/`sched-primary-v2:`
+   (`t0.schedules/declared-v2`). Over a capture the reader lists and reads
+   only the capture, so its closure is the capture's `Enumeration` under
+   `schedule-walk-v1` and each captured file it read; a probed location
+   the capture lacks is the enumeration's answer. A proven Python
+   dispatch enters a function only when the Python adapter emitted it, so
+   the facts are established only when reading with no symbols gives the
+   same facts; otherwise `cross_file_input_unbound`.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
