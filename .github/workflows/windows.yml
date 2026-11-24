@@ -7,7 +7,8 @@
 # once they have stayed green on main for a week.
 #
 # They run on every push to main, on demand, and on a pull request that
-# changes this workflow or the Windows packaging inputs. The per-PR Windows
+# changes Rust code, this workflow or the Windows packaging inputs (Rust code
+# since #2607, a Windows-only clone failure found only after release). The per-PR Windows
 # gate stays ci.yml's Windows job ownership. The installer built here is
 # unsigned-dev: signing needs secrets, which no pull-request run reads
 # (windows-installer.yml, ADR-0093).
@@ -30,6 +31,11 @@ on:
       - scripts/build-mcp-relay.mjs
       - scripts/agent-runtime-node.json
       - src-tauri/tauri.windows-bundle.conf.json
+      # Rust code, so Windows-only regressions show on the PR, not after merge.
+      - crates/**
+      - src-tauri/**
+      - Cargo.toml
+      - Cargo.lock
       # The installer job's manifests, lockfiles and bundled runtime.
       - package.json
       - package-lock.json

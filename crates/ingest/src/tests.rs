@@ -78,10 +78,19 @@ fn clone_fetches_only_the_default_branch() {
         .unwrap()
         .refname_to_id("refs/heads/main")
         .unwrap();
-    let deep = format!(
-        "dependabot/npm_and_yarn/{}/lib-1.0.0",
-        ["deeply-nested-directory"; 12].join("/")
+    // libgit2 reads the fixture's own refs through the local transport, so
+    // its path must stay under MAX_PATH (260, counting ".lock") while the
+    // clone's longer refs/remotes path would not: size the name to fit.
+    let source_prefix = bare.join("refs/heads/").to_str().unwrap().len() + ".lock".len();
+    let budget = 259 - source_prefix;
+    assert!(
+        budget > 60,
+        "temp path too long for the fixture: {source_prefix}"
     );
+    let mut deep = String::from("dependabot/npm_and_yarn");
+    while deep.len() + "/nested-dir".len() <= budget {
+        deep.push_str("/nested-dir");
+    }
     let packed = bare.join("packed-refs");
     // Appending breaks the order a `sorted` header promises; drop the trait.
     let mut refs = std::fs::read_to_string(&packed)
