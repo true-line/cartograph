@@ -1054,11 +1054,17 @@ pub(super) fn append_for_task_with_merge(
                 | "domain-analyst@29"
                 | "domain-analyst@30"
                 | "domain-analyst@31"
+                | "domain-analyst@32"
         )
     {
         return Err(InvestigationStoreError::Invalid);
     }
-    if feedback.citation_drop.is_some() && request.specialist_id != "domain-analyst@31" {
+    if feedback.citation_drop.is_some()
+        && !matches!(
+            request.specialist_id.as_str(),
+            "domain-analyst@31" | "domain-analyst@32"
+        )
+    {
         return Err(InvestigationStoreError::Invalid);
     }
     let mut record = RefusalRecord {
