@@ -1609,6 +1609,20 @@ impl Receipt {
     }
 }
 
+/// `receipt` with its last range's role set to `role` (index 0), re-signed,
+/// and not validated: a self-consistent identity for tests of content checks.
+#[cfg(test)]
+pub(super) fn resigned_with_role(receipt: Receipt, role: RangeRole) -> Receipt {
+    let mut content = receipt.content;
+    let last = content.ranges.last_mut().unwrap();
+    last.role = role;
+    last.index = 0;
+    Receipt {
+        receipt_id: content_id(&content).unwrap(),
+        content,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

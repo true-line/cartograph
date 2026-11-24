@@ -368,8 +368,8 @@ fn completion_emitted_facts_are_established_on_the_walk_closure() {
 }
 
 // AC-1520: a TypeScript receipt binds other files only when every range is
-// provenance; the same multi-file receipt with a rule's range role is
-// refused on the wire.
+// provenance; the same multi-file receipt, re-signed with a rule's range
+// role, is refused.
 #[test]
 fn a_multi_file_typescript_receipt_is_provenance_only() {
     let directory = tempfile::tempdir().unwrap();
@@ -387,14 +387,22 @@ fn a_multi_file_typescript_receipt_is_provenance_only() {
     );
     let receipts = walk(root);
     let target = format!("sym:{REPO}@lib.ts#missing");
-    let json = decided_edge(&receipts, "rule.ts", &target)
+    let receipt = decided_edge(&receipts, "rule.ts", &target)
         .unwrap()
-        .to_json()
+        .to_receipt()
         .unwrap();
-    assert!(Receipt::from_json(&json).is_ok());
-    let mut wire: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let ranges = wire["content"]["ranges"].as_array_mut().unwrap();
-    assert!(ranges.iter().all(|range| range["role"] == "provenance"));
-    ranges[0]["role"] = "rule_exit".into();
-    assert!(Receipt::from_json(&wire.to_string()).is_err());
+    assert!(Receipt::from_json(&receipt.to_json().unwrap()).is_ok());
+    assert!(
+        receipt
+            .ranges()
+            .iter()
+            .all(|range| range.role == RangeRole::Provenance)
+    );
+    // The barrel's range as a rule exit is a well-formed rule inventory
+    // (provenance, then the exit), refused only because it binds two files.
+    let rule = receipt::resigned_with_role(receipt, RangeRole::RuleExit);
+    assert!(matches!(
+        rule.to_json(),
+        Err(CapturedError::Invalid("receipt files"))
+    ));
 }
