@@ -93,14 +93,29 @@ fn clone_fetches_only_the_default_branch() {
             .unwrap()
     };
     assert_ne!(other, head);
-    // libgit2 reads the fixture's own refs through the local transport, so
-    // its path must stay under MAX_PATH (260, counting ".lock") while the
-    // clone's longer refs/remotes path would not: size the name to fit.
-    let source_prefix = bare.join("refs/heads/").to_str().unwrap().len() + ".lock".len();
-    let budget = 259 - source_prefix;
+    // libgit2's local (file://) transport looks every advertised ref up by
+    // name in the destination during negotiation (local_negotiate_fetch,
+    // git_revparse_single, whose longest DWIM candidate is
+    // refs/remotes/<name>/HEAD), so offline the name must fit under
+    // MAX_PATH there (260, counting ".lock").
+    // An https clone does no such lookup; there the failure was writing
+    // refs/remotes/origin/<branch> for every branch, which the remote-ref
+    // assertion below rules out. Size the name for that longest candidate,
+    // with the longest attempt directory name.
+    let attempt = ".attempt-4294967295-18446744073709551615000-999";
+    let destination_prefix = dunce::canonicalize(dir.path())
+        .unwrap()
+        .join("clones/sources/src_22222222222222222222222222222222")
+        .join(attempt)
+        .join("checkout/.git/refs/remotes/refs/heads/")
+        .to_str()
+        .unwrap()
+        .len()
+        + "/HEAD.lock".len();
+    let budget = 259 - destination_prefix;
     assert!(
-        budget > 60,
-        "temp path too long for the fixture: {source_prefix}"
+        budget > 40,
+        "temp path too long for the fixture: {destination_prefix}"
     );
     let mut deep = String::from("dependabot/npm_and_yarn");
     while deep.len() + "/nested-dir".len() <= budget {
