@@ -262,6 +262,11 @@ impl MintedReceipt {
     pub fn file(&self) -> &CaptureFileRef {
         &self.header.file
     }
+    /// Further captured files the spans cite (AC-1039, AC-1520), in path
+    /// order.
+    pub fn other_files(&self) -> &[CaptureFileRef] {
+        &self.other_files
+    }
     /// Typed node or directed-edge identity.
     pub fn fact_key(&self) -> &FactKey {
         &self.fact_key

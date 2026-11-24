@@ -852,7 +852,8 @@ impl<'de> Deserialize<'de> for Content {
             _ => Err(()),
         }
         .map_err(|()| serde::de::Error::custom("receipt range form does not match its version"))?;
-        if wire.schema_version != 3 && !wire.other_files.is_empty() {
+        // v4 keeps v3's file binding; `validate` admits it for TS alone.
+        if !matches!(wire.schema_version, 3 | 4) && !wire.other_files.is_empty() {
             return Err(serde::de::Error::custom(
                 "receipt files do not match its version",
             ));
@@ -964,14 +965,23 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
 
 /// A lane receipt may cite further captured files besides its primary file
 /// (AC-1039): each of the same capture and grammar, listed once in path order,
-/// cited by at least one range, with the primary file cited first. TypeScript
-/// receipts and measured receipts stay single-file.
+/// cited by at least one range, with the primary file cited first. A
+/// TypeScript receipt whose ranges are all provenance may too, citing other
+/// TS/JS sources of its capture, such as a barrel (AC-1520); a rule's
+/// inventory and measured receipts stay single-file.
 fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
     if content.other_files.is_empty() {
         return Ok(());
     }
-    if content.schema_version != 3
-        || !content.grammar.provenance_only()
+    let typescript = !content.grammar.provenance_only();
+    // Contract v4 is TypeScript-only and keeps the v3 file binding.
+    let schema = content.schema_version == 3 || (typescript && content.schema_version == 4);
+    if !schema
+        || (typescript
+            && content
+                .ranges
+                .iter()
+                .any(|range| range.role != RangeRole::Provenance))
         || content.source_sizes.is_some()
         || content.other_files.len() > MAX_RECEIPT_OTHER_FILES
         || content
@@ -987,7 +997,7 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
         if file.source_id != content.file.source_id
             || file.capture_id != content.file.capture_id
             || file.path == content.file.path
-            || Grammar::for_file(file) != content.grammar
+            || !same_lane(Grammar::for_file(file), content.grammar)
             || previous.is_some_and(|previous| previous >= file.path.as_str())
             || !content
                 .ranges
@@ -999,6 +1009,14 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
         previous = Some(&file.path);
     }
     Ok(())
+}
+
+/// Whether a file of `other` grammar may be cited by a receipt of
+/// `primary`: the same lane grammar, or either TS grammar for a TypeScript
+/// receipt (a `.tsx` component may re-export a `.ts` module).
+fn same_lane(other: Grammar, primary: Grammar) -> bool {
+    other == primary
+        || (!primary.provenance_only() && matches!(other, Grammar::TypeScript | Grammar::Tsx))
 }
 
 fn canonical(value: serde_json::Value) -> serde_json::Value {
@@ -1588,6 +1606,20 @@ impl Receipt {
             })
             && edge_digest(edge).is_ok_and(|digest| digest == self.content.fact_digest)
             && self.matches_inventory(&edge.props)
+    }
+}
+
+/// `receipt` with its last range's role set to `role` (index 0), re-signed,
+/// and not validated: a self-consistent identity for tests of content checks.
+#[cfg(test)]
+pub(super) fn resigned_with_role(receipt: Receipt, role: RangeRole) -> Receipt {
+    let mut content = receipt.content;
+    let last = content.ranges.last_mut().unwrap();
+    last.role = role;
+    last.index = 0;
+    Receipt {
+        receipt_id: content_id(&content).unwrap(),
+        content,
     }
 }
 

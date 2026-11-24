@@ -287,8 +287,9 @@ fn walk_decided_call_edges_are_established_on_the_walk_closure() {
 
 // AC-1098: a fact directory completion emits itself is receipted against
 // the file its evidence cites and established on that file's walk closure,
-// here a Pulumi reference to a resource another module exports. A call
-// resolved through a barrel also cites the barrel, so it keeps none.
+// here a Pulumi reference to a resource another module exports. AC-1520: a
+// call resolved through a barrel also cites the barrel, which its receipt
+// binds as another file; a fact citing a config keeps none.
 #[test]
 fn completion_emitted_facts_are_established_on_the_walk_closure() {
     let directory = tempfile::tempdir().unwrap();
@@ -335,5 +336,73 @@ fn completion_emitted_facts_are_established_on_the_walk_closure() {
         walk_record(decided(&receipts, "file:", "index.ts").unwrap())
     );
     let target = format!("sym:{REPO}@lib.ts#missing");
-    assert!(decided_edge(&receipts, "rule.ts", &target).is_none());
+    let call = decided_edge(&receipts, "rule.ts", &target).expect("a re-export CALLS receipt");
+    assert_eq!(
+        call.other_files()
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["barrel.ts"]
+    );
+    assert_eq!(
+        walk_record(call),
+        walk_record(decided(&receipts, "file:", "rule.ts").unwrap())
+    );
+    // A Next API route also cites the `package.json` that declares Next, a
+    // config no receipt binds, so it keeps none.
+    write(
+        root,
+        "pages/api/hello.ts",
+        "export default function handler(req, res) { res.status(200).json({}); }\n",
+    );
+    write(
+        root,
+        "package.json",
+        r#"{"dependencies":{"@pulumi/aws":"1","next":"14"}}"#,
+    );
+    let receipts = walk(root);
+    assert!(!receipts.iter().any(|receipt| {
+        matches!(receipt.fact_key(), FactKey::Node { id } if id.ends_with("@ALL:/api/hello"))
+    }));
+    assert!(decided_edge(&receipts, "rule.ts", &target).is_some());
+}
+
+// AC-1520: a TypeScript receipt binds other files only when every range is
+// provenance; the same multi-file receipt, re-signed with a rule's range
+// role, is refused.
+#[test]
+fn a_multi_file_typescript_receipt_is_provenance_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(
+        root,
+        "rule.ts",
+        &format!("import {{ missing }} from './barrel';\n{RULE}"),
+    );
+    write(root, "barrel.ts", "export { missing } from './lib';\n");
+    write(
+        root,
+        "lib.ts",
+        "export function missing() { return false; }\n",
+    );
+    let receipts = walk(root);
+    let target = format!("sym:{REPO}@lib.ts#missing");
+    let receipt = decided_edge(&receipts, "rule.ts", &target)
+        .unwrap()
+        .to_receipt()
+        .unwrap();
+    assert!(Receipt::from_json(&receipt.to_json().unwrap()).is_ok());
+    assert!(
+        receipt
+            .ranges()
+            .iter()
+            .all(|range| range.role == RangeRole::Provenance)
+    );
+    // The barrel's range as a rule exit is a well-formed rule inventory
+    // (provenance, then the exit), refused only because it binds two files.
+    let rule = receipt::resigned_with_role(receipt, RangeRole::RuleExit);
+    assert!(matches!(
+        rule.to_json(),
+        Err(CapturedError::Invalid("receipt files"))
+    ));
 }
