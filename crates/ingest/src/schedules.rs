@@ -30,6 +30,8 @@ use core_graph::{Edge, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+pub use crate::captured_walk::CaptureReads;
 use tree_sitter::{Node as TsNode, Parser};
 
 mod dispatch;
@@ -163,6 +165,32 @@ pub fn extract_from_capture(
             .and_then(|bytes| String::from_utf8(bytes).ok())
     };
     Ok(extract_walked(&walked, &text, id, symbols))
+}
+
+/// [`extract_from_capture`], and whether its facts are the captured files'
+/// alone (ADR-0072 slice 9, AC-1532). Over a capture the reader lists and
+/// reads only the capture, but a proven Python dispatch enters a function
+/// only when the Python adapter emitted it (`symbols`): the facts are bound
+/// when reading again with no symbols gives the same facts. `read` lists
+/// the captured files opened.
+pub fn extract_from_capture_reading(
+    root: &Path,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+) -> std::io::Result<(ScheduleExtraction, CaptureReads)> {
+    let opened = std::cell::RefCell::new(BTreeSet::new());
+    let recorded = |rel: &str| {
+        opened.borrow_mut().insert(rel.to_string());
+        read(rel)
+    };
+    let facts = extract_from_capture(root, captured, &recorded, id, symbols)?;
+    let alone = extract_from_capture(root, captured, read, id, &BTreeSet::new())?;
+    let bound =
+        alone.nodes == facts.nodes && alone.edges == facts.edges && alone.files == facts.files;
+    let read = opened.into_inner().into_iter().collect();
+    Ok((facts, CaptureReads { bound, read }))
 }
 
 fn extract_walked(

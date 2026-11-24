@@ -10,6 +10,18 @@ use std::path::Path;
 use core_graph::{Edge, Node};
 use source_walk::WalkedFile;
 
+/// What a reader's `extract_from_capture_reading` found about where its
+/// facts come from (ADR-0072 slice 9, AC-1530, AC-1532).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureReads {
+    /// True when the facts are a function of the captured files alone: the
+    /// reader, given only the capture's listing and bytes, reads no other
+    /// file and emits the same facts whatever the other producers emitted.
+    pub bound: bool,
+    /// The captured files that reading opened, in path order.
+    pub read: Vec<String>,
+}
+
 /// The checkout walk the readers share.
 pub(crate) fn walk(root: &Path) -> std::io::Result<Vec<WalkedFile>> {
     source_walk::files(
