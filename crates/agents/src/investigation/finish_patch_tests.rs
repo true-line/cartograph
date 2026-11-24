@@ -496,6 +496,42 @@ fn a_capacity_gap_is_disclosed_inside_the_patch() {
 /// AC-1434 (#1728 run-29): an @29 disclosure that claims a finding was
 /// withdrawn is refused when the patch withdrew nothing; earlier roles merge
 /// it unchanged.
+// AC-1444: @32's patch asks for no capacity disclosure, since the host writes
+// it. A refusal that flags nothing else has nothing to patch.
+#[test]
+fn a_host_disclosed_capacity_gap_is_not_asked_of_the_patch() {
+    let first = finish();
+    let gap = "e".repeat(64);
+    let mut record = limitation_refusal(&first);
+    record.feedback.unmet = vec![FeedbackEntry {
+        obligation_id: gap.clone(),
+        kind: "source".into(),
+        reason: RefusalReason::ExcludedByCapacity,
+    }];
+    record.refusal_id = record.content_id().unwrap();
+    let old =
+        PatchBasis::from_refusal_for_role(&record, 3, SpecialistId::DomainAnalystV31).unwrap();
+    assert_eq!(old.capacity_gaps, vec![gap]);
+    let new =
+        PatchBasis::from_refusal_for_role(&record, 3, SpecialistId::DomainAnalystV32).unwrap();
+    assert!(new.capacity_gaps.is_empty());
+    assert_eq!(new.flagged_limitations, old.flagged_limitations);
+    assert_eq!(new.flagged_indices, old.flagged_indices);
+    let ledger = crate::investigation::tests::ledger();
+    assert!(
+        !new.response_schema(&ledger)
+            .unwrap()
+            .contains("disclosures")
+    );
+    record.feedback.prose_correction = None;
+    record.refusal_id = record.content_id().unwrap();
+    assert!(PatchBasis::from_refusal_for_role(&record, 3, SpecialistId::DomainAnalystV31).is_ok());
+    assert_eq!(
+        PatchBasis::from_refusal_for_role(&record, 3, SpecialistId::DomainAnalystV32).err(),
+        Some(PatchRejection::UnsupportedRefusal)
+    );
+}
+
 #[test]
 fn a_disclosure_claiming_an_unmade_withdrawal_is_refused() {
     let first = finish();
