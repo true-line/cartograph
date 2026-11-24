@@ -632,7 +632,8 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    and each captured record the reader read. A `DECIDES` edge exists only
    when its target is a recovered fact, so it is receipted
    `cross_file_input_unbound` until relinking binds each target as an
-   `UpstreamFact`.
+   `UpstreamFact`. Relinking writes only the ADRs and edges it reads
+   differently, since any write to a fact's row drops its source binding.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
