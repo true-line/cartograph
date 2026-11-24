@@ -480,7 +480,9 @@ impl InvestigationInput {
         policy: &InvestigationPolicy,
         consistency: Option<&AcquisitionDisclosureConsistency<'_>>,
     ) -> Result<Option<Vec<String>>, InvestigationError> {
-        if self.payload.system != SpecialistId::DomainAnalystV31.prompt() {
+        if self.payload.system != SpecialistId::DomainAnalystV31.prompt()
+            && self.payload.system != SpecialistId::DomainAnalystV32.prompt()
+        {
             return Ok(None);
         }
         if finish.schema_version != 1 || finish.narrative.is_some() {
@@ -1262,11 +1264,20 @@ impl InvestigationInput {
             finishing_attempts_hash: completed_attempts_hash_with_policy(attempts, policy)?,
             assessment: candidate.assessment,
         };
+        // AC-1444: host-written capacity disclosures are part of the result,
+        // so it is built from the finish with those limitations appended.
+        let mut action = finish.action.clone();
+        if let InvestigationAction::Finish { limitations, .. } = &mut action
+            && limitations.len() < candidate.limitations.len()
+            && candidate.limitations.starts_with(limitations)
+        {
+            limitations.clone_from(&candidate.limitations);
+        }
         let result = self.admit_result_bound_with_policy(
             task,
             step,
             Some(disclosure),
-            &finish.action,
+            &action,
             model,
             timestamp,
             Some(completion),
