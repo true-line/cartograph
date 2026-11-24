@@ -255,6 +255,85 @@ impl llm::LlmProvider for RecordingProvider {
     }
 }
 
+// AC-1088: a prepared task records schema 3 and copies each read receipt's
+// closure state: a v4 receipt's established closure names the record the
+// receipt store retains.
+#[test]
+fn a_prepared_task_copies_each_read_receipts_closure_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(root.join("source.ts"), ORIGINAL).unwrap();
+    let state = app_state(&app_data);
+    let source = crate::register_local_source(&state, &root).unwrap();
+    let captured = capture(&state, &source, true);
+    let (owner, candidate) = rule_pair(&captured);
+    install_task(&state, &owner, &[candidate]);
+    let prepared = prepare(&state, GAP, "task:closure").unwrap();
+    let basis = prepared.source_basis();
+    assert_eq!(basis.schema_version, 3);
+    let mut read = 0;
+    for origin in &basis.evidence {
+        let TaskEvidenceKind::CapturedPrimarySource {
+            receipt_id,
+            input_closure,
+            ..
+        } = &origin.origin
+        else {
+            continue;
+        };
+        read += 1;
+        assert!(receipt_id.starts_with("ts-primary-v4:"), "{receipt_id}");
+        let agents::TaskInputClosure::Established { closure_id } = input_closure else {
+            panic!("{input_closure:?}");
+        };
+        let record = state
+            .primary_sources
+            .receipts
+            .lock()
+            .unwrap()
+            .closure(closure_id)
+            .unwrap();
+        assert_eq!(&*record.closure_id, &**closure_id);
+    }
+    assert!(read > 0);
+}
+
+// AC-1088: a not-established state is copied with its reasons in order, and a
+// pre-v4 receipt's legacy state stays legacy.
+#[test]
+fn a_receipts_gap_reasons_are_copied_as_they_are() {
+    use adapters_lang_ts::captured::{ClosureGapReason, ReceiptClosure};
+    assert_eq!(task_input_closure(None), agents::TaskInputClosure::LEGACY);
+    assert_eq!(
+        task_input_closure(Some(&ReceiptClosure::InputClosureNotEstablished {
+            reasons: vec![
+                ClosureGapReason::ProducerNotParticipating,
+                ClosureGapReason::CrossFileInputUnbound,
+                ClosureGapReason::ExternalInputUnbound,
+                ClosureGapReason::RemoteReference,
+                ClosureGapReason::UpstreamClosureIncomplete,
+                ClosureGapReason::EnrichmentChangedFact,
+                ClosureGapReason::CacheReuseUnproven,
+                ClosureGapReason::LimitExceeded,
+            ],
+        })),
+        agents::TaskInputClosure::NotEstablished {
+            reasons: vec![
+                agents::TaskClosureGap::ProducerNotParticipating,
+                agents::TaskClosureGap::CrossFileInputUnbound,
+                agents::TaskClosureGap::ExternalInputUnbound,
+                agents::TaskClosureGap::RemoteReference,
+                agents::TaskClosureGap::UpstreamClosureIncomplete,
+                agents::TaskClosureGap::EnrichmentChangedFact,
+                agents::TaskClosureGap::CacheReuseUnproven,
+                agents::TaskClosureGap::LimitExceeded,
+            ]
+            .into(),
+        }
+    );
+}
+
 #[test]
 fn prepared_task_retains_original_bytes_after_checkout_change_deletion_and_restart() {
     // AC-0172, AC-0174: real captured producer facts supply exact bytes after
@@ -298,7 +377,8 @@ fn prepared_task_retains_original_bytes_after_checkout_change_deletion_and_resta
                 TaskEvidenceKind::CapturedPrimarySource {
                     registered_source_id,
                     scope: PrimarySourceScope::PrimarySourceOnly,
-                    input_closure: agents::TaskInputClosure::LEGACY,
+                    // Copied from the v4 receipt read (AC-1088).
+                    input_closure: agents::TaskInputClosure::Established { .. },
                     ..
                 } if registered_source_id == &source.source_id
             ))

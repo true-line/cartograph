@@ -213,7 +213,7 @@ fn unverified_state_and_reasons() {
     legacy.schema_version = 1;
     legacy.evidence.iter_mut().for_each(|e| e.captured = false);
     let mut future = record("future");
-    future.schema_version = 3;
+    future.schema_version = 4;
     let mut empty = record("empty");
     empty.evidence.clear();
     let mut mixed = record("mixed");
