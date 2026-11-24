@@ -15,6 +15,11 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # hcl-edit is the Terraform lane's exact grammar and parser pin, named in
+      # every tf-primary-v1 receipt (AC-1053, SPEC-06). Moving it changes what
+      # parses, so it advances only with a receipt contract revision.
+      - dependency-name: hcl-edit
 
   - package-ecosystem: npm
     directory: /
