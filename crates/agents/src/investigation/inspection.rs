@@ -80,6 +80,7 @@ impl InvestigationInspectionTarget {
                 .or_else(|| self.receipt_id.strip_prefix("rs-primary-v1:"))
                 .or_else(|| self.receipt_id.strip_prefix("kt-primary-v1:"))
                 .or_else(|| self.receipt_id.strip_prefix("tf-primary-v1:"))
+                .or_else(|| self.receipt_id.strip_prefix("tf-primary-v2:"))
                 .is_some_and(crate::source_basis::hash)
             || !text(&self.source.repo, 256)
             || !text(&self.source.commit_sha, 256)
