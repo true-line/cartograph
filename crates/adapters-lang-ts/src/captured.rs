@@ -25,6 +25,11 @@ pub use python::{
     mint_kotlin_file_receipts, mint_python_file_receipts, mint_rust_file_receipts,
     stage_lane_receipts,
 };
+mod closure;
+pub use closure::{
+    CLOSURE_ID_PREFIX, ClosureGapReason, ClosureInput, ClosureParameters, ClosureRef,
+    ExternalMedia, InputClosureV1, MAX_CLOSURE_BYTES, MAX_CLOSURE_INPUTS, is_closure_id,
+};
 mod observed;
 pub use observed::mint_observed_receipts;
 mod receipt;
