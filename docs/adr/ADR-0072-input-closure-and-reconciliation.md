@@ -624,6 +624,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    receipts. A contract `Drift` or `Gap` also weighs the recovered
    Endpoints, an upstream input no captured document decides, so it is not
    receipted.
+   *As built (AC-1540, found ADRs):* producer-keyed (`Grammar::Adr`,
+   `adr-primary-v1:`/`adr-primary-v2:`, `t0.adr-markdown/declared-v2`),
+   pinning the reader's own Markdown line rules as
+   `found-adr-markdown-v1`. An ADR node is decided by its record alone, so
+   it is established on the capture's `Enumeration` under `adr-walk-v1`
+   and each captured record the reader read. A `DECIDES` edge exists only
+   when its target is a recovered fact, so it is receipted
+   `cross_file_input_unbound` until relinking binds each target as an
+   `UpstreamFact`.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
