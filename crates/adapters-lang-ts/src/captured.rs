@@ -1610,7 +1610,7 @@ fn state_completed(
 const PROBED_ROOT_FILE: &str = "vercel.json";
 
 /// True for a path whose file name the resolution index reads.
-fn is_config_path(path: &str) -> bool {
+pub(super) fn is_config_path(path: &str) -> bool {
     super::resolution::is_config(path.rsplit('/').next().unwrap_or(path))
 }
 
