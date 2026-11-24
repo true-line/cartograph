@@ -219,6 +219,39 @@ pub fn stage_pipeline_receipts(
     )
 }
 
+/// Environment reader receipts for `files` (AC-1530), staged as
+/// [`stage_pipeline_receipts`] stages a pipeline's: established on the
+/// reader's closure ([`super::environment_walk_closure`]) when `read` names
+/// the files the reader opened over the capture and reported its facts
+/// bound to, all of them among `files` under the environment grammar, and
+/// `cross_file_input_unbound` otherwise.
+pub fn stage_environment_receipts(
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    read: Option<&[String]>,
+) -> ReceiptStage {
+    let covered = read.is_some_and(|read| {
+        read.iter()
+            .all(|path| Grammar::for_path(path) == Grammar::Environment && files.contains(path))
+    });
+    let closure = if covered {
+        super::environment_walk_closure(capture, files, id.repo)
+            .map_err(|_| ClosureGapReason::LimitExceeded)
+    } else {
+        Err(ClosureGapReason::CrossFileInputUnbound)
+    };
+    stage_walk_receipts(
+        Grammar::Environment,
+        closure,
+        capture,
+        files,
+        id,
+        (nodes, edges),
+    )
+}
+
 /// Stage `grammar`'s receipts for `files`, each established on `closure`
 /// or carrying its reason.
 fn stage_walk_receipts(

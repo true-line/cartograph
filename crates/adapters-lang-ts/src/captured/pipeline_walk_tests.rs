@@ -121,10 +121,11 @@ fn pipeline_receipts_are_established_on_the_reader_closure() {
 }
 
 // AC-1528: a Pipeline receipt's grammar follows the reader's selection, so
-// a YAML file outside it is no Pipeline file.
+// a YAML file outside it is no Pipeline file (it is the environment
+// reader's, AC-1530).
 #[test]
 fn the_pipeline_grammar_follows_the_reader_selection() {
     assert_eq!(Grammar::for_path(WORKFLOW), Grammar::Pipeline);
     assert_eq!(Grammar::for_path("svc/Dockerfile"), Grammar::Pipeline);
-    assert_eq!(Grammar::for_path("config/app.yml"), Grammar::Tsx);
+    assert_eq!(Grammar::for_path("config/app.yml"), Grammar::Environment);
 }
