@@ -296,6 +296,11 @@ pub(crate) fn hash(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
+/// A receipt contract that records an input closure state: TypeScript v4
+/// and Terraform v2 (AC-1526).
+fn closure_receipt(value: &str) -> bool {
+    value.starts_with("ts-primary-v4:") || value.starts_with("tf-primary-v2:")
+}
 fn prefixed(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(hash)
 }
@@ -310,6 +315,7 @@ fn receipt(value: &str) -> bool {
         || prefixed(value, "rs-primary-v1:")
         || prefixed(value, "kt-primary-v1:")
         || prefixed(value, "tf-primary-v1:")
+        || prefixed(value, "tf-primary-v2:")
 }
 impl TaskFactKey {
     fn valid(&self) -> bool {
@@ -446,12 +452,11 @@ impl TaskSourceBasisV2 {
                 } => {
                     // Schema 2 and pre-v4 receipts record the legacy state; a
                     // schema-3 origin read from a v4 receipt carries its state.
-                    let closure_valid =
-                        if self.schema_version == 3 && receipt_id.starts_with("ts-primary-v4:") {
-                            input_closure.v4_valid()
-                        } else {
-                            *input_closure == TaskInputClosure::LEGACY
-                        };
+                    let closure_valid = if self.schema_version == 3 && closure_receipt(receipt_id) {
+                        input_closure.v4_valid()
+                    } else {
+                        *input_closure == TaskInputClosure::LEGACY
+                    };
                     if !closure_valid {
                         return Err(invalid());
                     }

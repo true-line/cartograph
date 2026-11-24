@@ -15,9 +15,19 @@ fn read_from_v4(
     schema: u32,
     closure: TaskInputClosure,
 ) -> TaskSourceBasisV2 {
+    read_from(task, schema, closure, "ts-primary-v4:")
+}
+
+/// `task`'s basis read from a receipt whose id starts with `prefix`.
+fn read_from(
+    task: &PreparedAgentTask,
+    schema: u32,
+    closure: TaskInputClosure,
+    prefix: &str,
+) -> TaskSourceBasisV2 {
     let mut source = task.source_basis().clone();
     source.schema_version = schema;
-    let receipt = format!("ts-primary-v4:{}", "4".repeat(64));
+    let receipt = format!("{prefix}{}", "4".repeat(64));
     for fact in &mut source.selected_facts {
         if let Some(binding) = &mut fact.binding {
             binding.receipt_id = receipt.clone();
@@ -213,4 +223,18 @@ fn a_schema_three_task_stages_as_v3_content() {
     mislabeled["schema_version"] = json!(2);
     assert!(ImmutableContent::decode(&mislabeled.to_string()).is_err());
     assert!(ImmutableContent::decode(&raw).is_ok());
+}
+
+// AC-1526: a Terraform contract-v4 receipt (`tf-primary-v2:`) carries its
+// closure state into a schema-3 basis as a TypeScript v4 receipt does; a
+// v3 lane receipt still carries only the legacy state.
+#[test]
+fn a_terraform_v4_receipt_carries_its_closure_state() {
+    let task = fixture();
+    let v3 = prepared(&task, read_from(&task, 3, established(), "tf-primary-v2:")).unwrap();
+    assert_eq!(
+        origin_closure(v3.source_basis()),
+        json!({"state": "established", "closure_id": CLOSURE})
+    );
+    assert!(prepared(&task, read_from(&task, 3, established(), "tf-primary-v1:")).is_err());
 }

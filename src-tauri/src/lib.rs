@@ -1732,6 +1732,38 @@ fn stage_lane_publication_receipts(
     admit_surviving_lane_receipts(nodes, edges, stage, receipts);
 }
 
+/// Terraform's [`stage_lane_publication_receipts`] under contract v4
+/// (ADR-0072 slice 9, AC-1526): the receipts are established on the walk's
+/// closure when the walk read only the captured `.tf` files (`reads`),
+/// `remote_reference` when a module call names a remote source, and
+/// `cross_file_input_unbound` when it read anything else.
+fn stage_terraform_publication_receipts(
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &adapters_lang_ts::SourceId<'_>,
+    (nodes, edges): (&[core_graph::Node], &[core_graph::Edge]),
+    reads: &iac::SourceReads,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
+) {
+    use adapters_lang_ts::captured::{ClosureGapReason, TerraformWalk};
+    let walk = if !reads.bound_to(files) {
+        TerraformWalk::NotEstablished(ClosureGapReason::CrossFileInputUnbound)
+    } else if reads.remote_module {
+        TerraformWalk::NotEstablished(ClosureGapReason::RemoteReference)
+    } else {
+        TerraformWalk::Bound
+    };
+    let (published_nodes, published_edges) = publication_view(nodes, edges);
+    let stage = adapters_lang_ts::captured::stage_terraform_receipts(
+        capture,
+        files,
+        id,
+        (&published_nodes, &published_edges),
+        walk,
+    );
+    admit_surviving_lane_receipts(nodes, edges, stage, receipts);
+}
+
 /// The facts graph publication keeps: each node id's last occurrence, in
 /// extraction order, and each relation merged across its occurrences.
 fn publication_view(
@@ -2422,10 +2454,12 @@ fn extract_tree_packed(
         // A capture holding `.tf` files is parsed from its retained bytes,
         // with provenance-only Terraform receipts (AC-1053). Local module
         // directories are still listed in the checkout, and a module file
-        // outside the capture is read there and stays uncited.
+        // outside the capture is read there and stays uncited; the receipts
+        // are established on the walk's closure only when it read nothing
+        // but captured files (AC-1526).
         let captured_tf = captured_lane_paths(primary, ".tf");
         let (tf, stats) = if let (Some(capture), false) = (primary, captured_tf.is_empty()) {
-            let (tf, stats) = iac::extract_dir_from_sources(
+            let (tf, stats, reads) = iac::extract_dir_from_sources_reading(
                 root,
                 &tf_id,
                 &captured_tf,
@@ -2440,13 +2474,12 @@ fn extract_tree_packed(
                 &mut tf_progress,
             )
             .map_err(|e| e.to_string())?;
-            stage_lane_publication_receipts(
-                adapters_lang_ts::captured::Grammar::Terraform,
+            stage_terraform_publication_receipts(
                 capture,
                 &captured_tf,
                 &adapters_lang_ts::SourceId { repo, commit },
-                &tf.nodes,
-                &tf.edges,
+                (&tf.nodes, &tf.edges),
+                &reads,
                 receipts,
             );
             (tf, stats)

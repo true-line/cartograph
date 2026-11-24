@@ -545,6 +545,19 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    declarative readers, ADR relinking. *Tests:* each declared input class
    changes the closure; each undeclared read fails a guard test; the slice 2
    fixtures are extended to the producer.
+   *As built (AC-1526, IaC HCL):* Terraform receipts gain contract v4
+   (`tf-primary-v2:`, `t0.adapter-iac/direct-lexical-v2`). Module
+   expansion, policy-document grants and endpoint closure read across the
+   whole walk, so every Terraform fact of a walk shares one closure: the
+   capture's `Enumeration` under `tf-module-walk-v1` and each captured
+   `.tf` file. The iac walk reports what it read besides the captured
+   files (`SourceReads`); the closure is established only when it read no
+   outside file, resolved every local module source, and each local module
+   directory it listed in the checkout holds exactly the captured files
+   directly in it. Otherwise the receipts are `cross_file_input_unbound`.
+   A registry or remote module call makes them `remote_reference`. The
+   walk reads no `*.tfvars`, so none is probed. Per-module scoping of the
+   closure, so a remote call taints only its own module, is left for later.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.

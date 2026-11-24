@@ -11,11 +11,13 @@
 //! receipt within the same extraction budget.
 
 use super::{
-    CapturedError, Charge, Grammar, MAX_EXTRACTION_RECEIPT_BYTES, MAX_EXTRACTION_RECEIPTS,
-    MintedReceipt, Receipt, ReceiptBudget, SourceId, valid_path,
+    CapturedError, Charge, ClosureGapReason, Grammar, MAX_EXTRACTION_RECEIPT_BYTES,
+    MAX_EXTRACTION_RECEIPTS, MintedReceipt, Receipt, ReceiptBudget, ReceiptClosure, SourceId,
+    valid_path,
 };
 use core_graph::{Edge, Node};
 use source_capture::CapturedFile;
+use std::sync::Arc;
 
 /// Receipts for the facts one captured Python file emitted. A fact whose
 /// provenance leaves the file, or that carries a rule, gets none.
@@ -150,6 +152,67 @@ pub fn stage_lane_receipts(
     nodes: &[Node],
     edges: &[Edge],
 ) -> ReceiptStage {
+    stage_lane_receipts_with(grammar, capture, files, id, (nodes, edges), &|receipt| {
+        Ok(receipt)
+    })
+}
+
+/// How a Terraform walk's inputs are bound (ADR-0072 slice 9, AC-1526).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerraformWalk {
+    /// The walk read only captured `.tf` files, and each local module
+    /// directory it listed held the captured files alone.
+    Bound,
+    /// The walk read an input the capture does not bind, for this reason.
+    NotEstablished(ClosureGapReason),
+}
+
+/// Terraform receipts for `files` (AC-1053) under contract v4 (AC-1526):
+/// established on the walk's closure ([`super::terraform_walk_closure`])
+/// when `walk` is bound, `limit_exceeded` when that closure would pass its
+/// bound, else carrying the reason in `walk`. Staged as
+/// [`stage_lane_receipts`] stages them; the shared closure record is
+/// charged once.
+pub fn stage_terraform_receipts(
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    walk: TerraformWalk,
+) -> ReceiptStage {
+    let gap = |reason| ReceiptClosure::InputClosureNotEstablished {
+        reasons: vec![reason],
+    };
+    let (state, record) = match walk {
+        TerraformWalk::Bound => match super::terraform_walk_closure(capture, files, id.repo) {
+            Ok(record) => (
+                ReceiptClosure::Established {
+                    closure_id: record.closure_id.clone(),
+                },
+                Some(Arc::new(record)),
+            ),
+            Err(_) => (gap(ClosureGapReason::LimitExceeded), None),
+        },
+        TerraformWalk::NotEstablished(reason) => (gap(reason), None),
+    };
+    stage_lane_receipts_with(
+        Grammar::Terraform,
+        capture,
+        files,
+        id,
+        (nodes, edges),
+        &|receipt| receipt.with_closure(state.clone(), record.clone()),
+    )
+}
+
+fn stage_lane_receipts_with(
+    grammar: Grammar,
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    state: &dyn Fn(MintedReceipt) -> Result<MintedReceipt, CapturedError>,
+) -> ReceiptStage {
     let mut by_file: std::collections::BTreeMap<&str, (Vec<&Node>, Vec<&Edge>)> =
         std::collections::BTreeMap::new();
     for node in nodes {
@@ -171,7 +234,14 @@ pub fn stage_lane_receipts(
         let nodes: Vec<Node> = nodes.iter().map(|node| (*node).clone()).collect();
         let edges: Vec<Edge> = edges.iter().map(|edge| (*edge).clone()).collect();
         if let Ok(receipts) =
-            mint_lane_receipts_in(grammar, file, Some(capture), id, &nodes, &edges)
+            mint_lane_receipts_in(grammar, file, Some(capture), id, &nodes, &edges).and_then(
+                |receipts| {
+                    receipts
+                        .into_iter()
+                        .map(state)
+                        .collect::<Result<Vec<_>, _>>()
+                },
+            )
         {
             stage.extend(receipts);
         }
