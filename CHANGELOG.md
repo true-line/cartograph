@@ -1,5 +1,55 @@
 # cartograph
 
+## 0.78.0
+
+### Minor Changes
+
+- 2087cdb: A staged section draft can be accepted without some of its claims: the draft is returned with a note naming them and its successor, holding the other claims unchanged, is accepted (#1748).
+- 5b07070: A new analyst version, domain-analyst@31, gets one chance to fix a finish that cites evidence it never read: the refusal names the ids to drop, in either mode, instead of ending the run. A cited source the run can still read keeps the existing "read it first" correction. A source read refused because the prompt is full is no longer offered again later in the same run.
+- 495b55b: When checked local drafting of business rules fails on one area, that area is reported as failed and the remaining areas are still drafted (#1748).
+- 743c31a: The app can record the project's engineer, take the engineer's answer to an open Gap from the Gaps register as an attested record, and let the engineer confirm, dispute or withdraw a record; none of this is reachable over MCP (#2463, AC-1079).
+- ef4ad3f: The section composer is handed the attested records that answer its section, or a Gap among its facts, and may cite them by their `A-` ids; two attested records sharing one id fail the curated projection (#2463, AC-1077).
+- a2b3a19: The gated §1.5 business-rules composition now drafts the attested records handed to the section, after its rule rows, and gates each claim against the record's statement (#2463, AC-1077).
+- f88dd56: An MCP session with the task grant can stage a finding of its own completed task as an agent-attested, unconfirmed answer to an open Gap with `cartograph_task_propose_attested`, for review in the app; no MCP tool confirms (#2463, AC-1079).
+- 9c15f6b: `product-specification.md` prints drafted claims that cite attested records in `best-effort`, labelled attested or agent-attested, unconfirmed with each contributor and verb, counts them per section in `verified-only`, and `fact-index` lists each cited `A-` id in its own attested table (#2463, AC-1077).
+- 3fa1824: The curated projection moves to version 4 and projects attested records as a fourth kind with their own states, including `agent-attested, unconfirmed`, and empty tier and confidence; an agent attestation must match the role, provider and model its contributor id was registered for (#2463, AC-1075).
+- ddc10d3: A finding of a completed investigation or chat can be proposed as its agent's answer to an open Gap, recorded as agent-attested, unconfirmed until the engineer confirms it; another agent's identical proposal is recorded as agreeing (#2463, AC-1079).
+- 9034202: The export and the MCP curated read now take the stored attested records into the curated projection; `curated-json` shows engineer-backed and agent-attested, unconfirmed records in `best-effort` only, with their label and contributors, and counts them in `verified-only` (#2463, AC-1077).
+- 50561a4: Attested context has its record model: an engineer- or agent-attested answer to a Gap or a section, its contributors by id, its stable `A-` citation id and its standing, including `agent-attested, unconfirmed` (#2463, AC-1071).
+- 0a2bce9: Attested records are stored in the project's review store with append-only attestations and a contributor table that holds one engineer and one entry per agent role, provider and model; names live only in that table (#2463, AC-1073).
+- 8824c0e: The Gaps register and the Spec Workbench show attested records apart from recovered content, labelled `attested` or `agent-attested, unconfirmed` with each contributor, and let the engineer confirm, dispute or withdraw them; an answered Gap stays open (#2463, AC-1081).
+- 0e9f19a: Export bundle now writes bundle file v3. The Markdown fact index is no longer stored a second time next to its JSON data. The spec crate's reader rebuilds it byte for byte and refuses a file where it does not match. On a large repository this cuts the file from 883 MB to 729 MB. Files written as v1 and v2 still read (#1582).
+- d68ed75: D1 §1.2 cites the example operations of each caller, so a drafted actors section can describe signed-in users and API clients with citations (#1748).
+- ba0f8c1: Business rules (D1 §1.5) now list each capability's operations and their rate limits under the capability, citing the endpoint, and the checked rules drafter drafts a capability whole and states a rule with the conditions that explain it as one requirement.
+- 7c0000c: Local checked drafting of business rules skips rows that state no rule and rules already drafted under another capability, so an area's draft has fewer repeated and empty claims (#1748).
+- 43976f9: Ingest reads the original sources a shipped JavaScript bundle's source map carries, under the bundle, with artifact evidence citing the map, and reports them as their own layer (#1445).
+- 12d24b5: A gated §1.5 run can draft its areas in parallel: set `CARTOGRAPH_COMPOSE_PARTS_PARALLEL` (1 to 8, default 1) for a server that batches requests. Drafts are still reported in area order (#1748).
+- 7f02d49: Gated plugins are now routed the files they claim from the source capture when it holds them, so plugin facts match the bytes the rest of recovery used (#385, AC-1069).
+- 0cafebf: A checked local draft too large to review in one request is now reviewed in batches instead of being staged unreviewed (#1748).
+- 882d0c9: The app can suggest the sources an investigation should read first: the functions that hold the most recovered validation and refusal rules (guarded throws and exits), at most two per file (#1728).
+- d6db7df: An investigation whose source read is discarded after it ran now saves and logs which read or publication step failed and its error class, instead of only "known_read_discarded" (#1728).
+- 599cd4a: The proposal review dialog shows whether a staged proposal still matches the current recovery, with every recorded reconciliation, and can reconcile it again (#385, AC-1074).
+
+### Patch Changes
+
+- a335a46: The product specification now prints an accepted section draft that cites an area of the system, instead of noting that it cites a fact the export does not list (#2511).
+- 0cef8d1: An accepted section draft that cites an area of the system is printed in the export instead of being withheld as citing a missing fact (#2511).
+- ff249e1: The rule-scope check now judges each claim against each cited rule and that rule's own capabilities, which on a local model replaces replies that echoed every capability or answered "all" throughout.
+- 3ddfdd0: The section composer is told not to add describing words, purposes or operations its cited facts do not state, so composed claims carry fewer unsupported details.
+- efc9405: Update the `cookie` crate to 0.18.3, which fixes a private-cookie nonce reuse after `fork`.
+- 8e8bbfb: A project can lower how many texts a semantic preview sends to the embedding model in one call, so a slow local model can finish each call before its timeout.
+- 6de8c50: A captured range too long to inspect is now reported as too large instead of as stale, and rule-bearing source suggestions offer only ranges that can be inspected (#2523).
+- 5ec5c80: Java, Python, Go, Rust and Kotlin source reads in an investigation now reserve their measured size instead of six times their length, so a run can read several times more source before it reaches its input limit (#1728).
+- 8cb7ff5: A part of a checked rules run by area that fails now keeps its cause on its report: the failed model call's class and the error, even when other areas were staged.
+- ce25289: A finish correction whose new limitation text says a finding was withdrawn or replaced when it was not is now sent back to the model instead of being saved, so a saved result no longer claims a finding is gone that is still there.
+- 3e2c6cd: A drafted claim that names a platform such as Android or iOS is no longer staged unless a fact it cites names that platform.
+- 56426db: A captured file that only another reader retained, such as an ignored API reference, is no longer routed to a gated plugin (#385, AC-1069).
+- 62649f0: A recovered flask-limiter rate limit now records the 429 status a request past it is refused with, so a business rule stating the limit and its refusal can cite the endpoint.
+- f66b5ea: The rule-scope check asks identical rules a claim cites as one pair, settles a claim citing every copy of an identical rule within its capabilities without asking, and (rule-scope@3) no longer reads different wording of a rule as widening it.
+- ea916a0: Rule-bearing source suggestions now fill any remaining slots from further rule owners in the same files, instead of stopping at two per file (#1728).
+- 785ecb3: Typed-decision providers (one choice per question, with probabilities and a confidence) now go through the same egress firewall and consent as completions, and a candidate-selection eval measures them against labelled cases. No provider ships and nothing runs by default.
+- 677e608: A follow-up on an investigation that withheld findings now tells the child which original finding each saved finding is, so an Evidence auditor no longer takes a surviving finding for the withheld one.
+
 ## 0.77.0
 
 ### Minor Changes

@@ -114,7 +114,7 @@ fn an_engineer_backed_record_is_eligible_with_empty_tier_and_the_gap_still_count
     assert_eq!(record.citations, vec!["F-1".to_owned()]);
     assert_eq!(record.attestations.len(), 2);
     assert!(projection.revision.starts_with("curated-revision-v4:"));
-    assert_eq!(CURATED_POLICY_VERSION, "curated-policy-v4");
+    assert_eq!(CURATED_POLICY_VERSION, "curated-policy-v5");
     // The base graph is the one passed in, and its Gap is still a Gap.
     assert_eq!(projection.graph_basis, GRAPH_HASH);
     assert!(is_gap(&nodes[0]));

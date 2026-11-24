@@ -182,6 +182,13 @@ pub(crate) fn graph_copies() -> usize {
 }
 
 impl SharedObservation {
+    /// The store revision of the rows last observed, if any.
+    pub(super) fn revision(&self) -> Option<core_graph::StoreRevision> {
+        self.0
+            .as_ref()
+            .map(|observed| observed.rows.revision.clone())
+    }
+
     /// The observation the store is at now and the source-selection states
     /// of `keys` in it. The graph lock is held for the store read alone and
     /// not while the identity is computed. `Err` when the store read failed.

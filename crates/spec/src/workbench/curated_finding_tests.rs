@@ -99,6 +99,7 @@ fn finding(id: &str, cited: &[String]) -> ReviewedFinding {
             .map(|id| (id.clone(), current[id].clone()))
             .collect(),
         support: SourceSupport {
+            corroborated: 0,
             captured: 0,
             unverified: cited.len(),
         },

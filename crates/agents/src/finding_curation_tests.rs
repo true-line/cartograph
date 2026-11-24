@@ -359,6 +359,7 @@ fn a_stored_finding_becomes_the_projection_input_without_an_upgrade() {
     assert_eq!(
         input.support,
         SourceSupport {
+            corroborated: 0,
             captured: 1,
             unverified: 1
         }

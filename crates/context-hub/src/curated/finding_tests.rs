@@ -22,6 +22,7 @@ fn finding(id: &str) -> ReviewedFinding {
             ("F-2".to_owned(), "edge-v1:2".to_owned()),
         ]),
         support: SourceSupport {
+            corroborated: 0,
             captured: 1,
             unverified: 1,
         },
