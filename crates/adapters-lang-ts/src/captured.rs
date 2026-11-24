@@ -1209,24 +1209,70 @@ fn extract_captured_dir_packed_with_policy(
     drop(index);
     stats.completion_probes = bind_probes(capture, &probes);
     drop(probes);
+    let matching = packed_matcher(&store);
+    // A parse receipt whose complete fact completion changed in place (a
+    // service-worker File or Symbol marked `runtime`) no longer matches; its
+    // fact is minted afresh from the store with the emitted ones (AC-1524).
+    let mut edited = std::collections::BTreeSet::new();
+    receipts.retain(|receipt| {
+        let kept = matching(receipt);
+        if !kept {
+            edited.insert(receipt.fact_key().clone());
+        }
+        kept
+    });
+    // Recharge what is still held, so a dropped receipt's bytes, header and
+    // closure leave room for the receipts minted after completion.
+    charge = Charge::default();
+    let unlimited = ReceiptBudget {
+        bytes: usize::MAX,
+        receipts: usize::MAX,
+    };
+    for (index, receipt) in receipts.iter().enumerate() {
+        charge.admit(receipt, index, unlimited);
+    }
+    let declared: Vec<bool> = declarations.iter().map(&matching).collect();
+    let decided: Vec<bool> = completed
+        .iter()
+        .map(|(receipt, _)| matching(receipt))
+        .collect();
     let receipted: std::collections::BTreeSet<FactKey> = receipts
         .iter()
-        .chain(&declarations)
-        .chain(completed.iter().map(|(receipt, _)| receipt))
+        .chain(
+            declarations
+                .iter()
+                .zip(&declared)
+                .filter(|(_, kept)| **kept)
+                .map(|(receipt, _)| receipt),
+        )
+        .chain(
+            completed
+                .iter()
+                .zip(&decided)
+                .filter(|(_, kept)| **kept)
+                .map(|((receipt, _), _)| receipt),
+        )
         .map(|receipt| receipt.fact_key().clone())
         .collect();
+    edited.extend(
+        declarations
+            .iter()
+            .zip(&declared)
+            .chain(completed.iter().map(|(receipt, _)| receipt).zip(&decided))
+            .filter(|(_, kept)| !**kept)
+            .map(|(receipt, _)| receipt.fact_key().clone())
+            .filter(|key| !receipted.contains(key)),
+    );
     let emitted = completion_receipts(
         capture,
         id,
         &store,
         held,
-        &receipted,
+        (&receipted, &edited),
         budget,
         measure_source,
     );
-    drop(receipted);
-    let matching = packed_matcher(&store);
-    receipts.retain(|receipt| matching(receipt));
+    drop((receipted, edited));
     // Count an omitted rule only when its fact survived directory completion,
     // so the named omissions describe facts the graph actually holds.
     let surviving = surviving_facts(&store);
@@ -1247,8 +1293,8 @@ fn extract_captured_dir_packed_with_policy(
     // budget. Admission is greedy in deterministic manifest order: a declaration
     // that does not fit is skipped and a smaller later one may still be admitted.
     drop(staged);
-    for receipt in declarations {
-        if !matching(&receipt) {
+    for (receipt, kept) in declarations.into_iter().zip(declared) {
+        if !kept {
             continue;
         }
         if charge.admit(&receipt, receipts.len(), budget) {
@@ -1276,8 +1322,8 @@ fn extract_captured_dir_packed_with_policy(
     // budget charges.
     let walk = walk_inputs(capture, &stats);
     let mut current = None;
-    for (receipt, proven) in completed {
-        if !matching(&receipt) {
+    for ((receipt, proven), kept) in completed.into_iter().zip(decided) {
+        if !kept {
             continue;
         }
         let receipt = state_completed(receipt, proven, walk.as_deref(), id.repo, &mut current)?;
@@ -1313,7 +1359,8 @@ fn extract_captured_dir_packed_with_policy(
 }
 
 /// Receipt candidates for the facts directory completion appended past
-/// `held` (nodes, edges), skipping any fact already `receipted`. Each is
+/// `held` (nodes, edges), and for held facts whose parse receipt it
+/// `edited` in place (AC-1524), skipping any fact already `receipted`. Each is
 /// minted against the captured TS file its first evidence entry cites, file
 /// by file in path order, binding each other captured source file it cites
 /// (a barrel, a base class; AC-1520), and staged within `budget` as it is
@@ -1324,7 +1371,10 @@ fn completion_receipts(
     id: &SourceId,
     store: &FactStore,
     (nodes, edges): (usize, usize),
-    receipted: &std::collections::BTreeSet<FactKey>,
+    (receipted, edited): (
+        &std::collections::BTreeSet<FactKey>,
+        &std::collections::BTreeSet<FactKey>,
+    ),
     budget: ReceiptBudget,
     measure_source: bool,
 ) -> Vec<MintedReceipt> {
@@ -1334,26 +1384,30 @@ fn completion_receipts(
             .filter(|path| supported(path))
             .map(str::to_owned)
     };
-    for (index, node) in store.nodes().iter().enumerate().skip(nodes) {
-        let Ok(node) = node.unpack() else { continue };
-        if receipted.contains(&FactKey::Node {
+    // A held fact is a candidate only when its parse receipt was `edited`;
+    // its key is read without decoding it.
+    for (index, node) in store.nodes().iter().enumerate() {
+        let key = FactKey::Node {
             id: node.id.clone(),
-        }) {
+        };
+        if receipted.contains(&key) || (index < nodes && !edited.contains(&key)) {
             continue;
         }
+        let Ok(node) = node.unpack() else { continue };
         if let Some(path) = primary(&node.props) {
             by_file.entry(path).or_default().0.push(index);
         }
     }
-    for (index, edge) in store.edges().iter().enumerate().skip(edges) {
-        let Ok(edge) = edge.unpack() else { continue };
-        if receipted.contains(&FactKey::Edge {
+    for (index, edge) in store.edges().iter().enumerate() {
+        let key = FactKey::Edge {
             source: edge.src.clone(),
             label: edge.label.clone(),
             destination: edge.dst.clone(),
-        }) {
+        };
+        if receipted.contains(&key) || (index < edges && !edited.contains(&key)) {
             continue;
         }
+        let Ok(edge) = edge.unpack() else { continue };
         if let Some(path) = primary(&edge.props) {
             by_file.entry(path).or_default().1.push(index);
         }

@@ -422,3 +422,47 @@ fn a_multi_file_typescript_receipt_is_provenance_only() {
         Err(CapturedError::Invalid("receipt files"))
     ));
 }
+
+// AC-1524: completion marks a registered service worker's File and the
+// Symbols defined in it `runtime` in place, citing the registration call.
+// Their parse receipts no longer match, so each is minted afresh from the
+// marked fact, binding the registering file, on the worker's walk closure.
+#[test]
+fn facts_completion_edits_in_place_are_receipted_afresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(
+        root,
+        "src/main.ts",
+        "navigator.serviceWorker.register('/worker.js');\n",
+    );
+    write(
+        root,
+        "public/worker.js",
+        "export function onPush(event) { return event; }\n",
+    );
+    let receipts = walk(root);
+    let file = decided(&receipts, "file:", "public/worker.js").expect("the worker File receipt");
+    let symbol = receipts
+        .iter()
+        .find(|receipt| {
+            matches!(receipt.fact_key(), FactKey::Node { id } if id.ends_with("public/worker.js#onPush"))
+        })
+        .expect("the worker Symbol receipt");
+    for receipt in [file, symbol] {
+        assert_eq!(receipt.file().path, "public/worker.js");
+        assert_eq!(
+            receipt
+                .other_files()
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/main.ts"]
+        );
+        assert_eq!(walk_record(receipt), walk_record(file));
+    }
+    assert_eq!(
+        walk_record(file).parameters.walk_policy,
+        TS_DIRECTORY_WALK_POLICY
+    );
+}
