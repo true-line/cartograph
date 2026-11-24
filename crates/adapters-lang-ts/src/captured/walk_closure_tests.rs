@@ -289,7 +289,7 @@ fn walk_decided_call_edges_are_established_on_the_walk_closure() {
 // the file its evidence cites and established on that file's walk closure,
 // here a Pulumi reference to a resource another module exports. AC-1520: a
 // call resolved through a barrel also cites the barrel, which its receipt
-// binds as another file; a fact citing a config keeps none.
+// binds as another file; AC-1522: so is a config it cites.
 #[test]
 fn completion_emitted_facts_are_established_on_the_walk_closure() {
     let directory = tempfile::tempdir().unwrap();
@@ -348,8 +348,8 @@ fn completion_emitted_facts_are_established_on_the_walk_closure() {
         walk_record(call),
         walk_record(decided(&receipts, "file:", "rule.ts").unwrap())
     );
-    // A Next API route also cites the `package.json` that declares Next, a
-    // config no receipt binds, so it keeps none.
+    // AC-1522: a Next API route also cites the `package.json` that declares
+    // Next, which its receipt binds as another file.
     write(
         root,
         "pages/api/hello.ts",
@@ -361,9 +361,25 @@ fn completion_emitted_facts_are_established_on_the_walk_closure() {
         r#"{"dependencies":{"@pulumi/aws":"1","next":"14"}}"#,
     );
     let receipts = walk(root);
-    assert!(!receipts.iter().any(|receipt| {
-        matches!(receipt.fact_key(), FactKey::Node { id } if id.ends_with("@ALL:/api/hello"))
-    }));
+    let route = receipts
+        .iter()
+        .find(|receipt| {
+            matches!(receipt.fact_key(), FactKey::Node { id } if id.ends_with("@ALL:/api/hello"))
+        })
+        .expect("a Next API route receipt");
+    assert_eq!(route.file().path, "pages/api/hello.ts");
+    assert_eq!(
+        route
+            .other_files()
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["package.json"]
+    );
+    assert_eq!(
+        walk_record(route),
+        walk_record(decided(&receipts, "file:", "pages/api/hello.ts").unwrap())
+    );
     assert!(decided_edge(&receipts, "rule.ts", &target).is_some());
 }
 

@@ -941,6 +941,12 @@ pub(super) fn validate_source_repo(
 }
 
 pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(), CapturedError> {
+    validate_file(file, repo, false)
+}
+
+/// [`validate_identity`]; with `config`, a TS resolution config the walk
+/// captured (a `package.json`, a tsconfig) is a valid path too (AC-1522).
+fn validate_file(file: &CaptureFileRef, repo: &str, config: bool) -> Result<(), CapturedError> {
     validate_source_repo(&file.source_id, repo)?;
     // Capture IDs are versioned hashes; CaptureStore independently verifies
     // membership and the actual raw object before a source read.
@@ -950,6 +956,7 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
         || !super::valid_path(&file.path)
         || !(is_input_source(&file.source_id)
             || super::supported(&file.path)
+            || (config && super::is_config_path(&file.path))
             || file.path.ends_with(".py")
             || file.path.ends_with(".go")
             || file.path.ends_with(".java")
@@ -967,7 +974,8 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
 /// (AC-1039): each of the same capture and grammar, listed once in path order,
 /// cited by at least one range, with the primary file cited first. A
 /// TypeScript receipt whose ranges are all provenance may too, citing other
-/// TS/JS sources of its capture, such as a barrel (AC-1520); a rule's
+/// TS/JS sources of its capture, such as a barrel (AC-1520), or its
+/// resolution configs, such as a `package.json` (AC-1522); a rule's
 /// inventory and measured receipts stay single-file.
 fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
     if content.other_files.is_empty() {
@@ -993,7 +1001,8 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
     }
     let mut previous: Option<&str> = None;
     for file in &content.other_files {
-        validate_identity(file, &content.repo_key)?;
+        // A TS receipt may cite the walk's resolution configs (AC-1522).
+        validate_file(file, &content.repo_key, typescript)?;
         if file.source_id != content.file.source_id
             || file.capture_id != content.file.capture_id
             || file.path == content.file.path
@@ -1013,7 +1022,8 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
 
 /// Whether a file of `other` grammar may be cited by a receipt of
 /// `primary`: the same lane grammar, or either TS grammar for a TypeScript
-/// receipt (a `.tsx` component may re-export a `.ts` module).
+/// receipt (a `.tsx` component may re-export a `.ts` module; a config's path
+/// selects the TSX grammar).
 fn same_lane(other: Grammar, primary: Grammar) -> bool {
     other == primary
         || (!primary.provenance_only() && matches!(other, Grammar::TypeScript | Grammar::Tsx))
