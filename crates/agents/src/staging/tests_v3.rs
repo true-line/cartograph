@@ -236,7 +236,8 @@ fn a_terraform_v4_receipt_carries_its_closure_state() {
     // a schedule v4 receipt (`sched-primary-v2:`), and AC-1534: an
     // entry-point v4 receipt (`entry-primary-v2:`), and AC-1536: a
     // toolchain v4 receipt (`tool-primary-v2:`), and AC-1538: an API
-    // reference v4 receipt (`apidoc-primary-v2:`).
+    // reference v4 receipt (`apidoc-primary-v2:`), and AC-1540: a found
+    // ADR v4 receipt (`adr-primary-v2:`).
     for prefix in [
         "tf-primary-v2:",
         "pipe-primary-v2:",
@@ -245,6 +246,7 @@ fn a_terraform_v4_receipt_carries_its_closure_state() {
         "entry-primary-v2:",
         "tool-primary-v2:",
         "apidoc-primary-v2:",
+        "adr-primary-v2:",
     ] {
         let v3 = prepared(&task, read_from(&task, 3, established(), prefix)).unwrap();
         assert_eq!(
