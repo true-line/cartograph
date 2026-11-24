@@ -198,11 +198,16 @@ jobs:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
+  # Releases are immutable once published, so the signed Windows installer
+  # has to be in the one create call. publish waits for the Windows job but
+  # never depends on its success: a Windows failure ships macOS alone.
   publish:
     name: Publish GitHub Release
     needs:
       - validate
       - build
+      - windows
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -224,6 +229,14 @@ jobs:
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: dist
+
+      # Only a signed installer is ever published (ADR-0093).
+      - name: Download this run's signed Windows installer
+        if: needs.windows.result == 'success' && needs.windows.outputs.signing_mode == 'signed'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.windows.outputs.artifact_name }}
+          path: windows
 
       # The organisation's Linux runner does not carry Node on its default PATH.
       # This step reaches for `node`, or runs an action that does, so the
@@ -251,6 +264,15 @@ jobs:
             printf '::error::Expected only %s, %s and %s; found: %s\n' \
               "$expected_app" "$expected_dsym" "$expected_dmg" "${assets[*]}"
             exit 1
+          fi
+
+          if [ -d windows ]; then
+            mapfile -t found < <(find windows -maxdepth 1 -type f -name '*-setup.exe')
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::Expected one signed NSIS installer; found ${#found[@]}."
+              exit 1
+            fi
+            mv "${found[0]}" "dist/Cartograph_${VERSION}_x64_signed-setup.exe"
           fi
 
           if [ "$SIGNING_MODE" = 'unsigned-dev' ]; then
@@ -321,55 +343,3 @@ jobs:
               --title "$RELEASE_TITLE" \
               --notes-file release-notes.md
           fi
-
-  # Attach the Windows installer to the release the macOS job published, but
-  # only when it is signed: an unsigned-dev installer stays an Actions
-  # artifact (ADR-0093).
-  publish-windows:
-    name: Attach signed Windows installer
-    needs:
-      - validate
-      - windows
-      - publish
-    if: needs.windows.outputs.signing_mode == 'signed'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      actions: read
-      contents: read
-    env:
-      TAG: ${{ needs.validate.outputs.tag }}
-      VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - name: Download this run's signed Windows installer
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ${{ needs.windows.outputs.artifact_name }}
-          path: windows
-
-      - name: Name the installer for the release
-        run: |
-          set -euo pipefail
-          mapfile -t found < <(find windows -maxdepth 1 -type f -name '*-setup.exe')
-          if [ "${#found[@]}" -ne 1 ]; then
-            echo "::error::Expected one signed NSIS installer; found ${#found[@]}."
-            exit 1
-          fi
-          mkdir dist
-          mv "${found[0]}" "dist/Cartograph_${VERSION}_x64_signed-setup.exe"
-
-      - name: Require chores-dumb credentials
-        run: test "${{ secrets.CHORES_DUMB_CLIENT_ID != '' && secrets.CHORES_DUMB_PRIVATE_KEY != '' }}" = true
-
-      - name: Mint the chores-dumb token
-        id: chores
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ secrets.CHORES_DUMB_CLIENT_ID }}
-          private-key: ${{ secrets.CHORES_DUMB_PRIVATE_KEY }}
-          permission-contents: write
-
-      - name: Upload the signed installer
-        env:
-          GH_TOKEN: ${{ steps.chores.outputs.token }}
-        run: gh release upload "$TAG" "dist/Cartograph_${VERSION}_x64_signed-setup.exe" --clobber --repo "$GITHUB_REPOSITORY"
