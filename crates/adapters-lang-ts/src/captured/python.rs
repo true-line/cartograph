@@ -181,7 +181,7 @@ pub fn stage_lane_receipts(
 
 /// The file a fact's first primary evidence entry cites: its receipt's
 /// primary file.
-fn first_evidence_path(props: &serde_json::Value) -> Option<&str> {
+pub(super) fn first_evidence_path(props: &serde_json::Value) -> Option<&str> {
     props
         .get("prov")?
         .get("evidence")?
