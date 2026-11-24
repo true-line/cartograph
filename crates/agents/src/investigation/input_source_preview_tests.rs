@@ -1732,6 +1732,76 @@ fn analyst26_bare_finish_fields_are_versioned_and_position_complete() {
     }
 }
 
+// AC-1443: a read refused for capacity leaves its obligation unattempted, so
+// attempts never complete. The forced finish still gets the finish allowance.
+#[test]
+fn capacity_exhausted_finish_gets_the_local_finish_allowance() {
+    for opted in [false, true] {
+        let policy = if opted {
+            INVESTIGATION_V2_POLICY
+                .with_local_finish_generation()
+                .unwrap()
+        } else {
+            INVESTIGATION_V2_POLICY.clone()
+        };
+        let role = SpecialistId::DomainAnalystV26;
+        let (f, raw, _, _) = source_fixture(role, "bounded source");
+        let input = InvestigationInput::prepare_v9_with_policy(
+            &f.request.question,
+            role,
+            f.ledger.clone(),
+            &[&raw],
+            &[],
+            &[],
+            &usage(CompletionCallMode::Choice),
+            &f.basis,
+            &f.request,
+            &f.metadata,
+            &[],
+            CompletionCallMode::Choice,
+            0,
+            None,
+            &policy,
+        )
+        .unwrap();
+        let offered = derive_source_choices(&f, &[], &f.ledger);
+        let open = source_choices(&f, input.clone(), &[], &f.ledger);
+        assert_eq!(open.invocation_output_tokens(&policy).unwrap(), 2048);
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let refused = offered
+            .entries()
+            .iter()
+            .map(|entry| {
+                let value = serde_json::to_value(&entry.action).unwrap();
+                core_prov::content_hash(&bounded_bytes(&value, MAX_ACTION_BYTES).unwrap())
+            })
+            .collect();
+        let exhausted = offered
+            .excluding_capacity_refusals(
+                &contract,
+                &f.metadata,
+                &f.ledger,
+                &refused,
+                &INVESTIGATION_V2_POLICY,
+            )
+            .unwrap();
+        assert!(exhausted.capacity_exhausted());
+        assert!(!exhausted.attempts_complete());
+        let input = input
+            .with_acquisition_choices(std::sync::Arc::new(exhausted))
+            .unwrap();
+        assert_eq!(
+            input.invocation_output_tokens(&policy).unwrap(),
+            if opted { 4096 } else { 2048 }
+        );
+    }
+}
+
 #[test]
 fn local_finish_policy_authenticates_complete_acquisition_and_restricts_schema() {
     use staged_finish::{FeedbackEntry, RefusalFeedback, RefusalReason};
