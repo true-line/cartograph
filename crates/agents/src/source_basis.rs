@@ -97,6 +97,90 @@ pub enum InputClosureStatus {
     InputClosureNotEstablished,
 }
 
+/// Why a receipt's input closure is not established: the fixed ADR-0072
+/// codes, in the sorted order a receipt lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskClosureGap {
+    ProducerNotParticipating,
+    CrossFileInputUnbound,
+    ExternalInputUnbound,
+    RemoteReference,
+    UpstreamClosureIncomplete,
+    EnrichmentChangedFact,
+    CacheReuseUnproven,
+    LimitExceeded,
+}
+
+/// What the receipt a captured range was read from says about its inputs
+/// (ADR-0072). Basis schema 2 and receipt contracts v1 to v3 record only the
+/// legacy bare `input_closure_not_established`. Schema 3 copies a contract-v4
+/// receipt's state, tagged by `state` exactly as the receipt's wire form;
+/// it is never computed at staging. Boxed, so a captured origin stays small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskInputClosure {
+    Legacy(InputClosureStatus),
+    Established { closure_id: Box<str> },
+    NotEstablished { reasons: Box<[TaskClosureGap]> },
+}
+impl TaskInputClosure {
+    pub const LEGACY: Self = Self::Legacy(InputClosureStatus::InputClosureNotEstablished);
+
+    /// True for a well-formed v4 state: a `closure-v1:` id, or one or more
+    /// strictly sorted reasons.
+    fn v4_valid(&self) -> bool {
+        match self {
+            Self::Legacy(_) => false,
+            Self::Established { closure_id } => prefixed(closure_id, "closure-v1:"),
+            Self::NotEstablished { reasons } => {
+                !reasons.is_empty() && reasons.windows(2).all(|pair| pair[0] < pair[1])
+            }
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum TaggedClosure {
+    Established { closure_id: String },
+    InputClosureNotEstablished { reasons: Vec<TaskClosureGap> },
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireClosure {
+    Legacy(InputClosureStatus),
+    Tagged(TaggedClosure),
+}
+impl Serialize for TaskInputClosure {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Legacy(status) => status.serialize(s),
+            Self::Established { closure_id } => TaggedClosure::Established {
+                closure_id: closure_id.to_string(),
+            }
+            .serialize(s),
+            Self::NotEstablished { reasons } => TaggedClosure::InputClosureNotEstablished {
+                reasons: reasons.to_vec(),
+            }
+            .serialize(s),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for TaskInputClosure {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match WireClosure::deserialize(d)? {
+            WireClosure::Legacy(status) => Self::Legacy(status),
+            WireClosure::Tagged(TaggedClosure::Established { closure_id }) => Self::Established {
+                closure_id: closure_id.into(),
+            },
+            WireClosure::Tagged(TaggedClosure::InputClosureNotEstablished { reasons }) => {
+                Self::NotEstablished {
+                    reasons: reasons.into(),
+                }
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskEvidenceKind {
@@ -107,7 +191,7 @@ pub enum TaskEvidenceKind {
         receipt_inventory_index: u32,
         captured: TaskCaptureSpanRef,
         scope: PrimarySourceScope,
-        input_closure: InputClosureStatus,
+        input_closure: TaskInputClosure,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +271,9 @@ pub struct SelectionReport {
     pub unread_tail: bool,
     pub stop_reason: SelectionStopReason,
 }
+/// A task's source basis. Schema 2 is frozen; schema 3 (`TaskSourceBasisV3`
+/// in ADR-0072) is the same shape whose captured origins carry their v4
+/// receipt's closure state, under its own fingerprint domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSourceBasisV2 {
@@ -250,12 +337,17 @@ impl TaskSourceBasisV2 {
     /// prompt; redaction cannot collapse two receipt selections to one consent.
     pub fn fingerprint(&self) -> Result<String, AgentError> {
         let bytes = bounded_json(self, MAX_SOURCE_BASIS_BYTES)?;
-        Ok(domain_hash(b"cartograph:task-source-basis:v2\0", &bytes))
+        let domain: &[u8] = match self.schema_version {
+            2 => b"cartograph:task-source-basis:v2\0",
+            3 => b"cartograph:task-source-basis:v3\0",
+            _ => return Err(invalid()),
+        };
+        Ok(domain_hash(domain, &bytes))
     }
     pub(crate) fn validate(&self, basis: &TaskBasisManifest) -> Result<(), AgentError> {
         let r = &self.selection;
         let l = &r.limits;
-        if self.schema_version != 2
+        if !matches!(self.schema_version, 2 | 3)
             || !prefixed(&self.graph_snapshot_id, "context-v1:")
             || l != &SelectionLimits::default()
             || r.metadata_lookahead > l.metadata_lookahead
@@ -349,8 +441,20 @@ impl TaskSourceBasisV2 {
                     receipt_id,
                     receipt_inventory_index,
                     captured,
+                    input_closure,
                     ..
                 } => {
+                    // Schema 2 and pre-v4 receipts record the legacy state; a
+                    // schema-3 origin read from a v4 receipt carries its state.
+                    let closure_valid =
+                        if self.schema_version == 3 && receipt_id.starts_with("ts-primary-v4:") {
+                            input_closure.v4_valid()
+                        } else {
+                            *input_closure == TaskInputClosure::LEGACY
+                        };
+                    if !closure_valid {
+                        return Err(invalid());
+                    }
                     let binding = selected.binding.as_ref().ok_or_else(invalid)?;
                     let file = &captured.file;
                     if !text(registered_source_id, 256)

@@ -18,7 +18,6 @@ use std::path::Path;
 
 /// Current immutable envelope and task-manifest version.
 pub const STAGING_SCHEMA_VERSION: u32 = 1;
-const PREPARED_STAGING_SCHEMA_VERSION: u32 = 2;
 const HISTORY_CURSOR_VERSION: u32 = 1;
 /// Hard bound on both scanned history and returned retention references.
 pub const MAX_STAGED_REFERENCE_SCAN: usize = 4096;
@@ -487,6 +486,9 @@ impl StageContent {
 }
 
 /// Separate envelope: never serialize historical v1 rows through this type.
+/// Schema 3 (`StageContentV3`, ADR-0072) is the same envelope over a
+/// schema-3 source basis, whose captured origins carry the closure state of
+/// the receipt each was read from; it has its own identity domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StageContentV2 {
@@ -530,7 +532,9 @@ impl StageContentV2 {
             return Err(StagingError::InvalidRecord);
         }
         let content = Self {
-            schema_version: PREPARED_STAGING_SCHEMA_VERSION,
+            // The envelope follows its source basis: 2, or 3 once the basis
+            // carries closure states.
+            schema_version: task.source_basis().schema_version,
             proposal: proposal.clone(),
             job_id,
             graph_snapshot_id: graph_snapshot_id.into(),
@@ -555,7 +559,8 @@ impl StageContentV2 {
         }
     }
     fn validate(&self) -> Result<(), StagingError> {
-        if self.schema_version != 2
+        if !matches!(self.schema_version, 2 | 3)
+            || self.source_basis.schema_version != self.schema_version
             || self.basis.schema_version != 2
             || self.evidence_binding != EvidenceBinding::PerItem
             || self.source_basis.graph_snapshot_id != self.graph_snapshot_id
@@ -581,13 +586,18 @@ impl StageContentV2 {
         Ok(())
     }
     fn identity(&self) -> Result<String, StagingError> {
-        Ok(format!(
-            "proposal-stage-v2:{}",
-            crate::source_basis::domain_hash(
-                b"cartograph:proposal-stage:v2\0",
-                &serde_json::to_vec(self)?
+        let bytes = serde_json::to_vec(self)?;
+        Ok(if self.schema_version == 3 {
+            format!(
+                "proposal-stage-v3:{}",
+                crate::source_basis::domain_hash(b"cartograph:proposal-stage:v3\0", &bytes)
             )
-        ))
+        } else {
+            format!(
+                "proposal-stage-v2:{}",
+                crate::source_basis::domain_hash(b"cartograph:proposal-stage:v2\0", &bytes)
+            )
+        })
     }
 }
 fn selected_fingerprint(source: &TaskSourceBasisV2) -> Result<String, StagingError> {
@@ -637,7 +647,7 @@ impl ImmutableContent {
                 c.validate()?;
                 Ok(Self::V1(Box::new(c)))
             }
-            2 => {
+            2 | 3 => {
                 strict::preflight(json)?;
                 let value: serde_json::Value =
                     serde_json::from_str(json).map_err(|_| StagingError::InvalidRecord)?;
@@ -659,17 +669,19 @@ impl ImmutableContent {
 fn versioned_content(staged: &StagedProposal) -> Result<ImmutableContent, StagingError> {
     match (staged.schema_version, &staged.source_basis) {
         (1, None) => Ok(ImmutableContent::V1(Box::new(immutable_content(staged)))),
-        (2, Some(source_basis)) => Ok(ImmutableContent::V2(Box::new(StageContentV2 {
-            schema_version: 2,
-            proposal: staged.proposal.clone(),
-            job_id: staged.job_id,
-            graph_snapshot_id: staged.graph_snapshot_id.clone(),
-            basis: staged.basis.clone(),
-            evidence_binding: staged.evidence_binding,
-            context_status: staged.context_status,
-            source_basis: source_basis.clone(),
-            selected_facts_fingerprint: selected_fingerprint(source_basis)?,
-        }))),
+        (version @ (2 | 3), Some(source_basis)) => {
+            Ok(ImmutableContent::V2(Box::new(StageContentV2 {
+                schema_version: version,
+                proposal: staged.proposal.clone(),
+                job_id: staged.job_id,
+                graph_snapshot_id: staged.graph_snapshot_id.clone(),
+                basis: staged.basis.clone(),
+                evidence_binding: staged.evidence_binding,
+                context_status: staged.context_status,
+                source_basis: source_basis.clone(),
+                selected_facts_fingerprint: selected_fingerprint(source_basis)?,
+            })))
+        }
         _ => Err(StagingError::InvalidRecord),
     }
 }
@@ -1251,3 +1263,6 @@ mod tests;
 #[cfg(test)]
 #[path = "staging/tests_v2.rs"]
 mod tests_v2;
+#[cfg(test)]
+#[path = "staging/tests_v3.rs"]
+mod tests_v3;

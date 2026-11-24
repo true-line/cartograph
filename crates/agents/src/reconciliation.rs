@@ -724,7 +724,7 @@ impl ReconciliationResultV1 {
                 .is_some_and(crate::source_basis::hash)
         };
         if self.schema_version != RECONCILIATION_SCHEMA_VERSION
-            || !matches!(self.proposal_schema_version, 1 | 2)
+            || !matches!(self.proposal_schema_version, 1..=3)
             || (self.method == ReconcileMethod::LegacyTextV1) != (self.proposal_schema_version == 1)
             || !crate::source_basis::text(&self.proposal_id, 256)
             || r.job_id <= 0
