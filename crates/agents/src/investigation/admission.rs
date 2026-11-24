@@ -315,6 +315,8 @@ fn receipt_id(value: &str) -> bool {
         .or_else(|| value.strip_prefix("tool-primary-v2:"))
         .or_else(|| value.strip_prefix("apidoc-primary-v1:"))
         .or_else(|| value.strip_prefix("apidoc-primary-v2:"))
+        .or_else(|| value.strip_prefix("adr-primary-v1:"))
+        .or_else(|| value.strip_prefix("adr-primary-v2:"))
         .is_some_and(hash)
 }
 

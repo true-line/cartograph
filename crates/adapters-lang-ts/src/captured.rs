@@ -24,9 +24,9 @@ mod python;
 pub use python::{
     ReceiptStage, TerraformWalk, admit_after, mint_go_file_receipts, mint_java_file_receipts,
     mint_kotlin_file_receipts, mint_python_file_receipts, mint_rust_file_receipts,
-    stage_api_doc_receipts, stage_entry_point_receipts, stage_environment_receipts,
-    stage_lane_receipts, stage_pipeline_receipts, stage_schedule_receipts,
-    stage_terraform_receipts, stage_toolchain_receipts,
+    stage_adr_receipts, stage_api_doc_receipts, stage_entry_point_receipts,
+    stage_environment_receipts, stage_lane_receipts, stage_pipeline_receipts,
+    stage_schedule_receipts, stage_terraform_receipts, stage_toolchain_receipts,
 };
 mod closure;
 pub use closure::{
@@ -37,14 +37,15 @@ mod observed;
 pub use observed::mint_observed_receipts;
 mod receipt;
 pub use receipt::{
-    API_DOCS_WALK_POLICY, Citable, ENTRY_POINT_WALK_POLICY, ENVIRONMENT_WALK_POLICY, Grammar,
-    MAX_RECEIPT_BYTES, MAX_RECEIPT_OTHER_FILES, MAX_RECEIPT_RANGES, MintedHeader, MintedReceipt,
-    PIPELINE_WALK_POLICY, RangeRole, Receipt, ReceiptClosure, ReceiptRange, ReceiptSourceSizes,
-    SCHEDULE_WALK_POLICY, TF_MODULE_WALK_POLICY, TOOLCHAIN_WALK_POLICY, TS_DIRECTORY_WALK_POLICY,
-    TS_GRAMMAR_RULE, TS_WALK_POLICY, api_docs_walk_closure, direct_lexical_closure,
-    directory_walk_closure, entry_point_walk_closure, environment_walk_closure,
-    fact_match_workspace, fact_match_workspace_bytes, is_input_source, pipeline_walk_closure,
-    schedule_walk_closure, terraform_walk_closure, toolchain_walk_closure,
+    ADR_WALK_POLICY, API_DOCS_WALK_POLICY, Citable, ENTRY_POINT_WALK_POLICY,
+    ENVIRONMENT_WALK_POLICY, Grammar, MAX_RECEIPT_BYTES, MAX_RECEIPT_OTHER_FILES,
+    MAX_RECEIPT_RANGES, MintedHeader, MintedReceipt, PIPELINE_WALK_POLICY, RangeRole, Receipt,
+    ReceiptClosure, ReceiptRange, ReceiptSourceSizes, SCHEDULE_WALK_POLICY, TF_MODULE_WALK_POLICY,
+    TOOLCHAIN_WALK_POLICY, TS_DIRECTORY_WALK_POLICY, TS_GRAMMAR_RULE, TS_WALK_POLICY,
+    adr_walk_closure, api_docs_walk_closure, direct_lexical_closure, directory_walk_closure,
+    entry_point_walk_closure, environment_walk_closure, fact_match_workspace,
+    fact_match_workspace_bytes, is_input_source, pipeline_walk_closure, schedule_walk_closure,
+    terraform_walk_closure, toolchain_walk_closure,
 };
 
 /// Maximum directory entries examined, including excluded entries.
@@ -1798,6 +1799,8 @@ fn matcher<R: Citable>(extraction: &Extraction) -> impl Fn(&R) -> bool + '_ {
     }
 }
 
+#[cfg(test)]
+mod adr_walk_tests;
 #[cfg(test)]
 mod api_docs_walk_tests;
 #[cfg(test)]

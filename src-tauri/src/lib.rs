@@ -2696,6 +2696,14 @@ fn extract_tree_packed(
             spec::UnreadAdrReason::NotUtf8 => reads.adr_not_utf8.push(unread.path),
         }
     }
+    if let Some(capture) = primary.filter(|_| reads.documents_captured) {
+        stage_adr_receipts(
+            capture,
+            &adapters_lang_ts::SourceId { repo, commit },
+            &adr_read.facts,
+            receipts,
+        );
+    }
     facts
         .extend(adr_read.facts.nodes, adr_read.facts.edges)
         .map_err(pack_err)?;
@@ -3342,6 +3350,33 @@ fn stage_api_doc_receipts(
         bound,
     );
     admit_surviving_lane_receipts(&kept, &edges, stage, receipts);
+}
+
+/// Producer-keyed Adr receipts for a captured repository's found ADRs
+/// (AC-1540), on the decision records the reader read: each ADR node's own
+/// record. An ADR is established on them; a `DECIDES` edge, which exists
+/// only for a recovered target, is not.
+fn stage_adr_receipts(
+    capture: &source_capture::Capture,
+    id: &adapters_lang_ts::SourceId<'_>,
+    adr_facts: &spec::AdrFacts,
+    receipts: &mut Vec<adapters_lang_ts::captured::MintedReceipt>,
+) {
+    let read: Vec<String> = adr_facts
+        .nodes
+        .iter()
+        .filter_map(|node| node.props["path"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (published_nodes, published_edges) = publication_view(&adr_facts.nodes, &adr_facts.edges);
+    let stage = adapters_lang_ts::captured::stage_adr_receipts(
+        capture,
+        &read,
+        id,
+        (&published_nodes, &published_edges),
+    );
+    admit_surviving_lane_receipts(&adr_facts.nodes, &adr_facts.edges, stage, receipts);
 }
 
 fn id_explicitly_owned_by_repo(id: &str, repo: &str) -> bool {
@@ -4270,32 +4305,55 @@ fn found_adr_patch(
     let mut linked = std::collections::BTreeMap::new();
     for (repo, facts) in updates {
         let adr_prefix = format!("adr:{repo}@");
-        let existing_ids = nodes
+        let existing: std::collections::BTreeMap<&str, &Node> = nodes
             .iter()
             .filter(|node| {
                 node.label == "ADR"
                     && node.id.starts_with(&adr_prefix)
                     && node.props["origin"].as_str() == Some("found")
             })
-            .map(|node| node.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
+            .map(|node| (node.id.as_str(), node))
+            .collect();
         let current_ids = facts
             .nodes
             .iter()
-            .map(|node| node.id.clone())
+            .map(|node| node.id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        for edge in edges.iter().filter(|edge| {
-            edge.label == "DECIDES"
-                && (existing_ids.contains(&edge.src) || current_ids.contains(&edge.src))
-        }) {
-            patch.delete_edges.push(edge_key(edge));
+        // A fact the relinking reads again unchanged is left as published,
+        // so the source binding of its receipt survives (AC-1540): any
+        // write to a node or edge row drops its bindings.
+        let kept_edges: Vec<&Edge> = edges
+            .iter()
+            .filter(|edge| {
+                edge.label == "DECIDES"
+                    && (existing.contains_key(edge.src.as_str())
+                        || current_ids.contains(edge.src.as_str()))
+            })
+            .collect();
+        for edge in &kept_edges {
+            if !facts.edges.contains(edge) {
+                patch.delete_edges.push(edge_key(edge));
+            }
         }
-        patch
-            .delete_node_ids
-            .extend(existing_ids.difference(&current_ids).cloned());
+        patch.delete_node_ids.extend(
+            existing
+                .keys()
+                .filter(|id| !current_ids.contains(*id))
+                .map(|id| (*id).to_owned()),
+        );
         linked.insert(repo, distinct_edge_count(&facts.edges));
-        patch.upsert_nodes.extend(facts.nodes);
-        patch.upsert_edges.extend(facts.edges);
+        patch.upsert_nodes.extend(
+            facts
+                .nodes
+                .into_iter()
+                .filter(|node| existing.get(node.id.as_str()) != Some(&node)),
+        );
+        patch.upsert_edges.extend(
+            facts
+                .edges
+                .into_iter()
+                .filter(|edge| !kept_edges.contains(&edge)),
+        );
     }
     (patch, linked)
 }
@@ -10996,6 +11054,53 @@ resource "aws_sqs_queue" "orders" {
             (labelled("Document"), labelled("DocSection")),
             (counted.read, counted.sections)
         );
+    }
+
+    // AC-1540: relinking leaves a found ADR and its DECIDES edges it reads
+    // again unchanged untouched, so their receipts' source bindings, which
+    // any write to the row drops, survive; a changed fact is written.
+    #[test]
+    fn relinking_leaves_unchanged_found_adrs_untouched() {
+        let adr = Node {
+            id: "adr:local/shop@docs/adr/0001-orders.md".into(),
+            label: "ADR".into(),
+            props: serde_json::json!({"origin": "found", "title": "Orders"}),
+        };
+        let decides = Edge {
+            src: adr.id.clone(),
+            dst: "file:local/shop@app.ts".into(),
+            label: "DECIDES".into(),
+            props: serde_json::json!({"prov": {"extractor": "t0.adr-markdown"}}),
+        };
+        let read = spec::AdrFacts {
+            nodes: vec![adr.clone()],
+            edges: vec![decides.clone()],
+        };
+        let (patch, _) = crate::found_adr_patch(
+            std::slice::from_ref(&adr),
+            std::slice::from_ref(&decides),
+            vec![("local/shop".into(), read)],
+        );
+        assert!(patch.upsert_nodes.is_empty(), "{:?}", patch.upsert_nodes);
+        assert!(patch.upsert_edges.is_empty(), "{:?}", patch.upsert_edges);
+        assert!(patch.delete_edges.is_empty(), "{:?}", patch.delete_edges);
+        assert!(patch.delete_node_ids.is_empty());
+
+        let mut retitled = adr.clone();
+        retitled.props["title"] = "Payments".into();
+        let (patch, _) = crate::found_adr_patch(
+            std::slice::from_ref(&adr),
+            std::slice::from_ref(&decides),
+            vec![(
+                "local/shop".into(),
+                spec::AdrFacts {
+                    nodes: vec![retitled.clone()],
+                    edges: Vec::new(),
+                },
+            )],
+        );
+        assert_eq!(patch.upsert_nodes, vec![retitled]);
+        assert_eq!(patch.delete_edges, vec![crate::edge_key(&decides)]);
     }
 
     #[test]

@@ -3824,6 +3824,60 @@ fn export_does_not_list_a_call_bound_into_another_repository() {
     assert_eq!(states, [events::BINDING_STATE_NONE; 2], "{nodes:?}");
 }
 
+// AC-1540: a recovery whose capture holds its decision records keeps the
+// found ADR's and its DECIDES edge's source bindings through the
+// system-wide relinking, which reads them again unchanged.
+#[test]
+fn found_adr_bindings_survive_relinking() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "project");
+    std::fs::write(
+        root.join("rules.ts"),
+        "export function alpha() { return 1; }\n",
+    )
+    .unwrap();
+    let app = crate::test_app::TestApp::new(
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap(),
+    );
+    app.manage(app_state(&app_data));
+    app.manage(crate::PreflightRuns::default());
+    let state = tauri::Manager::state::<AppState>(&*app);
+    let registered = register_local_source(&state, &root).unwrap();
+    let target = format!("file:{}@rules.ts", registered.repo_key);
+    std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+    std::fs::write(
+        root.join("docs/adr/0001-rules.md"),
+        format!("# 1. Rules\n\nGoverns: `{target}`\n"),
+    )
+    .unwrap();
+    let operation = source_operation(&state, vec![(registered.clone(), false)]).unwrap();
+    let (_, execution) = start_job(&state, &registered.ingest_job_kind()).unwrap();
+    run_ingest(&registered, &operation, &execution, app.handle(), &state).unwrap();
+
+    let graph = state.graph.lock().unwrap();
+    let bindings = graph
+        .source_bindings_for_repo(&registered.repo_key)
+        .unwrap();
+    let adr = format!("adr:{}@docs/adr/0001-rules.md", registered.repo_key);
+    let bound =
+        |fact: &core_graph::source::FactKey| bindings.iter().any(|binding| &binding.fact == fact);
+    assert!(
+        bound(&core_graph::source::FactKey::Node { id: adr.clone() }),
+        "{bindings:?}"
+    );
+    assert!(
+        bound(&core_graph::source::FactKey::Edge {
+            source: adr,
+            label: "DECIDES".into(),
+            destination: target,
+        }),
+        "{bindings:?}"
+    );
+}
+
 // AC-0314: when receipt store capacity omits receipts during recovery,
 // publication records per-fact StoreCapacity omissions while keeping the
 // retained fact's source binding intact. (T-0314)

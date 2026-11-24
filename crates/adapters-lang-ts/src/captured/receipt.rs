@@ -58,6 +58,10 @@ pub const TOOLCHAIN_WALK_POLICY: &str = "toolchain-walk-v1";
 /// slice 9, AC-1538): the capture's listing and the captured documents and
 /// config the API reference loader read.
 pub const API_DOCS_WALK_POLICY: &str = "api-docs-walk-v1";
+/// The walk policy a found-ADR closure records (ADR-0072 slice 9,
+/// AC-1540): the capture's listing, whose decision records the
+/// documentation walk selects by path, and the captured records it read.
+pub const ADR_WALK_POLICY: &str = "adr-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -258,6 +262,17 @@ pub fn api_docs_walk_closure(
     )
 }
 
+/// The input closure of a found ADR (ADR-0072 slice 9, AC-1540): the
+/// capture's enumeration under [`ADR_WALK_POLICY`] and the retained bytes
+/// of every decision record in `read`.
+pub fn adr_walk_closure(
+    capture: &source_capture::Capture,
+    read: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    lane_walk_closure(Grammar::Adr, ADR_WALK_POLICY, capture, read, read, repo_key)
+}
+
 /// A walk closure over `grammar`'s captured files: the capture's
 /// enumeration under `walk_policy` and each of `files` of that grammar, or
 /// among `also`, the capture holds, under the grammar's contract-v4 pins.
@@ -384,6 +399,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
                 parser_package_legacy: &[],
             });
         }
+        (4, Grammar::Adr) => {
+            return Ok(Contract {
+                prefix: "adr-primary-v2:",
+                producer: "t0.adr-markdown/declared-v2",
+                domain: b"cartograph:adr-primary-receipt:v2\0",
+                grammar_package: ADR_MARKDOWN_RULE,
+                parser_package: JSON_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
         (4, Grammar::Environment) => {
             return Ok(Contract {
                 prefix: "env-primary-v2:",
@@ -492,6 +517,15 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             producer: "t0.api-contract/declared-v1",
             domain: b"cartograph:apidoc-primary-receipt:v1\0",
             grammar_package: TOML_PACKAGE,
+            parser_package: JSON_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        // Decision records, read by the found-ADR reader (AC-1540).
+        Grammar::Adr => Some(Contract {
+            prefix: "adr-primary-v1:",
+            producer: "t0.adr-markdown/declared-v1",
+            domain: b"cartograph:adr-primary-receipt:v1\0",
+            grammar_package: ADR_MARKDOWN_RULE,
             parser_package: JSON_PACKAGE,
             parser_package_legacy: &[],
         }),
@@ -606,6 +640,10 @@ const YAML_GRAMMAR_PACKAGE: &str = "tree-sitter-yaml@0.7.2";
 // `toolchain_pins_match_the_manifests` keeps them in step.
 const TOML_PACKAGE: &str = "toml@1.1.6";
 const JSON_PACKAGE: &str = "serde_json@1.0.154";
+// The found-ADR reader parses Markdown fields and inline code by its own
+// line rules (crates/spec), versioned here as its grammar; its identity
+// bytes are JSON (AC-1540).
+const ADR_MARKDOWN_RULE: &str = "found-adr-markdown-v1";
 // Observation inputs are JSON documents (state, Pulumi) or JSON lines
 // (OTLP), cited by the byte spans the T1 producers record (ADR-0079).
 const OBSERVED_INPUT_FORMAT: &str = "json/jsonl";
@@ -678,6 +716,9 @@ pub enum Grammar {
     /// the producer as [`Self::Schedule`] is: a documented route cites a
     /// Markdown or OpenAPI JSON document, whichever lane its path selects.
     ApiDocs,
+    /// Facts the found-ADR reader emits (AC-1540), chosen by the producer:
+    /// a decision record is Markdown, whichever lane its path selects.
+    Adr,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -701,6 +742,7 @@ impl Grammar {
                 | Self::EntryPoint
                 | Self::Toolchain
                 | Self::ApiDocs
+                | Self::Adr
                 | Self::ObservedInput
         )
     }
@@ -708,8 +750,8 @@ impl Grammar {
     /// A grammar whose receipts have contract v4, with an input closure
     /// state: TypeScript (slice 5), Terraform (slice 9, AC-1526) and
     /// pipelines (AC-1528), environments (AC-1530), schedules (AC-1532) and
-    /// entry points (AC-1534), the toolchain (AC-1536) and declared API
-    /// references (AC-1538).
+    /// entry points (AC-1534), the toolchain (AC-1536), declared API
+    /// references (AC-1538) and found ADRs (AC-1540).
     pub(super) fn has_v4(self) -> bool {
         !self.provenance_only()
             || matches!(
@@ -721,17 +763,19 @@ impl Grammar {
                     | Self::EntryPoint
                     | Self::Toolchain
                     | Self::ApiDocs
+                    | Self::Adr
             )
     }
 
     /// A grammar chosen by the producer that minted the receipt, not by the
     /// cited file's path (AC-1532): its receipts may cite any captured
     /// source file. Entry points (AC-1534), the toolchain (AC-1536) and
-    /// declared API references (AC-1538) are too.
+    /// declared API references (AC-1538) and found ADRs (AC-1540) are
+    /// too.
     pub(super) fn producer_keyed(self) -> bool {
         matches!(
             self,
-            Self::Schedule | Self::EntryPoint | Self::Toolchain | Self::ApiDocs
+            Self::Schedule | Self::EntryPoint | Self::Toolchain | Self::ApiDocs | Self::Adr
         )
     }
 
