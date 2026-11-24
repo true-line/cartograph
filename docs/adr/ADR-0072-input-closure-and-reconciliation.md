@@ -459,6 +459,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    carries its file's record (one shared allocation per file, charged once
    against the extraction receipt budget), so the store retains it with the
    receipt without a separate hand-off.
+   *As built (AC-1086):* `TaskSourceBasisV3` is the `TaskSourceBasisV2`
+   struct at `schema_version` 3, and `StageContentV3` the v2 envelope over
+   it, so no reader forks. A captured origin's `input_closure` is a
+   `TaskInputClosure`: the bare legacy string under schema 2 and for v1 to
+   v3 receipts, else the v4 receipt's own state in its wire form. Schema 3
+   fingerprints under `task-source-basis:v3`, hashes the prepared task under
+   `prepared-agent-task:v3` and stages under `proposal-stage:v3`. Nothing
+   prepares a schema-3 basis yet; the host copies receipt states in the next
+   slice.
 6. **TS walk closure** (directory completion). Enumeration and probe binding,
    and receipts for directory-proven facts. *Tests:* adding the target of a
    previously unresolved import changes the closure and the fact; adding an

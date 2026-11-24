@@ -932,9 +932,15 @@ export interface TaskSelectionReport {
     'validation_byte_limit' | 'participating_source_unavailable' | 'invalid_selection' | 'required_membership_missing';
 }
 
+/** What the receipt a captured range was read from says about its inputs. */
+export type TaskInputClosure = 'input_closure_not_established' |
+  { state: 'established'; closure_id: string } |
+  { state: 'input_closure_not_established'; reasons: string[] };
+
 /** Metadata of the exact inputs supplied at preparation, never a live assessment. */
 export interface TaskSourceBasisV2 {
-  schema_version: 2;
+  /** 3 carries each v4 receipt's closure state (ADR-0072, AC-1086). */
+  schema_version: 2 | 3;
   graph_snapshot_id: string;
   selected_facts: {
     fact: FactKey;
@@ -957,7 +963,7 @@ export interface TaskSourceBasisV2 {
         byte_end: number;
       };
       scope: 'primary_source_only';
-      input_closure: 'input_closure_not_established';
+      input_closure: TaskInputClosure;
     };
   }[];
   selection: TaskSelectionReport;
@@ -976,8 +982,8 @@ export interface AgentProposal {
 
 /** Host-persisted proposal returned by staging and revision-checked review. */
 export interface StagedProposal extends AgentProposal {
-  /** Absent only for older hosts and fixtures. New host rows declare 1 or 2. */
-  schema_version?: 1 | 2;
+  /** Absent only for older hosts and fixtures. New host rows declare 1, 2 or 3. */
+  schema_version?: 1 | 2 | 3;
   proposal_id: string;
   review_revision: number;
   review_decision: 'accepted' | 'rejected' | null;
@@ -1039,9 +1045,10 @@ function requireBasisAssessment(result: BasisAssessment | null, proposalId: stri
 function requireStagedProposal(proposal: StagedProposal | null): StagedProposal {
   if (!proposal?.proposal_id || !Number.isSafeInteger(proposal.review_revision) ||
       proposal.review_revision < 0 ||
-      (proposal.schema_version !== undefined && proposal.schema_version !== 1 && proposal.schema_version !== 2) ||
-      (proposal.schema_version === 2
-        ? proposal.evidence_binding !== 'per_item' || proposal.source_basis?.schema_version !== 2
+      (proposal.schema_version !== undefined && proposal.schema_version !== 1 && proposal.schema_version !== 2 &&
+        proposal.schema_version !== 3) ||
+      (proposal.schema_version === 2 || proposal.schema_version === 3
+        ? proposal.evidence_binding !== 'per_item' || proposal.source_basis?.schema_version !== proposal.schema_version
         : proposal.evidence_binding !== 'working_tree_unverified' || proposal.source_basis !== undefined)) {
     throw new Error('The core did not return a saved proposal. No review was recorded.');
   }

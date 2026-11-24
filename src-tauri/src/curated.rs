@@ -248,12 +248,12 @@ fn dimensions(assessed: assessment::BasisAssessment) -> BasisDimensions {
 }
 
 /// Whether the projection consults an assessment for `record` at all. A
-/// record that is not version 2, has no evidence or has an item that is not
+/// record that is not version 2 or 3, has no evidence or has an item that is not
 /// captured is `unverified` from the record alone (ADR-0061 decision 4), so
 /// no retained byte is read for it.
 fn needs_assessment(record: &ReviewedProposal) -> bool {
     record.decision == Some(core::ReviewDecision::Accepted)
-        && record.schema_version == 2
+        && matches!(record.schema_version, 2 | 3)
         && !record.evidence.is_empty()
         && record.evidence.iter().all(|item| item.captured)
 }

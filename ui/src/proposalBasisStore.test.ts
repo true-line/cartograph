@@ -189,4 +189,24 @@ describe('versioned proposal history (AC-0179)', () => {
       expect(useAppStore.getState().stagedError).toContain('did not return a saved proposal');
     }
   });
+
+  it('loads a v3 row only with a schema-3 basis (AC-1086)', async () => {
+    const v3Basis = { ...mixedTaskBasis, schema_version: 3 as const };
+    const v3: StagedProposal = { ...proposal('v3'), schema_version: 3, evidence_binding: 'per_item',
+      source_basis: v3Basis };
+    mockIPC(() => ({ items: [v3], next_cursor: null }));
+    await useAppStore.getState().loadStagedProposals();
+    expect(useAppStore.getState().stagedProposals).toEqual([v3]);
+    const legacy = proposal('legacy');
+    for (const item of [
+      { ...v3, source_basis: mixedTaskBasis },
+      { ...proposal('v2'), schema_version: 2, evidence_binding: 'per_item', source_basis: v3Basis },
+    ]) {
+      useAppStore.setState({ stagedProposals: [legacy] });
+      mockIPC(() => ({ items: [item], next_cursor: null }));
+      await useAppStore.getState().loadStagedProposals();
+      expect(useAppStore.getState().stagedProposals).toEqual([legacy]);
+      expect(useAppStore.getState().stagedError).toContain('did not return a saved proposal');
+    }
+  });
 });

@@ -189,10 +189,13 @@ pub(crate) fn prepared_basis_hash(
     source
         .evidence
         .sort_by(|a, b| a.evidence_id.cmp(&b.evidence_id));
-    Ok(domain_hash(
-        b"cartograph:prepared-agent-task:v2\0",
-        &serde_json::to_vec(&(b, source))?,
-    ))
+    // A schema-3 source basis (ADR-0072) hashes under its own domain.
+    let domain: &[u8] = if source.schema_version == 3 {
+        b"cartograph:prepared-agent-task:v3\0"
+    } else {
+        b"cartograph:prepared-agent-task:v2\0"
+    };
+    Ok(domain_hash(domain, &serde_json::to_vec(&(b, source))?))
 }
 
 #[cfg(test)]
