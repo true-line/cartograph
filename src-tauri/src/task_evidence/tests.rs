@@ -298,7 +298,7 @@ fn prepared_task_retains_original_bytes_after_checkout_change_deletion_and_resta
                 TaskEvidenceKind::CapturedPrimarySource {
                     registered_source_id,
                     scope: PrimarySourceScope::PrimarySourceOnly,
-                    input_closure: InputClosureStatus::InputClosureNotEstablished,
+                    input_closure: agents::TaskInputClosure::LEGACY,
                     ..
                 } if registered_source_id == &source.source_id
             ))
