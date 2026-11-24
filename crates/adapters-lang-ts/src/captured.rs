@@ -348,6 +348,7 @@ pub struct Selection {
     /// bundler configs, `package.json`), sorted. A capture retains them with
     /// the files so completion's configs can be bound (ADR-0072 slice 6).
     /// A bundler config is a TS/JS source and is listed in `files` too.
+    /// A root `vercel.json`, which completion reads, is listed here as well.
     pub configs: Vec<String>,
 }
 
@@ -497,7 +498,10 @@ fn enumerate_with_limits(
                         self.configs.push(path.clone());
                     }
                     self.files.push(path);
-                } else if is_config_path(&path) && kind.is_file() && valid_path(&path) {
+                } else if (is_config_path(&path) || path == PROBED_ROOT_FILE)
+                    && kind.is_file()
+                    && valid_path(&path)
+                {
                     if self.configs.len() == self.max_files {
                         return Err(CapturedError::Limit("selected files"));
                     }
@@ -1160,8 +1164,11 @@ fn extract_captured_dir_packed_with_policy(
         super::resolution::ResolutionIndex::load_reading(root).map_err(ExtractError::from)?;
     stats.resolution_configs = bind_configs(capture, &reads);
     drop(reads);
-    super::complete_directory_with(&mut extraction, &mut store, root, id, &index)?;
+    let mut probes = super::Probes::default();
+    super::complete_directory_with(&mut extraction, &mut store, root, id, &index, &mut probes)?;
     drop(index);
+    stats.completion_probes = bind_probes(capture, &probes);
+    drop(probes);
     let matching = packed_matcher(&store);
     receipts.retain(|receipt| matching(receipt));
     // Count an omitted rule only when its fact survived directory completion,
@@ -1258,6 +1265,80 @@ fn bind_configs(capture: &Capture, reads: &[super::resolution::ConfigRead]) -> C
     }
     ConfigBinding::Bound(bound)
 }
+
+/// Whether the capture answers every other live lookup directory completion
+/// made exactly as the live tree did (ADR-0072 slice 6). A later closure may
+/// name completion's lookups only when this is [`ProbeBinding::Bound`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ProbeBinding {
+    /// Not a captured walk, or some lookup's live answer is not the
+    /// capture's: a path found that the capture does not hold, one the
+    /// capture holds that was not found, a root file read with other bytes,
+    /// or a dependency type allowlist, under which completion may read
+    /// installed packages.
+    #[default]
+    Unbound,
+    /// Every lookup is answered by the capture.
+    Bound {
+        /// Paths looked up and not found, each absent from the capture,
+        /// sorted.
+        absent: Vec<String>,
+        /// Root files read, each retained with exactly the bytes read,
+        /// sorted by path.
+        read: Vec<CaptureFileRef>,
+    },
+}
+
+/// Bind completion's live lookups to `capture`. A directory is held when
+/// the capture retains a file beneath it, a file when the capture retains
+/// it; a path found and held is covered by the capture's membership.
+fn bind_probes(capture: &Capture, probes: &super::Probes) -> ProbeBinding {
+    if probes.allowlist {
+        return ProbeBinding::Unbound;
+    }
+    let files = &capture.manifest().files;
+    let holds_file = |path: &str| {
+        files
+            .binary_search_by(|entry| entry.path.as_str().cmp(path))
+            .is_ok()
+    };
+    let holds_directory = |path: &str| {
+        let prefix = format!("{path}/");
+        let start = files.partition_point(|entry| entry.path.as_str() < prefix.as_str());
+        files
+            .get(start)
+            .is_some_and(|entry| entry.path.starts_with(&prefix))
+    };
+    let mut absent = Vec::new();
+    for (path, (lookup, found)) in &probes.exists {
+        let held = match lookup {
+            super::Lookup::Directory => holds_directory(path),
+            super::Lookup::File => holds_file(path),
+        };
+        if held != *found {
+            return ProbeBinding::Unbound;
+        }
+        if !found {
+            absent.push(path.clone());
+        }
+    }
+    let mut read = Vec::new();
+    for (path, bytes) in &probes.read {
+        match (bytes, capture.file(path)) {
+            (None, Err(_)) if !holds_file(path) => absent.push(path.clone()),
+            (Some(bytes), Ok(file)) if file.bytes() == bytes.as_slice() => {
+                read.push(file.reference().clone());
+            }
+            _ => return ProbeBinding::Unbound,
+        }
+    }
+    absent.sort();
+    absent.dedup();
+    ProbeBinding::Bound { absent, read }
+}
+
+/// The root file directory completion reads besides its resolution configs.
+const PROBED_ROOT_FILE: &str = "vercel.json";
 
 /// True for a path whose file name the resolution index reads.
 fn is_config_path(path: &str) -> bool {
@@ -1392,6 +1473,8 @@ fn matcher<R: Citable>(extraction: &Extraction) -> impl Fn(&R) -> bool + '_ {
 
 #[cfg(test)]
 mod config_binding_tests;
+#[cfg(test)]
+mod probe_binding_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
