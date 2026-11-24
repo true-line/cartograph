@@ -5699,6 +5699,98 @@ fn schedule_facts_are_established_on_the_reader_closure() {
     }
 }
 
+// AC-1534: the host's entry-point facts over a capture get producer-keyed
+// receipts established on the files the entry-point and schedule readers
+// read, and the receipts bind the facts it publishes.
+#[test]
+fn entry_point_facts_are_established_on_the_reader_closure() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("crontab"), "*/5 * * * * python cron.py\n").unwrap();
+    std::fs::write(root.join("cron.py"), "print('cron')\n").unwrap();
+    std::fs::write(
+        root.join("worker.py"),
+        "if __name__ == \"__main__\":\n    print('work')\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("Procfile"), "worker: python worker.py\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.starts_captured);
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                starts_captured: input.starts_captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+    };
+    let entry: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.id().starts_with("entry-primary-v2:"))
+        .collect();
+    assert!(
+        entry
+            .iter()
+            .any(|receipt| receipt.file().path == "Procfile"),
+        "{:?}",
+        receipts.iter().map(|r| r.id()).collect::<Vec<_>>()
+    );
+    let record = entry[0].input_closure().expect("an established closure");
+    assert_eq!(
+        record.parameters.walk_policy,
+        adapters_lang_ts::captured::ENTRY_POINT_WALK_POLICY
+    );
+    let files: BTreeSet<&str> = record
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            adapters_lang_ts::captured::ClosureInput::CapturedFile { file } => {
+                Some(file.path.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    for path in ["Procfile", "worker.py", "crontab"] {
+        assert!(files.contains(path), "{files:?}");
+    }
+    let published = crate::primary_source::matching_bindings(&extraction, &receipts);
+    for minted in &entry {
+        assert_eq!(minted.input_closure(), Some(record));
+        assert!(
+            published
+                .iter()
+                .any(|binding| binding.receipt_id == minted.id())
+        );
+    }
+}
+
 // AC-1037: a fact the Java directory join builds, a Spring endpoint composed
 // from the class and method mappings of one captured file, gets a Java
 // receipt bound to its final form and citing both mapping spans.

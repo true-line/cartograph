@@ -588,6 +588,19 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    dispatch enters a function only when the Python adapter emitted it, so
    the facts are established only when no dispatch asked for an adapter
    symbol, whatever the answer; otherwise `cross_file_input_unbound`.
+   *As built (AC-1534, entry-point reader):* producer-keyed as schedules
+   are (`Grammar::EntryPoint`, `entry-primary-v1:`/`entry-primary-v2:`,
+   `t0.entry-point/declared-v2`). A start skips a file a schedule job
+   already enters, so the closure is the capture's `Enumeration` under
+   `entry-point-walk-v1` and each captured file the entry-point or the
+   schedule reader read. The Go, Rust, Java, Kotlin, Android and
+   console-script readers enter a function only when its adapter emitted
+   it, so the facts are established only when no reader asked for an
+   adapter symbol and the schedule facts are established; otherwise
+   `cross_file_input_unbound`. A reader's closure pins every grammar it
+   parses with, not only the contract's: the schedule reader adds
+   `tree-sitter-python`, the entry-point reader the TypeScript, Java,
+   Kotlin, Rust and YAML grammars, each exact in the ingest manifest.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.

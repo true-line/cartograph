@@ -23,9 +23,9 @@
 //! processing instructions and CDATA skipped), so a commented-out
 //! component declares nothing.
 
-use super::{Kind, Start, Target};
+use super::{Kind, Start, Symbols, Target};
 use core_prov::ConfidenceTier;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tree_sitter::Parser;
 
 /// Directories whose manifests are not part of the running system.
@@ -313,7 +313,7 @@ pub(super) fn starts(
     text: &str,
     namespace: Option<&str>,
     classes: &BTreeMap<String, Declared>,
-    symbols: &BTreeSet<String>,
+    symbols: &Symbols,
 ) -> Vec<Start> {
     let elements = scan(text);
     let package = elements
@@ -404,10 +404,7 @@ pub(super) fn starts(
                             .then(|| format!("{class}.{method}"));
                     }
                     let prefix = format!("{exact}(");
-                    let found: Vec<&String> = symbols
-                        .range(prefix.clone()..)
-                        .take_while(|s| s.starts_with(&prefix))
-                        .collect();
+                    let found: Vec<&String> = symbols.with_prefix(&prefix);
                     match found.as_slice() {
                         [one] => one.split_once('#').map(|(_, f)| f.to_owned()),
                         _ => None,

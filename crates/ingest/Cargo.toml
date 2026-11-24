@@ -28,15 +28,16 @@ tree-sitter = "=0.27.2"
 # Exact, as Pipeline receipts record it (AC-1528).
 tree-sitter-yaml = "=0.7.2"
 # The `__main__` argument dispatch of a scheduled Python entry (#779).
-tree-sitter-python = "0.25"
+# Grammars are exact, as Schedule and EntryPoint closures pin them (AC-1534).
+tree-sitter-python = "=0.25.0"
 # The command-line dispatch of a Node script (`#!/usr/bin/env node`).
 tree-sitter-typescript = "=0.23.2"
 # Java process starts, listeners, schedules and runners (#2020).
-tree-sitter-java = "0.23"
+tree-sitter-java = "=0.23.5"
 # Kotlin process starts, listeners, schedules and runners (#2021).
-tree-sitter-kotlin-ng = "1.1"
+tree-sitter-kotlin-ng = "=1.1.0"
 # Rust process starts, Tauri IPC commands and tonic gRPC methods (#2041).
-tree-sitter-rust = "0.24"
+tree-sitter-rust = "=0.24.2"
 url = "2"
 dunce = "1"
 # Anchored no-follow reads of declared API docs, as in source-capture.

@@ -21,9 +21,8 @@
 //! impl), else the file. Test, example, bench, fuzz and end-to-end trees and
 //! `build.rs` start nothing.
 
-use super::{Kind, OPERATOR_DIRS, Start, Target};
+use super::{Kind, OPERATOR_DIRS, Start, Symbols, Target};
 use core_prov::ConfidenceTier;
-use std::collections::BTreeSet;
 use tree_sitter::{Node as TsNode, Parser};
 
 /// Directories whose programs are not part of the running system.
@@ -170,12 +169,7 @@ pub(super) fn desktop_function(text: &str, name: &str) -> Option<(u64, u64)> {
 }
 
 /// Every start a Rust file declares.
-pub(super) fn rust_starts(
-    repo: &str,
-    rel: &str,
-    text: &str,
-    symbols: &BTreeSet<String>,
-) -> Vec<Start> {
+pub(super) fn rust_starts(repo: &str, rel: &str, text: &str, symbols: &Symbols) -> Vec<Start> {
     if !text.contains("fn ") {
         return Vec::new();
     }
@@ -216,7 +210,7 @@ struct File<'a> {
     text: &'a str,
     /// The source with comments and string literals blanked.
     code: &'a str,
-    symbols: &'a BTreeSet<String>,
+    symbols: &'a Symbols<'a>,
 }
 
 impl File<'_> {

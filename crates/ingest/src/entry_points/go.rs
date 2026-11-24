@@ -9,9 +9,8 @@
 //! end-to-end trees, and a file a `//go:build ignore` line excludes, start
 //! nothing.
 
-use super::{Kind, OPERATOR_DIRS, Start, Target};
+use super::{Kind, OPERATOR_DIRS, Start, Symbols, Target};
 use core_prov::ConfidenceTier;
-use std::collections::BTreeSet;
 
 /// Directories whose programs are not part of the running system.
 const NOT_SYSTEM_DIRS: &[&str] = &["e2e", "testdata", "examples", "example", "test", "tests"];
@@ -30,12 +29,7 @@ pub(super) fn candidate(rel: &str) -> bool {
 
 /// The start a Go file declares: none unless it is `package main` with a
 /// top-level `func main()`.
-pub(super) fn go_start(
-    repo: &str,
-    rel: &str,
-    text: &str,
-    symbols: &BTreeSet<String>,
-) -> Option<Start> {
+pub(super) fn go_start(repo: &str, rel: &str, text: &str, symbols: &Symbols) -> Option<Start> {
     if text.lines().any(|line| {
         let line = line.trim_end();
         line.starts_with("//go:build") && line.contains("ignore")

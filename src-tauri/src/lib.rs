@@ -2808,7 +2808,7 @@ fn extract_tree_packed(
                 .map(|file| file.bytes().to_vec())
                 .map_err(|_| std::io::Error::other("captured start file is unavailable"))
         };
-        let schedule_facts = match captured_starts {
+        let (schedule_facts, schedule_reads) = match captured_starts {
             Some(capture) => {
                 let (schedule_facts, capture_reads) =
                     ingest::schedules::extract_from_capture_reading(
@@ -2840,10 +2840,13 @@ fn extract_tree_packed(
                     capture_reads.bound,
                 );
                 admit_surviving_lane_receipts(&kept, &schedule_facts.edges, stage, receipts);
-                schedule_facts
+                (schedule_facts, Some(capture_reads))
             }
-            None => ingest::schedules::extract_dir(root, &schedule_id, &symbols)
-                .map_err(|e| e.to_string())?,
+            None => (
+                ingest::schedules::extract_dir(root, &schedule_id, &symbols)
+                    .map_err(|e| e.to_string())?,
+                None,
+            ),
         };
         layers.schedules = LayerSummary {
             files: schedule_facts.files,
@@ -2872,18 +2875,52 @@ fn extract_tree_packed(
         // process, a declared console script or `bin`) becomes an
         // EntryPoint flow trigger with an ENTRY into the file it runs, or a
         // Gap naming it. An adapter's File node supersedes the reader's.
-        let entry_facts = match captured_starts {
-            Some(_) => ingest::entry_points::extract_from_capture(
-                root,
-                &captured_paths,
-                &captured_read,
-                &schedule_id,
-                &symbols,
-                &scheduled,
-            ),
-            None => ingest::entry_points::extract_dir(root, &schedule_id, &symbols, &scheduled),
-        }
-        .map_err(|e| e.to_string())?;
+        let entry_facts = match (captured_starts, schedule_reads) {
+            (Some(capture), Some(schedule_reads)) => {
+                let (entry_facts, entry_reads) =
+                    ingest::entry_points::extract_from_capture_reading(
+                        root,
+                        &captured_paths,
+                        &captured_read,
+                        &schedule_id,
+                        &symbols,
+                        &scheduled,
+                    )
+                    .map_err(|e| e.to_string())?;
+                // Producer-keyed EntryPoint receipts (AC-1534), established
+                // on the files both readers read when neither consulted an
+                // adapter's symbols: `scheduled` is the schedule reader's
+                // answer. Only the facts the graph keeps are receipted.
+                let read: Vec<String> = entry_reads
+                    .read
+                    .iter()
+                    .chain(&schedule_reads.read)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let known_files = unplaceholdered_set(&facts, "File")?;
+                let kept: Vec<core_graph::Node> = entry_facts
+                    .nodes
+                    .iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id))
+                    .cloned()
+                    .collect();
+                let (published_nodes, published_edges) =
+                    publication_view(&kept, &entry_facts.edges);
+                let stage = adapters_lang_ts::captured::stage_entry_point_receipts(
+                    capture,
+                    &read,
+                    &adapters_lang_ts::SourceId { repo, commit },
+                    (&published_nodes, &published_edges),
+                    entry_reads.bound && schedule_reads.bound,
+                );
+                admit_surviving_lane_receipts(&kept, &entry_facts.edges, stage, receipts);
+                entry_facts
+            }
+            _ => ingest::entry_points::extract_dir(root, &schedule_id, &symbols, &scheduled)
+                .map_err(|e| e.to_string())?,
+        };
         layers.entry_points = LayerSummary {
             files: entry_facts.files,
             nodes: distinct_node_count(&entry_facts.nodes),

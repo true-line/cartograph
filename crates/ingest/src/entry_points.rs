@@ -64,6 +64,38 @@ use tree_sitter::{Node as TsNode, Parser};
 /// Extractor id recorded on every entry-point fact.
 pub const ENTRY_POINT_EXTRACTOR_ID: &str = "t0.entry-point";
 
+/// The `Symbol` ids the language adapters emitted, as the readers consult
+/// them: whether any reader asked is recorded, since a fact a symbol
+/// decided is not decided by the captured files alone (AC-1534).
+pub(crate) struct Symbols<'a> {
+    set: &'a BTreeSet<String>,
+    consulted: std::cell::Cell<bool>,
+}
+
+impl<'a> Symbols<'a> {
+    fn new(set: &'a BTreeSet<String>) -> Self {
+        Self {
+            set,
+            consulted: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Whether the adapters emitted `id`.
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.consulted.set(true);
+        self.set.contains(id)
+    }
+
+    /// The emitted ids that start with `prefix`, in order.
+    pub(crate) fn with_prefix(&self, prefix: &str) -> Vec<&'a String> {
+        self.consulted.set(true);
+        self.set
+            .range(prefix.to_string()..)
+            .take_while(|s| s.starts_with(prefix))
+            .collect()
+    }
+}
+
 /// Facts from one directory walk.
 #[derive(Debug, Clone, Default)]
 pub struct EntryPointExtraction {
@@ -145,7 +177,8 @@ pub fn extract_dir(
 ) -> std::io::Result<EntryPointExtraction> {
     let walked = crate::captured_walk::walk(root)?;
     let text = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
-    Ok(extract_walked(&walked, &text, id, symbols, scheduled))
+    let symbols = Symbols::new(symbols);
+    Ok(extract_walked(&walked, &text, id, &symbols, scheduled))
 }
 
 /// The JavaScript and TypeScript extensions a Node start or a worker's
@@ -209,14 +242,46 @@ pub fn extract_from_capture(
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
     };
-    Ok(extract_walked(&walked, &text, id, symbols, scheduled))
+    let symbols = Symbols::new(symbols);
+    Ok(extract_walked(&walked, &text, id, &symbols, scheduled))
+}
+
+/// [`extract_from_capture`], reporting which captured files the reader
+/// read and whether its facts are bound to them (AC-1534, #385): they are
+/// unless a reader consulted the adapters' `symbols` to decide a fact.
+/// `scheduled` is the schedule reader's answer, which the caller binds
+/// through that reader's own reads and binding.
+pub fn extract_from_capture_reading(
+    root: &Path,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    symbols: &BTreeSet<String>,
+    scheduled: &BTreeSet<String>,
+) -> std::io::Result<(EntryPointExtraction, crate::captured_walk::CaptureReads)> {
+    let opened = std::cell::RefCell::new(BTreeSet::new());
+    let recorded = |rel: &str| {
+        opened.borrow_mut().insert(rel.to_string());
+        read(rel)
+    };
+    let walked = crate::captured_walk::listing(root, captured);
+    let text = |rel: &str| {
+        recorded(rel)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    let symbols = Symbols::new(symbols);
+    let facts = extract_walked(&walked, &text, id, &symbols, scheduled);
+    let bound = !symbols.consulted.get();
+    let read = opened.into_inner().into_iter().collect();
+    Ok((facts, crate::captured_walk::CaptureReads { bound, read }))
 }
 
 fn extract_walked(
     walked: &[source_walk::WalkedFile],
     text: &dyn Fn(&str) -> Option<String>,
     id: &SourceId,
-    symbols: &BTreeSet<String>,
+    symbols: &Symbols,
     scheduled: &BTreeSet<String>,
 ) -> EntryPointExtraction {
     let files: BTreeSet<String> = walked.iter().map(|file| file.rel.clone()).collect();
@@ -1059,7 +1124,7 @@ fn console_scripts(
     text: &str,
     files: &BTreeSet<String>,
     id: &SourceId,
-    symbols: &BTreeSet<String>,
+    symbols: &Symbols,
 ) -> Vec<Start> {
     let Ok(doc) = text.parse::<toml::Table>() else {
         return Vec::new();

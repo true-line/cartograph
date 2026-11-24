@@ -30,9 +30,8 @@
 //! else the file. Test sources (`src/test/`, `src/it/`) and test, example
 //! and end-to-end trees start nothing.
 
-use super::{Kind, OPERATOR_DIRS, Start, Target};
+use super::{Kind, OPERATOR_DIRS, Start, Symbols, Target};
 use core_prov::ConfidenceTier;
-use std::collections::BTreeSet;
 use tree_sitter::{Node as TsNode, Parser};
 
 /// Directories whose programs are not part of the running system.
@@ -158,7 +157,7 @@ pub(super) fn starts(
     repo: &str,
     files: &[(String, String)],
     web: Option<(String, (u64, u64))>,
-    symbols: &BTreeSet<String>,
+    symbols: &Symbols,
 ) -> Vec<Start> {
     let mut parser = Parser::new();
     parser
@@ -267,7 +266,7 @@ struct Cx<'a> {
     repo: &'a str,
     rel: &'a str,
     text: &'a str,
-    symbols: &'a BTreeSet<String>,
+    symbols: &'a Symbols<'a>,
     imports: Vec<Import>,
     web: Option<&'a (String, (u64, u64))>,
 }

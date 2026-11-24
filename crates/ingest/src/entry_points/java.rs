@@ -21,7 +21,7 @@
 //! with that name, else the file. Test sources (`src/test/`, `src/it/`) and
 //! test, example and end-to-end trees start nothing.
 
-use super::{Kind, OPERATOR_DIRS, Start, Target};
+use super::{Kind, OPERATOR_DIRS, Start, Symbols, Target};
 use core_prov::ConfidenceTier;
 use std::collections::BTreeSet;
 use tree_sitter::{Node as TsNode, Parser};
@@ -75,11 +75,7 @@ pub(super) fn candidate(rel: &str) -> bool {
 }
 
 /// The starts every Java source in `files` declares.
-pub(super) fn starts(
-    repo: &str,
-    files: &[(String, String)],
-    symbols: &BTreeSet<String>,
-) -> Vec<Start> {
+pub(super) fn starts(repo: &str, files: &[(String, String)], symbols: &Symbols) -> Vec<Start> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_java::LANGUAGE.into())
@@ -215,7 +211,7 @@ struct Cx<'a> {
     repo: &'a str,
     rel: &'a str,
     text: &'a str,
-    symbols: &'a BTreeSet<String>,
+    symbols: &'a Symbols<'a>,
     imports: Vec<Import>,
 }
 
@@ -626,11 +622,7 @@ impl Cx<'_> {
             };
         }
         let prefix = format!("sym:{}@{}#{class}.{name}(", self.repo, self.rel);
-        let matches: Vec<&String> = self
-            .symbols
-            .range(prefix.clone()..)
-            .take_while(|s| s.starts_with(&prefix))
-            .collect();
+        let matches: Vec<&String> = self.symbols.with_prefix(&prefix);
         let function = match matches.as_slice() {
             [one] => one.split_once('#').map(|(_, f)| f.to_string()),
             _ => None,
