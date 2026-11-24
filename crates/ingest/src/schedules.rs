@@ -115,7 +115,9 @@ pub fn extract_dir(
 ) -> std::io::Result<ScheduleExtraction> {
     let walked = crate::captured_walk::walk(root)?;
     let text = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
-    Ok(extract_walked(&walked, &text, id, symbols))
+    Ok(extract_walked(&walked, &text, id, &|symbol| {
+        symbols.contains(symbol)
+    }))
 }
 
 /// True when the schedule reader may open `rel` and a capture retains it: a
@@ -158,21 +160,34 @@ pub fn extract_from_capture(
     id: &SourceId,
     symbols: &BTreeSet<String>,
 ) -> std::io::Result<ScheduleExtraction> {
+    Ok(captured_walked(root, captured, read, id, &|symbol| {
+        symbols.contains(symbol)
+    }))
+}
+
+fn captured_walked(
+    root: &Path,
+    captured: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    emitted: &dyn Fn(&str) -> bool,
+) -> ScheduleExtraction {
     let walked = crate::captured_walk::listing(root, captured);
     let text = |rel: &str| {
         read(rel)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
     };
-    Ok(extract_walked(&walked, &text, id, symbols))
+    extract_walked(&walked, &text, id, emitted)
 }
 
 /// [`extract_from_capture`], and whether its facts are the captured files'
 /// alone (ADR-0072 slice 9, AC-1532). Over a capture the reader lists and
-/// reads only the capture, but a proven Python dispatch enters a function
-/// only when the Python adapter emitted it (`symbols`): the facts are bound
-/// when reading again with no symbols gives the same facts. `read` lists
-/// the captured files opened.
+/// reads only the capture, but a recognized Python dispatch enters a
+/// function only when the Python adapter emitted it (`symbols`), and is
+/// otherwise unresolved: the facts are bound only when no dispatch asked
+/// for an adapter symbol, whatever the answer. `read` lists the captured
+/// files opened.
 pub fn extract_from_capture_reading(
     root: &Path,
     captured: &[String],
@@ -185,10 +200,12 @@ pub fn extract_from_capture_reading(
         opened.borrow_mut().insert(rel.to_string());
         read(rel)
     };
-    let facts = extract_from_capture(root, captured, &recorded, id, symbols)?;
-    let alone = extract_from_capture(root, captured, read, id, &BTreeSet::new())?;
-    let bound =
-        alone.nodes == facts.nodes && alone.edges == facts.edges && alone.files == facts.files;
+    let consulted = std::cell::Cell::new(false);
+    let facts = captured_walked(root, captured, &recorded, id, &|symbol| {
+        consulted.set(true);
+        symbols.contains(symbol)
+    });
+    let bound = !consulted.get();
     let read = opened.into_inner().into_iter().collect();
     Ok((facts, CaptureReads { bound, read }))
 }
@@ -197,7 +214,7 @@ fn extract_walked(
     walked: &[source_walk::WalkedFile],
     text: &dyn Fn(&str) -> Option<String>,
     id: &SourceId,
-    symbols: &BTreeSet<String>,
+    emitted: &dyn Fn(&str) -> bool,
 ) -> ScheduleExtraction {
     let files: BTreeSet<String> = walked.iter().map(|file| file.rel.clone()).collect();
     let container = text("Dockerfile").and_then(|text| container_root(&text));
@@ -247,8 +264,7 @@ fn extract_walked(
                         .ok_or("imported function is not one top-level def the call runs")?
                 }
             };
-            symbols
-                .contains(&format!("sym:{}@{file}#{}", id.repo, found.function))
+            emitted(&format!("sym:{}@{file}#{}", id.repo, found.function))
                 .then_some((found, file))
                 .ok_or("dispatched function not emitted by the Python adapter")
         }))
