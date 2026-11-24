@@ -115,8 +115,12 @@ fn a_fresh_parse_establishes_each_fact_on_its_own_file() {
             receipt.input_closure().map(|record| &record.closure_id)
         );
     }
-    // One record per freshly parsed file.
-    assert_eq!(records.len(), 2);
+    // One direct-lexical record per freshly parsed file.
+    let direct = records
+        .iter()
+        .filter(|closure| closure.parameters.walk_policy == TS_WALK_POLICY)
+        .count();
+    assert_eq!(direct, 2);
 }
 
 // AC-1084: changing another file of the walk leaves a fact's digest, its
@@ -177,15 +181,18 @@ fn another_file_of_the_walk_never_changes_a_direct_lexical_fact() {
 }
 
 // AC-1084: a receipt whose fact directory completion decides depends on
-// other files of the walk, so its closure is not established.
+// other files of the walk, so its closure is not established while
+// completion reads what the capture does not bind, here an existing
+// imported stylesheet (AC-1094).
 #[test]
 fn a_completion_decided_receipt_is_cross_file_input_unbound() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("rule.ts"),
-        b"export function ready(ok: boolean) { if (!ok) return missing(); return true; }\n",
+        b"import './style.css';\nexport function ready(ok: boolean) { if (!ok) return missing(); return true; }\n",
     )
     .unwrap();
+    fs::write(directory.path().join("style.css"), b"body {}\n").unwrap();
     let (receipts, _) = walk(directory.path());
     let decided: Vec<_> = receipts
         .iter()
