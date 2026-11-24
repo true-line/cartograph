@@ -258,6 +258,9 @@ pub struct IncrementalStats {
     /// True when every extraction receipt omission produced a [`core_graph::FactKey`];
     /// false when a per-file declaration bound omitted unminted receipts by count only.
     pub omitted_receipt_facts_complete: bool,
+    /// Whether a captured walk's resolution configs are the capture's own
+    /// bytes (ADR-0072 slice 6); always unbound for an uncaptured walk.
+    pub resolution_configs: captured::ConfigBinding,
 }
 
 impl Default for IncrementalStats {
@@ -270,6 +273,7 @@ impl Default for IncrementalStats {
             omitted_rule_receipts: std::collections::BTreeMap::new(),
             omitted_receipt_facts: Vec::new(),
             omitted_receipt_facts_complete: true,
+            resolution_configs: captured::ConfigBinding::Unbound,
         }
     }
 }
@@ -3911,6 +3915,23 @@ fn complete_directory(
     root: &Path,
     id: &SourceId,
 ) -> Result<(), ExtractError> {
+    // Config-driven bare-specifier resolution (#213): tsconfig paths/baseUrl
+    // and workspace-package names rewrite `mod:` IMPORTS targets to real
+    // files, citing the deciding config. Reads configs fresh on every walk —
+    // a tsconfig edit must take effect even when every source parse is
+    // cache-reused.
+    let index = resolution::ResolutionIndex::load(root)?;
+    complete_directory_with(out, facts, root, id, &index)
+}
+
+/// [`complete_directory`] under an already loaded resolution index.
+fn complete_directory_with(
+    out: &mut Extraction,
+    facts: &mut impl FactAccess,
+    root: &Path,
+    id: &SourceId,
+    index: &resolution::ResolutionIndex,
+) -> Result<(), ExtractError> {
     let known_symbols: std::collections::HashSet<String> =
         facts.node_keys().map(|(id, _)| id.to_string()).collect();
     let known_files: std::collections::HashSet<String> = facts
@@ -3919,13 +3940,7 @@ fn complete_directory(
         .map(|(id, _)| id.to_string())
         .collect();
     reconcile_guessed_edge_targets(&mut *facts, &known_files, &known_symbols)?;
-    // Config-driven bare-specifier resolution (#213): tsconfig paths/baseUrl
-    // and workspace-package names rewrite `mod:` IMPORTS targets to real
-    // files, citing the deciding config. Reads configs fresh on every walk —
-    // a tsconfig edit must take effect even when every source parse is
-    // cache-reused.
-    let index = resolution::ResolutionIndex::load(root)?;
-    resolution::resolve_bare_imports(&mut *facts, &index, id, &known_files)?;
+    resolution::resolve_bare_imports(&mut *facts, index, id, &known_files)?;
     let reexports = std::mem::take(&mut out.reexports);
     let exported = std::mem::take(&mut out.exported);
     complete_pending_calls(
@@ -3940,7 +3955,7 @@ fn complete_directory(
     out.dependency_types = dependency_types::complete(
         std::mem::take(&mut out.dependency_calls),
         root,
-        &index,
+        index,
         id,
         &known_files,
         &mut *facts,
@@ -3970,11 +3985,11 @@ fn complete_directory(
     let navigation = std::mem::take(&mut out.client_navigation);
     client_navigation::complete(navigation, &files, id.repo, &mut *facts)?;
     next_pages_screens(&out.default_exports, id, &mut *facts)?;
-    next_api::app_screens(root, &index, id, &out.default_exports, &mut *facts)?;
+    next_api::app_screens(root, index, id, &out.default_exports, &mut *facts)?;
     next_api::complete(
         std::mem::take(&mut out.next_routes),
         root,
-        &index,
+        index,
         id,
         &mut *facts,
     )?;
@@ -3982,7 +3997,7 @@ fn complete_directory(
     service_worker::mark_registered(&registrations, &mut *facts, &format!("file:{}@", id.repo))?;
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
-    close_directory(&mut *facts, root, id, &index, &known_files)?;
+    close_directory(&mut *facts, root, id, index, &known_files)?;
     Ok(())
 }
 
