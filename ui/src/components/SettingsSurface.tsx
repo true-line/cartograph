@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from 'react';
 import { REPOSITORY_URL } from '../helpNotes';
+import { IS_MAC } from '../shortcuts';
 import { CoverageMatrix } from './CoverageMatrix';
 import type {
   AdapterInventory,
@@ -287,15 +288,17 @@ export function SettingsSurface({
       {error && <p className="error-text">{error}</p>}
 
       <h3 className="settings-section-title">Quick investigation shortcut</h3>
-      <label className="tier-card">
+      {IS_MAC && <label className="tier-card">
         <input type="checkbox" checked={quickDispatchFallbackEnabled} onChange={(event) => onQuickDispatchFallbackChange?.(event.target.checked)} />
         <span>Enable Cmd+J fallback for quick investigation</span>
-      </label>
+      </label>}
       <label className="tier-card">
         <input type="checkbox" checked={quickDispatchHintShown} onChange={(event) => onQuickDispatchHintChange?.(event.target.checked)} />
         <span>Show the "Dispatch to an agent" hint</span>
       </label>
-      <p className="muted">Cmd+Space works while Cartograph is focused and receives it; macOS may intercept it. Use this button if the shortcut is unavailable, or enable Cmd+J as a fallback.</p>
+      <p className="muted">{IS_MAC
+        ? 'Cmd+Space works while Cartograph is focused and receives it; macOS may intercept it. Use this button if the shortcut is unavailable, or enable Cmd+J as a fallback.'
+        : 'Ctrl+J works while Cartograph is focused. Use this button if the shortcut is unavailable.'}</p>
       <button type="button" className="secondary-button" onClick={onOpenQuickDispatch}>Open quick investigation</button>
 
       <h3 className="settings-section-title">Recovery tiers</h3>

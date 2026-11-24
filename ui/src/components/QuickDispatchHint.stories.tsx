@@ -5,7 +5,7 @@ import { QuickDispatchHint } from './QuickDispatchHint';
 const meta = {
   title: 'Shell/QuickDispatchHint',
   component: QuickDispatchHint,
-  args: { fallbackEnabled: true, onOpen: fn(), onDismiss: fn() },
+  args: { fallbackEnabled: true, mac: true, onOpen: fn(), onDismiss: fn() },
 } satisfies Meta<typeof QuickDispatchHint>;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -29,5 +29,16 @@ export const WithoutFallback: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText('Cmd+Space')).toBeVisible();
     await expect(canvas.queryByText('Cmd+J')).toBeNull();
+  },
+};
+
+// Windows and Linux name Ctrl+J only: Ctrl+Space switches input methods there.
+export const WindowsShowsCtrlJ: Story = {
+  args: { mac: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Ctrl+J')).toBeVisible();
+    await expect(canvas.queryByText(/Cmd/)).toBeNull();
+    await expect(canvas.queryByText('Ctrl+Space')).toBeNull();
   },
 };
