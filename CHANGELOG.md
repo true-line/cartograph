@@ -1,5 +1,16 @@
 # cartograph
 
+## 0.79.0
+
+### Minor Changes
+
+- 72dcf16: New analyst version `domain-analyst@32`: when a required source could not be read for lack of prompt capacity, the app now records that limitation itself instead of asking the model to, so an answer is no longer refused and lost over how that sentence was worded (#1728).
+- d9c7f8d: Curated content now follows a proposal's latest reconciliation: a reconciled record is read from its matched evidence (so a legacy record whose evidence still matches can be curated, with corroborated evidence counted apart), and one that changed or went missing is listed with that reason (#385, AC-1076).
+
+### Patch Changes
+
+- d238242: An investigation that has to finish because its next read did not fit now gets the full finish allowance, so its answer is no longer cut off and lost (#1728).
+
 ## 0.78.0
 
 ### Minor Changes
