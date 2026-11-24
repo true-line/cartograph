@@ -606,10 +606,12 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    `t0.toolchain/declared-v2`), pinning the `toml` and `serde_json`
    parsers exactly. Each detector reads only its own file, so the closure
    is the capture's `Enumeration` under `toolchain-walk-v1` and each
-   captured config file the reader read. Env files, which no capture
-   retains, are still read from the checkout; their facts cite no captured
-   file and get no receipt, and a `Tool` proven by both an env file and a
-   captured file would leave the receipts `cross_file_input_unbound`.
+   captured config file the reader read; a tool proven by a file's name
+   alone cites the whole file, so it is receipted too. Env files, which no
+   capture retains, are still read from the checkout; their facts cite no
+   captured file and get no receipt, and a `Tool` proven by both an env
+   file and a captured file would leave the receipts
+   `cross_file_input_unbound`.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
