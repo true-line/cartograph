@@ -298,7 +298,7 @@ pub(crate) fn hash(value: &str) -> bool {
 }
 /// A receipt contract that records an input closure state: TypeScript v4,
 /// Terraform v2 (AC-1526), pipeline v2 (AC-1528), environment v2
-/// (AC-1530) and schedule v2 (AC-1532).
+/// (AC-1530), schedule v2 (AC-1532) and entry point v2 (AC-1534).
 fn closure_receipt(value: &str) -> bool {
     [
         "ts-primary-v4:",
@@ -306,6 +306,7 @@ fn closure_receipt(value: &str) -> bool {
         "pipe-primary-v2:",
         "env-primary-v2:",
         "sched-primary-v2:",
+        "entry-primary-v2:",
     ]
     .iter()
     .any(|prefix| value.starts_with(prefix))
@@ -331,6 +332,8 @@ fn receipt(value: &str) -> bool {
         || prefixed(value, "env-primary-v2:")
         || prefixed(value, "sched-primary-v1:")
         || prefixed(value, "sched-primary-v2:")
+        || prefixed(value, "entry-primary-v1:")
+        || prefixed(value, "entry-primary-v2:")
 }
 impl TaskFactKey {
     fn valid(&self) -> bool {
