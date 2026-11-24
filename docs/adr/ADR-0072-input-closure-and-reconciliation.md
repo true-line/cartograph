@@ -505,9 +505,14 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    record per file is shared by its decided receipts. Otherwise the reason
    stays `cross_file_input_unbound`, or `cache_reuse_unproven` for a parse
    reused under another closure, or `limit_exceeded` past the closure bound.
-   Directory-proven facts with no receipt today (CALLS, routes, Pulumi
-   edges) still have none; giving them receipts is the remaining slice 6
-   work.
+   *As built (AC-1096):* a pending cross-file call's CALLS edge and Gap
+   edge are both minted from the caller's parse with its decided receipts;
+   completion keeps the one it emitted unchanged, on the same walk
+   closure. A call resolved through a re-export, a base class or an
+   interface is emitted with other files' evidence and keeps no receipt.
+   Other directory-proven facts with no receipt today (routes, Pulumi
+   edges, service-worker registrations, GraphQL target tests) are the
+   remaining slice 6 work.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
