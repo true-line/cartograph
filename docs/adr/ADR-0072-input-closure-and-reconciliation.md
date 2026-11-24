@@ -485,8 +485,17 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    (`IncrementalStats::resolution_configs`) only when the capture's config
    set is exactly the set read, byte for byte. A walk closure may name them
    only then; otherwise completion-decided facts stay
-   `cross_file_input_unbound`. Its other live reads (dependency type
-   packages, Next router directories, asset files) are not bound yet.
+   `cross_file_input_unbound`.
+   *As built (AC-1092):* completion's other live lookups are recorded: Next
+   router roots (directory exists), imported non-source files (file
+   exists), the root `vercel.json` read and whether a dependency type
+   allowlist exists. A captured walk reports them bound
+   (`IncrementalStats::completion_probes`) only when the capture answers
+   each alike: a directory found holds a captured file, a path not found is
+   absent from the capture (listed for `AbsentFromEnumeration`), a root file
+   read is retained with those bytes. An existing imported asset is not
+   retained and an allowlist may lead completion into installed packages,
+   so either leaves them unbound. The selection lists a root `vercel.json`.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
