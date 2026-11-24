@@ -1850,6 +1850,121 @@ fn analyst32_accepts_a_finish_whose_capacity_gap_the_host_discloses() {
     }
 }
 
+// AC-1445: under the local finish policy the turn after the last required
+// read is finish-only, so @32 reserves that continuation alone. A ceiling that
+// holds the finish-only continuation but not the choice one refuses the read
+// under @31 and admits it under @32. Without the policy @32 reserves both.
+#[test]
+fn analyst32_last_required_read_reserves_only_the_finish_continuation() {
+    let local = INVESTIGATION_V2_POLICY
+        .with_local_finish_generation()
+        .unwrap();
+    let certify = |role, policy: &InvestigationPolicy, input_bytes: Option<u64>| {
+        let (f, raw, target, _) = source_fixture(role, "bounded source");
+        let input = InvestigationInput::prepare_v9_with_policy(
+            &f.request.question,
+            role,
+            f.ledger.clone(),
+            &[&raw],
+            &[],
+            &[],
+            &usage(CompletionCallMode::Choice),
+            &f.basis,
+            &f.request,
+            &f.metadata,
+            &[],
+            CompletionCallMode::Choice,
+            0,
+            None,
+            policy,
+        )
+        .unwrap();
+        let input = source_choices(&f, input, &[], &f.ledger);
+        let contract = InvestigationCompletionContract {
+            schema_version: 1,
+            request_hash: f.metadata.request_hash.clone(),
+            obligations_hash: f.metadata.obligations_hash.clone(),
+            obligations: f.request.obligations.clone(),
+        };
+        let choices = input.acquisition_choices.as_ref().unwrap();
+        assert!(choices.attempt_leaves_none_pending(&contract, &target));
+        let mut other = target.clone();
+        other.index += 1;
+        assert!(!choices.attempt_leaves_none_pending(&contract, &other));
+        let limits = CompletionLimits::new(CompletionLimitValues {
+            input_bytes: input_bytes.unwrap_or(CompletionLimits::default().values().input_bytes),
+            ..CompletionLimits::default().values()
+        })
+        .unwrap();
+        let prepared = llm::EgressFirewall::new(llm::EgressPolicy::default())
+            .prepare_bounded(
+                &DescriptorOnly,
+                &input.action("current:1".into()).unwrap(),
+                &limits,
+            )
+            .unwrap();
+        input
+            .certify_unread_source_v9_with_policy(
+                &prepared,
+                &target,
+                &profile(),
+                &limits,
+                "next:2",
+                policy,
+            )
+            .map(|bound| bound.continuation())
+    };
+    let ceiling = |v: llm::bounded::BoundedWireMeasurements| {
+        [
+            v.raw_string_bytes,
+            v.original_payload_bytes,
+            v.redacted_payload_bytes,
+            v.original_action_bytes.saturating_sub(4096),
+        ]
+        .into_iter()
+        .max()
+        .unwrap()
+    };
+    let old = certify(SpecialistId::DomainAnalystV31, &local, None).unwrap();
+    let new = certify(SpecialistId::DomainAnalystV32, &local, None).unwrap();
+    assert!(ceiling(old.choice) > ceiling(old.finish_only));
+    assert_eq!(new.choice, new.finish_only);
+    let finish = ceiling(new.finish_only);
+    assert_eq!(
+        certify(
+            SpecialistId::DomainAnalystV31,
+            &local,
+            Some(ceiling(old.finish_only))
+        )
+        .err(),
+        Some(InvestigationError::LimitExceeded)
+    );
+    let admitted = certify(SpecialistId::DomainAnalystV32, &local, Some(finish)).unwrap();
+    assert_eq!(admitted.choice, admitted.finish_only);
+    assert_eq!(ceiling(admitted.finish_only), finish);
+    assert_eq!(
+        certify(SpecialistId::DomainAnalystV32, &local, Some(finish - 1)).err(),
+        Some(InvestigationError::LimitExceeded)
+    );
+    // Without the local finish policy a choice turn can follow the last read.
+    let plain = certify(
+        SpecialistId::DomainAnalystV32,
+        &INVESTIGATION_V2_POLICY,
+        None,
+    )
+    .unwrap();
+    assert_ne!(plain.choice, plain.finish_only);
+    assert_eq!(
+        certify(
+            SpecialistId::DomainAnalystV32,
+            &INVESTIGATION_V2_POLICY,
+            Some(ceiling(plain.finish_only))
+        )
+        .err(),
+        Some(InvestigationError::LimitExceeded)
+    );
+}
+
 // AC-1443: a read refused for capacity leaves its obligation unattempted, so
 // attempts never complete. The forced finish still gets the finish allowance.
 #[test]
