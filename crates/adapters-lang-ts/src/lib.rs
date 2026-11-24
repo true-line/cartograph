@@ -261,6 +261,10 @@ pub struct IncrementalStats {
     /// Whether a captured walk's resolution configs are the capture's own
     /// bytes (ADR-0072 slice 6); always unbound for an uncaptured walk.
     pub resolution_configs: captured::ConfigBinding,
+    /// Whether a captured walk's capture answers completion's other live
+    /// lookups as the live tree did (ADR-0072 slice 6); always unbound for
+    /// an uncaptured walk.
+    pub completion_probes: captured::ProbeBinding,
 }
 
 impl Default for IncrementalStats {
@@ -274,6 +278,7 @@ impl Default for IncrementalStats {
             omitted_receipt_facts: Vec::new(),
             omitted_receipt_facts_complete: true,
             resolution_configs: captured::ConfigBinding::Unbound,
+            completion_probes: captured::ProbeBinding::Unbound,
         }
     }
 }
@@ -3921,17 +3926,45 @@ fn complete_directory(
     // a tsconfig edit must take effect even when every source parse is
     // cache-reused.
     let index = resolution::ResolutionIndex::load(root)?;
-    complete_directory_with(out, facts, root, id, &index)
+    complete_directory_with(out, facts, root, id, &index, &mut Probes::default())
 }
 
-/// [`complete_directory`] under an already loaded resolution index.
+/// How a path was looked up in the live tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lookup {
+    /// Whether a directory exists.
+    Directory,
+    /// Whether a regular file exists.
+    File,
+}
+
+/// What directory completion looked up in the live tree beyond its
+/// resolution configs (ADR-0072 slice 6), so a captured walk can tell
+/// whether its capture answers each lookup the same way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Probes {
+    /// Repo-relative paths looked up for existence, with the answer: Next
+    /// router roots and imported non-source files.
+    pub(crate) exists: std::collections::BTreeMap<String, (Lookup, bool)>,
+    /// Root files read, with their bytes when one was read (`vercel.json`).
+    pub(crate) read: std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    /// Whether anything exists at the dependency type allowlist's path;
+    /// with one, completion may read installed packages.
+    pub(crate) allowlist: bool,
+}
+
+/// [`complete_directory`] under an already loaded resolution index,
+/// recording its live lookups in `probes`.
 fn complete_directory_with(
     out: &mut Extraction,
     facts: &mut impl FactAccess,
     root: &Path,
     id: &SourceId,
     index: &resolution::ResolutionIndex,
+    probes: &mut Probes,
 ) -> Result<(), ExtractError> {
+    probes.allowlist =
+        std::fs::symlink_metadata(root.join(dependency_types::CONFIG_REL_PATH)).is_ok();
     let known_symbols: std::collections::HashSet<String> =
         facts.node_keys().map(|(id, _)| id.to_string()).collect();
     let known_files: std::collections::HashSet<String> = facts
@@ -3985,19 +4018,20 @@ fn complete_directory_with(
     let navigation = std::mem::take(&mut out.client_navigation);
     client_navigation::complete(navigation, &files, id.repo, &mut *facts)?;
     next_pages_screens(&out.default_exports, id, &mut *facts)?;
-    next_api::app_screens(root, index, id, &out.default_exports, &mut *facts)?;
+    next_api::app_screens(root, index, id, &out.default_exports, &mut *facts, probes)?;
     next_api::complete(
         std::mem::take(&mut out.next_routes),
         root,
         index,
         id,
         &mut *facts,
+        probes,
     )?;
     let registrations = std::mem::take(&mut out.service_worker_registrations);
     service_worker::mark_registered(&registrations, &mut *facts, &format!("file:{}@", id.repo))?;
     // Bare-module import targets are classified against the same index:
     // external only when nothing in the repository could answer them.
-    close_directory(&mut *facts, root, id, index, &known_files)?;
+    close_directory(&mut *facts, root, id, index, &known_files, probes)?;
     Ok(())
 }
 
@@ -4010,6 +4044,7 @@ fn close_directory(
     id: &SourceId,
     index: &resolution::ResolutionIndex,
     known_files: &std::collections::HashSet<String>,
+    probes: &mut Probes,
 ) -> Result<(), core_graph::GraphError> {
     let file_prefix = format!("file:{}@", id.repo);
     core_graph::placeholder::close_over_facts(
@@ -4036,11 +4071,16 @@ fn close_directory(
                     // Without the spelled specifier the path is unproven.
                     _ => true,
                 };
-                return (asset && !escapes && root.join(path).is_file()).then(|| {
-                    core_graph::placeholder::Boundary::Internal {
-                        reason: "non-source file in this repository (not parsed at T0)".into(),
-                        evidence: vec![],
-                    }
+                if !asset || escapes {
+                    return None;
+                }
+                let found = root.join(path).is_file();
+                probes
+                    .exists
+                    .insert(path.to_string(), (Lookup::File, found));
+                return found.then(|| core_graph::placeholder::Boundary::Internal {
+                    reason: "non-source file in this repository (not parsed at T0)".into(),
+                    evidence: vec![],
                 });
             }
             let spec = endpoint.strip_prefix("mod:")?;

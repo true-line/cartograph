@@ -28,7 +28,7 @@
 //! is a cited Gap, never a guess. `next.config` `basePath`/i18n is not applied.
 
 use crate::callable::{self, Bindings};
-use crate::{EXTRACTOR_ID, FileCx, SourceId, file_id, resolution::ResolutionIndex};
+use crate::{EXTRACTOR_ID, FileCx, Lookup, Probes, SourceId, file_id, resolution::ResolutionIndex};
 use core_graph::facts::FactAccess;
 use core_graph::{Edge, GraphError, Node};
 use core_prov::{ConfidenceTier, EvidenceRef, Provenance, Tier};
@@ -304,8 +304,16 @@ fn route(rel: &str, app: bool, root_router: bool) -> Option<(String, Option<&'st
 /// root. Next selects the root directory by its existence alone, so one
 /// holding only assets (`app/globals.css`) still makes `src/<router>`
 /// inactive; walked source files cannot tell.
-fn root_router(root: &Path, dir: &str, router: &str) -> bool {
-    root.join(dir).join(router).is_dir()
+/// The lookup is recorded in `probes` (ADR-0072 slice 6).
+fn root_router(root: &Path, dir: &str, router: &str, probes: &mut Probes) -> bool {
+    let found = root.join(dir).join(router).is_dir();
+    let path = if dir.is_empty() {
+        router.to_string()
+    } else {
+        format!("{dir}/{router}")
+    };
+    probes.exists.insert(path, (Lookup::Directory, found));
+    found
 }
 
 /// Emit every proven route site as an Endpoint, and every unproven one under
@@ -316,6 +324,7 @@ pub(crate) fn complete(
     index: &ResolutionIndex,
     id: &SourceId,
     facts: &mut impl FactAccess,
+    probes: &mut Probes,
 ) -> Result<(), GraphError> {
     let mut seen: HashSet<String> = facts.node_keys().map(|(id, _)| id.to_string()).collect();
     let (mut nodes, mut edges) = (Vec::new(), Vec::new());
@@ -325,7 +334,11 @@ pub(crate) fn complete(
     let vercel_config = sites
         .iter()
         .any(|site| site.vercel)
-        .then(|| source_walk::root_file(root, VERCEL_CONFIG))
+        .then(|| {
+            let bytes = source_walk::root_file(root, VERCEL_CONFIG);
+            probes.read.insert(VERCEL_CONFIG.to_string(), bytes.clone());
+            bytes
+        })
         .flatten();
     // Each Vercel function's path, for the rewrites onto it.
     let mut functions: Vec<(String, String, String)> = Vec::new();
@@ -349,7 +362,7 @@ pub(crate) fn complete(
         };
         let app = site.app;
         let router = if app { "app" } else { "pages" };
-        let Some((path, prefix)) = route(rel, app, root_router(root, dir, router)) else {
+        let Some((path, prefix)) = route(rel, app, root_router(root, dir, router, probes)) else {
             continue;
         };
         let declaration = EvidenceRef {
@@ -749,6 +762,7 @@ pub(crate) fn app_screens(
     id: &SourceId,
     default_exports: &HashMap<String, String>,
     facts: &mut impl FactAccess,
+    probes: &mut Probes,
 ) -> Result<(), GraphError> {
     let mut seen: HashSet<String> = facts.node_keys().map(|(id, _)| id.to_string()).collect();
     let files: Vec<String> = facts
@@ -766,7 +780,7 @@ pub(crate) fn app_screens(
         } else {
             &file[dir.len() + 1..]
         };
-        let Some(route) = app_screen_route(rel, root_router(root, dir, "app")) else {
+        let Some(route) = app_screen_route(rel, root_router(root, dir, "app", probes)) else {
             continue;
         };
         let screen = format!("screen:{}@{route}", id.repo);
@@ -1513,11 +1527,43 @@ mod tests {
             nodes: &mut listed,
             edges: &mut listed_edges,
         };
-        app_screens(root, &index, &id, &exports, &mut lists).unwrap();
-        complete(sites(), root, &index, &id, &mut lists).unwrap();
+        app_screens(
+            root,
+            &index,
+            &id,
+            &exports,
+            &mut lists,
+            &mut crate::Probes::default(),
+        )
+        .unwrap();
+        complete(
+            sites(),
+            root,
+            &index,
+            &id,
+            &mut lists,
+            &mut crate::Probes::default(),
+        )
+        .unwrap();
         let mut store = FactStore::from_facts(nodes.clone(), Vec::new()).unwrap();
-        app_screens(root, &index, &id, &exports, &mut store).unwrap();
-        complete(sites(), root, &index, &id, &mut store).unwrap();
+        app_screens(
+            root,
+            &index,
+            &id,
+            &exports,
+            &mut store,
+            &mut crate::Probes::default(),
+        )
+        .unwrap();
+        complete(
+            sites(),
+            root,
+            &index,
+            &id,
+            &mut store,
+            &mut crate::Probes::default(),
+        )
+        .unwrap();
         assert_eq!(
             store.into_facts().unwrap(),
             (listed.clone(), listed_edges.clone())
