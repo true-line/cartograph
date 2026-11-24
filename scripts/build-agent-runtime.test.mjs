@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildAgentRuntime, claudeCodeRequirement, hostNodeSlice, lockedRunners, pinnedClaudeCode, pinnedNode, SEA_FUSE, SIGNING_INPUTS } from './build-agent-runtime.mjs';
+import { buildAgentRuntime, claudeCodeRequirement, hostNodeSlice, lockedRunners, pinnedClaudeCode, pinnedNode, SEA_FUSE, SIGNING_INPUTS, stripAuthenticode } from './build-agent-runtime.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const archive = (slice) => `node archive ${slice}`;
@@ -195,4 +195,30 @@ test('the repository pins exact Node and Pi versions and packages the sidecar on
   const workflow = readFileSync(path.join(ROOT, '.github/workflows/package.yml'), 'utf8');
   assert.match(workflow, /node scripts\/build-agent-runtime\.mjs universal-apple-darwin\n[\s\S]*node scripts\/generate-notices\.mjs --with-agent-runtime/u, 'the sidecar is built before the shipped notices are generated');
   assert.match(workflow, /agent="\$app\/Contents\/MacOS\/cartograph-agent"[\s\S]*lipo "\$agent" -verify_arch arm64[\s\S]*lipo "\$agent" -verify_arch x86_64[\s\S]*codesign --verify --strict --verbose=2 "\$agent"[\s\S]*"type":"ready"/u);
+});
+
+// #227: signtool rejects a single executable whose node.exe signature
+// postject edited around, so the build drops that signature first.
+test('stripAuthenticode removes a trailing certificate table and nothing else', () => {
+  const image = Buffer.alloc(0x210);
+  image.writeUInt16LE(0x5a4d, 0);
+  image.writeUInt32LE(0x80, 0x3c);
+  image.writeUInt32LE(0x00004550, 0x80);
+  image.writeUInt16LE(0x20b, 0x98);
+  image.writeUInt32LE(0x1234, 0x98 + 64);
+  const entry = 0x98 + 112 + 4 * 8;
+  image.writeUInt32LE(0x200, entry);
+  image.writeUInt32LE(0x10, entry + 4);
+  image.fill(0xab, 0x200);
+  const stripped = stripAuthenticode(image);
+  assert.equal(stripped.length, 0x200);
+  assert.equal(stripped.readUInt32LE(entry), 0);
+  assert.equal(stripped.readUInt32LE(entry + 4), 0);
+  assert.equal(stripped.readUInt32LE(0x98 + 64), 0);
+  assert.deepEqual(stripped.subarray(0, 0x98), image.subarray(0, 0x98));
+  assert.equal(stripAuthenticode(stripped), stripped);
+  const plain = Buffer.from('not a PE image');
+  assert.equal(stripAuthenticode(plain), plain);
+  const inner = Buffer.concat([image, Buffer.alloc(8)]);
+  assert.throws(() => stripAuthenticode(inner), /not at the end/u);
 });
