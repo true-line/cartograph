@@ -344,9 +344,9 @@ fn pinned_v2_nested_ranges_survive_current_binding_and_fact_removal() {
     let captured = capture(&state, &source, true);
     let (owner, other) = rule_pair(&captured);
     let original = receipt_for(&captured, &owner);
-    // Nested definition roles arrived with v2; new receipts mint as compact v3
-    // (ADR-0046), which expands to the same inventory.
-    assert!(original.id().starts_with("ts-primary-v3:"));
+    // Nested definition roles arrived with v2; directory receipts now mint as
+    // compact v4 (ADR-0046, AC-1084), which expands to the same inventory.
+    assert!(original.id().starts_with("ts-primary-v4:"));
     let guard = state.primary_sources.task_guard(&source.source_id).unwrap();
     let pinned = state
         .primary_sources

@@ -34,7 +34,7 @@ struct Parsed {
     // The production retention guard must survive persistence and publication.
     input: primary_source::PrimaryInput,
     extraction: adapters_lang_ts::Extraction,
-    receipts: Vec<Receipt>,
+    receipts: Vec<adapters_lang_ts::captured::MintedReceipt>,
     delta: DeltaSummary,
 }
 
@@ -75,10 +75,7 @@ fn parse(state: &AppState, source: &RegisteredSource, after_capture: impl FnOnce
     Parsed {
         input,
         extraction,
-        receipts: receipts
-            .iter()
-            .map(|receipt| receipt.to_receipt().unwrap())
-            .collect(),
+        receipts,
         delta,
     }
 }
@@ -1419,7 +1416,7 @@ fn primary_source_forget_reclaims_unpinned_and_retains_pinned_receipts_as_captur
         })
         .unwrap()
         .clone();
-    let unpinned_receipts: Vec<Receipt> = parsed
+    let unpinned_receipts: Vec<adapters_lang_ts::captured::MintedReceipt> = parsed
         .receipts
         .iter()
         .filter(|receipt| {
@@ -1444,7 +1441,25 @@ fn primary_source_forget_reclaims_unpinned_and_retains_pinned_receipts_as_captur
                 )
                 .unwrap() as u64
         })
-        .sum();
+        .sum::<u64>()
+        // A v4 compact header names its closure state, so a header that only
+        // reclaimed receipts share is reclaimed with them (AC-1084).
+        + before_conn
+            .query_row(
+                &format!(
+                    "SELECT coalesce(sum(length(CAST(header AS BLOB))),0) FROM receipt_headers
+                     WHERE NOT EXISTS(SELECT 1 FROM receipts
+                                      WHERE header_id = receipt_headers.id AND id NOT IN ({}))",
+                    unpinned_receipts
+                        .iter()
+                        .map(|receipt| format!("'{}'", receipt.id()))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap() as u64;
     drop(before_conn);
     let (count_before, bytes_before) = receipt_store_accounting(&app_data);
     assert_eq!(count_before, parsed.receipts.len() as u64);
@@ -1463,7 +1478,7 @@ fn primary_source_forget_reclaims_unpinned_and_retains_pinned_receipts_as_captur
     drop(parsed);
 
     retain_investigation_selection(&state, &source, &inv_binding, "reclaim-inv-pin");
-    retain_staged_proposal_reference(&state, &source, &staged_receipt);
+    retain_staged_proposal_reference(&state, &source, &staged_receipt.to_receipt().unwrap());
 
     let preview = primary_source::preview(&state, &source.source_id).unwrap();
     assert_eq!(preview.investigation_references, 1);
@@ -2539,7 +2554,8 @@ fn mcp_exact_pinned_and_reclaimed_forgotten_receipts_keep_v3_and_basis_boundarie
             .into_iter()
             .find(|b| b.fact == FactKey::from_node(&rule))
             .unwrap();
-        assert!(binding.receipt_id.starts_with("ts-primary-v3:"));
+        // The directory lane mints contract v4 (AC-1084).
+        assert!(binding.receipt_id.starts_with("ts-primary-v4:"));
         drop(parsed);
         if pinned {
             retain_investigation_selection(&state, &source, &binding, "mcp-forgotten-pin");
@@ -3039,7 +3055,7 @@ fn primary_source_publish_reclaims_superseded_receipts() {
         .map(|receipt| receipt.id().to_owned())
         .collect();
     drop(first);
-    retain_staged_proposal_reference(&state, &source, &pinned);
+    retain_staged_proposal_reference(&state, &source, &pinned.to_receipt().unwrap());
 
     std::fs::write(root.join("source.ts"), STABLE_B).unwrap();
     let second = parse(&state, &source, || {});
@@ -3161,7 +3177,7 @@ fn receipt_workspace_covers_capture_roundtrip_and_range_refusal() {
     let model = crate::mcp_reads::reservation::receipt::workspace_bytes().unwrap();
     for receipt in &parsed.receipts {
         let raw = receipt.to_json().unwrap();
-        assert!(receipt.id().starts_with("ts-primary-v3:"));
+        assert!(receipt.id().starts_with("ts-primary-v4:"));
         let decoded = Receipt::from_json(&raw).unwrap();
         assert_eq!(decoded.to_json().unwrap(), raw);
         let range_wire = serde_json::to_vec(decoded.ranges()).unwrap().len();
@@ -5573,10 +5589,7 @@ fn facts_citing_several_captured_files_are_cited_and_read_back() {
     let parsed = Parsed {
         input,
         extraction,
-        receipts: minted
-            .iter()
-            .map(|receipt| receipt.to_receipt().unwrap())
-            .collect(),
+        receipts: minted,
         delta: Default::default(),
     };
     let bindings = publish(&state, &source, &parsed);
