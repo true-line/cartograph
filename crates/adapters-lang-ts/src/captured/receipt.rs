@@ -29,6 +29,10 @@ pub const TS_WALK_POLICY: &str = "source-walk-v1";
 /// `vercel.json` directory completion reads, so a path absent from that
 /// enumeration was not there for completion either.
 pub const TS_DIRECTORY_WALK_POLICY: &str = "source-walk-v2";
+/// The walk policy a Terraform module-walk closure records (ADR-0072 slice
+/// 9, AC-1526): the captured `.tf` selection, plus each local module
+/// directory the walk lists, which must hold the captured files alone.
+pub const TF_MODULE_WALK_POLICY: &str = "tf-module-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -94,6 +98,48 @@ pub fn directory_walk_closure(
     )
 }
 
+/// The input closure of a Terraform fact (ADR-0072 slice 9, AC-1526): the
+/// capture's enumeration under [`TF_MODULE_WALK_POLICY`] and the retained
+/// bytes of every `.tf` file in `files` the capture holds, under contract
+/// v4's pins. Module expansion, policy grants and endpoint closure read
+/// across the whole walk, so every fact of the walk shares it. A closure
+/// over more than [`super::MAX_CLOSURE_INPUTS`] inputs is a limit error.
+pub fn terraform_walk_closure(
+    capture: &source_capture::Capture,
+    files: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    let current = contract(4, Grammar::Terraform)?;
+    let mut inputs = vec![super::ClosureInput::Enumeration {
+        source_id: capture.manifest().source_id.clone(),
+        capture_id: capture.id().to_string(),
+        walk_policy: TF_MODULE_WALK_POLICY.into(),
+    }];
+    for path in files {
+        if inputs.len() > super::MAX_CLOSURE_INPUTS {
+            return Err(CapturedError::Limit("closure inputs"));
+        }
+        if Grammar::for_path(path) == Grammar::Terraform
+            && let Ok(file) = capture.file(path)
+        {
+            inputs.push(super::ClosureInput::CapturedFile {
+                file: file.reference().clone(),
+            });
+        }
+    }
+    super::InputClosureV1::new(
+        current.producer,
+        vec![current.grammar_package.into()],
+        super::ClosureParameters {
+            repo_key: repo_key.into(),
+            walk_policy: TF_MODULE_WALK_POLICY.into(),
+            layer_hints: Vec::new(),
+            grammar_rule: TS_GRAMMAR_RULE.into(),
+        },
+        inputs,
+    )
+}
+
 struct Contract {
     prefix: &'static str,
     producer: &'static str,
@@ -109,10 +155,21 @@ struct Contract {
 
 /// The producer contract a receipt of `version` and `grammar` was minted
 /// under. Python (AC-1024), Go (AC-1026), Java (AC-1031), Rust (AC-1033),
-/// Kotlin (AC-1035) and Terraform (AC-1053) receipts exist only in the v3
-/// shape and carry primary provenance alone; each lane's own prefix and domain keep it distinct from
-/// every TypeScript receipt.
+/// Kotlin (AC-1035) and Terraform (AC-1053) receipts exist in the v3 shape
+/// and carry primary provenance alone; each lane's own prefix and domain keep it distinct from
+/// every TypeScript receipt. Terraform receipts also exist under v4, v3's
+/// compact form with an input closure state (AC-1526).
 fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
+    if (version, grammar) == (4, Grammar::Terraform) {
+        return Ok(Contract {
+            prefix: "tf-primary-v2:",
+            producer: "t0.adapter-iac/direct-lexical-v2",
+            domain: b"cartograph:tf-primary-receipt:v2\0",
+            grammar_package: TERRAFORM_PARSER_PACKAGE,
+            parser_package: TERRAFORM_PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        });
+    }
     let lane = match grammar {
         Grammar::Python => Some(Contract {
             prefix: "py-primary-v1:",
@@ -323,6 +380,12 @@ impl Grammar {
                 | Self::Terraform
                 | Self::ObservedInput
         )
+    }
+
+    /// A grammar whose receipts have contract v4, with an input closure
+    /// state: TypeScript (slice 5) and Terraform (slice 9, AC-1526).
+    pub(super) fn has_v4(self) -> bool {
+        !self.provenance_only() || self == Self::Terraform
     }
 
     /// The grammar a receipt citing `file` is minted under: an observation
@@ -982,8 +1045,9 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
         return Ok(());
     }
     let typescript = !content.grammar.provenance_only();
-    // Contract v4 is TypeScript-only and keeps the v3 file binding.
-    let schema = content.schema_version == 3 || (typescript && content.schema_version == 4);
+    // Contract v4 (TypeScript, Terraform) keeps the v3 file binding.
+    let schema =
+        content.schema_version == 3 || (content.grammar.has_v4() && content.schema_version == 4);
     if !schema
         || (typescript
             && content
@@ -1441,7 +1505,7 @@ impl Receipt {
     /// it; a published receipt is never retrofitted.
     pub fn with_closure(self, closure: ReceiptClosure) -> Result<Self, CapturedError> {
         self.validate()?;
-        if self.content.schema_version != 3 || self.content.grammar.provenance_only() {
+        if self.content.schema_version != 3 || !self.content.grammar.has_v4() {
             return Err(CapturedError::Invalid("receipt contract"));
         }
         let current = contract(4, self.content.grammar)?;
