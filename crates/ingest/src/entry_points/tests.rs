@@ -1278,3 +1278,73 @@ fn captured_start_files_are_read_instead_of_the_checkout() {
         before
     );
 }
+
+fn captured_reading(
+    files: &[(&str, &str)],
+    symbols: &BTreeSet<String>,
+) -> (EntryPointExtraction, crate::captured_walk::CaptureReads) {
+    let captured: BTreeMap<String, Vec<u8>> = files
+        .iter()
+        .map(|(path, body)| (path.to_string(), body.as_bytes().to_vec()))
+        .collect();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let none = BTreeSet::new();
+    let dir = tempfile::tempdir().unwrap();
+    let out = extract_from_capture_reading(dir.path(), &keys, &read, &id, symbols, &none).unwrap();
+    let plain = extract_from_capture(dir.path(), &keys, &read, &id, symbols, &none).unwrap();
+    assert_eq!(format!("{:?}", out.0.nodes), format!("{:?}", plain.nodes));
+    assert_eq!(format!("{:?}", out.0.edges), format!("{:?}", plain.edges));
+    out
+}
+
+// AC-1534: over a capture, entry-point facts no adapter's symbols decide
+// are bound to the captured files, and the files the reader opened are
+// reported; a Go `func main` asks whether the Go adapter emitted it, so it
+// depends on that adapter's facts and is not bound, whether it was emitted
+// or not.
+#[test]
+fn capture_reads_report_entry_point_facts_bound_to_the_captured_files() {
+    let worker = "if __name__ == \"__main__\":\n    run()\n";
+    let files = [
+        ("worker.py", worker),
+        ("Procfile", "web: python worker.py\n"),
+        ("README.md", "notes\n"),
+    ];
+    let (facts, reads) = captured_reading(&files, &BTreeSet::new());
+    assert!(!facts.nodes.is_empty());
+    assert!(reads.bound, "{reads:?}");
+    for path in ["worker.py", "Procfile"] {
+        assert!(reads.read.contains(&path.to_string()), "{reads:?}");
+    }
+    assert!(!reads.read.contains(&"README.md".to_string()), "{reads:?}");
+    let go = "package main\n\nfunc main() {}\n";
+    let mut with_go = files.to_vec();
+    with_go.push(("cmd/api/main.go", go));
+    let (_, reads) = captured_reading(&with_go, &BTreeSet::new());
+    assert!(
+        reads.read.contains(&"cmd/api/main.go".to_string()),
+        "{reads:?}"
+    );
+    assert!(!reads.bound, "{reads:?}");
+    let symbols = BTreeSet::from([format!("sym:{REPO}@cmd/api/main.go#main")]);
+    let (facts, reads) = captured_reading(&with_go, &symbols);
+    assert!(
+        facts
+            .edges
+            .iter()
+            .any(|edge| edge.dst == format!("sym:{REPO}@cmd/api/main.go#main")),
+        "{:#?}",
+        facts.edges
+    );
+    assert!(!reads.bound, "{reads:?}");
+}
