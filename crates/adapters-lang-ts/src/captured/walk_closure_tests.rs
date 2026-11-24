@@ -284,3 +284,56 @@ fn walk_decided_call_edges_are_established_on_the_walk_closure() {
         .count();
     assert_eq!(calls, 1);
 }
+
+// AC-1098: a fact directory completion emits itself is receipted against
+// the file its evidence cites and established on that file's walk closure,
+// here a Pulumi reference to a resource another module exports. A call
+// resolved through a barrel also cites the barrel, so it keeps none.
+#[test]
+fn completion_emitted_facts_are_established_on_the_walk_closure() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "Pulumi.yaml", "name: app\nruntime: nodejs\n");
+    write(
+        root,
+        "package.json",
+        r#"{"dependencies":{"@pulumi/aws":"1"}}"#,
+    );
+    write(
+        root,
+        "index.ts",
+        "import * as aws from '@pulumi/aws';\nimport { bucket } from './bucket';\n\
+         new aws.lambda.Function('f', { environment: { variables: { B: bucket.arn } } });\n",
+    );
+    write(
+        root,
+        "bucket.ts",
+        "import * as aws from '@pulumi/aws';\nexport const bucket = new aws.s3.Bucket('b');\n",
+    );
+    write(
+        root,
+        "rule.ts",
+        &format!("import {{ missing }} from './barrel';\n{RULE}"),
+    );
+    write(root, "barrel.ts", "export { missing } from './lib';\n");
+    write(
+        root,
+        "lib.ts",
+        "export function missing() { return false; }\n",
+    );
+    let receipts = walk(root);
+    let reference = receipts
+        .iter()
+        .find(|receipt| {
+            matches!(receipt.fact_key(), FactKey::Edge { label, destination, .. }
+                if label == "REFERENCES" && destination.contains("s3/bucket:Bucket:b"))
+        })
+        .expect("a Pulumi REFERENCES receipt");
+    assert_eq!(reference.file().path, "index.ts");
+    assert_eq!(
+        walk_record(reference),
+        walk_record(decided(&receipts, "file:", "index.ts").unwrap())
+    );
+    let target = format!("sym:{REPO}@lib.ts#missing");
+    assert!(decided_edge(&receipts, "rule.ts", &target).is_none());
+}

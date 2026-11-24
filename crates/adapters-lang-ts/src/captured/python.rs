@@ -84,7 +84,7 @@ fn mint_lane_file_receipts(
 
 /// As [`mint_lane_file_receipts`]; with `capture`, a fact whose evidence also
 /// cites other captured files of the same grammar is bound to each (AC-1039).
-fn mint_lane_receipts_in(
+pub(super) fn mint_lane_receipts_in(
     grammar: Grammar,
     file: &CapturedFile,
     capture: Option<&source_capture::Capture>,
@@ -181,7 +181,7 @@ pub fn stage_lane_receipts(
 
 /// The file a fact's first primary evidence entry cites: its receipt's
 /// primary file.
-fn first_evidence_path(props: &serde_json::Value) -> Option<&str> {
+pub(super) fn first_evidence_path(props: &serde_json::Value) -> Option<&str> {
     props
         .get("prov")?
         .get("evidence")?
