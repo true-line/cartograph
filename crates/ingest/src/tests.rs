@@ -65,6 +65,57 @@ fn clone_lists_repo_with_commit_sha() {
     assert_eq!(again.commit_sha, cloned.commit_sha);
 }
 
+// AC-0001: a clone fetches only the default branch, so a remote branch
+// whose name nests past Windows' MAX_PATH (a dependabot branch on a deep
+// manifest path) cannot fail the recovery with "path too long". The ref is
+// written into packed-refs so the fixture itself never needs a long path.
+#[test]
+fn clone_fetches_only_the_default_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = bare_fixture(dir.path());
+    let bare = dir.path().join("fixture.git");
+    let head = git2::Repository::open_bare(&bare)
+        .unwrap()
+        .refname_to_id("refs/heads/main")
+        .unwrap();
+    let deep = format!(
+        "dependabot/npm_and_yarn/{}/lib-1.0.0",
+        ["deeply-nested-directory"; 12].join("/")
+    );
+    let packed = bare.join("packed-refs");
+    // Appending breaks the order a `sorted` header promises; drop the trait.
+    let mut refs = std::fs::read_to_string(&packed)
+        .unwrap_or_default()
+        .replace(" sorted", "");
+    refs.push_str(&format!("{head} refs/heads/{deep}\n"));
+    std::fs::write(&packed, refs).unwrap();
+    let dest = dir.path().join("clones");
+    std::fs::create_dir(&dest).unwrap();
+    let dest = dunce::canonicalize(dest).unwrap();
+    let origin = managed::parse_managed_origin(&url).unwrap();
+    let checkout = managed::ManagedCheckout::new(
+        &dest,
+        "reg_11111111111111111111111111111111",
+        "src_22222222222222222222222222222222",
+    )
+    .unwrap();
+    let mut guard = checkout.try_write().unwrap();
+    let cloned = guard.clone_from(&origin, None).unwrap();
+    assert_eq!(cloned.commit_sha, head.to_string());
+    let repo = git2::Repository::open(&cloned.path).unwrap();
+    let remotes: Vec<String> = repo
+        .references_glob("refs/remotes/**")
+        .unwrap()
+        .map(|r| r.unwrap().name().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        remotes,
+        ["refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        "only the default branch (and its HEAD alias) is fetched"
+    );
+    assert_eq!(repo.head().unwrap().shorthand().unwrap(), "main");
+}
+
 // AC-0003: a failed clone leaves no partial clone behind. (T-0003)
 #[test]
 fn failed_clone_leaves_nothing_behind() {

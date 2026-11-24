@@ -212,19 +212,27 @@ fn clone_into_new(
         Err(error) => return Err(error.into()),
     }
 
-    let mut callbacks = git2::RemoteCallbacks::new();
-    if let Some(token) = token {
-        let token = token.to_string();
-        callbacks.credentials(move |_url, _user, _kinds| {
-            // GitHub accepts a token as the password with any username.
-            git2::Cred::userpass_plaintext("x-access-token", &token)
-        });
-    }
+    let callbacks = || {
+        let mut callbacks = git2::RemoteCallbacks::new();
+        if let Some(token) = token {
+            let token = token.to_string();
+            callbacks.credentials(move |_url, _user, _kinds| {
+                // GitHub accepts a token as the password with any username.
+                git2::Cred::userpass_plaintext("x-access-token", &token)
+            });
+        }
+        callbacks
+    };
     let mut fetch = git2::FetchOptions::new();
-    fetch.remote_callbacks(callbacks);
+    fetch.remote_callbacks(callbacks());
     if !clone_url.starts_with("file://") {
         fetch.depth(HISTORY_DEPTH); // shallow per SPEC §10 (local transport can't)
     }
+    // Fetch only the default branch. A full clone wrote one loose ref file per
+    // remote branch, and libgit2 caps ref paths at MAX_PATH on Windows even
+    // with core.longpaths, so a deep dependabot branch name failed the whole
+    // recovery with "path too long" (Windows recovery fix). It also fetches less.
+    let branch = default_branch(clone_url, callbacks());
 
     // Clone without writing the tree, then check it out with the platform's
     // newline conversion off (#227): Git for Windows sets core.autocrlf=true
@@ -232,10 +240,25 @@ fn clone_into_new(
     // offset and content hash away from the committed blob.
     let mut deferred = git2::build::CheckoutBuilder::new();
     deferred.dry_run();
-    let result = git2::build::RepoBuilder::new()
-        .fetch_options(fetch)
-        .with_checkout(deferred)
-        .clone(clone_url, destination);
+    let mut builder = git2::build::RepoBuilder::new();
+    builder.fetch_options(fetch).with_checkout(deferred);
+    if let Some(branch) = &branch {
+        builder.branch(branch);
+    }
+    builder.remote_create(|repo, name, url| {
+        // Working-tree paths past MAX_PATH check out on Windows (a no-op
+        // elsewhere); ref paths stay capped, hence the single-branch refspec.
+        repo.config()?.set_bool("core.longpaths", true)?;
+        match &branch {
+            Some(branch) => repo.remote_with_fetch(
+                name,
+                url,
+                &format!("+refs/heads/{branch}:refs/remotes/{name}/{branch}"),
+            ),
+            None => repo.remote(name, url),
+        }
+    });
+    let result = builder.clone(clone_url, destination);
     let repo = match result {
         Ok(repo) => repo,
         Err(e) => {
@@ -253,6 +276,20 @@ fn clone_into_new(
         .map_err(|e| classify_git_error(clone_url, e, token.is_some()))?;
     drop(repo);
     Ok(commit_sha)
+}
+
+/// The remote's default branch name (`main` for `refs/heads/main`), from a
+/// ref advertisement alone. `None` (an empty remote, a detached HEAD, a
+/// failed connection) leaves the clone to libgit2's defaults, which then
+/// report any connection failure through the usual classification.
+fn default_branch(clone_url: &str, callbacks: git2::RemoteCallbacks<'_>) -> Option<String> {
+    let mut remote = git2::Remote::create_detached(clone_url).ok()?;
+    let connection = remote
+        .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+        .ok()?;
+    let head = connection.default_branch().ok()?;
+    let name = head.as_str().ok()?.strip_prefix("refs/heads/")?;
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 #[cfg(test)]
