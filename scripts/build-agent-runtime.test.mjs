@@ -18,7 +18,7 @@ function fixture(t, { pi = '0.73.1', sdk = '0.3.330', claude = 'claude code', li
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(path.join(root, 'scripts'));
   mkdirSync(path.join(root, 'agent-runtime'));
-  const slices = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win-x64'];
+  const slices = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win-arm64', 'win-x64'];
   writeFileSync(path.join(root, 'scripts/agent-runtime-node.json'), JSON.stringify({
     version: '22.23.5', sha256: Object.fromEntries(slices.map((slice) => [slice, digest(archive(slice))])),
     license_sha256: digest(license),
@@ -120,6 +120,24 @@ test('windows: the zip archive, node.exe, a CRLF LICENSE and an .exe sidecar (#2
     'one pinned sha256 covers the CRLF copy, and the shipped notices carry LF line ends');
 });
 
+test('windows arm64: an x64 host writes the blob, and only the arm64 node.exe ships (#227)', (t) => {
+  const root = fixture(t);
+  const calls = [];
+  const output = buildAgentRuntime({ root, target: 'aarch64-pc-windows-msvc', env: {}, hostSlice: 'win-x64',
+    run: tools(root, calls), bundle: () => {} });
+  assert.equal(path.basename(output), 'cartograph-agent-aarch64-pc-windows-msvc.exe');
+  const curls = calls.filter(([command]) => command === 'curl').map((call) => call.at(-1));
+  assert.deepEqual(curls, ['win-arm64.zip', 'win-x64.zip'].map((tail) => `https://nodejs.org/dist/v22.23.5/node-v22.23.5-${tail}`));
+  const blob = calls.find(([, first]) => first === '--experimental-sea-config');
+  assert.equal(blob[0], 'node.exe', 'the pinned x64 host Node writes the blob');
+  const injected = calls.filter((call) => call.includes('NODE_SEA_BLOB'));
+  assert.equal(injected.length, 1);
+  assert.match(injected[0][2], /cartograph-agent-win-arm64\.exe$/u);
+  // A host that is neither a shipped slice nor a listed cross host is refused.
+  assert.throws(() => buildAgentRuntime({ root, target: 'aarch64-pc-windows-msvc', env: {}, hostSlice: 'linux-x64',
+    run: tools(root, []), bundle: () => {} }), /must be built on one of win-arm64, win-x64/u);
+});
+
 test('the host slice follows Node release names, so Windows is win-x64 (#227)', () => {
   assert.equal(hostNodeSlice('win32', 'x64'), 'win-x64');
   assert.equal(hostNodeSlice('darwin', 'arm64'), 'darwin-arm64');
@@ -168,14 +186,14 @@ test('signing inputs, unknown targets, the wrong host and an unlocked Pi all fai
   for (const key of SIGNING_INPUTS) {
     assert.throws(() => buildAgentRuntime({ root, target: 'universal-apple-darwin', env: { [key]: 'secret' }, hostSlice: 'darwin-arm64', run, bundle }), /signing inputs/u);
   }
-  assert.throws(() => buildAgentRuntime({ root, target: 'aarch64-pc-windows-msvc', env: {}, run, bundle }), /unsupported target/u);
+  assert.throws(() => buildAgentRuntime({ root, target: 'i686-pc-windows-msvc', env: {}, run, bundle }), /unsupported target/u);
   assert.throws(() => buildAgentRuntime({ root, target: 'universal-apple-darwin', env: {}, hostSlice: 'linux-x64', run, bundle }), /must be built on/u);
   assert.throws(() => buildAgentRuntime({ root: fixture(t, { pi: null }), target: 'x86_64-unknown-linux-gnu', env: {}, hostSlice: 'linux-x64', run, bundle }), /pi-agent-core is not locked/u);
 });
 
 test('the repository pins exact Node and Pi versions and packages the sidecar on macOS', () => {
   const node = pinnedNode(ROOT);
-  for (const slice of ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win-x64']) assert.match(node.sha256[slice], /^[0-9a-f]{64}$/u);
+  for (const slice of ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win-arm64', 'win-x64']) assert.match(node.sha256[slice], /^[0-9a-f]{64}$/u);
   assert.match(node.license_sha256, /^[0-9a-f]{64}$/u);
   assert.match(lockedRunners(ROOT).pi, /^pi-agent-core@\d+\.\d+\.\d+$/u);
   assert.match(lockedRunners(ROOT).claude, /^claude-agent-sdk@\d+\.\d+\.\d+$/u);
