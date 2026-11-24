@@ -789,7 +789,7 @@ jobs:
 
       - name: Restore the app incremental cache
         id: restore
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.APP_INCREMENTAL_DIR }}
           key: ${{ steps.incremental.outputs.key }}
@@ -988,7 +988,7 @@ jobs:
 
       - name: Restore the app incremental cache
         id: restore
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.APP_INCREMENTAL_DIR }}
           key: ${{ steps.incremental.outputs.key }}
@@ -1010,7 +1010,7 @@ jobs:
       # caches out: once this hour's entry exists, later merges skip the build.
       - name: Save the app incremental cache
         if: steps.restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.APP_INCREMENTAL_DIR }}
           key: ${{ steps.incremental.outputs.key }}

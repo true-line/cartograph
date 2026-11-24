@@ -806,14 +806,14 @@ test('the app crate compiles incrementally from state main saves, and only main 
     assert.match(contents, /LOCK_HASH: \$\{\{ hashFiles\('rust-toolchain\.toml', 'Cargo\.lock'\) \}\}/u);
     assert.match(contents, /APP_INCREMENTAL_DIR=\$RUNNER_TEMP\/app-incremental/u);
     assert.match(contents, key);
-    assert.match(contents, /uses: actions\/cache\/restore@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
+    assert.match(contents, /uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u);
   }
   // A shard restores and never writes: a pull request's cache would be
   // visible to that pull request alone, and six writers a run would evict
   // the other lanes' caches.
   assert.doesNotMatch(shards, /actions\/cache(?:\/save)?@/u);
   assert.match(seed, /if: "!cancelled\(\) && github\.event_name == 'push' && needs\.ci-image\.result == 'success'"/u);
-  assert.match(seed, /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25 # v5\.1\.0/u);
+  assert.match(seed, /uses: actions\/cache\/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u);
   assert.match(seed, /group: \[acceptance, core\]/u);
   assert.match(seed, /APP_TEST_GROUP: \$\{\{ matrix\.group \}\}\n +run: cargo test -p app --lib --no-run/u);
   assert.match(seed, /save-if: false/u);
