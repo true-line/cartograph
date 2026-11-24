@@ -231,10 +231,13 @@ fn a_schema_three_task_stages_as_v3_content() {
 #[test]
 fn a_terraform_v4_receipt_carries_its_closure_state() {
     let task = fixture();
-    let v3 = prepared(&task, read_from(&task, 3, established(), "tf-primary-v2:")).unwrap();
-    assert_eq!(
-        origin_closure(v3.source_basis()),
-        json!({"state": "established", "closure_id": CLOSURE})
-    );
+    // AC-1528: a pipeline v4 receipt (`pipe-primary-v2:`) does too.
+    for prefix in ["tf-primary-v2:", "pipe-primary-v2:"] {
+        let v3 = prepared(&task, read_from(&task, 3, established(), prefix)).unwrap();
+        assert_eq!(
+            origin_closure(v3.source_basis()),
+            json!({"state": "established", "closure_id": CLOSURE})
+        );
+    }
     assert!(prepared(&task, read_from(&task, 3, established(), "tf-primary-v1:")).is_err());
 }
