@@ -860,6 +860,39 @@ fn by_fact(receipts: Vec<MintedReceipt>) -> Vec<Receipt> {
     receipts
 }
 
+/// Single-file `receipts` as the directory lane mints them from a fresh
+/// parse: under contract v4, established by each file's own closure
+/// (ADR-0072 slice 5).
+fn established(receipts: Vec<Receipt>) -> Vec<Receipt> {
+    receipts
+        .into_iter()
+        .map(|receipt| {
+            let closure = direct_lexical_closure(receipt.file(), receipt.repo_key()).unwrap();
+            receipt
+                .with_closure(ReceiptClosure::Established {
+                    closure_id: closure.closure_id,
+                })
+                .unwrap()
+        })
+        .collect()
+}
+
+/// A receipt's fact, digest and cited spans, which a reused parse keeps.
+fn cited(
+    receipts: &[MintedReceipt],
+) -> Vec<(FactKey, String, Vec<source_capture::CaptureSpanRef>)> {
+    receipts
+        .iter()
+        .map(|receipt| {
+            (
+                receipt.fact_key().clone(),
+                receipt.fact_digest().to_owned(),
+                receipt.captured_spans().collect(),
+            )
+        })
+        .collect()
+}
+
 /// What admitting `receipts` charges, each shared header once (#725).
 fn charged<'a>(receipts: impl IntoIterator<Item = &'a MintedReceipt>) -> usize {
     let mut charge = Charge::default();
@@ -920,7 +953,7 @@ export const pick = (items: string[]) => items[0];
         &mut |_| {},
     )
     .unwrap();
-    assert_eq!(by_fact(directory_receipts), receipts);
+    assert_eq!(by_fact(directory_receipts), established(receipts.clone()));
     assert!(stats.omitted_declaration_receipts.is_empty());
 }
 
@@ -945,14 +978,13 @@ fn captured_declarations_yield_budget_to_rules_and_name_omissions() {
     let per_file: Vec<_> = paths
         .iter()
         .map(|path| {
-            extract_file_with(
-                capture.file(path).unwrap(),
-                &parser_id(),
-                Registries::builtin(),
-                FILE_DECLARATIONS,
-            )
-            .unwrap()
-            .1
+            let file = capture.file(path).unwrap();
+            let closure = direct_lexical_closure(file.reference(), parser_id().repo).unwrap();
+            let receipts =
+                extract_file_with(file, &parser_id(), Registries::builtin(), FILE_DECLARATIONS)
+                    .unwrap()
+                    .1;
+            establish(receipts, Some(Arc::new(closure))).unwrap()
         })
         .collect();
     let rules: Vec<_> = per_file.iter().flat_map(|file| &file.rules).collect();
@@ -1338,7 +1370,7 @@ export function configure(options: Options) {{
         &mut |_| {},
     )
     .unwrap();
-    assert_eq!(by_fact(directory_receipts), receipts);
+    assert_eq!(by_fact(directory_receipts), established(receipts.clone()));
     assert!(stats.omitted_declaration_receipts.is_empty());
 }
 
@@ -1472,7 +1504,7 @@ export function small() {{ const inner = 1; return inner; }}
         &mut |_| {},
     )
     .unwrap();
-    assert_eq!(by_fact(directory_receipts), receipts);
+    assert_eq!(by_fact(directory_receipts), established(receipts.clone()));
     assert!(stats.omitted_declaration_receipts.is_empty());
     // Locals are minted last: when the file's own facts exhaust the budget,
     // only locals are omitted, and they are counted.
@@ -1542,7 +1574,7 @@ fn compact_receipts_rebuild_exactly_and_share_one_header_per_file() {
         );
     }
     full.sort_by(|a, b| a.fact_key().cmp(b.fact_key()));
-    assert_eq!(by_fact(minted.clone()), full);
+    assert_eq!(by_fact(minted.clone()), established(full.clone()));
     for receipt in &minted {
         let rebuilt = receipt.to_receipt().unwrap();
         let json = receipt.to_json().unwrap();
@@ -1565,8 +1597,22 @@ fn compact_receipts_rebuild_exactly_and_share_one_header_per_file() {
         assert!(shares, "{} has one header", receipt.file().path);
     }
     // The compact form retains less than the canonical JSON of the same
-    // receipts.
-    let json_bytes: usize = full.iter().map(|r| r.to_json().unwrap().len()).sum();
+    // receipts and of the closure records they name, each once.
+    let records: BTreeMap<_, _> = minted
+        .iter()
+        .filter_map(MintedReceipt::input_closure)
+        .map(|record| {
+            (
+                record.closure_id.clone(),
+                record.canonical_bytes().unwrap().len(),
+            )
+        })
+        .collect();
+    let json_bytes: usize = established(full)
+        .iter()
+        .map(|r| r.to_json().unwrap().len())
+        .sum::<usize>()
+        + records.values().sum::<usize>();
     assert!(charged(&minted) < json_bytes);
 }
 
@@ -1849,10 +1895,36 @@ fn attested_parses_are_reused_only_for_unchanged_bytes_and_equal_a_cold_walk() {
     assert_eq!(cache.len(), 3);
     assert!(!receipts.is_empty());
 
-    // The same capture again: nothing parsed, everything equal.
+    let all = |receipts: &[MintedReceipt], expected: &dyn Fn(Option<&ReceiptClosure>) -> bool| {
+        receipts
+            .iter()
+            .filter(|receipt| !completed(*receipt))
+            .all(|receipt| expected(receipt.closure()))
+    };
+    let established = |closure: Option<&ReceiptClosure>| {
+        matches!(closure, Some(ReceiptClosure::Established { .. }))
+    };
+    let unproven = |closure: Option<&ReceiptClosure>| {
+        closure
+            == Some(&ReceiptClosure::InputClosureNotEstablished {
+                reasons: vec![ClosureGapReason::CacheReuseUnproven],
+            })
+    };
+    // A fresh parse establishes each fact's single-file closure, and the walk
+    // receipt carries the record it names (ADR-0072 slice 5).
+    assert!(all(&receipts, &established));
+    assert!(
+        receipts
+            .iter()
+            .filter(|receipt| !completed(*receipt))
+            .all(|receipt| receipt.input_closure().is_some())
+    );
+
+    // The same capture again: nothing parsed, and each reused parse was made
+    // under the closure it now names, so the receipts equal the cold walk's.
     let (again, again_receipts, stats) = walk(&first, first_commit, &mut cache);
     assert_eq!(counts(&stats), (0, 3, 0));
-    assert_eq!((again, again_receipts), (facts, receipts));
+    assert_eq!((again, &again_receipts), (facts, &receipts));
 
     // Unchanged bytes at a later commit equal a cold walk at that commit.
     let later = capture(directory.path(), &paths);
@@ -1865,7 +1937,7 @@ fn attested_parses_are_reused_only_for_unchanged_bytes_and_equal_a_cold_walk() {
             .iter()
             .any(|node| node.props.to_string().contains(later_commit))
     );
-    assert_eq!((warm, warm_receipts), (cold_facts, cold_receipts));
+    assert_eq!((warm, &warm_receipts), (cold_facts, &cold_receipts));
 
     // One changed byte parses exactly that file.
     fs::write(
@@ -1877,7 +1949,24 @@ fn attested_parses_are_reused_only_for_unchanged_bytes_and_equal_a_cold_walk() {
     let (warm, warm_receipts, stats) = walk(&changed, later_commit, &mut cache);
     assert_eq!(counts(&stats), (1, 2, 0));
     let (cold_facts, cold_receipts, _) = cold(&changed, later_commit);
-    assert_eq!((warm, warm_receipts), (cold_facts, cold_receipts));
+    assert_eq!(
+        (warm, cited(&warm_receipts)),
+        (cold_facts, cited(&cold_receipts))
+    );
+    // The changed bytes recapture every file, so a reused parse no longer
+    // proves its closure: only the parsed file's facts establish theirs.
+    assert!(
+        warm_receipts
+            .iter()
+            .filter(|receipt| receipt.file().path != "src/price.ts" && !completed(*receipt))
+            .all(|receipt| unproven(receipt.closure()) && receipt.input_closure().is_none())
+    );
+    let parsed: std::collections::BTreeSet<&str> = warm_receipts
+        .iter()
+        .filter(|receipt| matches!(receipt.closure(), Some(ReceiptClosure::Established { .. })))
+        .map(|receipt| receipt.file().path.as_str())
+        .collect();
+    assert_eq!(parsed, std::collections::BTreeSet::from(["src/price.ts"]));
 
     // A file left out of the capture is counted and leaves the cache.
     let fewer = capture(directory.path(), &paths[..2]);
