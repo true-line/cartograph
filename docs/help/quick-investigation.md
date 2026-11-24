@@ -1,9 +1,11 @@
 # Quick investigation
 
-While Cartograph is focused and receives the shortcut, press **Cmd+Space** to
-open quick dispatch, or use **Cmd+J** when its fallback is enabled in Settings.
-macOS may intercept Cmd+Space; Settings always has an **Open quick
-investigation** button as a pointer-accessible entry to the same dialog.
+While Cartograph is focused and receives the shortcut, press **Cmd+Space** on
+macOS to open quick dispatch, or use **Cmd+J** when its fallback is enabled in
+Settings. On Windows and Linux press **Ctrl+J** (Ctrl+Space is left alone
+because it switches input methods there). macOS may intercept Cmd+Space;
+Settings always has an **Open quick investigation** button as a
+pointer-accessible entry to the same dialog.
 The dialog starts one of the host catalog's supported Domain Analyst or Evidence
 Auditor simple investigations. It also supports Standard completion specialists
 (@7, Spec Writer, and Gap Triager) when the host advertises their compatible

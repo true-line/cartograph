@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { SettingsSurface } from './SettingsSurface';
 import type { AdapterInventory, CloudDisclosure, IngestParallelism, TierSettings } from '../store';
+import { IS_MAC } from '../shortcuts';
 
 /** Mirrors `ingest::preflight::INSTALLED_ADAPTERS`/`PLANNED_ADAPTERS`. */
 const INVENTORY: AdapterInventory = {
@@ -166,7 +167,7 @@ export const LocalOnlyDefaults: Story = {
 export const QuickInvestigationHasSettingsEntry: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText(/macOS may intercept it/)).toBeInTheDocument();
+    await expect(canvas.getByText(IS_MAC ? /macOS may intercept it/ : /Ctrl\+J works while Cartograph is focused/)).toBeInTheDocument();
     await userEvent.click(canvas.getByRole('button', { name: 'Open quick investigation' }));
     await expect(args.onOpenQuickDispatch).toHaveBeenCalledTimes(1);
   },

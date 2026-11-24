@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { ChatDock } from '../agentChatDockStore';
 import { historyTextMatches, normalizedHistorySearch, type InvestigationState } from '../investigationStore';
 import { readQuickDispatchFallback } from '../quickDispatchPreference';
+import { isQuickDispatchKey } from '../shortcuts';
 
 export interface AgentChatSearchPaletteProps {
   state: InvestigationState; docks: readonly ChatDock[]; query: string;
@@ -48,8 +49,7 @@ export function AgentChatSearchPalette({ state, docks, query, onQuery, onClose, 
     }
     // Let existing shell/summon handlers run, after dismissing this competing modal.
     if ((mod && (event.key.toLowerCase() === 'k' || /^[1-8]$/.test(event.key))) ||
-        (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
-          (event.code === 'Space' || (event.key.toLowerCase() === 'j' && readQuickDispatchFallback())))) onClose();
+        isQuickDispatchKey(event, readQuickDispatchFallback())) onClose();
     const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('input, button:not(:disabled)') ?? []);
     if (event.key === 'Tab' && controls.length) {
       const edge = event.shiftKey ? controls[0] : controls.at(-1);
