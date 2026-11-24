@@ -566,6 +566,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    files and Dockerfiles and probes no other location, so its facts share
    one closure: the capture's `Enumeration` under `pipeline-walk-v1` and
    each captured pipeline file.
+   *As built (AC-1530, environment reader):* Environment receipts
+   (`env-primary-v2:`, `t0.environments/declared-v2`) take the reader's
+   selection less the files a TS source, config or other grammar claims.
+   The reader lists the checkout for directories, named files and env
+   files, so over a capture it runs again with the captured selection
+   alone as listing and bytes; when that run opens nothing else and emits
+   the same facts, they share one closure (the capture's `Enumeration`
+   under `environment-walk-v1` and each captured environment file).
+   Otherwise they are `cross_file_input_unbound`.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
