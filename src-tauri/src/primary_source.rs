@@ -2430,8 +2430,11 @@ impl PrimarySourceStore {
         // selection, so they are retained with the TS/JS selection itself,
         // even when the lanes fall back: a capture always holds the pipeline
         // reader's whole selection, and the reader never falls back to the
-        // checkout.
+        // checkout. Directory completion's resolution configs join it too,
+        // so a walk can show they are the capture's own bytes (ADR-0072
+        // slice 6).
         let mut base = selection.files.clone();
+        base.extend(selection.configs.iter().cloned());
         base.extend(ingest::pipelines::pipeline_paths(root).map_err(|_| {
             "Pipeline files could not be listed for capture; recovery was not published."
                 .to_string()

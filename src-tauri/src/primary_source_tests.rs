@@ -3532,6 +3532,45 @@ fn an_environment_selection_that_does_not_fit_never_costs_the_lanes() {
     assert_eq!(paths, ["app.py", "source.ts"]);
 }
 
+// AC-1090: directory completion's resolution configs join the TS/JS
+// selection's capture, and an ignored one does not.
+#[test]
+fn resolution_configs_join_the_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "local");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(root.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+    std::fs::create_dir_all(root.join("vendor")).unwrap();
+    std::fs::write(root.join("vendor/package.json"), "{}").unwrap();
+    std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let input = state
+        .primary_sources
+        .prepare_at(
+            &source,
+            source.root(),
+            &[],
+            None,
+            source_capture::CaptureLimits::default(),
+            adapters_lang_ts::captured::MAX_VISITED_ENTRIES,
+            Default::default(),
+        )
+        .unwrap();
+    let paths: Vec<_> = input
+        .capture
+        .as_ref()
+        .unwrap()
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(paths, ["package.json", "source.ts", "tsconfig.json"]);
+}
+
 // AC-1057: a source's workflows and Dockerfiles join its capture, and the
 // pipeline reader parses the retained bytes, not the checkout.
 #[test]

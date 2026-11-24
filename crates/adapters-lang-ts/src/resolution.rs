@@ -148,100 +148,144 @@ fn entry_candidates(json: &serde_json::Value) -> Vec<String> {
     entries
 }
 
+/// One config the index read: its repo-relative path and exact bytes.
+pub(crate) type ConfigRead = (String, Vec<u8>);
+
+/// True for a tsconfig or jsconfig file name.
+fn is_tsconfig(name: &str) -> bool {
+    name == "tsconfig.json"
+        || name == "jsconfig.json"
+        || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+}
+
+/// True for a file name the resolution index reads: a tsconfig or jsconfig,
+/// a bundler config or a `package.json` (ADR-0072 slice 6).
+pub(crate) fn is_config(name: &str) -> bool {
+    is_tsconfig(name) || bundler_alias::is_bundler_config(name) || name == "package.json"
+}
+
 impl ResolutionIndex {
     /// Walk `root` (the same `.gitignore`-aware walk as source collection)
     /// and load every tsconfig/jsconfig scope and named workspace package.
     /// Deterministic: entries sorted, config order stable.
     pub(crate) fn load(root: &Path) -> std::io::Result<Self> {
+        Ok(Self::walk(root, false)?.0)
+    }
+
+    /// [`Self::load`], plus every config it read with the exact bytes read,
+    /// sorted by path (ADR-0072 slice 6). A config that cannot be read is
+    /// left out, as the index leaves it out; one that is not UTF-8 is read
+    /// and contributes nothing.
+    pub(crate) fn load_reading(root: &Path) -> std::io::Result<(Self, Vec<ConfigRead>)> {
+        Self::walk(root, true)
+    }
+
+    /// Load the index, keeping each config's bytes only when `keep`, so an
+    /// ordinary load holds one config at a time.
+    fn walk(root: &Path, keep: bool) -> std::io::Result<(Self, Vec<ConfigRead>)> {
         let mut index = Self::default();
         let walked = source_walk::files(
             root,
             &crate::skipped_directory,
             source_walk::Gitignores::Honor,
         )?;
+        let mut reads = Vec::new();
         for source_walk::WalkedFile { rel, path, name } in walked {
-            let dir_rel = Path::new(&rel)
-                .parent()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            let is_tsconfig = name == "tsconfig.json"
-                || name == "jsconfig.json"
-                || (name.starts_with("tsconfig.") && name.ends_with(".json"));
-            if is_tsconfig {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let facts = adapters_fw::tsconfig::parse(&text);
-                // A config with no baseUrl/paths still SHADOWS its
-                // parents (#220 review): the nearest tsconfig governs
-                // its files, so a root alias must not reach into a
-                // nested package that didn't declare it.
-                let mut paths = facts.paths;
-                // TypeScript matches the pattern with the longest
-                // prefix before `*`; exact patterns are most specific
-                // of all (#220 review).
-                paths.sort_by(|(a, _), (b, _)| {
-                    let specificity = |pattern: &str| match pattern.split_once('*') {
-                        None => usize::MAX,
-                        Some((prefix, _)) => prefix.len(),
-                    };
-                    specificity(b).cmp(&specificity(a)).then(a.cmp(b))
-                });
-                index.tsconfigs.push(TsconfigScope {
-                    dir: dir_rel,
-                    config_path: rel,
-                    base_url: facts.base_url,
-                    paths,
-                    paths_span: facts.paths_span,
-                    span: facts.span,
-                    extends: facts.settings.contains_key("extends"),
-                });
-            } else if bundler_alias::is_bundler_config(&name) {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                index
-                    .bundler_aliases
-                    .extend(bundler_alias::parse(&text, &dir_rel, &rel));
-            } else if name == "package.json" {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-                    continue;
-                };
-                index.manifests.push(Manifest {
-                    dir: dir_rel.clone(),
-                    config_path: rel.clone(),
-                    dependencies: declared_dependencies(&json, &text),
-                });
-                let Some(pkg_name) = json["name"].as_str() else {
-                    continue;
-                };
-                index
-                    .workspace_names
-                    .entry(pkg_name.to_string())
-                    .or_insert_with(|| (rel.clone(), span_of(&text, "\"name\"")));
-                let entries = entry_candidates(&json);
-                if entries.is_empty() {
-                    continue;
-                }
-                let span_key = if json.get("exports").is_some() {
-                    "\"exports\""
-                } else if json.get("module").is_some() {
-                    "\"module\""
-                } else {
-                    "\"main\""
-                };
-                index.packages.push(WorkspacePackage {
-                    name: pkg_name.to_string(),
-                    dir: dir_rel,
-                    entries,
-                    config_path: rel,
-                    span: span_of(&text, span_key),
-                });
+            if !is_config(&name) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                index.add(&rel, text);
+            }
+            if keep {
+                reads.push((rel, bytes));
             }
         }
+        index.sort();
+        Ok((index, reads))
+    }
+
+    /// Record one config's scope, aliases or manifest.
+    fn add(&mut self, rel: &str, text: &str) {
+        let index = self;
+        let dir_rel = Path::new(rel)
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        if is_tsconfig(name) {
+            let facts = adapters_fw::tsconfig::parse(text);
+            // A config with no baseUrl/paths still SHADOWS its
+            // parents (#220 review): the nearest tsconfig governs
+            // its files, so a root alias must not reach into a
+            // nested package that didn't declare it.
+            let mut paths = facts.paths;
+            // TypeScript matches the pattern with the longest
+            // prefix before `*`; exact patterns are most specific
+            // of all (#220 review).
+            paths.sort_by(|(a, _), (b, _)| {
+                let specificity = |pattern: &str| match pattern.split_once('*') {
+                    None => usize::MAX,
+                    Some((prefix, _)) => prefix.len(),
+                };
+                specificity(b).cmp(&specificity(a)).then(a.cmp(b))
+            });
+            index.tsconfigs.push(TsconfigScope {
+                dir: dir_rel,
+                config_path: rel.to_owned(),
+                base_url: facts.base_url,
+                paths,
+                paths_span: facts.paths_span,
+                span: facts.span,
+                extends: facts.settings.contains_key("extends"),
+            });
+        } else if bundler_alias::is_bundler_config(name) {
+            index
+                .bundler_aliases
+                .extend(bundler_alias::parse(text, &dir_rel, rel));
+        } else if name == "package.json" {
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
+                return;
+            };
+            index.manifests.push(Manifest {
+                dir: dir_rel.to_owned(),
+                config_path: rel.to_owned(),
+                dependencies: declared_dependencies(&json, text),
+            });
+            let Some(pkg_name) = json["name"].as_str() else {
+                return;
+            };
+            index
+                .workspace_names
+                .entry(pkg_name.to_string())
+                .or_insert_with(|| (rel.to_owned(), span_of(text, "\"name\"")));
+            let entries = entry_candidates(&json);
+            if entries.is_empty() {
+                return;
+            }
+            let span_key = if json.get("exports").is_some() {
+                "\"exports\""
+            } else if json.get("module").is_some() {
+                "\"module\""
+            } else {
+                "\"main\""
+            };
+            index.packages.push(WorkspacePackage {
+                name: pkg_name.to_string(),
+                dir: dir_rel,
+                entries,
+                config_path: rel.to_owned(),
+                span: span_of(text, span_key),
+            });
+        }
+    }
+
+    /// Put every entry in its deterministic lookup order.
+    fn sort(&mut self) {
+        let index = self;
         // Longest (most specific) tsconfig scope first per importer lookup;
         // within one directory the canonical `tsconfig.json`/`jsconfig.json`
         // outranks `tsconfig.*.json` variants.
@@ -272,7 +316,6 @@ impl ResolutionIndex {
                 .cmp(&a.dir.len())
                 .then(a.config_path.cmp(&b.config_path))
         });
-        Ok(index)
     }
 
     /// The nearest manifest at or above `file` that declares `dependency`:

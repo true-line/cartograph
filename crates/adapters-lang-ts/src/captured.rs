@@ -3,7 +3,8 @@
 //! The captured factory invokes the actual parser on the retained byte slice.
 //! Only its private direct-output sink admits facts; public receipt validation
 //! checks content integrity and does not establish who produced supplied JSON.
-//! Directory enrichment still reads live configuration and is outside closure.
+//! Directory enrichment still reads live configuration and is outside closure;
+//! a walk reports whether the configs it read are the capture's own bytes.
 
 use super::{ExtractError, Extraction, IncrementalStats, SourceId};
 use adapters_fw::events::Registries;
@@ -13,7 +14,7 @@ use core_graph::facts::FactStore;
 use core_graph::packed::{PackedEdge, PackedNode};
 use core_graph::source::FactKey;
 use core_graph::{Edge, Node};
-use source_capture::{Capture, CapturedFile};
+use source_capture::{Capture, CaptureFileRef, CapturedFile};
 use source_walk::IgnoreRules;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -343,6 +344,11 @@ pub struct Selection {
     /// opened, as in the ordinary walk (ADR-0030); callers report them so
     /// what they might hold is never claimed as covered (#1229).
     pub unfollowed: Vec<String>,
+    /// Resolution configs directory completion reads (tsconfig, jsconfig,
+    /// bundler configs, `package.json`), sorted. A capture retains them with
+    /// the files so completion's configs can be bound (ADR-0072 slice 6).
+    /// A bundler config is a TS/JS source and is listed in `files` too.
+    pub configs: Vec<String>,
 }
 
 /// Enumerate the ordinary TS/JS selection without following any symlink.
@@ -413,6 +419,7 @@ fn enumerate_with_limits(
     struct Walk {
         files: Vec<String>,
         unfollowed: Vec<String>,
+        configs: Vec<String>,
         visited: usize,
         max_entries: usize,
         max_depth: usize,
@@ -486,7 +493,15 @@ fn enumerate_with_limits(
                     if self.files.len() == self.max_files {
                         return Err(CapturedError::Limit("selected files"));
                     }
+                    if is_config_path(&path) {
+                        self.configs.push(path.clone());
+                    }
                     self.files.push(path);
+                } else if is_config_path(&path) && kind.is_file() && valid_path(&path) {
+                    if self.configs.len() == self.max_files {
+                        return Err(CapturedError::Limit("selected files"));
+                    }
+                    self.configs.push(path);
                 }
             }
             Ok(())
@@ -495,6 +510,7 @@ fn enumerate_with_limits(
     let mut walk = Walk {
         files: Vec::new(),
         unfollowed: Vec::new(),
+        configs: Vec::new(),
         visited: 0,
         max_entries,
         max_depth,
@@ -504,9 +520,11 @@ fn enumerate_with_limits(
     walk.visit(directory, "", &IgnoreRules::default(), 0)?;
     walk.files.sort();
     walk.unfollowed.sort();
+    walk.configs.sort();
     Ok(Selection {
         files: walk.files,
         unfollowed: walk.unfollowed,
+        configs: walk.configs,
     })
 }
 
@@ -1136,7 +1154,14 @@ fn extract_captured_dir_packed_with_policy(
         },
     )?;
     drop(previous);
-    super::complete_directory(&mut extraction, &mut store, root, id)?;
+    // Completion still reads its configs live; they are bound only when the
+    // capture retains exactly the bytes read (ADR-0072 slice 6).
+    let (index, reads) =
+        super::resolution::ResolutionIndex::load_reading(root).map_err(ExtractError::from)?;
+    stats.resolution_configs = bind_configs(capture, &reads);
+    drop(reads);
+    super::complete_directory_with(&mut extraction, &mut store, root, id, &index)?;
+    drop(index);
     let matching = packed_matcher(&store);
     receipts.retain(|receipt| matching(receipt));
     // Count an omitted rule only when its fact survived directory completion,
@@ -1191,6 +1216,52 @@ fn extract_captured_dir_packed_with_policy(
         cache.files = next;
     }
     Ok((extraction, store, receipts, stats))
+}
+
+/// Whether directory completion's resolution configs are the capture's own
+/// bytes (ADR-0072 slice 6). Completion reads tsconfig, jsconfig, bundler
+/// and `package.json` files from the live tree; a later closure may name
+/// them only when this is [`ConfigBinding::Bound`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ConfigBinding {
+    /// Not a captured walk, or the configs read differ from the capture's.
+    #[default]
+    Unbound,
+    /// Every config read is retained with exactly the bytes read, and the
+    /// capture retains no other: one reference per config, sorted by path.
+    Bound(Vec<CaptureFileRef>),
+}
+
+/// Bind the configs completion read to `capture`. The capture's own config
+/// set must be exactly the set read, byte for byte, so a config the live
+/// walk did not see, or one changed since capture, leaves them unbound.
+fn bind_configs(capture: &Capture, reads: &[super::resolution::ConfigRead]) -> ConfigBinding {
+    let captured: Vec<&str> = capture
+        .manifest()
+        .files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| is_config_path(path))
+        .collect();
+    if captured.len() != reads.len() {
+        return ConfigBinding::Unbound;
+    }
+    let mut bound = Vec::with_capacity(reads.len());
+    for (path, (read, bytes)) in captured.iter().zip(reads) {
+        if path != read {
+            return ConfigBinding::Unbound;
+        }
+        match capture.file(read) {
+            Ok(file) if file.bytes() == bytes.as_slice() => bound.push(file.reference().clone()),
+            _ => return ConfigBinding::Unbound,
+        }
+    }
+    ConfigBinding::Bound(bound)
+}
+
+/// True for a path whose file name the resolution index reads.
+fn is_config_path(path: &str) -> bool {
+    super::resolution::is_config(path.rsplit('/').next().unwrap_or(path))
 }
 
 /// Record `receipts`' closure states under contract v4 (ADR-0072 slice 5).
@@ -1319,6 +1390,8 @@ fn matcher<R: Citable>(extraction: &Extraction) -> impl Fn(&R) -> bool + '_ {
     }
 }
 
+#[cfg(test)]
+mod config_binding_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
