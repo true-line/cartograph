@@ -111,11 +111,48 @@ pub struct IncrementalStats {
     pub distinct_files: u64,
 }
 
+/// What a walk read besides the sources it was handed (ADR-0072 slice 9,
+/// AC-1526). A walk over captured sources is bound to them when it read no
+/// file outside them, resolved every local module source, and each local
+/// module directory it listed holds the captured `.tf` files alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceReads {
+    /// Files read from the checkout because the sources did not hold them.
+    pub outside: BTreeSet<String>,
+    /// Each local module directory listed in the checkout, with the `.tf`
+    /// files found directly in it, sorted.
+    pub listed: BTreeMap<String, Vec<String>>,
+    /// A module call names a registry or remote source, never fetched.
+    pub remote_module: bool,
+    /// A local module source did not resolve to a directory under the root.
+    pub unresolved_module: bool,
+}
+
+impl SourceReads {
+    /// Whether the walk read `paths` (the `.tf` sources it was handed) and
+    /// nothing else: no outside file, no unresolved local module, and each
+    /// listed module directory holding exactly the `paths` directly in it.
+    /// A remote module source is reported separately.
+    pub fn bound_to(&self, paths: &[String]) -> bool {
+        self.outside.is_empty()
+            && !self.unresolved_module
+            && self.listed.iter().all(|(dir, listed)| {
+                let held: Vec<&str> = paths
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|path| path.ends_with(".tf") && parent_dir(path) == dir)
+                    .collect();
+                listed.iter().map(String::as_str).eq(held)
+            })
+    }
+}
+
 struct CacheRun<'a> {
     cache: &'a mut IncrementalCache,
     active: BTreeSet<String>,
     paths: BTreeSet<String>,
     stats: IncrementalStats,
+    reads: SourceReads,
     /// Bytes of a repo-relative file: retained capture bytes when the host
     /// supplies them (AC-1053), else the checkout.
     read: &'a dyn Fn(&Path, &str) -> std::io::Result<Vec<u8>>,
@@ -850,6 +887,7 @@ pub fn extract_dir_incremental_with_progress(
     let mut files = Vec::new();
     collect_tf_files(&root, &mut files)?;
     extract_files(&root, id, files, cache, &read_checkout, on_file)
+        .map(|(extraction, stats, _)| (extraction, stats))
 }
 
 /// Extract the `.tf` files `paths` (repo-relative, the host's capture
@@ -865,12 +903,28 @@ pub fn extract_dir_from_sources(
     read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
     on_file: &mut dyn FnMut(&str),
 ) -> Result<(Extraction, IncrementalStats), ExtractError> {
+    extract_dir_from_sources_reading(root, id, paths, read, on_file)
+        .map(|(extraction, stats, _)| (extraction, stats))
+}
+
+/// [`extract_dir_from_sources`], also reporting what the walk read besides
+/// `paths` (AC-1526), so the host can tell whether its facts' closure is
+/// bound to the capture.
+pub fn extract_dir_from_sources_reading(
+    root: &Path,
+    id: &SourceId,
+    paths: &[String],
+    read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<(Extraction, IncrementalStats, SourceReads), ExtractError> {
     let root = dunce::canonicalize(root)?;
     let wanted: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let outside = std::cell::RefCell::new(BTreeSet::new());
     let read = |root: &Path, path: &str| {
         if wanted.contains(path) {
             read(path)
         } else {
+            outside.borrow_mut().insert(path.to_string());
             read_checkout(root, path)
         }
     };
@@ -880,14 +934,16 @@ pub fn extract_dir_from_sources(
         .cloned()
         .collect();
     files.dedup();
-    extract_files(
+    let (extraction, stats, mut reads) = extract_files(
         &root,
         id,
         files,
         &mut IncrementalCache::default(),
         &read,
         on_file,
-    )
+    )?;
+    reads.outside = outside.into_inner();
+    Ok((extraction, stats, reads))
 }
 
 /// The `.tf` files a source's capture selects: the same confined,
@@ -907,7 +963,7 @@ fn extract_files(
     cache: &mut IncrementalCache,
     read: &dyn Fn(&Path, &str) -> std::io::Result<Vec<u8>>,
     on_file: &mut dyn FnMut(&str),
-) -> Result<(Extraction, IncrementalStats), ExtractError> {
+) -> Result<(Extraction, IncrementalStats, SourceReads), ExtractError> {
     let root = root.to_path_buf();
     files.sort(); // deterministic order (US-0014)
     let old_keys = cache.files.keys().cloned().collect::<BTreeSet<_>>();
@@ -916,6 +972,7 @@ fn extract_files(
         active: BTreeSet::new(),
         paths: BTreeSet::new(),
         stats: IncrementalStats::default(),
+        reads: SourceReads::default(),
         read,
     };
     let mut out = Extraction::default();
@@ -946,7 +1003,7 @@ fn extract_files(
     run.stats.deleted_files = old_keys.difference(&run.active).count() as u64;
     run.stats.distinct_files = run.paths.len() as u64;
     run.cache.files.retain(|key, _| run.active.contains(key));
-    Ok((out, run.stats))
+    Ok((out, run.stats, run.reads))
 }
 
 /// Count physical Terraform source files using the same confined walk as
@@ -1010,10 +1067,19 @@ fn expand_local_modules(
         });
         let declaration = pending.remove(0);
         let Some(source_dir) = resolve_local_module_source(root, &declaration) else {
+            if is_local_source(&declaration.source) {
+                run.reads.unresolved_module = true;
+            } else {
+                run.reads.remote_module = true;
+            }
             continue;
         };
-        if let Ok(rel) = source_dir.strip_prefix(root) {
-            child_module_dirs.insert(rel.to_string_lossy().replace('\\', "/"));
+        let rel_dir = source_dir
+            .strip_prefix(root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"));
+        if let Some(rel) = &rel_dir {
+            child_module_dirs.insert(rel.clone());
         }
 
         let mut ancestors = declaration.ancestors.clone();
@@ -1035,7 +1101,14 @@ fn expand_local_modules(
         ancestors.push(source_dir.clone());
 
         let mut module_extraction = Extraction::default();
-        for rel in collect_direct_tf_files(root, &source_dir)? {
+        let listed = collect_direct_tf_files(root, &source_dir)?;
+        match rel_dir {
+            Some(rel) => {
+                run.reads.listed.insert(rel, listed.clone());
+            }
+            None => run.reads.unresolved_module = true,
+        }
+        for rel in listed {
             module_extraction.absorb(extract_file_incremental(
                 root,
                 &rel,
@@ -1081,16 +1154,21 @@ fn expand_local_modules(
     Ok(child_module_dirs)
 }
 
+/// Whether a module `source` is a local path literal rather than a
+/// registry or remote address.
+fn is_local_source(source: &str) -> bool {
+    Path::new(source).is_absolute()
+        || source == "."
+        || source == ".."
+        || source.starts_with("./")
+        || source.starts_with("../")
+        || source.starts_with(".\\")
+        || source.starts_with("..\\")
+}
+
 fn resolve_local_module_source(root: &Path, declaration: &ModuleDeclaration) -> Option<PathBuf> {
     let source = Path::new(&declaration.source);
-    let local_literal = source.is_absolute()
-        || declaration.source == "."
-        || declaration.source == ".."
-        || declaration.source.starts_with("./")
-        || declaration.source.starts_with("../")
-        || declaration.source.starts_with(".\\")
-        || declaration.source.starts_with("..\\");
-    if !local_literal {
+    if !is_local_source(&declaration.source) {
         return None;
     }
 

@@ -1328,3 +1328,67 @@ fn supplied_terraform_bytes_are_parsed_instead_of_the_checkout() {
     );
     assert_eq!(stats.distinct_files, 2);
 }
+
+/// Walk `files` of `root` from their checkout bytes as if captured,
+/// reporting what else the walk read.
+fn reads_of(root: &Path, files: &[&str]) -> SourceReads {
+    let paths: Vec<String> = files.iter().map(|path| path.to_string()).collect();
+    let root_dir = root.to_path_buf();
+    extract_dir_from_sources_reading(
+        root,
+        &id(),
+        &paths,
+        &|path| std::fs::read(root_dir.join(path)),
+        &mut |_| {},
+    )
+    .unwrap()
+    .2
+}
+
+// AC-1526: a walk over supplied sources reports what it read besides them:
+// a module file they do not hold, each local module directory listed, a
+// remote module source and an unresolved local one. It is bound to them
+// only when it read nothing else and each listed directory holds them alone.
+#[test]
+fn a_walk_over_supplied_sources_reports_what_else_it_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("modules/queue")).unwrap();
+    std::fs::write(
+        root.join("main.tf"),
+        "module \"queue\" {\n  source = \"./modules/queue\"\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("modules/queue/queue.tf"),
+        "resource \"aws_sqs_queue\" \"inner\" {}\n",
+    )
+    .unwrap();
+    let all = ["main.tf", "modules/queue/queue.tf"];
+    let paths: Vec<String> = all.iter().map(|path| path.to_string()).collect();
+    let bound = reads_of(root, &all);
+    assert!(bound.outside.is_empty());
+    assert_eq!(
+        bound.listed.get("modules/queue").map(Vec::as_slice),
+        Some(&paths[1..])
+    );
+    assert!(!bound.remote_module && !bound.unresolved_module);
+    assert!(bound.bound_to(&paths));
+    // The module file is not among the supplied sources: read from the
+    // checkout, so the walk is not bound to them.
+    let partial = reads_of(root, &all[..1]);
+    assert!(partial.outside.contains("modules/queue/queue.tf"));
+    assert!(!partial.bound_to(&paths[..1]));
+    // A listed directory holding a file the sources lack is not bound.
+    assert!(!bound.bound_to(&paths[..1]));
+    std::fs::write(
+        root.join("main.tf"),
+        "module \"vpc\" {\n  source = \"terraform-aws-modules/vpc/aws\"\n}\n\
+         module \"gone\" {\n  source = \"./modules/gone\"\n}\n",
+    )
+    .unwrap();
+    let flagged = reads_of(root, &all);
+    assert!(flagged.remote_module);
+    assert!(flagged.unresolved_module);
+    assert!(!flagged.bound_to(&paths));
+}
