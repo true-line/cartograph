@@ -3949,6 +3949,97 @@ fn toolchain_configs_are_read_from_the_capture() {
     assert!(checkout.iter().any(|id| id.contains("vue")), "{checkout:?}");
 }
 
+// AC-1536: the host's toolchain facts over a capture get producer-keyed
+// receipts established on the config files the reader read, never on the
+// checkout's env file, and the receipts bind the facts it publishes.
+#[test]
+fn toolchain_facts_are_established_on_the_reader_closure() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"shop\",\"dependencies\":{\"react\":\"^18\"}}",
+    )
+    .unwrap();
+    std::fs::write(root.join("Dockerfile"), "FROM node:20\n").unwrap();
+    std::fs::write(root.join(".env"), "PORT=3000\n").unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    assert!(input.toolchain_captured);
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads {
+                toolchain_captured: input.toolchain_captured,
+                ..crate::ProducerReads::default()
+            },
+        )
+        .unwrap()
+    };
+    let tool: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.id().starts_with("tool-primary-v2:"))
+        .collect();
+    assert!(
+        tool.iter()
+            .any(|receipt| receipt.file().path == "package.json"),
+        "{:?}",
+        receipts.iter().map(|r| r.id()).collect::<Vec<_>>()
+    );
+    assert!(tool.iter().all(|receipt| receipt.file().path != ".env"));
+    let record = tool[0].input_closure().expect("an established closure");
+    assert_eq!(
+        record.parameters.walk_policy,
+        adapters_lang_ts::captured::TOOLCHAIN_WALK_POLICY
+    );
+    let files: BTreeSet<&str> = record
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            adapters_lang_ts::captured::ClosureInput::CapturedFile { file } => {
+                Some(file.path.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(files.contains("package.json"), "{files:?}");
+    assert!(files.contains("Dockerfile"), "{files:?}");
+    assert!(!files.contains(".env"), "{files:?}");
+    let published = crate::primary_source::matching_bindings(&extraction, &receipts);
+    for minted in &tool {
+        assert_eq!(minted.input_closure(), Some(record));
+        assert!(
+            published
+                .iter()
+                .any(|binding| binding.receipt_id == minted.id())
+        );
+    }
+}
+
 // AC-1065: the documentation walk's selection joins the capture, and with
 // the capture both the recovery's documentation read and the system-wide
 // ADR relinking read the retained bytes: a README and a decision record

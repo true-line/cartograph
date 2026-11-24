@@ -2729,7 +2729,7 @@ fn extract_tree_packed(
                     .filter(|entry| ingest::toolchain::is_toolchain_file(&entry.path))
                     .map(|entry| entry.path.clone())
                     .collect();
-                ingest::toolchain::extract_from_capture(
+                let (tool_facts, capture_reads) = ingest::toolchain::extract_from_capture_reading(
                     root,
                     &captured,
                     &|path| {
@@ -2744,10 +2744,32 @@ fn extract_tree_packed(
                     &read,
                     &mut tool_progress,
                 )
+                .map_err(|e| e.to_string())?;
+                // Producer-keyed Toolchain receipts, established on the
+                // config files the reader read (AC-1536). An adapter's File
+                // node supersedes the reader's, so only the facts the graph
+                // keeps are receipted.
+                let known_files = unplaceholdered_set(&facts, "File")?;
+                let kept: Vec<core_graph::Node> = tool_facts
+                    .nodes
+                    .iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id))
+                    .cloned()
+                    .collect();
+                let (published_nodes, published_edges) = publication_view(&kept, &tool_facts.edges);
+                let stage = adapters_lang_ts::captured::stage_toolchain_receipts(
+                    capture,
+                    &capture_reads.read,
+                    &adapters_lang_ts::SourceId { repo, commit },
+                    (&published_nodes, &published_edges),
+                    capture_reads.bound,
+                );
+                admit_surviving_lane_receipts(&kept, &tool_facts.edges, stage, receipts);
+                tool_facts
             }
-            _ => ingest::toolchain::extract_dir_reading(root, &tool_id, &read, &mut tool_progress),
-        }
-        .map_err(|e| e.to_string())?;
+            _ => ingest::toolchain::extract_dir_reading(root, &tool_id, &read, &mut tool_progress)
+                .map_err(|e| e.to_string())?,
+        };
         layers.tools = LayerSummary {
             files: tool_facts.files,
             nodes: distinct_node_count(&tool_facts.nodes),
