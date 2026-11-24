@@ -34,6 +34,8 @@ const SELECT_SOURCE: &str = "SELECT source_id, repo_key, root, display_name, kin
 /// The recovery error for an origin `parse_managed_origin` refused. It
 /// echoes what was entered (trimmed, bounded) and names the accepted forms,
 /// so a typo or a local path under the GitHub source is fixable in place.
+/// Input that could carry a credential (userinfo, query, fragment, a
+/// `file:` URL) gets a fixed message instead, never an echo (AC-0140).
 fn managed_origin_error(input: &str) -> String {
     let trimmed = input.trim();
     let shown: String = trimmed
@@ -55,11 +57,21 @@ fn managed_origin_error(input: &str) -> String {
                 .get(2)
                 .copied()
                 .is_none_or(|c| matches!(c, b'\\' | b'/')));
+    // Userinfo, a query or a fragment can carry a token; never echo those.
+    let scp = trimmed
+        .get(..15)
+        .is_some_and(|s| s.eq_ignore_ascii_case("git@github.com:"));
+    let may_hold_secret = trimmed[if scp { 15 } else { 0 }..].contains(['@', '?', '#']);
     if trimmed
         .get(..5)
         .is_some_and(|s| s.eq_ignore_ascii_case("file:"))
     {
-        format!("Local mirror \"{shown}\" was not found or is not a folder.")
+        "The local mirror was not found or is not a folder.".to_string()
+    } else if may_hold_secret {
+        "The GitHub address was refused: it carries a user name, token, query or \
+         fragment. Enter https://github.com/owner/repo, git@github.com:owner/repo \
+         or owner/repo."
+            .to_string()
     } else if local_path {
         format!(
             "\"{shown}\" looks like a local folder, not a GitHub repository. \

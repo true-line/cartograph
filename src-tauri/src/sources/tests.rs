@@ -508,7 +508,12 @@ fn refused_managed_origin_echoes_input_and_expected_forms() {
     let error = registry
         .reserve_managed("file:///no/such/mirror.git")
         .unwrap_err();
-    assert!(error.starts_with("Local mirror"), "{error}");
+    assert!(error.starts_with("The local mirror"), "{error}");
+    let error = registry
+        .reserve_managed("https://gitlab.com/acme/shop?token=PRIVATE_TOKEN")
+        .unwrap_err();
+    assert!(!error.contains("PRIVATE_TOKEN"), "{error}");
+    assert!(error.contains("https://github.com/owner/repo"), "{error}");
     let source = registry
         .reserve_managed("github.com/simple-login/app?tab=readme-ov-file")
         .unwrap();
