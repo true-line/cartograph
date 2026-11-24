@@ -1219,18 +1219,21 @@ fn extract_captured_dir_packed_with_policy(
     // A completion-decided receipt is established on the walk's closure
     // only when completion's configs and lookups are bound to the capture
     // (ADR-0072 slice 6); one closure per file, shared by its receipts.
+    // A file's decided receipts are contiguous, so only the current file's
+    // record is held here; an admitted receipt keeps its own, which the
+    // budget charges.
     let walk = walk_inputs(capture, &stats);
-    let mut records = BTreeMap::new();
+    let mut current = None;
     for (receipt, proven) in completed {
         if !matching(&receipt) {
             continue;
         }
-        let receipt = state_completed(receipt, proven, walk.as_deref(), id.repo, &mut records)?;
+        let receipt = state_completed(receipt, proven, walk.as_deref(), id.repo, &mut current)?;
         if charge.admit(&receipt, receipts.len(), budget) {
             receipts.push(receipt);
         }
     }
-    drop(records);
+    drop(current);
     drop(matching);
     // Installed only once every fallible step has succeeded.
     if let Some(cache) = cache {
@@ -1400,7 +1403,7 @@ fn state_completed(
     proven: bool,
     walk: Option<&[ClosureInput]>,
     repo_key: &str,
-    records: &mut BTreeMap<String, Option<Arc<InputClosureV1>>>,
+    current: &mut Option<(String, Option<Arc<InputClosureV1>>)>,
 ) -> Result<MintedReceipt, CapturedError> {
     let gap = |reason| ReceiptClosure::InputClosureNotEstablished {
         reasons: vec![reason],
@@ -1412,15 +1415,15 @@ fn state_completed(
         return receipt.with_closure(gap(ClosureGapReason::CrossFileInputUnbound), None);
     };
     let file = receipt.file().clone();
-    let record = match records.get(&file.path) {
-        Some(record) => record.clone(),
-        None => {
+    let record = match current {
+        Some((path, record)) if *path == file.path => record.clone(),
+        _ => {
             let record = match directory_walk_closure(&file, repo_key, walk.to_vec()) {
                 Ok(record) => Some(Arc::new(record)),
                 Err(CapturedError::Limit(_)) => None,
                 Err(error) => return Err(error),
             };
-            records.insert(file.path.clone(), record.clone());
+            *current = Some((file.path.clone(), record.clone()));
             record
         }
     };
