@@ -283,6 +283,21 @@ fn clone_into_new(
 /// failed connection) leaves the clone to libgit2's defaults, which then
 /// report any connection failure through the usual classification.
 fn default_branch(clone_url: &str, callbacks: git2::RemoteCallbacks<'_>) -> Option<String> {
+    // libgit2's local transport advertises no HEAD symref, so the remote
+    // would guess the branch by HEAD's commit and could pick another branch
+    // sharing it (e.g. a dependabot branch sorting before `main`). A local
+    // mirror's HEAD is read directly instead.
+    if clone_url.starts_with("file:") {
+        let path = url::Url::parse(clone_url).ok()?.to_file_path().ok()?;
+        let repo = git2::Repository::open(path).ok()?;
+        let head = repo.find_reference("HEAD").ok()?;
+        let name = head
+            .symbolic_target()
+            .ok()
+            .flatten()?
+            .strip_prefix("refs/heads/")?;
+        return (!name.is_empty()).then(|| name.to_string());
+    }
     let mut remote = git2::Remote::create_detached(clone_url).ok()?;
     let connection = remote
         .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
