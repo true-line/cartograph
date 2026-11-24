@@ -1319,6 +1319,11 @@ fn bind_probes(capture: &Capture, probes: &super::Probes) -> ProbeBinding {
             return ProbeBinding::Unbound;
         }
         if !found {
+            // Absent means the capture holds nothing at the path, neither
+            // a file nor anything beneath it.
+            if holds_file(path) || holds_directory(path) {
+                return ProbeBinding::Unbound;
+            }
             absent.push(path.clone());
         }
     }

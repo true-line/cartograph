@@ -147,3 +147,35 @@ fn a_read_root_file_is_bound_to_its_retained_bytes() {
         &[capture.file("vercel.json").unwrap().reference().clone()]
     );
 }
+
+// AC-1092: a path looked up as a directory and not found is absent only
+// when the capture holds nothing there, not even a file of that name.
+#[test]
+fn an_absent_lookup_the_capture_holds_leaves_them_unbound() {
+    let mut probes = crate::Probes::default();
+    probes
+        .exists
+        .insert("app".into(), (crate::Lookup::Directory, false));
+    let directory = tree(&[("app", "not a directory\n"), ("src/a.ts", "")]);
+    let root = directory.path();
+    let paths = ["app".to_string(), "src/a.ts".to_string()];
+    let capture = capture_working_tree(
+        root,
+        &CaptureSourceId::new(SOURCE).unwrap(),
+        &paths,
+        CaptureLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(bind_probes(&capture, &probes), ProbeBinding::Unbound);
+    let mut other = crate::Probes::default();
+    other
+        .exists
+        .insert("pages".into(), (crate::Lookup::Directory, false));
+    assert_eq!(
+        bind_probes(&capture, &other),
+        ProbeBinding::Bound {
+            absent: vec!["pages".into()],
+            read: Vec::new()
+        }
+    );
+}
