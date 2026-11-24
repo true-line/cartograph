@@ -515,11 +515,16 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    minted after completion against the TS file its evidence cites, and
    stated like that file's decided receipts. A TS receipt binds one file,
    so only facts whose evidence lies in one file qualify (Pulumi
-   references, for example). Facts that also cite a barrel or a
-   `package.json` (re-export calls, Next API routes, package `mod:` nodes),
-   and facts completion edits in place (service-worker registrations),
-   still have none. Binding them needs a multi-file TS receipt contract;
-   that is the remaining slice 6 work.
+   references, for example).
+   *As built (AC-1520):* a TypeScript receipt whose ranges are all
+   provenance may bind other TS/JS source files of its capture, as a lane
+   receipt does (AC-1039), so a call resolved through a barrel, a base
+   class or an interface is receipted on its caller's walk closure. A
+   rule's inventory stays single-file. Facts that also cite a config
+   (`package.json` for Next API routes and package `mod:` nodes) still
+   have none, since a receipt file must be a parsed source, and facts
+   completion edits in place (service-worker registrations) still keep
+   none. Those two are the remaining slice 6 work.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
