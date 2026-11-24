@@ -22,7 +22,8 @@ adapters-fw = { workspace = true }
 adapters-lang-go = { workspace = true }
 # The W6 work packet an uncovered adapter cell is handed off as (#1072).
 work-packets = { workspace = true }
-toml = "1.1"
+# Exact, as Toolchain closures pin it (AC-1536).
+toml = "=1.1.6"
 # Span-preserving YAML for declared schedule files (#770).
 tree-sitter = "=0.27.2"
 # Exact, as Pipeline receipts record it (AC-1528).

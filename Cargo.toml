@@ -42,7 +42,8 @@ opt-level = 1
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: parse floats correctly rounded, so a value serialized
 # and parsed again keeps its exact bits (#725).
-serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
+# Exact, as Toolchain receipt closures pin it (AC-1536).
+serde_json = { version = "=1.0.154", features = ["raw_value", "float_roundtrip"] }
 thiserror = "2"
 rusqlite = { version = "0.41", features = ["bundled"] }
 blake3 = "1"
