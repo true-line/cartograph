@@ -15,12 +15,14 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 /// Identity shared by every receipt minted for one captured file. The other
-/// header fields are fixed by the current contract and the file's path.
+/// header fields are fixed by the current contract and the grammar: the
+/// file's path selects it, or a producer-keyed lane names it (AC-1532).
 #[derive(Debug, PartialEq, Eq)]
 pub struct MintedHeader {
     repo_key: String,
     file: CaptureFileRef,
     commit_sha: String,
+    grammar: Grammar,
 }
 
 impl MintedHeader {
@@ -78,7 +80,8 @@ impl MintedReceipt {
         };
         if content.source_id != content.file.source_id
             || content.producer_contract != current.producer
-            || content.grammar != Grammar::for_file(&content.file)
+            || (content.grammar != Grammar::for_file(&content.file)
+                && !content.grammar.producer_keyed())
             || content.grammar_package != current.grammar_package
             || content.parser_package != current.parser_package
         {
@@ -122,7 +125,8 @@ impl MintedReceipt {
             Some(shared)
                 if shared.repo_key == content.repo_key
                     && shared.file == content.file
-                    && shared.commit_sha == commit_sha =>
+                    && shared.commit_sha == commit_sha
+                    && shared.grammar == content.grammar =>
             {
                 Arc::clone(shared)
             }
@@ -131,6 +135,7 @@ impl MintedReceipt {
                     repo_key: content.repo_key,
                     file: content.file,
                     commit_sha,
+                    grammar: content.grammar,
                 });
                 *header = Some(Arc::clone(&shared));
                 shared
@@ -190,7 +195,7 @@ impl MintedReceipt {
             None => (RECEIPT_SCHEMA_VERSION, InputClosure::LEGACY),
             Some(closure) => (4, InputClosure::Closure(closure.clone())),
         };
-        let current = contract(schema_version, Grammar::for_file(&header.file))?;
+        let current = contract(schema_version, header.grammar)?;
         Ok(Receipt {
             receipt_id: self.receipt_id.clone(),
             content: Content {
@@ -200,7 +205,7 @@ impl MintedReceipt {
                 file: header.file.clone(),
                 commit_sha: Some(header.commit_sha.clone()),
                 producer_contract: current.producer.into(),
-                grammar: Grammar::for_file(&header.file),
+                grammar: header.grammar,
                 grammar_package: current.grammar_package.into(),
                 parser_package: current.parser_package.into(),
                 fact_key: self.fact_key.clone(),
@@ -340,12 +345,7 @@ impl MintedReceipt {
 
     fn matches_inventory(&self, props: &serde_json::Value) -> bool {
         let header = &*self.header;
-        inventory(
-            props,
-            RECEIPT_SCHEMA_VERSION,
-            Grammar::for_file(&self.header.file),
-        )
-        .is_ok_and(|ranges| {
+        inventory(props, RECEIPT_SCHEMA_VERSION, self.header.grammar).is_ok_and(|ranges| {
             ranges.len() == self.spans.len()
                 && ranges.iter().zip(self.spans.iter()).all(
                     |((role, index, evidence), &(span_role, span_index, start, end, slot))| {

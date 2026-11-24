@@ -803,17 +803,7 @@ pub fn extract_from_capture(
     Ok(extract_walked(&walked, &Source { read, len: &len }, id))
 }
 
-/// What [`extract_from_capture_reading`] found about where its facts come
-/// from (ADR-0072 slice 9, AC-1530).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CaptureReads {
-    /// True when the facts are a function of the captured files alone: the
-    /// reader, given only the captured selection as its listing and only
-    /// their bytes, reads no other file and emits the same facts.
-    pub bound: bool,
-    /// The captured files that reading opened, in path order.
-    pub read: Vec<String>,
-}
+pub use crate::captured_walk::CaptureReads;
 
 /// [`extract_from_capture`], and whether its facts depend on anything but
 /// the captured files (AC-1530). The checkout listing decides which

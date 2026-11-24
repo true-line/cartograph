@@ -2809,16 +2809,42 @@ fn extract_tree_packed(
                 .map_err(|_| std::io::Error::other("captured start file is unavailable"))
         };
         let schedule_facts = match captured_starts {
-            Some(_) => ingest::schedules::extract_from_capture(
-                root,
-                &captured_paths,
-                &captured_read,
-                &schedule_id,
-                &symbols,
-            ),
-            None => ingest::schedules::extract_dir(root, &schedule_id, &symbols),
-        }
-        .map_err(|e| e.to_string())?;
+            Some(capture) => {
+                let (schedule_facts, capture_reads) =
+                    ingest::schedules::extract_from_capture_reading(
+                        root,
+                        &captured_paths,
+                        &captured_read,
+                        &schedule_id,
+                        &symbols,
+                    )
+                    .map_err(|e| e.to_string())?;
+                // Producer-keyed Schedule receipts, established on the
+                // reader's closure when no adapter's symbols decided a fact
+                // (AC-1532). An adapter's File node supersedes the reader's,
+                // so only the facts the graph keeps are receipted.
+                let known_files = unplaceholdered_set(&facts, "File")?;
+                let kept: Vec<core_graph::Node> = schedule_facts
+                    .nodes
+                    .iter()
+                    .filter(|node| node.label != "File" || !known_files.contains(&node.id))
+                    .cloned()
+                    .collect();
+                let (published_nodes, published_edges) =
+                    publication_view(&kept, &schedule_facts.edges);
+                let stage = adapters_lang_ts::captured::stage_schedule_receipts(
+                    capture,
+                    &capture_reads.read,
+                    &adapters_lang_ts::SourceId { repo, commit },
+                    (&published_nodes, &published_edges),
+                    capture_reads.bound,
+                );
+                admit_surviving_lane_receipts(&kept, &schedule_facts.edges, stage, receipts);
+                schedule_facts
+            }
+            None => ingest::schedules::extract_dir(root, &schedule_id, &symbols)
+                .map_err(|e| e.to_string())?,
+        };
         layers.schedules = LayerSummary {
             files: schedule_facts.files,
             nodes: distinct_node_count(&schedule_facts.nodes),

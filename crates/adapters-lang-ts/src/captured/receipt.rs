@@ -41,6 +41,10 @@ pub const PIPELINE_WALK_POLICY: &str = "pipeline-walk-v1";
 /// 9, AC-1530): the captured environment selection, which decides the
 /// reader's facts alone when the reader reports them bound to it.
 pub const ENVIRONMENT_WALK_POLICY: &str = "environment-walk-v1";
+/// The walk policy a schedule reader closure records (ADR-0072 slice 9,
+/// AC-1532): the capture's listing and the captured files the reader read,
+/// which decide its facts alone when the reader reports them bound.
+pub const SCHEDULE_WALK_POLICY: &str = "schedule-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -168,6 +172,25 @@ pub fn environment_walk_closure(
     )
 }
 
+/// The input closure of a schedule fact (ADR-0072 slice 9, AC-1532): the
+/// capture's enumeration under [`SCHEDULE_WALK_POLICY`] and the retained
+/// bytes of every file in `read`, whatever its path selects: the reader
+/// reads schedule files, the scripts they run and the root `Dockerfile`.
+pub fn schedule_walk_closure(
+    capture: &source_capture::Capture,
+    read: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    lane_walk_closure(
+        Grammar::Schedule,
+        SCHEDULE_WALK_POLICY,
+        capture,
+        read,
+        read,
+        repo_key,
+    )
+}
+
 /// A walk closure over `grammar`'s captured files: the capture's
 /// enumeration under `walk_policy` and each of `files` of that grammar, or
 /// among `also`, the capture holds, under the grammar's contract-v4 pins.
@@ -253,6 +276,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
                 parser_package_legacy: &[],
             });
         }
+        (4, Grammar::Schedule) => {
+            return Ok(Contract {
+                prefix: "sched-primary-v2:",
+                producer: "t0.schedules/declared-v2",
+                domain: b"cartograph:sched-primary-receipt:v2\0",
+                grammar_package: YAML_GRAMMAR_PACKAGE,
+                parser_package: PARSER_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
         (4, Grammar::Environment) => {
             return Ok(Contract {
                 prefix: "env-primary-v2:",
@@ -326,6 +359,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
         }),
         // Compose, kustomize, Kubernetes, Helm and settings files, read by
         // the environment reader (AC-1530).
+        // Schedule files, read by the schedule reader (AC-1532), whatever
+        // their paths select.
+        Grammar::Schedule => Some(Contract {
+            prefix: "sched-primary-v1:",
+            producer: "t0.schedules/declared-v1",
+            domain: b"cartograph:sched-primary-receipt:v1\0",
+            grammar_package: YAML_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
         Grammar::Environment => Some(Contract {
             prefix: "env-primary-v1:",
             producer: "t0.environments/declared-v1",
@@ -484,6 +527,10 @@ pub enum Grammar {
     /// Files the environment reader selects that no language or pipeline
     /// grammar claims, read by it (AC-1530).
     Environment,
+    /// Facts the schedule reader emits (AC-1532). Chosen by the producer,
+    /// not the path: a schedule cites crontabs, YAML files and the scripts
+    /// it runs, whichever lane their paths select.
+    Schedule,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -503,16 +550,27 @@ impl Grammar {
                 | Self::Terraform
                 | Self::Pipeline
                 | Self::Environment
+                | Self::Schedule
                 | Self::ObservedInput
         )
     }
 
     /// A grammar whose receipts have contract v4, with an input closure
     /// state: TypeScript (slice 5), Terraform (slice 9, AC-1526) and
-    /// pipelines (AC-1528) and environments (AC-1530).
+    /// pipelines (AC-1528), environments (AC-1530) and schedules (AC-1532).
     pub(super) fn has_v4(self) -> bool {
         !self.provenance_only()
-            || matches!(self, Self::Terraform | Self::Pipeline | Self::Environment)
+            || matches!(
+                self,
+                Self::Terraform | Self::Pipeline | Self::Environment | Self::Schedule
+            )
+    }
+
+    /// A grammar chosen by the producer that minted the receipt, not by the
+    /// cited file's path (AC-1532): its receipts may cite any captured
+    /// source file.
+    pub(super) fn producer_keyed(self) -> bool {
+        matches!(self, Self::Schedule)
     }
 
     /// The grammar a receipt citing `file` is minted under: an observation
@@ -1138,9 +1196,47 @@ pub(super) fn validate_identity(file: &CaptureFileRef, repo: &str) -> Result<(),
     validate_file(file, repo, false)
 }
 
+/// [`validate_identity`] for a receipt of `grammar`: a producer-keyed lane
+/// (AC-1532) may cite any captured source file, never an observation input.
+pub(super) fn validate_lane_identity(
+    grammar: Grammar,
+    file: &CaptureFileRef,
+    repo: &str,
+) -> Result<(), CapturedError> {
+    if !grammar.producer_keyed() {
+        return validate_identity(file, repo);
+    }
+    if is_input_source(&file.source_id) {
+        return Err(CapturedError::Invalid("capture file binding"));
+    }
+    validate_bound_file(file, repo)
+}
+
 /// [`validate_identity`]; with `config`, a TS resolution config the walk
 /// captured (a `package.json`, a tsconfig) is a valid path too (AC-1522).
 fn validate_file(file: &CaptureFileRef, repo: &str, config: bool) -> Result<(), CapturedError> {
+    validate_bound_file(file, repo)?;
+    if !(is_input_source(&file.source_id)
+        || super::supported(&file.path)
+        || (config && super::is_config_path(&file.path))
+        || file.path.ends_with(".py")
+        || file.path.ends_with(".go")
+        || file.path.ends_with(".java")
+        || file.path.ends_with(".rs")
+        || file.path.ends_with(".kt")
+        || file.path.ends_with(".kts")
+        || file.path.ends_with(".tf")
+        || ingest::pipelines::is_pipeline_file(&file.path)
+        || environment_path(&file.path))
+    {
+        return Err(CapturedError::Invalid("capture file binding"));
+    }
+    Ok(())
+}
+
+/// A captured source file's binding, whatever lane its path selects: what a
+/// producer-keyed receipt (AC-1532) checks of each file it cites.
+fn validate_bound_file(file: &CaptureFileRef, repo: &str) -> Result<(), CapturedError> {
     validate_source_repo(&file.source_id, repo)?;
     // Capture IDs are versioned hashes; CaptureStore independently verifies
     // membership and the actual raw object before a source read.
@@ -1148,18 +1244,6 @@ fn validate_file(file: &CaptureFileRef, repo: &str, config: bool) -> Result<(), 
         || !hash_has_prefix(&file.digest, "")
         || file.byte_len > source_capture::MAX_FILE_BYTES
         || !super::valid_path(&file.path)
-        || !(is_input_source(&file.source_id)
-            || super::supported(&file.path)
-            || (config && super::is_config_path(&file.path))
-            || file.path.ends_with(".py")
-            || file.path.ends_with(".go")
-            || file.path.ends_with(".java")
-            || file.path.ends_with(".rs")
-            || file.path.ends_with(".kt")
-            || file.path.ends_with(".kts")
-            || file.path.ends_with(".tf")
-            || ingest::pipelines::is_pipeline_file(&file.path)
-            || environment_path(&file.path))
     {
         return Err(CapturedError::Invalid("capture file binding"));
     }
@@ -1198,12 +1282,18 @@ fn validate_other_files(content: &Content) -> Result<(), CapturedError> {
     }
     let mut previous: Option<&str> = None;
     for file in &content.other_files {
-        // A TS receipt may cite the walk's resolution configs (AC-1522).
-        validate_file(file, &content.repo_key, typescript)?;
+        // A TS receipt may cite the walk's resolution configs (AC-1522); a
+        // producer-keyed receipt, any captured source (AC-1532).
+        if content.grammar.producer_keyed() {
+            validate_bound_file(file, &content.repo_key)?;
+        } else {
+            validate_file(file, &content.repo_key, typescript)?;
+        }
         if file.source_id != content.file.source_id
             || file.capture_id != content.file.capture_id
             || file.path == content.file.path
-            || !same_lane(Grammar::for_file(file), content.grammar)
+            || !(content.grammar.producer_keyed()
+                || same_lane(Grammar::for_file(file), content.grammar))
             || previous.is_some_and(|previous| previous >= file.path.as_str())
             || !content
                 .ranges
@@ -1474,6 +1564,7 @@ impl Receipt {
     /// cites other files of that capture binds each range to its own file
     /// (AC-1039); without one, every range must lie in `file`.
     fn mint(
+        grammar: Grammar,
         file: &CapturedFile,
         capture: Option<&source_capture::Capture>,
         id: &SourceId,
@@ -1481,7 +1572,6 @@ impl Receipt {
         fact_digest: String,
         props: &serde_json::Value,
     ) -> Result<Self, CapturedError> {
-        let grammar = Grammar::for_file(file.reference());
         let current = contract(RECEIPT_SCHEMA_VERSION, grammar)?;
         let mut other_files = BTreeMap::new();
         let ranges = inventory(props, RECEIPT_SCHEMA_VERSION, grammar)?
@@ -1546,7 +1636,20 @@ impl Receipt {
         id: &SourceId,
         node: &Node,
     ) -> Result<Self, CapturedError> {
+        Self::for_node_as(Grammar::for_file(file.reference()), file, capture, id, node)
+    }
+
+    /// [`Self::for_node_in`] under `grammar`, which a producer-keyed lane
+    /// names (AC-1532).
+    pub(super) fn for_node_as(
+        grammar: Grammar,
+        file: &CapturedFile,
+        capture: Option<&source_capture::Capture>,
+        id: &SourceId,
+        node: &Node,
+    ) -> Result<Self, CapturedError> {
         Self::mint(
+            grammar,
             file,
             capture,
             id,
@@ -1572,7 +1675,19 @@ impl Receipt {
         id: &SourceId,
         edge: &Edge,
     ) -> Result<Self, CapturedError> {
+        Self::for_edge_as(Grammar::for_file(file.reference()), file, capture, id, edge)
+    }
+
+    /// [`Self::for_edge_in`] under `grammar` (AC-1532).
+    pub(super) fn for_edge_as(
+        grammar: Grammar,
+        file: &CapturedFile,
+        capture: Option<&source_capture::Capture>,
+        id: &SourceId,
+        edge: &Edge,
+    ) -> Result<Self, CapturedError> {
         Self::mint(
+            grammar,
             file,
             capture,
             id,
@@ -1673,7 +1788,7 @@ impl Receipt {
     /// Validate content identity/shape only, not producer trust or semantic truth.
     pub fn validate(&self) -> Result<(), CapturedError> {
         let content = &self.content;
-        validate_identity(&content.file, &content.repo_key)?;
+        validate_lane_identity(content.grammar, &content.file, &content.repo_key)?;
         let contract = contract(content.schema_version, content.grammar)?;
         match (content.schema_version, &content.commit_sha) {
             (1 | 2, None) => {}
@@ -1696,7 +1811,8 @@ impl Receipt {
                 && !contract
                     .parser_package_legacy
                     .contains(&content.parser_package.as_str()))
-            || content.grammar != Grammar::for_file(&content.file)
+            || (content.grammar != Grammar::for_file(&content.file)
+                && !content.grammar.producer_keyed())
         {
             return Err(CapturedError::Invalid("receipt contract"));
         }

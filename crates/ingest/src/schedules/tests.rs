@@ -1428,3 +1428,71 @@ fn captured_schedule_files_are_read_instead_of_the_checkout() {
         before
     );
 }
+
+/// [`extract_from_capture_reading`] over `files` as a whole capture.
+fn captured_reading(
+    files: &[(&str, &str)],
+    symbols: &BTreeSet<String>,
+) -> (ScheduleExtraction, CaptureReads) {
+    let captured: BTreeMap<String, Vec<u8>> = files
+        .iter()
+        .map(|(path, body)| (path.to_string(), body.as_bytes().to_vec()))
+        .collect();
+    let read = |rel: &str| {
+        captured
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("not captured"))
+    };
+    let keys: Vec<String> = captured.keys().cloned().collect();
+    let id = SourceId {
+        repo: REPO,
+        commit: "abc",
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = extract_from_capture_reading(dir.path(), &keys, &read, &id, symbols).unwrap();
+    let plain = extract_from_capture(dir.path(), &keys, &read, &id, symbols).unwrap();
+    assert_eq!(format!("{:?}", out.0.nodes), format!("{:?}", plain.nodes));
+    assert_eq!(format!("{:?}", out.0.edges), format!("{:?}", plain.edges));
+    out
+}
+
+// AC-1532: over a capture, schedule facts no adapter's symbols decide are
+// bound to the captured files, and the files the reader opened are
+// reported; a recognized dispatch asks whether the Python adapter emitted
+// its function, so it depends on that adapter's facts and is not bound,
+// whether the answer enters the function or leaves it unresolved.
+#[test]
+fn capture_reads_report_schedule_facts_bound_to_the_captured_files() {
+    let cron = "import argparse\n\ndef stats():\n    pass\n\nif __name__ == \"__main__\":\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"-j\", \"--job\")\n    args = parser.parse_args()\n    if args.job == \"stats\":\n        stats()\n";
+    let yacron = "jobs:\n  - name: stats\n    command: python cron.py -j stats\n    schedule: \"0 0 * * *\"\n";
+    let plain =
+        "jobs:\n  - name: plain\n    command: python cron.py\n    schedule: \"0 0 * * *\"\n";
+    let (facts, reads) = captured_reading(
+        &[
+            ("cron.py", cron),
+            ("cron.yaml", plain),
+            ("README.md", "notes\n"),
+        ],
+        &BTreeSet::new(),
+    );
+    assert!(!facts.nodes.is_empty());
+    assert!(reads.bound, "{reads:?}");
+    assert!(reads.read.contains(&"cron.yaml".to_string()), "{reads:?}");
+    assert!(!reads.read.contains(&"README.md".to_string()), "{reads:?}");
+    let files = [
+        ("cron.py", cron),
+        ("cron.yaml", yacron),
+        ("README.md", "notes\n"),
+    ];
+    let (_, reads) = captured_reading(&files, &BTreeSet::new());
+    assert!(reads.read.contains(&"cron.py".to_string()), "{reads:?}");
+    assert!(!reads.bound, "{reads:?}");
+    let symbols = BTreeSet::from([format!("sym:{REPO}@cron.py#stats")]);
+    let (facts, reads) = captured_reading(&files, &symbols);
+    assert_eq!(
+        entry(&facts, 0, "cron.yaml").dst,
+        format!("sym:{REPO}@cron.py#stats")
+    );
+    assert!(!reads.bound, "{reads:?}");
+}

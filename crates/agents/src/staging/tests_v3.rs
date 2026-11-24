@@ -232,8 +232,14 @@ fn a_schema_three_task_stages_as_v3_content() {
 fn a_terraform_v4_receipt_carries_its_closure_state() {
     let task = fixture();
     // AC-1528: a pipeline v4 receipt (`pipe-primary-v2:`) does too, and
-    // AC-1530: an environment v4 receipt (`env-primary-v2:`).
-    for prefix in ["tf-primary-v2:", "pipe-primary-v2:", "env-primary-v2:"] {
+    // AC-1530: an environment v4 receipt (`env-primary-v2:`), and AC-1532:
+    // a schedule v4 receipt (`sched-primary-v2:`).
+    for prefix in [
+        "tf-primary-v2:",
+        "pipe-primary-v2:",
+        "env-primary-v2:",
+        "sched-primary-v2:",
+    ] {
         let v3 = prepared(&task, read_from(&task, 3, established(), prefix)).unwrap();
         assert_eq!(
             origin_closure(v3.source_basis()),
