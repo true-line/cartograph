@@ -1009,6 +1009,45 @@ pub fn extract_from_capture(
     Ok(extract_walked(&walked, &captured, id, env_read, on_file))
 }
 
+/// [`extract_from_capture`], reporting which captured files the reader
+/// read and whether its facts are bound to them (AC-1536, #385). Each
+/// detector reads only its own file, so they are unless a `Tool` merges a
+/// proof from a checkout env file, which no capture retains, with one from
+/// a captured file: its settings then depend on the checkout. Env-file
+/// facts themselves cite no captured file.
+pub fn extract_from_capture_reading(
+    root: &Path,
+    captured: &[String],
+    captured_read: &dyn Fn(&str) -> std::io::Result<Vec<u8>>,
+    id: &SourceId,
+    env_read: &std::collections::BTreeSet<String>,
+    on_file: &mut dyn FnMut(&str),
+) -> std::io::Result<(ToolExtraction, crate::captured_walk::CaptureReads)> {
+    let opened = std::cell::RefCell::new(std::collections::BTreeSet::new());
+    let recorded = |rel: &str| {
+        opened.borrow_mut().insert(rel.to_string());
+        captured_read(rel)
+    };
+    let facts = extract_from_capture(root, captured, &recorded, id, env_read, on_file)?;
+    // Each Tool's DEFINED_IN files: env or not.
+    let file_prefix = format!("file:{}@", id.repo);
+    let mut defined_in: BTreeMap<&str, (bool, bool)> = BTreeMap::new();
+    for edge in facts.edges.iter().filter(|edge| edge.label == "DEFINED_IN") {
+        let Some(path) = edge.dst.strip_prefix(&file_prefix) else {
+            continue;
+        };
+        let (env, other) = defined_in.entry(edge.src.as_str()).or_default();
+        if is_env_file(path) {
+            *env = true;
+        } else {
+            *other = true;
+        }
+    }
+    let bound = !defined_in.values().any(|(env, other)| *env && *other);
+    let read = opened.into_inner().into_iter().collect();
+    Ok((facts, crate::captured_walk::CaptureReads { bound, read }))
+}
+
 /// Where the toolchain reader's bytes come from, by repo-relative path.
 trait Bytes {
     fn bytes(&self, rel: &str) -> Option<Vec<u8>>;
@@ -1127,12 +1166,22 @@ fn extract_walked(
         files: config_files.len() as u64,
         ..Default::default()
     };
-    let evidence = |path: &str, start: u64, end: u64| EvidenceRef {
-        repo: id.repo.to_string(),
-        path: path.to_string(),
-        byte_start: start,
-        byte_end: end,
-        commit_sha: id.commit.to_string(),
+    // A tool proven by a file's name alone (a lockfile, `requirements.txt`,
+    // `pom.xml`, a code-authored config) cites the whole file: its presence
+    // is the proof, and an empty span would cite no bytes (AC-1536).
+    let evidence = |path: &str, start: u64, end: u64| {
+        let end = if (start, end) == (0, 0) {
+            config_files.get(path).copied().unwrap_or(0)
+        } else {
+            end
+        };
+        EvidenceRef {
+            repo: id.repo.to_string(),
+            path: path.to_string(),
+            byte_start: start,
+            byte_end: end,
+            commit_sha: id.commit.to_string(),
+        }
     };
     for (rel, len) in &config_files {
         // Env files get no evidence span: a span is a readable window into
@@ -1907,6 +1956,56 @@ mod tests {
         assert_ne!(
             facts(&extract_dir_reading(dir.path(), &id, &allow, &mut |_| {}).unwrap()),
             before
+        );
+    }
+
+    // AC-1536: over a capture, toolchain facts are bound to the captured
+    // config files the reader read, which exclude the checkout's env
+    // files and every file no detector names.
+    #[test]
+    fn capture_reads_report_toolchain_facts_bound_to_the_captured_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            ("package.json", "{\"name\":\"web\"}"),
+            ("Dockerfile", "FROM node:20\n"),
+            (".env", "PORT=3000\n"),
+            ("README.md", "notes\n"),
+        ];
+        for (rel, text) in files {
+            write(dir.path(), rel, text);
+        }
+        let id = SourceId {
+            repo: "local/tools",
+            commit: "c0ffee",
+        };
+        let paths = toolchain_paths(dir.path()).unwrap();
+        let captured: BTreeMap<String, Vec<u8>> = paths
+            .iter()
+            .map(|rel| (rel.clone(), std::fs::read(dir.path().join(rel)).unwrap()))
+            .collect();
+        let read = |rel: &str| {
+            captured
+                .get(rel)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("not captured"))
+        };
+        let keys: Vec<String> = captured.keys().cloned().collect();
+        let none = std::collections::BTreeSet::new();
+        let (facts, reads) =
+            extract_from_capture_reading(dir.path(), &keys, &read, &id, &none, &mut |_| {})
+                .unwrap();
+        let plain =
+            extract_from_capture(dir.path(), &keys, &read, &id, &none, &mut |_| {}).unwrap();
+        assert_eq!(format!("{:?}", facts.nodes), format!("{:?}", plain.nodes));
+        assert_eq!(format!("{:?}", facts.edges), format!("{:?}", plain.edges));
+        assert!(reads.bound, "{reads:?}");
+        assert_eq!(reads.read, ["Dockerfile", "package.json"]);
+        assert!(
+            facts
+                .nodes
+                .iter()
+                .any(|node| node.id == "file:local/tools@.env"),
+            "the checkout's env file is still read"
         );
     }
 }

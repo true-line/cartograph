@@ -234,13 +234,15 @@ fn a_terraform_v4_receipt_carries_its_closure_state() {
     // AC-1528: a pipeline v4 receipt (`pipe-primary-v2:`) does too, and
     // AC-1530: an environment v4 receipt (`env-primary-v2:`), and AC-1532:
     // a schedule v4 receipt (`sched-primary-v2:`), and AC-1534: an
-    // entry-point v4 receipt (`entry-primary-v2:`).
+    // entry-point v4 receipt (`entry-primary-v2:`), and AC-1536: a
+    // toolchain v4 receipt (`tool-primary-v2:`).
     for prefix in [
         "tf-primary-v2:",
         "pipe-primary-v2:",
         "env-primary-v2:",
         "sched-primary-v2:",
         "entry-primary-v2:",
+        "tool-primary-v2:",
     ] {
         let v3 = prepared(&task, read_from(&task, 3, established(), prefix)).unwrap();
         assert_eq!(

@@ -305,6 +305,33 @@ pub fn stage_entry_point_receipts(
     )
 }
 
+/// Toolchain reader receipts (AC-1536), staged as
+/// [`stage_schedule_receipts`] stages a schedule's: `read` holds the
+/// captured config files the toolchain reader read, and `bound` is whether
+/// it reported its facts bound to them.
+pub fn stage_toolchain_receipts(
+    capture: &source_capture::Capture,
+    read: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    bound: bool,
+) -> ReceiptStage {
+    let closure = if bound {
+        super::toolchain_walk_closure(capture, read, id.repo)
+            .map_err(|_| ClosureGapReason::LimitExceeded)
+    } else {
+        Err(ClosureGapReason::CrossFileInputUnbound)
+    };
+    stage_walk_receipts(
+        Grammar::Toolchain,
+        closure,
+        capture,
+        read,
+        id,
+        (nodes, edges),
+    )
+}
+
 /// Stage `grammar`'s receipts for `files`, each established on `closure`
 /// or carrying its reason.
 fn stage_walk_receipts(

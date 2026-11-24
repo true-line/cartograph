@@ -494,3 +494,18 @@ fn reader_pins_match_the_ingest_manifest() {
             .contains(&PYTHON_GRAMMAR_PACKAGE)
     );
 }
+
+// AC-1536: the toolchain reader's TOML and JSON parsers are pinned exactly
+// in their manifests, as its closures record them.
+#[test]
+fn toolchain_pins_match_the_manifests() {
+    let ingest = include_str!("../../../../ingest/Cargo.toml");
+    let workspace = include_str!("../../../../../Cargo.toml");
+    let current = contract(4, Grammar::Toolchain).unwrap();
+    let (name, version) = current.grammar_package.split_once('@').unwrap();
+    assert_eq!(name, "toml");
+    assert!(ingest.contains(&format!("toml = \"={version}\"")));
+    let (name, version) = current.parser_package.split_once('@').unwrap();
+    assert_eq!(name, "serde_json");
+    assert!(workspace.contains(&format!("serde_json = {{ version = \"={version}\"")));
+}
