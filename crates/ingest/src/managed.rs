@@ -68,7 +68,10 @@ impl ManagedOrigin {
 /// File URLs are decoded and canonicalized exactly; absent mirrors fail here,
 /// while [`ManagedOrigin::validate`] can validate their retained metadata later.
 pub fn parse_managed_origin(input: &str) -> Result<ManagedOrigin, IngestError> {
-    let input = input.trim();
+    // Pasted text can carry invisible zero-width or byte-order marks.
+    let input = input.trim_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}')
+    });
     if input.is_empty() || input.len() > MAX_ORIGIN_BYTES || input.chars().any(char::is_control) {
         return Err(IngestError::InvalidManagedOrigin);
     }
@@ -128,23 +131,65 @@ fn file_origin(path: &Path) -> Result<ManagedOrigin, IngestError> {
     })
 }
 
+/// GitHub web-UI path segments that may follow `owner/repo` in a pasted
+/// browser URL (`…/tree/main`, `…/blob/main/README.md`). They name a view
+/// of the repository, not a different repository, so the rest is ignored.
+const GITHUB_VIEW_SEGMENTS: &[&str] = &[
+    "tree", "blob", "commit", "commits", "pull", "pulls", "issues", "releases", "tags", "branches",
+    "wiki", "actions",
+];
+
+/// Rewrite the common hand-typed or pasted GitHub forms onto the canonical
+/// `https://github.com/…` URL: scp-style `git@github.com:`, `github.com/…`
+/// or `www.github.com/…` with or without `http(s)://`, and bare `owner/repo`
+/// shorthand. Returns the candidate and whether it was shorthand, which may
+/// not carry extra path segments. Anything else is returned unchanged.
+fn github_candidate(input: &str) -> (String, bool) {
+    let lower = input.to_ascii_lowercase();
+    if lower.starts_with("git@github.com:") {
+        return (
+            format!("https://github.com/{}", &input["git@github.com:".len()..]),
+            false,
+        );
+    }
+    let scheme_len = ["https://", "http://"]
+        .iter()
+        .find(|scheme| lower.starts_with(*scheme))
+        .map_or(0, |scheme| scheme.len());
+    for host in ["github.com/", "www.github.com/"] {
+        if lower[scheme_len..].starts_with(host) {
+            let path = &input[scheme_len + host.len()..];
+            return (format!("https://github.com/{path}"), false);
+        }
+    }
+    if !input.contains(':') {
+        return (format!("https://github.com/{input}"), true);
+    }
+    (input.to_string(), false)
+}
+
+/// A query or fragment GitHub's own pages add to a repository URL
+/// (`?tab=readme-ov-file`, `#readme`). Both are dropped; any other query or
+/// fragment is still refused, so nothing credential-shaped is accepted.
+fn benign_github_suffix(parsed: &Url) -> bool {
+    let query = parsed.query_pairs().all(|(key, _)| key == "tab");
+    let fragment = parsed
+        .fragment()
+        .is_none_or(|f| f == "readme" || f.starts_with("readme-"));
+    query && fragment
+}
+
 fn github_origin(input: &str) -> Result<ManagedOrigin, IngestError> {
-    let candidate = if let Some((host, path)) = input.split_once(':')
-        && host.eq_ignore_ascii_case("git@github.com")
-    {
-        format!("https://github.com/{path}")
-    } else if !input.contains(':') {
-        format!("https://github.com/{input}")
-    } else {
-        input.to_string()
-    };
+    // A URL copied out of prose or Markdown keeps its wrapping: `<…>`, `(…)`,
+    // quotes or backticks. None of them can be part of a repository name.
+    let input = input.trim_matches(|c: char| matches!(c, '<' | '>' | '(' | ')' | '"' | '\'' | '`'));
+    let (candidate, shorthand) = github_candidate(input);
     let parsed = Url::parse(&candidate).map_err(|_| IngestError::InvalidManagedOrigin)?;
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("github.com")
         || !parsed.username().is_empty()
         || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
+        || !benign_github_suffix(&parsed)
         || parsed.port().is_some()
         || input
             .chars()
@@ -157,7 +202,8 @@ fn github_origin(input: &str) -> Result<ManagedOrigin, IngestError> {
     let owner = parts.next().ok_or(IngestError::InvalidManagedOrigin)?;
     let name = parts.next().ok_or(IngestError::InvalidManagedOrigin)?;
     let name = name.strip_suffix(".git").unwrap_or(name);
-    if parts.next().is_some()
+    let extra = parts.next();
+    if extra.is_some_and(|segment| shorthand || !GITHUB_VIEW_SEGMENTS.contains(&segment))
         || owner.is_empty()
         || owner.len() > 100
         || !owner
