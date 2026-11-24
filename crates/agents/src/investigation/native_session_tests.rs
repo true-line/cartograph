@@ -134,7 +134,10 @@ fn runtime(answers: Vec<Answer>, seen: Arc<Mutex<Vec<Value>>>, runner: &'static 
     }
 }
 
-/// A stand-in Ollama that counts calls and reports usage.
+/// A stand-in Ollama that counts calls and reports usage. It never panics, so
+/// its port stays bound for the whole test process and no later test's
+/// listener can be handed the same port. It answers one request per
+/// connection and says so, so the proxy never reuses a socket it closed.
 fn upstream() -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -142,28 +145,37 @@ fn upstream() -> (String, Arc<AtomicUsize>) {
     let counter = hits.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
+            let Ok(mut stream) = stream else { continue };
             let mut reader = BufReader::new(&mut stream);
             let mut length = 0;
+            let mut target = String::new();
             loop {
                 let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if target.is_empty() {
+                    target = line.clone();
+                }
                 if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse().unwrap();
+                    length = value.trim().parse().unwrap_or(0);
                 }
                 if line.trim().is_empty() {
                     break;
                 }
             }
             let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
+            // Only a call the proxy forwarded counts.
+            if reader.read_exact(&mut body).is_err() || !target.starts_with("POST /api/chat ") {
+                continue;
+            }
             counter.fetch_add(1, Ordering::SeqCst);
             let answer = format!(
                 "{{\"model\":\"{MODEL}\",\"message\":{{\"role\":\"assistant\",\"content\":\"\"}},\"done\":true,\"prompt_eval_count\":11,\"eval_count\":7}}\n"
             );
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\n\r\n{answer}",
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
                 answer.len()
             );
         }
@@ -172,7 +184,11 @@ fn upstream() -> (String, Arc<AtomicUsize>) {
 }
 
 struct Harness {
-    session: NativeSession<FakeLink>,
+    /// Never dropped: a dropped session frees its proxy port while its fake
+    /// runtime thread may still post, and a later test's listener could be
+    /// handed that port and take the stray call. Kept alive, the port stays
+    /// bound and the runtime stays blocked on its own link.
+    session: std::mem::ManuallyDrop<NativeSession<FakeLink>>,
     hits: Arc<AtomicUsize>,
     spawns: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<Value>>>,
@@ -211,7 +227,7 @@ fn harness_with(scripts: Vec<Vec<Answer>>, runners: Vec<&'static str>) -> Harnes
         claude_executable: None,
         budget_bytes: 1 << 20,
     };
-    let session = NativeSession::new(
+    let session = std::mem::ManuallyDrop::new(NativeSession::new(
         proxy,
         config,
         Box::new(move || {
@@ -222,7 +238,7 @@ fn harness_with(scripts: Vec<Vec<Answer>>, runners: Vec<&'static str>) -> Harnes
                 runners[index],
             ))
         }),
-    );
+    ));
     Harness {
         session,
         hits,

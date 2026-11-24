@@ -21,13 +21,13 @@ fn upstream() -> (String, Arc<AtomicUsize>) {
     let counter = hits.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
+            let Ok(mut stream) = stream else { continue };
             let _ = read_request(&mut stream, 1 << 20);
             counter.fetch_add(1, Ordering::SeqCst);
             let body = "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n";
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
         }
@@ -207,7 +207,7 @@ fn the_vllm_backend_serves_the_openai_path_without_num_ctx() {
         let (mut stream, _) = listener.accept().unwrap();
         let (path, _, _) = read_request(&mut stream, 1 << 20).unwrap();
         let body = "data: [DONE]\n\n";
-        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}", body.len()).unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
         path
     });
     let proxy = ModelProxy::bind(ProxyConfig {
@@ -429,7 +429,7 @@ fn anthropic_upstream() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
     let seen = heads.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
+            let Ok(mut stream) = stream else { continue };
             if let Ok((target, headers, _)) = read_request(&mut stream, 1 << 20) {
                 let mut head = target;
                 for (name, value) in headers {
@@ -440,7 +440,7 @@ fn anthropic_upstream() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
             let body = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
         }
