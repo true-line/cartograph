@@ -45,6 +45,11 @@ pub const ENVIRONMENT_WALK_POLICY: &str = "environment-walk-v1";
 /// AC-1532): the capture's listing and the captured files the reader read,
 /// which decide its facts alone when the reader reports them bound.
 pub const SCHEDULE_WALK_POLICY: &str = "schedule-walk-v1";
+/// The walk policy an entry-point reader closure records (ADR-0072 slice
+/// 9, AC-1534): the capture's listing, the captured files the entry-point
+/// reader read and those the schedule reader read, whose jobs' files are
+/// not entry points again.
+pub const ENTRY_POINT_WALK_POLICY: &str = "entry-point-walk-v1";
 /// The grammar selection rule an input closure records: by file path, as
 /// [`Grammar`] selects it.
 pub const TS_GRAMMAR_RULE: &str = "grammar-by-path-v1";
@@ -191,6 +196,24 @@ pub fn schedule_walk_closure(
     )
 }
 
+/// The input closure of an entry-point fact (ADR-0072 slice 9, AC-1534):
+/// the capture's enumeration under [`ENTRY_POINT_WALK_POLICY`] and the
+/// retained bytes of every file in `read`, whatever its path selects.
+pub fn entry_point_walk_closure(
+    capture: &source_capture::Capture,
+    read: &[String],
+    repo_key: &str,
+) -> Result<super::InputClosureV1, CapturedError> {
+    lane_walk_closure(
+        Grammar::EntryPoint,
+        ENTRY_POINT_WALK_POLICY,
+        capture,
+        read,
+        read,
+        repo_key,
+    )
+}
+
 /// A walk closure over `grammar`'s captured files: the capture's
 /// enumeration under `walk_policy` and each of `files` of that grammar, or
 /// among `also`, the capture holds, under the grammar's contract-v4 pins.
@@ -286,6 +309,16 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
                 parser_package_legacy: &[],
             });
         }
+        (4, Grammar::EntryPoint) => {
+            return Ok(Contract {
+                prefix: "entry-primary-v2:",
+                producer: "t0.entry-point/declared-v2",
+                domain: b"cartograph:entry-primary-receipt:v2\0",
+                grammar_package: PYTHON_GRAMMAR_PACKAGE,
+                parser_package: PARSER_PACKAGE,
+                parser_package_legacy: &[],
+            });
+        }
         (4, Grammar::Environment) => {
             return Ok(Contract {
                 prefix: "env-primary-v2:",
@@ -357,8 +390,6 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
-        // Compose, kustomize, Kubernetes, Helm and settings files, read by
-        // the environment reader (AC-1530).
         // Schedule files, read by the schedule reader (AC-1532), whatever
         // their paths select.
         Grammar::Schedule => Some(Contract {
@@ -369,6 +400,18 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             parser_package: PARSER_PACKAGE,
             parser_package_legacy: &[],
         }),
+        // Process starts, read by the entry-point reader (AC-1534),
+        // whatever their paths select.
+        Grammar::EntryPoint => Some(Contract {
+            prefix: "entry-primary-v1:",
+            producer: "t0.entry-point/declared-v1",
+            domain: b"cartograph:entry-primary-receipt:v1\0",
+            grammar_package: PYTHON_GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
+        // Compose, kustomize, Kubernetes, Helm and settings files, read by
+        // the environment reader (AC-1530).
         Grammar::Environment => Some(Contract {
             prefix: "env-primary-v1:",
             producer: "t0.environments/declared-v1",
@@ -531,6 +574,11 @@ pub enum Grammar {
     /// not the path: a schedule cites crontabs, YAML files and the scripts
     /// it runs, whichever lane their paths select.
     Schedule,
+    /// Facts the entry-point reader emits (AC-1534), chosen by the producer
+    /// as [`Self::Schedule`] is: a process start cites Python, Go, Rust,
+    /// Java, Kotlin and Node sources, a `Dockerfile`, a `Procfile` or a
+    /// manifest, whichever lane their paths select.
+    EntryPoint,
     /// A manifest observation input (Terraform state, Pulumi export, OTLP
     /// trace) captured under `input/<source id>`, read by the T1 producers
     /// (ADR-0079, AC-1045). Chosen by the capture identity, not the path.
@@ -551,26 +599,32 @@ impl Grammar {
                 | Self::Pipeline
                 | Self::Environment
                 | Self::Schedule
+                | Self::EntryPoint
                 | Self::ObservedInput
         )
     }
 
     /// A grammar whose receipts have contract v4, with an input closure
     /// state: TypeScript (slice 5), Terraform (slice 9, AC-1526) and
-    /// pipelines (AC-1528), environments (AC-1530) and schedules (AC-1532).
+    /// pipelines (AC-1528), environments (AC-1530), schedules (AC-1532) and
+    /// entry points (AC-1534).
     pub(super) fn has_v4(self) -> bool {
         !self.provenance_only()
             || matches!(
                 self,
-                Self::Terraform | Self::Pipeline | Self::Environment | Self::Schedule
+                Self::Terraform
+                    | Self::Pipeline
+                    | Self::Environment
+                    | Self::Schedule
+                    | Self::EntryPoint
             )
     }
 
     /// A grammar chosen by the producer that minted the receipt, not by the
     /// cited file's path (AC-1532): its receipts may cite any captured
-    /// source file.
+    /// source file. Entry points are too (AC-1534).
     pub(super) fn producer_keyed(self) -> bool {
-        matches!(self, Self::Schedule)
+        matches!(self, Self::Schedule | Self::EntryPoint)
     }
 
     /// The grammar a receipt citing `file` is minted under: an observation

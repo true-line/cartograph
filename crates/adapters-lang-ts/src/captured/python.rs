@@ -278,6 +278,33 @@ pub fn stage_schedule_receipts(
     )
 }
 
+/// Entry-point reader receipts (AC-1534), staged as
+/// [`stage_schedule_receipts`] stages a schedule's: `read` holds the
+/// captured files the entry-point reader and the schedule reader read, and
+/// `bound` is whether both reported their facts bound to them.
+pub fn stage_entry_point_receipts(
+    capture: &source_capture::Capture,
+    read: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+    bound: bool,
+) -> ReceiptStage {
+    let closure = if bound {
+        super::entry_point_walk_closure(capture, read, id.repo)
+            .map_err(|_| ClosureGapReason::LimitExceeded)
+    } else {
+        Err(ClosureGapReason::CrossFileInputUnbound)
+    };
+    stage_walk_receipts(
+        Grammar::EntryPoint,
+        closure,
+        capture,
+        read,
+        id,
+        (nodes, edges),
+    )
+}
+
 /// Stage `grammar`'s receipts for `files`, each established on `closure`
 /// or carrying its reason.
 fn stage_walk_receipts(
