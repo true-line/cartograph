@@ -177,15 +177,14 @@ struct StagedProposalWire {
 impl TryFrom<StagedProposalWire> for StagedProposal {
     type Error = &'static str;
     fn try_from(w: StagedProposalWire) -> Result<Self, Self::Error> {
-        if !matches!(
-            (
-                w.schema_version,
-                w.evidence_binding,
-                w.source_basis.is_some()
-            ),
-            (1, EvidenceBinding::WorkingTreeUnverified, false)
-                | (2, EvidenceBinding::PerItem, true)
-        ) {
+        // A v2 or v3 record names a source basis of its own schema (AC-1086).
+        if !match (w.schema_version, w.evidence_binding, &w.source_basis) {
+            (1, EvidenceBinding::WorkingTreeUnverified, None) => true,
+            (version @ (2 | 3), EvidenceBinding::PerItem, Some(basis)) => {
+                basis.schema_version == version
+            }
+            _ => false,
+        } {
             return Err("invalid staged source basis version");
         }
         Ok(Self {

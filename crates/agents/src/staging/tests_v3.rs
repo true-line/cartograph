@@ -179,6 +179,16 @@ fn a_schema_three_task_stages_as_v3_content() {
     assert_eq!(v3.schema_version, 3);
     assert!(v3.proposal_id.starts_with("proposal-stage-v3:"));
     assert_eq!(v3.source_basis.as_ref(), Some(v3_task.source_basis()));
+    // The record crosses the host boundary and back, and names a basis of its
+    // own schema.
+    let wire = serde_json::to_value(&v3).unwrap();
+    assert_eq!(
+        serde_json::from_value::<StagedProposal>(wire.clone()).unwrap(),
+        v3
+    );
+    let mut mismatched = wire;
+    mismatched["source_basis"]["schema_version"] = json!(2);
+    assert!(serde_json::from_value::<StagedProposal>(mismatched).is_err());
     let raw: String = store
         .conn
         .query_row(

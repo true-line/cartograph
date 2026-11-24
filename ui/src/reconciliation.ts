@@ -28,7 +28,7 @@ export interface ReconciliationResult {
   schema_version: 1;
   result_id: string;
   proposal_id: string;
-  proposal_schema_version: 1 | 2;
+  proposal_schema_version: 1 | 2 | 3;
   recovery: { job_id: number; graph_snapshot_id: string; captures: { source_id: string; capture_id: string }[] };
   method: 'legacy_text_v1' | 'captured_span_v2';
   slot: {
@@ -99,7 +99,7 @@ function validResult(result: unknown, proposalId: string): result is Reconciliat
   const slot = r.slot;
   const recovery = r.recovery;
   return r.schema_version === 1 && isString(r.result_id) && r.proposal_id === proposalId &&
-    (r.proposal_schema_version === 1 || r.proposal_schema_version === 2) &&
+    (r.proposal_schema_version === 1 || r.proposal_schema_version === 2 || r.proposal_schema_version === 3) &&
     (r.method === 'legacy_text_v1' || r.method === 'captured_span_v2') &&
     !!recovery && Number.isSafeInteger(recovery.job_id) && isString(recovery.graph_snapshot_id) &&
     Array.isArray(recovery.captures) &&
