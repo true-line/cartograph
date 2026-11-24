@@ -455,3 +455,42 @@ fn lane_pins_match_the_adapter_manifests() {
         assert!(manifest.contains(&format!("{name} = \"={version}\"")));
     }
 }
+
+// AC-1534: every grammar the schedule and entry-point readers parse with is
+// pinned exactly in their manifest and in their closures' packages.
+#[test]
+fn reader_pins_match_the_ingest_manifest() {
+    let ingest = include_str!("../../../../ingest/Cargo.toml");
+    for grammar in [Grammar::Schedule, Grammar::EntryPoint] {
+        let current = contract(4, grammar).unwrap();
+        for pin in [current.grammar_package, current.parser_package]
+            .into_iter()
+            .chain(grammar.reader_packages().iter().copied())
+        {
+            let (name, version) = pin.split_once('@').unwrap();
+            assert!(
+                ingest.contains(&format!("{name} = \"={version}\"")),
+                "{pin}"
+            );
+        }
+    }
+    let entry = Grammar::EntryPoint.reader_packages();
+    for pin in [
+        PYTHON_GRAMMAR_PACKAGE,
+        GRAMMAR_PACKAGE,
+        JAVA_GRAMMAR_PACKAGE,
+        KOTLIN_GRAMMAR_PACKAGE,
+        RUST_GRAMMAR_PACKAGE,
+    ] {
+        assert!(
+            pin == contract(4, Grammar::EntryPoint).unwrap().grammar_package
+                || entry.contains(&pin),
+            "{pin}"
+        );
+    }
+    assert!(
+        Grammar::Schedule
+            .reader_packages()
+            .contains(&PYTHON_GRAMMAR_PACKAGE)
+    );
+}

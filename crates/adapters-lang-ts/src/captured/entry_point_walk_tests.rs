@@ -113,6 +113,22 @@ fn entry_point_receipts_are_established_on_the_reader_closure() {
     }
     assert_eq!(record.parameters.walk_policy, ENTRY_POINT_WALK_POLICY);
     assert_eq!(record.producer_contract, "t0.entry-point/declared-v2");
+    // The closure pins every grammar the reader parses with.
+    for pin in [
+        "tree-sitter-python@0.25.0",
+        "tree-sitter-typescript@0.23.2",
+        "tree-sitter-java@0.23.5",
+        "tree-sitter-kotlin-ng@1.1.0",
+        "tree-sitter-rust@0.24.2",
+        "tree-sitter-yaml@0.7.2",
+        "tree-sitter@0.27.2",
+    ] {
+        assert!(
+            record.producer_packages.contains(&pin.to_string()),
+            "{pin}: {:?}",
+            record.producer_packages
+        );
+    }
     let mut inputs: Vec<String> = record
         .inputs
         .iter()

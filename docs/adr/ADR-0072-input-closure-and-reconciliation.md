@@ -597,7 +597,10 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    console-script readers enter a function only when its adapter emitted
    it, so the facts are established only when no reader asked for an
    adapter symbol and the schedule facts are established; otherwise
-   `cross_file_input_unbound`.
+   `cross_file_input_unbound`. A reader's closure pins every grammar it
+   parses with, not only the contract's: the schedule reader adds
+   `tree-sitter-python`, the entry-point reader the TypeScript, Java,
+   Kotlin, Rust and YAML grammars, each exact in the ingest manifest.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.

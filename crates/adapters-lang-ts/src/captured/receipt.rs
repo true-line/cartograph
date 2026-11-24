@@ -245,6 +245,7 @@ fn lane_walk_closure(
     }
     let mut packages = vec![current.grammar_package.to_string()];
     packages.push(current.parser_package.into());
+    packages.extend(grammar.reader_packages().iter().map(|pin| pin.to_string()));
     super::InputClosureV1::new(
         current.producer,
         packages,
@@ -625,6 +626,26 @@ impl Grammar {
     /// source file. Entry points are too (AC-1534).
     pub(super) fn producer_keyed(self) -> bool {
         matches!(self, Self::Schedule | Self::EntryPoint)
+    }
+
+    /// The further grammars a lane's reader parses with, beyond the
+    /// contract's `grammar_package`, which its closures pin too: a grammar
+    /// upgrade can change the facts of identical inputs (AC-1534). The
+    /// schedule reader parses a Python entry's dispatch; the entry-point
+    /// reader parses Node, Java, Kotlin and Rust sources and skips the
+    /// files the schedule reader's jobs enter.
+    pub(super) fn reader_packages(self) -> &'static [&'static str] {
+        match self {
+            Self::Schedule => &[PYTHON_GRAMMAR_PACKAGE],
+            Self::EntryPoint => &[
+                GRAMMAR_PACKAGE,
+                JAVA_GRAMMAR_PACKAGE,
+                KOTLIN_GRAMMAR_PACKAGE,
+                RUST_GRAMMAR_PACKAGE,
+                YAML_GRAMMAR_PACKAGE,
+            ],
+            _ => &[],
+        }
     }
 
     /// The grammar a receipt citing `file` is minted under: an observation
