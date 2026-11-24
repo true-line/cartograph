@@ -26,6 +26,7 @@ pub use python::{
     mint_kotlin_file_receipts, mint_python_file_receipts, mint_rust_file_receipts,
     stage_entry_point_receipts, stage_environment_receipts, stage_lane_receipts,
     stage_pipeline_receipts, stage_schedule_receipts, stage_terraform_receipts,
+    stage_toolchain_receipts,
 };
 mod closure;
 pub use closure::{
@@ -39,10 +40,10 @@ pub use receipt::{
     Citable, ENTRY_POINT_WALK_POLICY, ENVIRONMENT_WALK_POLICY, Grammar, MAX_RECEIPT_BYTES,
     MAX_RECEIPT_OTHER_FILES, MAX_RECEIPT_RANGES, MintedHeader, MintedReceipt, PIPELINE_WALK_POLICY,
     RangeRole, Receipt, ReceiptClosure, ReceiptRange, ReceiptSourceSizes, SCHEDULE_WALK_POLICY,
-    TF_MODULE_WALK_POLICY, TS_DIRECTORY_WALK_POLICY, TS_GRAMMAR_RULE, TS_WALK_POLICY,
-    direct_lexical_closure, directory_walk_closure, entry_point_walk_closure,
+    TF_MODULE_WALK_POLICY, TOOLCHAIN_WALK_POLICY, TS_DIRECTORY_WALK_POLICY, TS_GRAMMAR_RULE,
+    TS_WALK_POLICY, direct_lexical_closure, directory_walk_closure, entry_point_walk_closure,
     environment_walk_closure, fact_match_workspace, fact_match_workspace_bytes, is_input_source,
-    pipeline_walk_closure, schedule_walk_closure, terraform_walk_closure,
+    pipeline_walk_closure, schedule_walk_closure, terraform_walk_closure, toolchain_walk_closure,
 };
 
 /// Maximum directory entries examined, including excluded entries.
@@ -1812,6 +1813,8 @@ mod schedule_walk_tests;
 mod terraform_walk_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod toolchain_walk_tests;
 #[cfg(test)]
 mod v4_lane_tests;
 #[cfg(test)]
