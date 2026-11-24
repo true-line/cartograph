@@ -727,6 +727,29 @@ impl AcquisitionChoices {
     /// Serializer-only conditional source completion. No attempt, ledger, Input
     /// or AcquisitionChoices leaves this projection; unknown hashes stay sizing
     /// values and the real publication must independently derive its authority.
+    /// AC-1445: whether an attempt on `target` leaves no required acquisition
+    /// pending. Pending slots alone decide it: an attempt clears its slot
+    /// whether the read is acquired or unavailable, and offered, blocked and
+    /// deferred entries all come from pending slots.
+    pub(super) fn attempt_leaves_none_pending(
+        &self,
+        contract: &InvestigationCompletionContract,
+        target: &InvestigationInspectionTarget,
+    ) -> bool {
+        let read = ReadIntent::Source {
+            fact: target.fact.clone(),
+            role: target.role,
+            index: target.index,
+        };
+        self.pending.len() == contract.obligations.obligations.len()
+            && self.pending.iter().any(|pending| *pending)
+            && self
+                .pending
+                .iter()
+                .zip(&contract.obligations.obligations)
+                .all(|(pending, obligation)| !*pending || read.matches(obligation))
+    }
+
     pub(super) fn source_projection(
         &self,
         contract: &InvestigationCompletionContract,

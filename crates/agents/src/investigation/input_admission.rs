@@ -423,6 +423,17 @@ impl InvestigationInput {
             action_hash: "f".repeat(64),
             reason: CapacityRefusalReason::UnprovenContribution,
         };
+        // AC-1445 (#1728): under the local finish policy every turn after the
+        // last required attempt is finish-only (the next mode is derived from
+        // attempts_complete, which never reverts), and both outcomes of this
+        // read, acquired and unavailable, record that attempt.
+        let finish_bound = policy.local_finish_generation()
+            && self.frozen_specialist()?.uses_final_read_finish_reserve()
+            && source_target.is_some_and(|target| {
+                self.acquisition_choices
+                    .as_ref()
+                    .is_some_and(|choices| choices.attempt_leaves_none_pending(&contract, target))
+            });
         // admission_reserve_basis already authenticated exact role/schema.
         let schema_role = response_schema::schema_role(&action.payload.system);
         let mut measure = |mode| -> Result<_, InvestigationError> {
@@ -537,6 +548,17 @@ impl InvestigationInput {
             }
             Ok(measurements)
         };
+        if finish_bound {
+            // AC-1445: no choice turn can follow this read, so the choice
+            // slot carries the finish-only bound. Settlement compares the
+            // real next prompt with the slot for its real mode, so a choice
+            // prompt after this read would still be held to this bound.
+            let finish_only = measure(CompletionCallMode::FinishOnly)?;
+            return Ok(AdmissionReserveMeasurements {
+                choice: finish_only,
+                finish_only,
+            });
+        }
         Ok(AdmissionReserveMeasurements {
             choice: measure(CompletionCallMode::Choice)?,
             finish_only: measure(CompletionCallMode::FinishOnly)?,

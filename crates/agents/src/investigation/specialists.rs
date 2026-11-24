@@ -373,6 +373,13 @@ impl SpecialistId {
         self.has(Capability::HostCapacityDisclosure)
     }
 
+    /// #1728 (AC-1445): a read that leaves no required acquisition pending
+    /// reserves the finish-only continuation alone, where the saved policy
+    /// makes every later turn finish-only.
+    pub fn uses_final_read_finish_reserve(self) -> bool {
+        self.has(Capability::FinalReadFinishReserve)
+    }
+
     /// #2522 (AC-1437): capacity exclusions survive later input revisions.
     pub fn uses_run_capacity_exclusions(self) -> bool {
         self.has(Capability::RunCapacityExclusions)
@@ -1599,12 +1606,17 @@ mod capacity_exclusion_identity_tests {
         assert!(
             SpecialistId::all()
                 .filter(|id| *id != role)
-                .all(|id| !id.uses_host_capacity_disclosure())
+                .all(|id| !id.uses_host_capacity_disclosure()
+                    && !id.uses_final_read_finish_reserve())
         );
+        assert!(role.uses_final_read_finish_reserve());
         assert_eq!(
             role.capabilities()
                 .iter()
-                .filter(|flag| !matches!(flag, Capability::HostCapacityDisclosure))
+                .filter(|flag| !matches!(
+                    flag,
+                    Capability::HostCapacityDisclosure | Capability::FinalReadFinishReserve
+                ))
                 .collect::<Vec<_>>(),
             old.capabilities().iter().collect::<Vec<_>>()
         );
