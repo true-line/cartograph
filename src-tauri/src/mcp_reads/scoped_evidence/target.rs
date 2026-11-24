@@ -86,6 +86,7 @@ impl ScopedEvidenceTarget {
         let primary_receipt = prefixed(&self.receipt_id, "ts-primary-v1:")
             || prefixed(&self.receipt_id, "ts-primary-v2:")
             || prefixed(&self.receipt_id, "ts-primary-v3:")
+            || prefixed(&self.receipt_id, "ts-primary-v4:")
             || prefixed(&self.receipt_id, "py-primary-v1:")
             || prefixed(&self.receipt_id, "go-primary-v1:")
             || prefixed(&self.receipt_id, "java-primary-v1:")
