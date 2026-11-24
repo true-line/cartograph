@@ -524,9 +524,13 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    *As built (AC-1522):* such a receipt may also cite the walk's captured
    resolution configs (`package.json`, tsconfig, jsconfig), so a fact such
    as a Next API route, which cites `package.json`, is receipted too; a
-   primary file is still a parsed source. Facts completion edits in place
-   (service-worker registrations) still keep none; that is the remaining
-   slice 6 work.
+   primary file is still a parsed source.
+   *As built (AC-1524):* a parsed fact completion changes in place (a
+   registered service worker's File and Symbols, marked `runtime`) loses
+   its parse receipt, which no longer matches, and is minted afresh from
+   the store like an emitted fact, binding the registering file. With
+   that, each slice 6 fact family has a receipt wherever its evidence lies
+   in captured sources and configs, within the receipt budget.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
