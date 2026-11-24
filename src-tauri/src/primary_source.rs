@@ -15,6 +15,10 @@ use std::sync::Mutex;
 
 #[path = "primary_source/pinned.rs"]
 mod pinned;
+
+#[cfg(test)]
+#[path = "primary_source/closure_tests.rs"]
+mod closure_tests;
 pub use pinned::PinnedReadError;
 
 use crate::sources::RegisteredSource;
@@ -35,7 +39,14 @@ const RECEIPTS_SCHEMA_V3: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT
 /// JSON in `payload`; rows with `header_id` set hold compact body JSON.
 const RECEIPTS_ALTER_V4: &str =
     "ALTER TABLE receipts ADD COLUMN header_id TEXT REFERENCES receipt_headers(id)";
-const RECEIPTS_SCHEMA: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id), header_id TEXT REFERENCES receipt_headers(id)) STRICT";
+const RECEIPTS_SCHEMA_V4: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id), header_id TEXT REFERENCES receipt_headers(id)) STRICT";
+/// v5 (ADR-0072 slice 5, AC-1082): the input closure a contract-v4 receipt
+/// names as established, stored once per closure id beside the receipts that
+/// cite it.
+const RECEIPTS_ALTER_V5: &str =
+    "ALTER TABLE receipts ADD COLUMN closure_id TEXT REFERENCES input_closures(id)";
+const RECEIPTS_SCHEMA: &str = "CREATE TABLE receipts (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 131072), capture_forgotten_tombstone INTEGER REFERENCES receipt_tombstones(id), header_id TEXT REFERENCES receipt_headers(id), closure_id TEXT REFERENCES input_closures(id)) STRICT";
+const CLOSURES_SCHEMA: &str = "CREATE TABLE input_closures (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) <= 2097152)) STRICT";
 const HEADERS_SCHEMA: &str = "CREATE TABLE receipt_headers (id TEXT PRIMARY KEY NOT NULL, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, header TEXT NOT NULL CHECK(length(CAST(header AS BLOB)) <= 16384)) STRICT";
 const TOMBSTONES_SCHEMA_V2: &str = "CREATE TABLE receipt_tombstones (id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, repo_key TEXT NOT NULL, capture_ids TEXT NOT NULL CHECK(length(CAST(capture_ids AS BLOB)) <= 65536), capture_ids_truncated INTEGER NOT NULL CHECK (capture_ids_truncated IN (0,1)), forgotten_at TEXT NOT NULL, receipts_reclaimed INTEGER NOT NULL CHECK (receipts_reclaimed >= 0), receipts_retained_pinned INTEGER NOT NULL CHECK (receipts_retained_pinned >= 0)) STRICT";
 /// v3 (ADR-0046 decision 5): why the tombstone's receipts were reclaimed.
@@ -47,8 +58,10 @@ const META_SCHEMA_V2: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 2)) STRICT";
 const META_SCHEMA_V3: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 3)) STRICT";
-const META_SCHEMA: &str =
+const META_SCHEMA_V4: &str =
     "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 4)) STRICT";
+const META_SCHEMA: &str =
+    "CREATE TABLE receipt_meta (version INTEGER PRIMARY KEY CHECK(version = 5)) STRICT";
 const RECEIPT_INDEXES_V3: [(&str, &str); 3] = [
     (
         "receipt_reclaims_by_tombstone",
@@ -66,13 +79,17 @@ const RECEIPT_INDEXES_V3: [(&str, &str); 3] = [
 /// Indexes that keep `receipt_storage`'s retention integrity checks linear;
 /// without them a valid store with many tombstones or headers costs a
 /// quadratic scan on every open.
-const RECEIPT_INDEXES: [(&str, &str); 4] = [
+const RECEIPT_INDEXES: [(&str, &str); 5] = [
     RECEIPT_INDEXES_V3[0],
     RECEIPT_INDEXES_V3[1],
     RECEIPT_INDEXES_V3[2],
     (
         "receipts_by_header",
         "CREATE INDEX receipts_by_header ON receipts (header_id)",
+    ),
+    (
+        "receipts_by_closure",
+        "CREATE INDEX receipts_by_closure ON receipts (closure_id) WHERE closure_id IS NOT NULL",
     ),
 ];
 
@@ -100,6 +117,20 @@ fn delete_orphan_headers(tx: &Connection) -> Result<(), String> {
         "DELETE FROM receipt_headers
          WHERE NOT EXISTS (
              SELECT 1 FROM receipts WHERE header_id = receipt_headers.id
+         )",
+        [],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+/// Delete input closures that no remaining receipt row names, so retained
+/// closures stay bounded by the receipts that cite them (AC-1082).
+fn delete_orphan_closures(tx: &Connection) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM input_closures
+         WHERE NOT EXISTS (
+             SELECT 1 FROM receipts WHERE closure_id = input_closures.id
          )",
         [],
     )
@@ -136,10 +167,20 @@ struct ReceiptHeader {
     grammar_package: String,
     parser_package: String,
     source_scope: String,
-    input_closure: String,
+    input_closure: StoredClosure,
 }
 
-/// Compact v3 receipt body stored in `receipts.payload` when `header_id` is set
+/// A receipt's `input_closure` as stored in a compact header: the legacy
+/// string of contracts v1 to v3, or the closure state of contract v4
+/// (AC-1082). Exact bytes are still proven by the rebuild round trip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredClosure {
+    Legacy(String),
+    Closure(captured::ReceiptClosure),
+}
+
+/// Compact v3 and v4 receipt body stored in `receipts.payload` when `header_id` is set
 /// (ADR-0046 decision 7):
 /// - `k`: node `fact_key.id` with `<repo_key>@<path>` removed after `<kind-prefix>:`
 ///   (stored as `"<kind-prefix>:<suffix>"`, only when re-adding `<repo_key>@<path>`
@@ -203,7 +244,7 @@ struct StrictV3WireContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_sizes: Option<captured::ReceiptSourceSizes>,
     source_scope: String,
-    input_closure: String,
+    input_closure: StoredClosure,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -263,7 +304,7 @@ fn restore_fact_id_prefix(compact: &str, repo_key: &str, path: &str) -> Option<S
 
 fn normalize_v3_receipt(receipt: &impl Citable, canonical_json: &str) -> Option<NormalizedReceipt> {
     let wire: StrictV3WireReceipt = serde_json::from_str(canonical_json).ok()?;
-    if wire.content.schema_version != 3
+    if !compact_contract(wire.content.schema_version, &wire.content.input_closure)
         || wire.receipt_id != receipt.id()
         || wire.content.source_id != *receipt.source_id()
         || wire.content.file.source_id != *receipt.source_id()
@@ -364,6 +405,15 @@ fn normalize_v3_receipt(receipt: &impl Citable, canonical_json: &str) -> Option<
     })
 }
 
+/// Contract v3 carries the legacy closure string and v4 a closure state;
+/// both store compactly (ADR-0046 decision 7, AC-1082).
+fn compact_contract(schema_version: u32, closure: &StoredClosure) -> bool {
+    matches!(
+        (schema_version, closure),
+        (3, StoredClosure::Legacy(_)) | (4, StoredClosure::Closure(_))
+    )
+}
+
 fn rebuild_normalized_receipt(
     id: &str,
     source: &str,
@@ -388,7 +438,7 @@ fn rebuild_normalized_receipt(
         return Err(storage_error("receipt header id mismatch"));
     }
     let header: ReceiptHeader = serde_json::from_str(header_json).map_err(storage_error)?;
-    if header.schema_version != 3
+    if !compact_contract(header.schema_version, &header.input_closure)
         || header.source_id.as_str() != source
         || header.file.source_id.as_str() != source
         || header.repo_key != repo
@@ -1005,9 +1055,51 @@ fn migrate_v3_to_v4(tx: &Connection) -> Result<(), String> {
         .map_err(storage_error)?;
     tx.execute_batch("DROP TABLE receipt_meta")
         .map_err(storage_error)?;
-    tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
+    tx.execute_batch(META_SCHEMA_V4).map_err(storage_error)?;
     require_one(
         tx.execute("INSERT INTO receipt_meta VALUES (4)", [])
+            .map_err(storage_error)?,
+    )
+}
+
+/// True when the store is exactly schema v4, before input closures: every
+/// row's closure state is inside its payload or header, none names a stored
+/// closure.
+fn is_v4_migration_candidate(conn: &Connection) -> Result<bool, String> {
+    for (name, ddl) in [
+        ("receipts", RECEIPTS_SCHEMA_V4),
+        ("receipt_headers", HEADERS_SCHEMA),
+        ("receipt_meta", META_SCHEMA_V4),
+    ] {
+        let exact: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 AND sql=?2)",
+                params![name, ddl],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exact {
+            return Ok(false);
+        }
+    }
+    conn.query_row(
+        "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=4),0) FROM receipt_meta",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(storage_error)
+}
+
+fn migrate_v4_to_v5(tx: &Connection) -> Result<(), String> {
+    tx.execute_batch(CLOSURES_SCHEMA).map_err(storage_error)?;
+    tx.execute_batch(RECEIPTS_ALTER_V5).map_err(storage_error)?;
+    tx.execute_batch(RECEIPT_INDEXES[4].1)
+        .map_err(storage_error)?;
+    tx.execute_batch("DROP TABLE receipt_meta")
+        .map_err(storage_error)?;
+    tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
+    require_one(
+        tx.execute("INSERT INTO receipt_meta VALUES (5)", [])
             .map_err(storage_error)?,
     )
 }
@@ -1020,7 +1112,7 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if objects != 5 + RECEIPT_INDEXES.len() as i64 {
+    if objects != 6 + RECEIPT_INDEXES.len() as i64 {
         return Err(storage_error("receipt schema objects"));
     }
     for (name, ddl) in RECEIPT_INDEXES {
@@ -1038,6 +1130,7 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
     for (name, ddl) in [
         ("receipts", RECEIPTS_SCHEMA),
         ("receipt_headers", HEADERS_SCHEMA),
+        ("input_closures", CLOSURES_SCHEMA),
         ("receipt_tombstones", TOMBSTONES_SCHEMA),
         ("receipt_reclaims", RECLAIMS_SCHEMA),
         ("receipt_meta", META_SCHEMA),
@@ -1055,7 +1148,7 @@ fn receipt_schema(conn: &Connection) -> Result<(), String> {
     }
     let valid: bool = conn
         .query_row(
-            "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=4),0) FROM receipt_meta",
+            "SELECT count(*)=1 AND coalesce(min(typeof(version)='integer' AND version=5),0) FROM receipt_meta",
             [],
             |row| row.get(0),
         )
@@ -1102,6 +1195,32 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     if invalid_headers {
         return Err(storage_error("receipt header bounds"));
     }
+    let closure_count: i64 = conn
+        .query_row("SELECT count(*) FROM input_closures", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if closure_count < 0 || closure_count > count {
+        return Err(storage_error("input closure count"));
+    }
+    // Each closure is a well-formed id owned like the receipts that name it.
+    let invalid_closures: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM input_closures WHERE typeof(id) != 'text'
+         OR length(CAST(id AS BLOB)) != 75 OR id NOT GLOB 'closure-v1:*'
+         OR trim(substr(id, 12), '0123456789abcdef') != ''
+         OR typeof(source_id) != 'text' OR NOT ((length(CAST(source_id AS BLOB)) = 36 AND source_id GLOB 'src_*'
+                  AND trim(substr(source_id, 5), '0123456789abcdef') = '')
+              OR (length(CAST(source_id AS BLOB)) = 42 AND source_id GLOB 'input/src_*'
+                  AND trim(substr(source_id, 11), '0123456789abcdef') = ''))
+         OR typeof(repo_key) != 'text' OR length(CAST(repo_key AS BLOB)) NOT BETWEEN 1 AND 256
+         OR typeof(payload) != 'text' OR length(CAST(payload AS BLOB)) NOT BETWEEN 1 AND ?1
+         OR NOT EXISTS(SELECT 1 FROM receipts WHERE receipts.closure_id = input_closures.id))",
+            [captured::MAX_CLOSURE_BYTES as i64],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if invalid_closures {
+        return Err(storage_error("input closure bounds"));
+    }
     let invalid: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM receipts WHERE typeof(id) != 'text'
@@ -1123,7 +1242,13 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
                   OR NOT EXISTS(SELECT 1 FROM receipt_headers
                                 WHERE receipt_headers.id = receipts.header_id
                                   AND receipt_headers.source_id = receipts.source_id
-                                  AND receipt_headers.repo_key = receipts.repo_key))))",
+                                  AND receipt_headers.repo_key = receipts.repo_key)))
+         OR (closure_id IS NOT NULL
+             AND (typeof(closure_id) != 'text'
+                  OR NOT EXISTS(SELECT 1 FROM input_closures
+                                WHERE input_closures.id = receipts.closure_id
+                                  AND input_closures.source_id = receipts.source_id
+                                  AND input_closures.repo_key = receipts.repo_key))))",
             [MAX_RECEIPT_BYTES as i64],
             |row| row.get(0),
         )
@@ -1134,7 +1259,8 @@ fn receipt_storage(conn: &Connection) -> Result<(u64, u64), String> {
     let bytes: i64 = conn
         .query_row(
             "SELECT (SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM receipts)
-                  + (SELECT coalesce(sum(length(CAST(header AS BLOB))),0) FROM receipt_headers)",
+                  + (SELECT coalesce(sum(length(CAST(header AS BLOB))),0) FROM receipt_headers)
+                  + (SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) FROM input_closures)",
             [],
             |row| row.get(0),
         )
@@ -1236,6 +1362,118 @@ fn encode_capture_ids(capture_ids: &[String]) -> Result<(String, i64), String> {
     }
 }
 
+/// The input closure a receipt being retained names as established.
+struct ReceiptClosureRow {
+    id: String,
+    /// Its canonical bytes' length, charged against the source's share.
+    bytes: u64,
+    /// Its canonical JSON when the store does not hold it yet.
+    new_payload: Option<String>,
+}
+
+/// Index `closures` by id after proving each is its own canonical record
+/// for `source` (AC-1082).
+fn supplied_closures<'a>(
+    source: &RegisteredSource,
+    closures: &'a [captured::InputClosureV1],
+) -> Result<std::collections::BTreeMap<&'a str, (&'a captured::InputClosureV1, String)>, String> {
+    let mut supplied = std::collections::BTreeMap::new();
+    for closure in closures {
+        let bytes = closure.canonical_bytes().map_err(storage_error)?;
+        if captured::InputClosureV1::decode(&bytes).map_err(storage_error)? != *closure
+            || closure.parameters.repo_key != source.repo_key
+        {
+            return Err(storage_error("input closure"));
+        }
+        let payload = String::from_utf8(bytes).map_err(storage_error)?;
+        supplied.insert(closure.closure_id.as_str(), (closure, payload));
+    }
+    Ok(supplied)
+}
+
+/// The closure `receipt` names as established, if any: already stored for
+/// this source, or supplied with the batch when it has no gap and does not
+/// name this receipt's own fact upstream. A receipt naming a closure
+/// neither holds is refused, never retained without it.
+fn receipt_closure(
+    tx: &Connection,
+    source: &RegisteredSource,
+    receipt: &impl Citable,
+    supplied: &std::collections::BTreeMap<&str, (&captured::InputClosureV1, String)>,
+) -> Result<Option<ReceiptClosureRow>, String> {
+    let Some(captured::ReceiptClosure::Established { closure_id }) = receipt.closure() else {
+        return Ok(None);
+    };
+    let stored: Option<(String, String, i64)> = tx
+        .query_row(
+            "SELECT source_id,repo_key,length(CAST(payload AS BLOB)) FROM input_closures WHERE id=?1",
+            [closure_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    if let Some((stored_source, stored_repo, bytes)) = stored {
+        if stored_source != source.source_id || stored_repo != source.repo_key {
+            return Err(storage_error("input closure collision"));
+        }
+        if let Some((_, payload)) = supplied.get(closure_id.as_str()) {
+            let same: bool = tx
+                .query_row(
+                    "SELECT payload = ?2 FROM input_closures WHERE id=?1",
+                    params![closure_id, payload],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !same {
+                return Err(storage_error("input closure collision"));
+            }
+        }
+        return Ok(Some(ReceiptClosureRow {
+            id: closure_id.clone(),
+            bytes: u64::try_from(bytes).map_err(storage_error)?,
+            new_payload: None,
+        }));
+    }
+    let (closure, payload) = supplied
+        .get(closure_id.as_str())
+        .ok_or_else(|| storage_error("receipt input closure missing"))?;
+    if !closure.gaps().is_empty() {
+        return Err(storage_error("receipt input closure not established"));
+    }
+    closure
+        .validate_for(receipt.fact_key())
+        .map_err(storage_error)?;
+    Ok(Some(ReceiptClosureRow {
+        id: closure_id.clone(),
+        bytes: payload.len() as u64,
+        new_payload: Some(payload.clone()),
+    }))
+}
+
+/// Store a retained receipt's new closure before the receipt row names it.
+fn insert_closure(
+    tx: &Connection,
+    source: &RegisteredSource,
+    closure: Option<&ReceiptClosureRow>,
+) -> Result<(), String> {
+    let Some(ReceiptClosureRow {
+        id,
+        new_payload: Some(payload),
+        ..
+    }) = closure
+    else {
+        return Ok(());
+    };
+    // An earlier receipt of this batch may have stored it already.
+    tx.execute(
+        "INSERT INTO input_closures (id,source_id,repo_key,payload) VALUES (?1,?2,?3,?4)
+         ON CONFLICT(id) DO NOTHING",
+        params![id, source.source_id, source.repo_key, payload],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 // The caller retains a transaction after receipt_storage validated all lengths.
 fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, String> {
     #[cfg(any(test, feature = "test-support"))]
@@ -1286,12 +1524,13 @@ impl ReceiptStore {
         if count == 0 {
             tx.execute_batch(RECEIPTS_SCHEMA).map_err(storage_error)?;
             tx.execute_batch(HEADERS_SCHEMA).map_err(storage_error)?;
+            tx.execute_batch(CLOSURES_SCHEMA).map_err(storage_error)?;
             tx.execute_batch(TOMBSTONES_SCHEMA).map_err(storage_error)?;
             tx.execute_batch(RECLAIMS_SCHEMA).map_err(storage_error)?;
             create_receipt_indexes(&tx)?;
             tx.execute_batch(META_SCHEMA).map_err(storage_error)?;
             require_one(
-                tx.execute("INSERT INTO receipt_meta VALUES (4)", [])
+                tx.execute("INSERT INTO receipt_meta VALUES (5)", [])
                     .map_err(storage_error)?,
             )?;
         } else {
@@ -1303,6 +1542,9 @@ impl ReceiptStore {
             }
             if is_v3_migration_candidate(&tx)? {
                 migrate_v3_to_v4(&tx)?;
+            }
+            if is_v4_migration_candidate(&tx)? {
+                migrate_v4_to_v5(&tx)?;
             }
         }
         receipt_storage(&tx)?;
@@ -1334,25 +1576,33 @@ impl ReceiptStore {
         receipts: &[impl Citable],
     ) -> Result<RetainedReceipts, String> {
         let share = self.capacity;
-        self.persist_within(capture, source, receipts, share)
+        self.persist_within(capture, source, receipts, &[], share)
     }
 
     /// [`Self::persist`], also leaving out each receipt that would take the
     /// batch's retained rows past `share`, the source's (count, bytes) ceiling
     /// (#725). Rows from the source's earlier recoveries still count against
     /// the store-wide bound but not against the share; nothing is evicted.
+    ///
+    /// A contract-v4 receipt whose closure is established is retained only
+    /// with that closure, in the same transaction: one of `closures` or one
+    /// the source already stored (AC-1082). A closure is charged like a
+    /// header, once, and only when a receipt that names it is retained.
     fn persist_within(
         &mut self,
         capture: &Capture,
         source: &RegisteredSource,
         receipts: &[impl Citable],
+        closures: &[captured::InputClosureV1],
         share: (u64, u64),
     ) -> Result<RetainedReceipts, String> {
+        let supplied = supplied_closures(source, closures)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let (mut count, mut bytes) = receipt_storage(&tx)?;
+        let mut charged_closures = std::collections::BTreeSet::new();
         // The batch's retained rows, each normalized header counted once
         // whether new or already stored, measured against `share`.
         let (mut source_count, mut source_bytes) = (0u64, 0u64);
@@ -1393,6 +1643,7 @@ impl ReceiptStore {
                 }
             }
             let normalized = normalize_v3_receipt(receipt, &json);
+            let closure = receipt_closure(&tx, source, receipt, &supplied)?;
             let (id, path, fact_key, fact_digest, canonical_json) = (
                 receipt.id().to_owned(),
                 receipt.file().path.clone(),
@@ -1408,9 +1659,26 @@ impl ReceiptStore {
                 )
                 .optional()
                 .map_err(storage_error)?;
+            // A closure not yet charged to this batch costs its bytes against
+            // the share; one not yet stored costs them store-wide too.
+            let (closure_id, closure_row_cost, closure_source_cost) = match &closure {
+                Some(closure) => (
+                    Some(closure.id.clone()),
+                    closure.new_payload.as_ref().map_or(0, |p| p.len() as u64),
+                    if charged_closures.contains(&closure.id) {
+                        0
+                    } else {
+                        closure.bytes
+                    },
+                ),
+                None => (None, 0, 0),
+            };
             if let Some((old_source, old_repo, old_payload, old_header_id)) = old {
                 source_count += 1;
-                source_bytes += old_payload.len() as u64;
+                source_bytes += old_payload.len() as u64 + closure_source_cost;
+                if let Some(closure_id) = &closure_id {
+                    charged_closures.insert(closure_id.clone());
+                }
                 let old_json = if let Some(header_id) = old_header_id {
                     let (header_source, header_repo, header_json): (String, String, String) = tx
                         .query_row(
@@ -1470,8 +1738,9 @@ impl ReceiptStore {
                     }
                     None => normalized.header_json.len() as u64,
                 };
-                let row_cost = normalized.body_json.len() as u64 + header_cost;
+                let row_cost = normalized.body_json.len() as u64 + header_cost + closure_row_cost;
                 let source_cost = normalized.body_json.len() as u64
+                    + closure_source_cost
                     + if charged_headers.contains(&normalized.header_id) {
                         0
                     } else {
@@ -1505,39 +1774,45 @@ impl ReceiptStore {
                 source_count += 1;
                 source_bytes += source_cost;
                 charged_headers.insert(normalized.header_id.clone());
+                insert_closure(&tx, source, closure.as_ref())?;
                 require_one(
                     tx.execute(
-                        "INSERT INTO receipts (id,source_id,repo_key,payload,header_id) VALUES (?1,?2,?3,?4,?5)",
+                        "INSERT INTO receipts (id,source_id,repo_key,payload,header_id,closure_id) VALUES (?1,?2,?3,?4,?5,?6)",
                         params![
                             id,
                             source.source_id,
                             source.repo_key,
                             normalized.body_json,
                             normalized.header_id,
+                            closure_id,
                         ],
                     )
                     .map_err(storage_error)?,
                 )?;
             } else if count + 1 > self.capacity.0
-                || bytes + canonical_json.len() as u64 > self.capacity.1
+                || bytes + canonical_json.len() as u64 + closure_row_cost > self.capacity.1
                 || source_count + 1 > share.0
-                || source_bytes + canonical_json.len() as u64 > share.1
+                || source_bytes + canonical_json.len() as u64 + closure_source_cost > share.1
             {
                 *retained.omitted.entry(path).or_default() += 1;
                 retained.omitted_facts.push((fact_key, fact_digest));
                 continue;
             } else {
                 count += 1;
-                bytes += canonical_json.len() as u64;
+                bytes += canonical_json.len() as u64 + closure_row_cost;
                 source_count += 1;
-                source_bytes += canonical_json.len() as u64;
+                source_bytes += canonical_json.len() as u64 + closure_source_cost;
+                insert_closure(&tx, source, closure.as_ref())?;
                 require_one(
                     tx.execute(
-                        "INSERT INTO receipts (id,source_id,repo_key,payload) VALUES (?1,?2,?3,?4)",
-                        params![id, source.source_id, source.repo_key, canonical_json],
+                        "INSERT INTO receipts (id,source_id,repo_key,payload,closure_id) VALUES (?1,?2,?3,?4,?5)",
+                        params![id, source.source_id, source.repo_key, canonical_json, closure_id],
                     )
                     .map_err(storage_error)?,
                 )?;
+            }
+            if let Some(closure_id) = closure_id {
+                charged_closures.insert(closure_id);
             }
             retained.ids.insert(id);
         }
@@ -1557,6 +1832,33 @@ impl ReceiptStore {
         let receipt = stored_receipt(&tx, id)?;
         tx.commit().map_err(storage_error)?;
         Ok(receipt)
+    }
+
+    /// The stored input closure `id`, decoded from its canonical bytes
+    /// (AC-1082). A stored record that is not its own canonical form, or
+    /// names another id, is invalid.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn closure(&self, id: &str) -> Result<captured::InputClosureV1, String> {
+        if !captured::is_closure_id(id) {
+            return Err(unavailable());
+        }
+        let tx = self.conn.unchecked_transaction().map_err(storage_error)?;
+        receipt_storage(&tx)?;
+        let payload: Option<String> = tx
+            .query_row(
+                "SELECT payload FROM input_closures WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let closure = captured::InputClosureV1::decode(payload.ok_or_else(unavailable)?.as_bytes())
+            .map_err(storage_error)?;
+        if closure.closure_id != id {
+            return Err(storage_error("input closure id"));
+        }
+        tx.commit().map_err(storage_error)?;
+        Ok(closure)
     }
 
     pub fn ids(&self, source: &str) -> Result<Vec<String>, String> {
@@ -1751,6 +2053,7 @@ impl ReceiptStore {
         }
         delete_orphan_tombstones(&tx)?;
         delete_orphan_headers(&tx)?;
+        delete_orphan_closures(&tx)?;
         receipt_storage(&tx)?;
         tx.commit().map_err(storage_error)?;
         Ok(reclaimed.len() as u64)
@@ -2252,7 +2555,7 @@ impl PrimarySourceStore {
             source_share(store.capacity.0, weight, total).saturating_sub(charged.0),
             source_share(store.capacity.1, weight, total).saturating_sub(charged.1),
         );
-        store.persist_within(capture, &source.owning_as(input), receipts, share)
+        store.persist_within(capture, &source.owning_as(input), receipts, &[], share)
     }
 
     /// Retain the capture and as many `receipts` as the store has room for
@@ -2283,7 +2586,7 @@ impl PrimarySourceStore {
                 source_share(store.capacity.0, weight, total),
                 source_share(store.capacity.1, weight, total),
             );
-            store.persist_within(capture, source, receipts, share)
+            store.persist_within(capture, source, receipts, &[], share)
         } else if !receipts.is_empty() {
             Err(storage_error("uncaptured receipts"))
         } else {
@@ -2558,7 +2861,7 @@ pub struct CapturedDescription {
 mod tests {
     use super::*;
 
-    fn fixture() -> (
+    pub(super) fn fixture() -> (
         tempfile::TempDir,
         RegisteredSource,
         Capture,
@@ -2718,7 +3021,7 @@ mod tests {
         for share in [(1, u64::MAX), (0, 0)] {
             let mut kept = receipts.clone();
             let (omitted, omitted_facts) = store
-                .persist_within(&capture, &source, &receipts, share)
+                .persist_within(&capture, &source, &receipts, &[], share)
                 .unwrap()
                 .keep_retained(&mut kept);
             assert_eq!(kept, receipts[..1]);
@@ -2738,7 +3041,7 @@ mod tests {
             let mut store = open(name);
             let mut kept = receipts[..1].to_vec();
             let (omitted, _) = store
-                .persist_within(&capture, &source, &receipts[..1], (u64::MAX, share))
+                .persist_within(&capture, &source, &receipts[..1], &[], (u64::MAX, share))
                 .unwrap()
                 .keep_retained(&mut kept);
             assert_eq!(kept, receipts[..retained]);
@@ -2758,7 +3061,7 @@ mod tests {
             let mut store = open(name);
             let mut kept = receipts[..2].to_vec();
             store
-                .persist_within(&capture, &source, &receipts[..2], (u64::MAX, share))
+                .persist_within(&capture, &source, &receipts[..2], &[], (u64::MAX, share))
                 .unwrap()
                 .keep_retained(&mut kept);
             assert_eq!(kept, receipts[..retained], "{name}");
@@ -2772,7 +3075,7 @@ mod tests {
             let mut kept = receipts[..2].to_vec();
             let mut store = open("first.sqlite");
             let (omitted, _) = store
-                .persist_within(&capture, &source, &receipts[..2], share)
+                .persist_within(&capture, &source, &receipts[..2], &[], share)
                 .unwrap()
                 .keep_retained(&mut kept);
             assert_eq!(kept, receipts[..retained]);
@@ -2817,7 +3120,7 @@ mod tests {
             let mut store = open(name);
             let mut kept = mixed[..batch].to_vec();
             store
-                .persist_within(&capture, &source, &mixed[..batch], share)
+                .persist_within(&capture, &source, &mixed[..batch], &[], share)
                 .unwrap()
                 .keep_retained(&mut kept);
             assert_eq!(kept, mixed[..retained], "{name}");
@@ -2925,7 +3228,7 @@ mod tests {
         for mutation in [
             "CREATE TRIGGER suppress_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(IGNORE); END",
             "CREATE INDEX unexpected_receipt_index ON receipts(source_id)",
-            "PRAGMA ignore_check_constraints=ON; UPDATE receipt_meta SET version=5",
+            "PRAGMA ignore_check_constraints=ON; UPDATE receipt_meta SET version=6",
             "DELETE FROM receipt_meta",
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -3379,7 +3682,9 @@ mod tests {
         }
     }
 
-    fn schema_objects(conn: &Connection) -> Vec<(String, String, String, Option<String>)> {
+    pub(super) fn schema_objects(
+        conn: &Connection,
+    ) -> Vec<(String, String, String, Option<String>)> {
         let mut stmt = conn
             .prepare(
                 "SELECT type, name, tbl_name, sql
@@ -3473,7 +3778,7 @@ mod tests {
         let fresh = ReceiptStore::open(&fresh_path).unwrap();
         let migrated_objects = schema_objects(&migrated.conn);
         let fresh_objects = schema_objects(&fresh.conn);
-        assert_eq!(migrated_objects.len(), 5 + RECEIPT_INDEXES.len());
+        assert_eq!(migrated_objects.len(), 6 + RECEIPT_INDEXES.len());
         assert_eq!(migrated_objects, fresh_objects);
 
         let mut migrated_rows: Vec<(String, String, String, String, i64)> = migrated
@@ -3839,6 +4144,7 @@ mod tests {
                  capture_forgotten_tombstone FROM receipts;
              DROP TABLE receipts;
              DROP TABLE receipt_headers;
+             DROP TABLE input_closures;
              {RECEIPTS_SCHEMA_V3};
              INSERT INTO receipts SELECT * FROM receipts_v2;
              DROP TABLE receipts_v2;

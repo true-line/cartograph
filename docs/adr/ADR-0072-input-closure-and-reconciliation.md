@@ -437,6 +437,12 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    with `reasons`); v1 to v3 keep the bare legacy string. A producer mints
    v4 from a freshly minted v3 TypeScript receipt with
    `Receipt::with_closure`; lane receipts stay v3.
+   *As built (AC-1082):* receipt store schema 5 adds `input_closures`
+   (closure id, owner, canonical bytes) and `receipts.closure_id`. A closure
+   is stored with the first retained receipt that names it, charged like a
+   shared header, and deleted with the last; v4 rows use the compact header
+   form, whose `input_closure` is the legacy string for v3 and the closure
+   state for v4.
 6. **TS walk closure** (directory completion). Enumeration and probe binding,
    and receipts for directory-proven facts. *Tests:* adding the target of a
    previously unresolved import changes the closure and the fact; adding an

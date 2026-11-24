@@ -62,6 +62,31 @@ fn admitted_receipt_fields(
     ))
 }
 
+/// The closure id a receipt row names; it must be exactly the closure the
+/// receipt records as established (AC-1082).
+fn stored_closure_id(conn: &Connection, id: &str) -> Result<Option<String>, PinnedReadError> {
+    let (named, closure_id): (bool, Option<String>) = conn
+        .query_row(
+            "SELECT closure_id IS NOT NULL,
+               CASE WHEN typeof(closure_id)='text' AND length(CAST(closure_id AS BLOB)) = 75 THEN closure_id END
+             FROM receipts WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1).ok().flatten())),
+        )
+        .map_err(|_| PinnedReadError::Operational)?;
+    if named && closure_id.is_none() {
+        return Err(PinnedReadError::Invalid);
+    }
+    Ok(closure_id)
+}
+
+fn established_closure(receipt: &Receipt) -> Option<String> {
+    match receipt.closure() {
+        Some(captured::ReceiptClosure::Established { closure_id }) => Some(closure_id.clone()),
+        _ => None,
+    }
+}
+
 pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, PinnedReadError> {
     // CASE projections keep malformed/oversized cells inside SQLite. They are
     // never copied into Rust Strings before admission. One statement also
@@ -142,6 +167,7 @@ pub(super) fn stored_receipt(conn: &Connection, id: &str) -> Result<Receipt, Pin
         || receipt.source_id().as_str() != source
         || receipt.repo_key() != repo
         || receipt.to_json().map_err(|_| PinnedReadError::Invalid)? != json
+        || stored_closure_id(conn, id)? != established_closure(&receipt)
     {
         return Err(PinnedReadError::Invalid);
     }
