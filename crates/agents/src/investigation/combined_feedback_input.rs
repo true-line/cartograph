@@ -76,6 +76,7 @@ impl RefusalFeedback {
                         | SpecialistId::DomainAnalystV29
                         | SpecialistId::DomainAnalystV30
                         | SpecialistId::DomainAnalystV31
+                        | SpecialistId::DomainAnalystV32
                 ) && prose::has_bare_finish_field(finish))
             {
                 emit(CombinedCorrection::RewriteSchemaPlaceholders)?;
