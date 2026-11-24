@@ -178,3 +178,14 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/windows-installer.yml
+
+  # The same installer for Windows on ARM: cross-built on x64, then installed
+  # and checked on a native ARM64 runner (#227).
+  installer-arm64:
+    name: Windows ARM64 installer
+    needs: policy
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      arch: arm64

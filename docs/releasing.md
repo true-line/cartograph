@@ -85,8 +85,9 @@ For a production release, require `isDraft: false`, `isPrerelease: false`, and
 exactly three versioned macOS `signed` assets: the app zip, the DMG and the
 dSYM zip (`Cartograph_X.Y.Z_universal_signed.dSYM.zip`, the debug symbols for
 crash symbolication). Once Windows signing is configured, also require the
-fourth asset, `Cartograph_X.Y.Z_x64_signed-setup.exe`, and check on Windows
-that `Get-AuthenticodeSignature` reports it `Valid` with a timestamp; without
+fourth and fifth assets, `Cartograph_X.Y.Z_x64_signed-setup.exe` and
+`Cartograph_X.Y.Z_arm64_signed-setup.exe`, and check on Windows that
+`Get-AuthenticodeSignature` reports each `Valid` with a timestamp; without
 the Windows secrets the release has the three macOS assets only. Then perform the manual
 Gatekeeper installation smoke test below and record the evidence on the release
 task.
@@ -166,6 +167,24 @@ assets. An `unsigned-dev` Windows build
 is never published, and a Windows failure never holds the macOS release.
 Until the three secrets are added to this repository, releases therefore
 carry macOS assets only.
+
+### Windows on ARM
+
+`windows-installer.yml` takes an `arch` input, `x64` (the default) or
+`arm64`. The ARM64 installer is cross-built on `windows-latest` for
+`aarch64-pc-windows-msvc`: the relay and app compile for that target, and the
+agent runtime injects its blob into the pinned Node `win-arm64` release. The
+pinned x64 host Node writes that blob, which carries no code cache or
+snapshot, so it is architecture independent (`CROSS_HOSTS` in
+`scripts/build-agent-runtime.mjs`). Signing is the same x64 signtool and dlib
+as the x64 installer. A second job, `verify-arm64`, then installs the
+installer silently on a native `windows-11-arm` runner, checks every
+installed app and sidecar is an ARM64 image, runs the agent runtime's ready
+line, and on the signed path requires a valid timestamped signature on each.
+`windows.yml` builds the `unsigned-dev` ARM64 installer beside the x64 one,
+and `release.yml`'s `windows-arm64` job attaches the signed one as
+`Cartograph_<version>_arm64_signed-setup.exe`. Each architecture is
+independent: one failing drops only its own installer.
 
 ## Required GitHub secrets
 

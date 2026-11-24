@@ -45,6 +45,22 @@ test('windows builds one MSVC slice named as Tauri externalBin expects (#227)', 
   const manifest = JSON.parse(readFileSync(path.join(ROOT, 'package.json')));
   assert.equal(manifest.scripts['package:windows'], 'node scripts/build-mcp-relay.mjs && node scripts/build-agent-runtime.mjs x86_64-pc-windows-msvc && tauri build --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.windows-bundle.conf.json');
 });
+test('windows builds the ARM64 slice when asked, and refuses other targets (#227)', (t) => {
+  const root = fixture(t); const calls = [];
+  const triple = 'aarch64-pc-windows-msvc';
+  const output = buildRelay({ root, platform: 'win32', env: {}, target: triple, run(command, args) {
+    calls.push([command, ...args]);
+    const built = path.join(root, 'target', triple, 'release');
+    mkdirSync(built, { recursive: true });
+    writeFileSync(path.join(built, 'cartograph-mcp.exe'), 'arm64-fixture');
+  } });
+  assert.equal(output, path.join(root, 'target', 'mcp-relay', `cartograph-mcp-${triple}.exe`));
+  assert.equal(readFileSync(output, 'utf8'), 'arm64-fixture');
+  assert.deepEqual(calls, [['cargo', 'build', '--locked', '--release', '-p', 'mcp-relay', '--bin', 'cartograph-mcp',
+    '--target', triple, '--target-dir', path.join(root, 'target')]]);
+  assert.throws(() => buildRelay({ root, platform: 'win32', env: {}, target: 'i686-pc-windows-msvc',
+    run: () => assert.fail('must not invoke compiler') }), /unsupported Windows target/u);
+});
 test('compilation and universal verification failures cannot leave a stale staged relay', (t) => {
   const root = fixture(t);
   const output = buildRelay({ root, platform: 'darwin', env: {}, run(command, args) {

@@ -14,9 +14,13 @@ export const SIGNING_INPUTS = [
   // ADR-0093: the Windows Artifact Signing service principal.
   'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
 ];
+// #227: the Windows MSVC slices the installers ship; x64 is the default.
+export const WINDOWS_TARGETS = ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
 export function buildRelay({ root = ROOT, platform = process.platform, env = process.env,
+  target: triple = WINDOWS_TARGETS[0],
   run = (command, args, options) => execFileSync(command, args, options) } = {}) {
   if (platform !== 'darwin' && platform !== 'win32') throw new Error('relay packaging requires macOS or Windows');
+  if (platform === 'win32' && !WINDOWS_TARGETS.includes(triple)) throw new Error(`unsupported Windows target ${triple}`);
   if (SIGNING_INPUTS.some((name) => Boolean(env[name]))) {
     throw new Error('signing inputs must be absent while compiling the relay');
   }
@@ -26,7 +30,7 @@ export function buildRelay({ root = ROOT, platform = process.platform, env = pro
   // #227: Windows packages one MSVC slice, named as Tauri's externalBin expects.
   const windows = platform === 'win32';
   const output = path.join(target, 'mcp-relay', windows
-    ? 'cartograph-mcp-x86_64-pc-windows-msvc.exe' : 'cartograph-mcp-universal-apple-darwin');
+    ? `cartograph-mcp-${triple}.exe` : 'cartograph-mcp-universal-apple-darwin');
   const temporary = `${output}.tmp`;
   mkdirSync(path.dirname(output), { recursive: true });
   rmSync(output, { force: true });
@@ -34,7 +38,6 @@ export function buildRelay({ root = ROOT, platform = process.platform, env = pro
   const options = { cwd: root, env, stdio: 'inherit' };
   try {
     if (windows) {
-      const triple = 'x86_64-pc-windows-msvc';
       run('cargo', ['build', '--locked', '--release', '-p', 'mcp-relay', '--bin',
         'cartograph-mcp', '--target', triple, '--target-dir', target], options);
       copyFileSync(path.join(target, triple, 'release', 'cartograph-mcp.exe'), temporary);
@@ -57,5 +60,5 @@ export function buildRelay({ root = ROOT, platform = process.platform, env = pro
   }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { buildRelay(); } catch { console.error('relay build failed'); process.exitCode = 1; }
+  try { buildRelay(process.argv[2] ? { target: process.argv[2] } : {}); } catch { console.error('relay build failed'); process.exitCode = 1; }
 }

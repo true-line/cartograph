@@ -32,7 +32,15 @@ export const TARGETS = {
   'x86_64-unknown-linux-gnu': ['linux-x64'],
   // #227: the unsigned Windows installer (.github/workflows/windows.yml).
   'x86_64-pc-windows-msvc': ['win-x64'],
+  // The ARM64 installer, cross-built on an x64 Windows runner.
+  'aarch64-pc-windows-msvc': ['win-arm64'],
 };
+/**
+ * Target triple -> other hosts that may build it. The blob carries no code
+ * cache or snapshot, so a pinned host Node of the same release writes a blob
+ * every slice reads; that host binary is verified but never shipped.
+ */
+export const CROSS_HOSTS = { 'aarch64-pc-windows-msvc': ['win-x64'] };
 
 /**
  * Removes a PE file's Authenticode certificate table: truncates the file at
@@ -146,7 +154,8 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
   const windows = target.endsWith('windows-msvc');
   // Node names its Windows release slices win-*, not win32-* (#227).
   const host = hostSlice ?? hostNodeSlice();
-  if (!slices.includes(host)) throw new Error(`target ${target} must be built on one of ${slices.join(', ')}`);
+  const hosts = [...slices, ...(CROSS_HOSTS[target] ?? [])];
+  if (!hosts.includes(host)) throw new Error(`target ${target} must be built on one of ${hosts.join(', ')}`);
   const node = pinnedNode(root);
   const runners = lockedRunners(root);
   const claudeCode = pinnedClaudeCode(root);
@@ -183,7 +192,7 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
     }
     const binaries = {};
     const licenses = [];
-    for (const slice of slices) {
+    for (const slice of slices.includes(host) ? slices : [...slices, host]) {
       const archive = path.join(work, 'cache', archiveName(node.version, slice));
       if (!existsSync(archive) || sha256(archive) !== node.sha256[slice]) {
         run('curl', ['-fsSL', '--retry', '3', '-o', archive,
@@ -202,7 +211,7 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
       if (createHash('sha256').update(licenseText(path.join(extracted, license))).digest('hex') !== node.license_sha256) {
         throw new Error(`Node ${node.version} ${slice} LICENSE does not match its pinned sha256`);
       }
-      licenses.push(path.join(extracted, license));
+      if (slices.includes(slice)) licenses.push(path.join(extracted, license));
       binaries[slice] = path.join(extracted, member);
     }
     // The blob carries no code cache or snapshot, so one blob serves every
