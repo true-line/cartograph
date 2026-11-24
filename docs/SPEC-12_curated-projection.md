@@ -57,7 +57,7 @@ Each accepted proposal gets the first state in this order that applies:
 
 | State | Condition |
 |---|---|
-| `unverified` | Not a version 2 record, a record with no evidence, or any evidence item that is not captured primary-source evidence |
+| `unverified` | Not a version 2 record, a record with no evidence, or any evidence item that is not captured primary-source evidence, unless the record's latest reconciliation is current and reconciled; or that reconciliation is `changed`, `missing`, `unverifiable` or `reconciliation_stale` (see Reconciliation below) |
 | `already-covered` | The base graph holds the exact proposed edge (source, label, target) with valid provenance, a tier other than Agentic and a confidence other than Gap. The Gap node need not exist |
 | `unresolvable` | The Gap, the source or the target is not in the current graph, or the node the record names as its Gap is no longer a Gap |
 | `stale` | No assessment was supplied or it failed operationally; the SPEC-09 graph or association comparison is not `unchanged`; a captured item is not available or was not assessed; or the assessment counts unverified items the record does not |
@@ -74,6 +74,27 @@ state.
 
 A proposal that is pending or rejected has no state and is not listed.
 
+### Reconciliation
+
+Policy v5 reads an accepted record's latest explicit reconciliation (ADR-0072
+slice 4, AC-1076). A record that was never reconciled is read as before.
+
+- A current `reconciled` result decides the record in place of the SPEC-09
+  assessment. Its evidence is read from the result, not from the staged
+  origin, so `unverified` does not apply even to a version 1 record (a record
+  with no evidence item is still `unverified`). Every later check is
+  unchanged. `source_support` counts `retained_match` items as captured and
+  `recapture_corroborated` items as `corroborated`, apart from captured
+  (R-INT-2).
+- A `changed` or `missing` result lists the record as `unverified` with the
+  reason `reconciliation_changed` or `reconciliation_missing`.
+- A `reconciliation_stale` or `unverifiable` result lists the record with
+  that reason only when the SPEC-09 assessment cannot make it eligible (not
+  a version 2 record whose every item is captured). Otherwise the assessment
+  decides, as for a record never reconciled.
+- A result read before the store moved is `reconciliation_stale` for an
+  export that reads the moved graph.
+
 ### Curated revision
 
 `revision = digest("curated-revision-v4", policy_version, graph_content_hash,
@@ -83,7 +104,8 @@ state, reason)…], [(finding_ref, review_decision, state, reason)…],
 record, draft, finding and attested lists each in identity order. Version 2
 added the section drafts of SPEC-15 (ADR-0064 decision 7). Version 3 added
 findings accepted as curated (ADR-0074 decision 6). Version 4 adds attested
-records (ADR-0090 decision 8); the policy version is `curated-policy-v4`. A rejected record enters with
+records (ADR-0090 decision 8). The policy version is `curated-policy-v5`,
+which reads reconciliations (ADR-0072 slice 4). A rejected record enters with
 its decision and no state, so any review gives a new revision; a pending
 record does not enter. The assertion-decision digest covers the rejections
 applied and the decisions that match no current assertion. Review notes,
@@ -94,7 +116,8 @@ content.
 
 Per read: `view`, `revision`, `graph_basis`. Per item and per listed record:
 `record_id`, `tier` and `confidence` as produced, `review_status`,
-`source_support` (count of captured items and of unverified items), `state`
+`source_support` (count of captured items and of unverified items, and of
+corroborated items when a reconciliation found any), `state`
 and `reason`.
 
 ## Attested context

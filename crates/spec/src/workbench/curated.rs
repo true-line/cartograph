@@ -52,8 +52,8 @@ use super::render::{Assertions, Budget, Literal, RenderLimit, Text};
 use super::{ExportMode, citation_id};
 use context_hub::curated::{
     AssertionReview, BasisComparison, BasisReport, CuratedCounts, CuratedFinding,
-    CuratedProjection, CuratedRecord, CuratedView, FindingState, FindingStateReason, RecordState,
-    ReviewDecision, StateReason,
+    CuratedProjection, CuratedRecord, CuratedView, FindingState, FindingStateReason,
+    RecordReconciliation, RecordState, ReviewDecision, StateReason,
 };
 use core_graph::{Edge, FactKey, Node};
 use serde::{Deserialize, Serialize};
@@ -308,6 +308,25 @@ fn state_name(state: RecordState) -> &'static str {
 fn reason_text(reason: StateReason) -> (&'static str, &'static str) {
     use StateReason::*;
     match reason {
+        ReconciliationChanged => (
+            "reconciliation_changed",
+            "The latest reconciliation found a cited item, candidate or the slot changed since \
+             the record was staged.",
+        ),
+        ReconciliationMissing => (
+            "reconciliation_missing",
+            "The latest reconciliation found a cited item, candidate or slot endpoint no longer \
+             recovered.",
+        ),
+        ReconciliationUnverifiable => (
+            "reconciliation_unverifiable",
+            "The latest reconciliation could not compare every cited item with the recovery.",
+        ),
+        ReconciliationStale => (
+            "reconciliation_stale",
+            "The latest reconciliation no longer describes the current recovery; reconcile the \
+             record again.",
+        ),
         LegacyRecord => (
             "legacy_record",
             "The record predates captured evidence, so nothing ties its evidence to stored \
@@ -447,6 +466,22 @@ impl fmt::Display for Basis<'_> {
         match self.0 {
             BasisReport::NotSupplied => f.write_str("no assessment supplied"),
             BasisReport::Failed => f.write_str("assessment could not be completed"),
+            BasisReport::Reconciliation(reconciliation) => match reconciliation {
+                RecordReconciliation::Reconciled {
+                    retained_match,
+                    recapture_corroborated,
+                } => write!(
+                    f,
+                    "reconciled: {retained_match} retained match, {recapture_corroborated} \
+                     recapture corroborated"
+                ),
+                RecordReconciliation::Changed => f.write_str("reconciliation found it changed"),
+                RecordReconciliation::Missing => f.write_str("reconciliation found it missing"),
+                RecordReconciliation::Unverifiable => {
+                    f.write_str("reconciliation could not compare it")
+                }
+                RecordReconciliation::Stale => f.write_str("reconciliation is out of date"),
+            },
             BasisReport::Assessed {
                 graph,
                 association,
@@ -464,6 +499,18 @@ impl fmt::Display for Basis<'_> {
     }
 }
 
+/// A corroborated count, written only when a reconciliation found one, so a
+/// record that was never reconciled reads as before.
+struct Corroborated(usize);
+impl fmt::Display for Corroborated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => Ok(()),
+            count => write!(f, "corroborated {count}, "),
+        }
+    }
+}
+
 /// The DR-4 cells every record row starts with: record id, Gap, proposed
 /// edge, tier and confidence as produced, review status, source support,
 /// basis and state.
@@ -473,7 +520,7 @@ impl fmt::Display for Fields<'_> {
         let record = self.0;
         write!(
             f,
-            "{} | {} | {} {} {} | {:?} | {:?} | {} | captured {}, unverified {} | {} | {}",
+            "{} | {} | {} {} {} | {:?} | {:?} | {} | captured {}, {}unverified {} | {} | {}",
             Literal(&record.record_id),
             Literal(&record.gap_id),
             Literal(&record.source_id),
@@ -483,6 +530,7 @@ impl fmt::Display for Fields<'_> {
             record.confidence,
             review_name(record.review_status),
             record.source_support.captured,
+            Corroborated(record.source_support.corroborated),
             record.source_support.unverified,
             Basis(&record.basis),
             state_name(record.state),

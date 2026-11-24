@@ -414,6 +414,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    state maps to its listed reason; a reconciled v1 record leaves
    `unverified`; corroborated and retained items are counted apart; the
    curated revision changes with policy v3; export and MCP agree.
+   *As built (AC-1076):* the policy is `curated-policy-v5`, since v3 and v4
+   were taken by findings and attested records. The host supplies a record's
+   reconciliation in place of the SPEC-09 assessment when it is current and
+   `reconciled`, `changed` or `missing`; a stale or unverifiable one decides
+   only a record the assessment cannot make eligible, so reconciling never
+   leaves a captured record worse off than not reconciling. A reconciled
+   record skips the SPEC-09 `stale` check, since the result already compared
+   it with the recovery the read is at. The non-matching outcomes are
+   `unverified` reasons, which keeps the state order.
 5. **Closure record and TS single-file closure** (`adapters-lang-ts`,
    receipt store schema 5, staging v3). `InputClosureV1`, receipt v4 and
    `TaskSourceBasisV3`. *Tests:* mutating every other walk file leaves the

@@ -224,3 +224,133 @@ fn v2_origins_bind_to_their_items_by_evidence_id_not_order() {
     let origin = origin_of(reordered.source_basis.as_ref().unwrap(), first).unwrap();
     assert_eq!(&origin.evidence_id, first);
 }
+
+/// The `curated.md` row of `id` in a best-effort export read now.
+fn curated_row(state: &AppState, id: &str) -> String {
+    let review = crate::curated::gather(state);
+    let bundle = crate::build_spec_bundle(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        &review,
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap();
+    let curated = bundle
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "curated")
+        .unwrap();
+    curated
+        .content
+        .lines()
+        .find(|line| line.starts_with(&format!("| {id} |")))
+        .unwrap_or_else(|| panic!("no row for {id}:\n{}", curated.content))
+        .to_owned()
+}
+
+fn accept(state: &AppState, id: &str) {
+    state
+        .proposals
+        .lock()
+        .unwrap()
+        .review(id, 0, agents::ProposalDecision::Accepted, None)
+        .unwrap();
+}
+
+// AC-1076: the curated read takes an accepted record's evidence from its
+// current reconciled result, and lists it with the reconciliation's reason
+// when the latest result did not match.
+#[test]
+fn the_curated_read_follows_the_records_reconciliation() {
+    let fixture = fixture();
+    let (state, id) = (&fixture.state, &fixture.staged.proposal_id);
+    accept(state, id);
+    // Never reconciled: the SPEC-09 assessment decides, as before.
+    let before = curated_row(state, id);
+    assert!(before.contains("| eligible |"), "{before}");
+    assert!(before.contains("graph unchanged"), "{before}");
+
+    reconcile(state, id, 7).unwrap();
+    let reconciled = curated_row(state, id);
+    assert!(reconciled.contains("| eligible |"), "{reconciled}");
+    let items = fixture.staged.basis.evidence.len();
+    assert!(
+        reconciled.contains(&format!(
+            "reconciled: {items} retained match, 0 recapture corroborated"
+        )),
+        "{reconciled}"
+    );
+
+    std::fs::write(
+        fixture.root.join("source.ts"),
+        ORIGINAL.replacen("return false;", "return !true;", 1),
+    )
+    .unwrap();
+    capture(state, &fixture.source, true);
+    reconcile(state, id, 8).unwrap();
+    let changed = curated_row(state, id);
+    assert!(changed.contains("| unverified |"), "{changed}");
+    assert!(changed.contains("reconciliation_changed"), "{changed}");
+}
+
+// AC-1076: a stale reconciliation does not decide a record the SPEC-09
+// assessment can still read; a reconciliation read before the graph moved
+// is stale for the export that reads the moved graph.
+#[test]
+fn a_stale_reconciliation_falls_back_to_the_assessment() {
+    let fixture = fixture();
+    let (state, id) = (&fixture.state, &fixture.staged.proposal_id);
+    accept(state, id);
+    reconcile(state, id, 1).unwrap();
+    let review = crate::curated::gather(state);
+    state
+        .graph
+        .lock()
+        .unwrap()
+        .put_node(&Node {
+            id: "doc:unrelated".into(),
+            label: "Document".into(),
+            props: json!({}),
+        })
+        .unwrap();
+    let moved = crate::build_spec_bundle(
+        &state.graph.lock().unwrap(),
+        &state.decisions.lock().unwrap(),
+        &review,
+        spec::ExportMode::BestEffort,
+    )
+    .unwrap();
+    let row = moved
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "curated")
+        .unwrap()
+        .content
+        .lines()
+        .find(|line| line.starts_with(&format!("| {id} |")))
+        .unwrap()
+        .to_owned();
+    assert!(row.contains("reconciliation_stale"), "{row}");
+    // Read again: the result is stale, so the assessment decides.
+    let row = curated_row(state, id);
+    assert!(!row.contains("reconciliation"), "{row}");
+    assert!(row.contains("graph changed"), "{row}");
+}
+
+// AC-1076: an MCP read's recheck sees a record reconciled again after its
+// projection read the earlier result.
+#[test]
+fn reconciling_again_after_a_read_fails_its_recheck() {
+    use crate::curated::ReviewSource;
+    let fixture = fixture();
+    let (state, id) = (&fixture.state, &fixture.staged.proposal_id);
+    accept(state, id);
+    let never = state.gather();
+    assert!(state.unchanged(&never).unwrap());
+    reconcile(state, id, 1).unwrap();
+    assert!(!state.unchanged(&never).unwrap());
+    let read = state.gather();
+    assert!(state.unchanged(&read).unwrap());
+    reconcile(state, id, 2).unwrap();
+    assert!(!state.unchanged(&read).unwrap());
+}

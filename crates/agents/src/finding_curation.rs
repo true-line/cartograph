@@ -256,6 +256,7 @@ pub fn reviewed_finding(stored: &StoredCuratedFinding) -> ReviewedFinding {
             .map(|cited| (cited.citation.clone(), cited.digest.clone()))
             .collect(),
         support: SourceSupport {
+            corroborated: 0,
             captured,
             unverified: record.cited.len() - captured,
         },

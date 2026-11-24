@@ -436,6 +436,7 @@ fn a_draft_citing_an_overlay_capability_resolves_against_the_overlay() {
         findings: Vec::new(),
         attested: Vec::new(),
         assessments: BTreeMap::new(),
+        reconciled: BTreeMap::new(),
         settled: Arc::default(),
     };
     let content_hash = spec::graph_content_hash(&nodes, &edges);

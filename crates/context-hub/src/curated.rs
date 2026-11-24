@@ -84,12 +84,13 @@ mod attested_tests;
 
 /// Version of the eligibility policy in this module. It enters the revision,
 /// so a policy change gives a new revision for unchanged inputs.
-pub const CURATED_POLICY_VERSION: &str = "curated-policy-v4";
+pub const CURATED_POLICY_VERSION: &str = "curated-policy-v5";
 
 /// Domain prefix of the curated revision. Version 2 added section drafts
 /// beside proposals (ADR-0064 decision 7); version 3 adds findings accepted
 /// as curated (ADR-0074 decision 6); version 4 adds attested records
-/// (ADR-0090 decision 8).
+/// (ADR-0090 decision 8). Policy v5 reads a record's reconciliation
+/// (ADR-0072 slice 4) without changing the revision's framing.
 pub const CURATED_REVISION_PREFIX: &str = "curated-revision-v4";
 
 /// Domain prefix of the assertion decision digest.
@@ -228,6 +229,35 @@ pub enum BasisAssessment {
     Assessed(BasisDimensions),
     /// The assessment itself failed operationally.
     Failed,
+    /// The record's latest explicit reconciliation (ADR-0072 slice 4), which
+    /// the host supplies in place of the SPEC-09 assessment when it decides
+    /// the record: a current `reconciled`, `changed` or `missing` result, or
+    /// a stale or unverifiable one for a record the assessment cannot make
+    /// eligible.
+    Reconciliation(RecordReconciliation),
+}
+
+/// A record's derived reconciliation state as the projection reads it
+/// (ADR-0072 slice 4, AC-1076).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RecordReconciliation {
+    /// The latest result is current and every item matched: the record's
+    /// evidence is read from it instead of from the staged origin.
+    Reconciled {
+        /// Captured items whose recaptured span and fact match exactly.
+        retained_match: usize,
+        /// Working-tree items whose recapture gives the same text.
+        recapture_corroborated: usize,
+    },
+    /// The latest result found a cited item, candidate or slot changed.
+    Changed,
+    /// The latest result found something missing.
+    Missing,
+    /// The latest result could not compare everything.
+    Unverifiable,
+    /// The latest result no longer describes the current recovery.
+    Stale,
 }
 
 /// A Workbench decision on one inferred assertion.
@@ -294,7 +324,9 @@ pub struct ProjectionInput<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordState {
-    /// Version 1 record, or evidence that is not all captured primary source.
+    /// Version 1 record, or evidence that is not all captured primary
+    /// source, unless a current reconciliation matched every item; or a
+    /// reconciliation that did not (ADR-0072 slice 4).
     Unverified,
     /// A base fact already holds the proposed edge, whether or not the Gap
     /// and the endpoints are still in the graph.
@@ -315,6 +347,15 @@ pub enum RecordState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateReason {
+    /// `unverified`: the latest reconciliation found the record changed.
+    ReconciliationChanged,
+    /// `unverified`: the latest reconciliation found something missing.
+    ReconciliationMissing,
+    /// `unverified`: the latest reconciliation could not compare everything.
+    ReconciliationUnverifiable,
+    /// `unverified`: the latest reconciliation no longer describes the
+    /// current recovery.
+    ReconciliationStale,
     /// `unverified`: a version 1 record.
     LegacyRecord,
     /// `unverified`: a record version this policy does not know.
@@ -364,10 +405,19 @@ pub enum StateReason {
 }
 
 /// How much of a record's evidence is captured (DR-4 `source_support`).
+/// A reconciled record's items are counted as the reconciliation found
+/// them, and a corroborated working-tree item is counted apart from a
+/// captured one (ADR-0072 slice 4, R-INT-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSupport {
-    /// Captured primary-source items.
+    /// Captured primary-source items (for a reconciled record, those whose
+    /// retained span and fact matched).
     pub captured: usize,
+    /// Working-tree items a reconciliation's recapture corroborated. Left
+    /// out of the encoding when zero, so a record that was never reconciled
+    /// reads as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corroborated: usize,
     /// Items that nothing verified.
     pub unverified: usize,
 }
@@ -381,6 +431,8 @@ pub enum BasisReport {
     NotSupplied,
     /// The assessment failed operationally.
     Failed,
+    /// The host supplied the record's reconciliation instead.
+    Reconciliation(RecordReconciliation),
     /// The assessment completed.
     Assessed {
         /// Graph comparison.
@@ -600,7 +652,28 @@ fn conflicted_gaps<'a>(accepted: &[&'a ReviewedProposal]) -> HashSet<&'a str> {
     conflicted
 }
 
-fn unverified(record: &ReviewedProposal) -> Option<StateReason> {
+/// `unverified`, read from the record's reconciliation when the host
+/// supplied one (ADR-0072 slice 4), and otherwise from its staged origin.
+fn unverified(
+    record: &ReviewedProposal,
+    assessment: Option<&BasisAssessment>,
+) -> Option<StateReason> {
+    match assessment {
+        Some(BasisAssessment::Reconciliation(reconciliation)) => match reconciliation {
+            RecordReconciliation::Reconciled { .. } if record.evidence.is_empty() => {
+                Some(StateReason::NoEvidence)
+            }
+            RecordReconciliation::Reconciled { .. } => None,
+            RecordReconciliation::Changed => Some(StateReason::ReconciliationChanged),
+            RecordReconciliation::Missing => Some(StateReason::ReconciliationMissing),
+            RecordReconciliation::Unverifiable => Some(StateReason::ReconciliationUnverifiable),
+            RecordReconciliation::Stale => Some(StateReason::ReconciliationStale),
+        },
+        _ => unverified_origin(record),
+    }
+}
+
+fn unverified_origin(record: &ReviewedProposal) -> Option<StateReason> {
     match record.schema_version {
         1 => Some(StateReason::LegacyRecord),
         CAPTURED_RECORD_VERSION if record.evidence.is_empty() => Some(StateReason::NoEvidence),
@@ -644,6 +717,12 @@ fn stale(record: &ReviewedProposal, assessment: Option<&BasisAssessment>) -> Opt
     let dimensions = match assessment {
         None => return Some(StateReason::AssessmentMissing),
         Some(BasisAssessment::Failed) => return Some(StateReason::AssessmentFailed),
+        // A current reconciliation compared the record with this recovery.
+        Some(BasisAssessment::Reconciliation(RecordReconciliation::Reconciled { .. })) => {
+            return None;
+        }
+        // Not reached: `unverified` lists every other reconciliation.
+        Some(BasisAssessment::Reconciliation(_)) => return Some(StateReason::AssessmentMismatch),
         Some(BasisAssessment::Assessed(dimensions)) => dimensions,
     };
     let graph = comparison(
@@ -702,6 +781,9 @@ fn basis_report(assessment: Option<&BasisAssessment>) -> BasisReport {
     match assessment {
         None => BasisReport::NotSupplied,
         Some(BasisAssessment::Failed) => BasisReport::Failed,
+        Some(BasisAssessment::Reconciliation(reconciliation)) => {
+            BasisReport::Reconciliation(*reconciliation)
+        }
         Some(BasisAssessment::Assessed(dimensions)) => {
             let available = dimensions
                 .evidence
@@ -719,6 +801,37 @@ fn basis_report(assessment: Option<&BasisAssessment>) -> BasisReport {
     }
 }
 
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// DR-4 `source_support`: from a reconciled result when the host supplied
+/// one, and otherwise from the staged origin.
+fn source_support(
+    record: &ReviewedProposal,
+    assessment: Option<&BasisAssessment>,
+) -> SourceSupport {
+    let total = record.evidence.len();
+    match assessment {
+        Some(BasisAssessment::Reconciliation(RecordReconciliation::Reconciled {
+            retained_match,
+            recapture_corroborated,
+        })) => SourceSupport {
+            captured: *retained_match,
+            corroborated: *recapture_corroborated,
+            unverified: total.saturating_sub(retained_match + recapture_corroborated),
+        },
+        _ => {
+            let captured = record.evidence.iter().filter(|item| item.captured).count();
+            SourceSupport {
+                captured,
+                corroborated: 0,
+                unverified: total - captured,
+            }
+        }
+    }
+}
+
 /// The first state that applies, with its reason, in the order `unverified`,
 /// `already-covered`, `unresolvable`, `stale`, `conflicted`, `eligible`.
 fn assign(
@@ -727,7 +840,7 @@ fn assign(
     graph: &GraphIndex<'_>,
     conflicted: &HashSet<&str>,
 ) -> (RecordState, StateReason) {
-    if let Some(reason) = unverified(record) {
+    if let Some(reason) = unverified(record, assessment) {
         return (RecordState::Unverified, reason);
     }
     // Before `unresolvable` and `stale`: once a lower tier resolves the slot
@@ -868,7 +981,7 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
             Some(reason),
         ));
         count(&mut counts, state);
-        let captured = record.evidence.iter().filter(|item| item.captured).count();
+        let source_support = source_support(record, assessment);
         let entry = CuratedRecord {
             record_id: record.record_id.clone(),
             gap_id: record.gap_id.clone(),
@@ -878,10 +991,7 @@ pub fn project(input: &ProjectionInput<'_>) -> Result<CuratedProjection, Project
             tier: record.tier,
             confidence: record.confidence,
             review_status: decision,
-            source_support: SourceSupport {
-                captured,
-                unverified: record.evidence.len() - captured,
-            },
+            source_support,
             basis: basis_report(assessment),
             state,
             reason,

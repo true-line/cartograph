@@ -188,6 +188,7 @@ fn eligible_record_is_an_item_with_dr4_fields() {
     assert_eq!(
         item.source_support,
         SourceSupport {
+            corroborated: 0,
             captured: 2,
             unverified: 0
         }
@@ -239,6 +240,7 @@ fn unverified_state_and_reasons() {
     assert_eq!(
         mixed.source_support,
         SourceSupport {
+            corroborated: 0,
             captured: 1,
             unverified: 1
         }
@@ -1030,4 +1032,141 @@ fn states_and_reasons_serialize_as_stable_codes() {
     assert_eq!(wire["listed"][2]["basis"]["graph"], "changed");
     let back: CuratedProjection = serde_json::from_value(wire).unwrap();
     assert_eq!(back, projection);
+}
+
+fn reconciled(retained_match: usize, recapture_corroborated: usize) -> BasisAssessment {
+    BasisAssessment::Reconciliation(RecordReconciliation::Reconciled {
+        retained_match,
+        recapture_corroborated,
+    })
+}
+
+// AC-1076: a current `reconciled` result replaces the staged origin. A
+// legacy record whose items the recapture corroborated is eligible, and its
+// corroborated items are counted apart from captured ones (R-INT-2).
+#[test]
+fn a_reconciled_legacy_record_is_eligible_with_corroborated_support() {
+    let mut legacy = record("legacy");
+    legacy.schema_version = 1;
+    legacy.evidence.iter_mut().for_each(|e| e.captured = false);
+    let mut fixture = Fixture::new(vec![legacy, record("captured")]);
+    fixture
+        .assessments
+        .insert("legacy".into(), reconciled(0, 2));
+    fixture
+        .assessments
+        .insert("captured".into(), reconciled(2, 0));
+    let projection = fixture.run();
+    assert!(projection.listed.is_empty(), "{:?}", projection.listed);
+    let support = |id: &str| {
+        let item = projection.items.iter().find(|i| i.record_id == id).unwrap();
+        (item.reason, item.source_support, item.basis)
+    };
+    assert_eq!(
+        support("legacy"),
+        (
+            StateReason::AllConditionsHold,
+            SourceSupport {
+                captured: 0,
+                corroborated: 2,
+                unverified: 0
+            },
+            BasisReport::Reconciliation(RecordReconciliation::Reconciled {
+                retained_match: 0,
+                recapture_corroborated: 2
+            })
+        )
+    );
+    assert_eq!(support("captured").1.captured, 2);
+    assert_eq!(support("captured").1.corroborated, 0);
+    // The tier and confidence are the record's own.
+    assert!(
+        projection
+            .items
+            .iter()
+            .all(|i| (i.tier, i.confidence) == (Tier::Agentic, ConfidenceTier::InferredWeak))
+    );
+}
+
+// AC-1076: every other reconciliation keeps the record listed with that
+// reason, even a version 2 record the SPEC-09 assessment would pass.
+#[test]
+fn a_reconciliation_that_did_not_match_lists_the_record_with_its_reason() {
+    let ids = ["changed", "missing", "unverifiable", "stale"];
+    let mut fixture = Fixture::new(ids.iter().map(|id| record(id)).collect());
+    for (id, reconciliation) in ids.iter().zip([
+        RecordReconciliation::Changed,
+        RecordReconciliation::Missing,
+        RecordReconciliation::Unverifiable,
+        RecordReconciliation::Stale,
+    ]) {
+        fixture.assessments.insert(
+            (*id).into(),
+            BasisAssessment::Reconciliation(reconciliation),
+        );
+    }
+    let projection = fixture.run();
+    assert!(projection.items.is_empty());
+    for (id, reason) in ids.iter().zip([
+        StateReason::ReconciliationChanged,
+        StateReason::ReconciliationMissing,
+        StateReason::ReconciliationUnverifiable,
+        StateReason::ReconciliationStale,
+    ]) {
+        assert_eq!(
+            outcome(&projection, id),
+            (RecordState::Unverified, reason),
+            "{id}"
+        );
+    }
+    assert_eq!(projection.counts.unverified, 4);
+}
+
+// AC-1076: a reconciled record still goes through every later check, and
+// one with no evidence item is never eligible.
+#[test]
+fn a_reconciled_record_keeps_every_other_check() {
+    let mut gone = record("gone");
+    gone.gap_id = "gap:gone".into();
+    let mut empty = record("empty");
+    empty.evidence.clear();
+    let mut fixture = Fixture::new(vec![gone, empty]);
+    fixture.assessments.insert("gone".into(), reconciled(2, 0));
+    fixture.assessments.insert("empty".into(), reconciled(0, 0));
+    let projection = fixture.run();
+    assert_eq!(
+        outcome(&projection, "gone"),
+        (RecordState::Unresolvable, StateReason::GapMissing)
+    );
+    assert_eq!(
+        outcome(&projection, "empty"),
+        (RecordState::Unverified, StateReason::NoEvidence)
+    );
+}
+
+// AC-1076: policy v5 gives a new revision for unchanged inputs, and a
+// record that was never reconciled reads exactly as before: its support
+// encodes without a corroborated count.
+#[test]
+fn policy_v5_changes_the_revision_and_leaves_unreconciled_records_alone() {
+    let mut fixture = Fixture::new(vec![record("r1")]);
+    let current = fixture.run();
+    fixture.policy = "curated-policy-v4".into();
+    let previous = fixture.run();
+    assert_ne!(current.revision, previous.revision);
+    assert_eq!(current.items, previous.items);
+    let encoded = serde_json::to_value(current.items[0].source_support).unwrap();
+    assert_eq!(encoded, json!({ "captured": 2, "unverified": 0 }));
+    let reconciled_support = SourceSupport {
+        captured: 0,
+        corroborated: 1,
+        unverified: 0,
+    };
+    assert_eq!(
+        serde_json::to_value(reconciled_support).unwrap(),
+        json!({ "captured": 0, "corroborated": 1, "unverified": 0 })
+    );
+    let round: BasisAssessment =
+        serde_json::from_value(serde_json::to_value(reconciled(1, 1)).unwrap()).unwrap();
+    assert_eq!(round, reconciled(1, 1));
 }

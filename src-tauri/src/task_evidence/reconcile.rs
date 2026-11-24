@@ -564,6 +564,76 @@ pub(crate) fn current_state(
     Ok(result.outcome.into())
 }
 
+/// What the curated read took from a record's results: the id of the
+/// latest result it read (`None` when there is none), and that result's
+/// read with the store revision its graph read observed, when it has one.
+pub(crate) type CuratedReconciliation = (
+    Option<String>,
+    Option<(
+        context_hub::curated::RecordReconciliation,
+        Option<core_graph::StoreRevision>,
+    )>,
+);
+
+/// The id of the record's latest result, `None` when it has none. An MCP
+/// read compares it with the one its projection read (AC-1076).
+pub(crate) fn latest_result_id(
+    store: &agents::ProposalStore,
+    proposal_id: &str,
+) -> Result<Option<String>, String> {
+    Ok(store
+        .reconciliations(proposal_id, 1)
+        .map_err(|error| error.to_string())?
+        .first()
+        .map(|latest| latest.result.result_id.clone()))
+}
+
+/// The record's latest reconciliation as the curated projection reads it
+/// (ADR-0072 slice 4, AC-1076). A record never reconciled has no read. A
+/// current `reconciled` result reports how many items matched their
+/// retained bytes and how many a recapture corroborated.
+pub(crate) fn curated_reconciliation(
+    state: &AppState,
+    proposal_id: &str,
+    shared: &mut SharedObservation,
+) -> Result<CuratedReconciliation, String> {
+    use agents::reconciliation::ItemOutcome;
+    use context_hub::curated::RecordReconciliation as Read;
+    let results = state
+        .proposals
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .reconciliations(proposal_id, 1)
+        .map_err(|error| error.to_string())?;
+    let Some(latest) = results.first() else {
+        return Ok((None, None));
+    };
+    let id = Some(latest.result.result_id.clone());
+    let staged = staged(state, proposal_id)?;
+    let read = match current_state(state, &staged, Some(latest), shared)? {
+        ReconciliationState::AwaitingReconciliation => return Ok((id, None)),
+        ReconciliationState::Reconciled => {
+            let count = |kind: fn(&ItemOutcome) -> bool| {
+                latest
+                    .result
+                    .evidence
+                    .iter()
+                    .filter(|item| kind(&item.outcome))
+                    .count()
+            };
+            Read::Reconciled {
+                retained_match: count(|o| matches!(o, ItemOutcome::RetainedMatch)),
+                recapture_corroborated: count(|o| matches!(o, ItemOutcome::RecaptureCorroborated)),
+            }
+        }
+        ReconciliationState::Changed => Read::Changed,
+        ReconciliationState::Missing => Read::Missing,
+        ReconciliationState::Unverifiable => Read::Unverifiable,
+        ReconciliationState::ReconciliationStale => Read::Stale,
+    };
+    Ok((id, Some((read, shared.revision()))))
+}
+
 /// A record's state and up to `limit` results, newest first.
 pub(crate) fn history(
     state: &AppState,
