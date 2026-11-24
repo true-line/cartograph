@@ -4608,7 +4608,7 @@ Used by:
 - serde_with_macros 3.21.0 — https://github.com/jonasbb/serde_with/
 - servo_arc 0.4.3 — https://github.com/servo/stylo
 - smallvec 1.15.2 — https://github.com/servo/rust-smallvec
-- socket2 0.6.4 — https://github.com/rust-lang/socket2
+- socket2 0.6.5 — https://github.com/rust-lang/socket2
 - stable_deref_trait 1.2.1 — https://github.com/storyyeller/stable_deref_trait
 - string_cache 0.9.0 — https://github.com/servo/string-cache
 - tempfile 3.27.0 — https://github.com/Stebalien/tempfile
