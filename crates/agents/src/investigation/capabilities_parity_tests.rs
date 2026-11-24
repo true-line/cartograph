@@ -23,7 +23,7 @@ fn table_rows_follow_enum_order_and_ids() {
 #[test]
 fn every_capability_matches_the_legacy_predicates() {
     for id in SpecialistId::all() {
-        let legacy: [(Capability, bool); 26] = [
+        let legacy: [(Capability, bool); 27] = [
             (C::CompactDisclosure, legacy_uses_compact_disclosure(id)),
             (C::TurnProgress, legacy_uses_turn_progress(id)),
             (
@@ -121,6 +121,11 @@ fn every_capability_matches_the_legacy_predicates() {
             // #1728 (AC-1444): new with @32.
             (
                 C::HostCapacityDisclosure,
+                id == SpecialistId::DomainAnalystV32,
+            ),
+            // #1728 (AC-1445): new with @32.
+            (
+                C::FinalReadFinishReserve,
                 id == SpecialistId::DomainAnalystV32,
             ),
         ];
