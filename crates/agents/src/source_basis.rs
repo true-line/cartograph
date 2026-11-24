@@ -297,11 +297,17 @@ pub(crate) fn hash(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 /// A receipt contract that records an input closure state: TypeScript v4,
-/// Terraform v2 (AC-1526) and pipeline v2 (AC-1528).
+/// Terraform v2 (AC-1526), pipeline v2 (AC-1528) and environment v2
+/// (AC-1530).
 fn closure_receipt(value: &str) -> bool {
-    ["ts-primary-v4:", "tf-primary-v2:", "pipe-primary-v2:"]
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
+    [
+        "ts-primary-v4:",
+        "tf-primary-v2:",
+        "pipe-primary-v2:",
+        "env-primary-v2:",
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix))
 }
 fn prefixed(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(hash)
@@ -320,6 +326,8 @@ fn receipt(value: &str) -> bool {
         || prefixed(value, "tf-primary-v2:")
         || prefixed(value, "pipe-primary-v1:")
         || prefixed(value, "pipe-primary-v2:")
+        || prefixed(value, "env-primary-v1:")
+        || prefixed(value, "env-primary-v2:")
 }
 impl TaskFactKey {
     fn valid(&self) -> bool {
