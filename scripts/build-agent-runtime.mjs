@@ -34,6 +34,32 @@ export const TARGETS = {
   'x86_64-pc-windows-msvc': ['win-x64'],
 };
 
+/**
+ * Removes a PE file's Authenticode certificate table: truncates the file at
+ * the table and clears its data directory entry and the header checksum.
+ * Anything that is not a PE image, or carries no certificate, is returned
+ * as is; a table that is not the file's tail cannot be removed safely.
+ */
+export function stripAuthenticode(image) {
+  if (image.length < 0x40 || image.readUInt16LE(0) !== 0x5a4d) return image;
+  const pe = image.readUInt32LE(0x3c);
+  if (pe + 24 > image.length || image.readUInt32LE(pe) !== 0x00004550) return image;
+  const optional = pe + 24;
+  const magic = image.readUInt16LE(optional);
+  if (magic !== 0x10b && magic !== 0x20b) throw new Error('unknown PE optional header');
+  // Data directory 4 is the certificate table; its address is a file offset.
+  const entry = optional + (magic === 0x20b ? 112 : 96) + 4 * 8;
+  const offset = image.readUInt32LE(entry);
+  const size = image.readUInt32LE(entry + 4);
+  if (size === 0) return image;
+  if (offset + size !== image.length) throw new Error('the Authenticode certificate table is not at the end of the image');
+  const stripped = Buffer.from(image.subarray(0, offset));
+  stripped.writeUInt32LE(0, entry);
+  stripped.writeUInt32LE(0, entry + 4);
+  stripped.writeUInt32LE(0, optional + 64);
+  return stripped;
+}
+
 /** The pinned Node release; every archive must match its recorded sha256. */
 export function pinnedNode(root = ROOT) {
   const pin = JSON.parse(readFileSync(path.join(root, 'scripts/agent-runtime-node.json'), 'utf8'));
@@ -193,6 +219,10 @@ export function buildAgentRuntime({ root = ROOT, target, env = process.env, host
       const file = path.join(work, `cartograph-agent-${slice}${windows ? '.exe' : ''}`);
       copyFileSync(binaries[slice], file);
       if (mac) run('codesign', ['--remove-signature', file], options);
+      // node.exe ships Authenticode signed. postject edits the PE after that
+      // signature, which signtool then rejects (0x800700C1), so drop it first,
+      // as `signtool remove /s` does in Node's single-executable guide (#227).
+      if (windows) writeFileSync(file, stripAuthenticode(readFileSync(file)));
       run(process.execPath, [postject, file, 'NODE_SEA_BLOB', blob, '--sentinel-fuse', SEA_FUSE,
         ...(mac ? ['--macho-segment-name', 'NODE_SEA'] : [])], options);
       return file;
