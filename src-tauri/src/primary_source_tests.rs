@@ -5421,6 +5421,86 @@ fn terraform_facts_are_parsed_from_the_capture_and_cited() {
     )));
 }
 
+// AC-1528: the pipeline reader's facts over a capture get Pipeline receipts
+// established on the reader's closure, which binds the captured workflow
+// and no other source, and each binds a fact the recovery publishes.
+#[test]
+fn pipeline_facts_are_established_on_the_reader_closure() {
+    const WORKFLOW: &str =
+        "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n";
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = directory(dir.path(), "private");
+    let root = directory(dir.path(), "mixed");
+    std::fs::write(root.join("source.ts"), STABLE_A).unwrap();
+    std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    std::fs::write(root.join(".github/workflows/ci.yml"), WORKFLOW).unwrap();
+    let state = app_state(&app_data);
+    let source = register_local_source(&state, &root).unwrap();
+    let layers = vec!["client".to_string()];
+    let input = state
+        .primary_sources
+        .prepare(&source, source.root(), &layers)
+        .unwrap();
+    let capture = input.capture.as_ref().unwrap();
+    let mut receipts = Vec::new();
+    let (extraction, _, _) = {
+        let mut caches = state.extraction_caches.lock().unwrap();
+        let cache = caches.repos.entry(source.repo_key.clone()).or_default();
+        extract_tree_with_primary(
+            source.root(),
+            &source.repo_key,
+            "workdir",
+            &layers,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+            None,
+            &[],
+            cache,
+            &[],
+            &mut |_| {},
+            Some(capture),
+            &mut receipts,
+            &mut crate::ProducerReads::default(),
+        )
+        .unwrap()
+    };
+    let pipeline: Vec<_> = receipts
+        .iter()
+        .filter(|receipt| receipt.file().path == ".github/workflows/ci.yml")
+        .collect();
+    assert!(!pipeline.is_empty());
+    let file = capture.file(".github/workflows/ci.yml").unwrap();
+    let record = pipeline[0].input_closure().expect("an established closure");
+    assert_eq!(
+        record.parameters.walk_policy,
+        adapters_lang_ts::captured::PIPELINE_WALK_POLICY
+    );
+    let bound: Vec<_> = record
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            adapters_lang_ts::captured::ClosureInput::CapturedFile { file } => Some(file),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bound, [file.reference()]);
+    let published = crate::primary_source::matching_bindings(&extraction, &receipts);
+    for minted in &pipeline {
+        assert!(
+            minted.id().starts_with("pipe-primary-v2:"),
+            "{}",
+            minted.id()
+        );
+        assert_eq!(minted.input_closure(), Some(record));
+        assert!(
+            published
+                .iter()
+                .any(|binding| binding.receipt_id == minted.id())
+        );
+    }
+}
+
 // AC-1037: a fact the Java directory join builds, a Spring endpoint composed
 // from the class and method mappings of one captured file, gets a Java
 // receipt bound to its final form and citing both mapping spans.

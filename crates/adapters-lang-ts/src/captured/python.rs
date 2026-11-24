@@ -180,29 +180,72 @@ pub fn stage_terraform_receipts(
     (nodes, edges): (&[Node], &[Edge]),
     walk: TerraformWalk,
 ) -> ReceiptStage {
-    let gap = |reason| ReceiptClosure::InputClosureNotEstablished {
-        reasons: vec![reason],
+    let closure = match walk {
+        TerraformWalk::Bound => super::terraform_walk_closure(capture, files, id.repo)
+            .map_err(|_| ClosureGapReason::LimitExceeded),
+        TerraformWalk::NotEstablished(reason) => Err(reason),
     };
-    let (state, record) = match walk {
-        TerraformWalk::Bound => match super::terraform_walk_closure(capture, files, id.repo) {
-            Ok(record) => (
-                ReceiptClosure::Established {
-                    closure_id: record.closure_id.clone(),
-                },
-                Some(Arc::new(record)),
-            ),
-            Err(_) => (gap(ClosureGapReason::LimitExceeded), None),
-        },
-        TerraformWalk::NotEstablished(reason) => (gap(reason), None),
-    };
-    stage_lane_receipts_with(
+    stage_walk_receipts(
         Grammar::Terraform,
+        closure,
         capture,
         files,
         id,
         (nodes, edges),
-        &|receipt| receipt.with_closure(state.clone(), record.clone()),
     )
+}
+
+/// Pipeline reader receipts for `files` (AC-1528): minted from the facts the
+/// reader emitted over the capture, which it reads alone, as contract-v4
+/// receipts established on the reader's closure
+/// ([`super::pipeline_walk_closure`]), or `limit_exceeded` when that
+/// closure would pass its bound. Staged as [`stage_lane_receipts`] stages
+/// them; the shared closure record is charged once.
+pub fn stage_pipeline_receipts(
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+) -> ReceiptStage {
+    let closure = super::pipeline_walk_closure(capture, files, id.repo)
+        .map_err(|_| ClosureGapReason::LimitExceeded);
+    stage_walk_receipts(
+        Grammar::Pipeline,
+        closure,
+        capture,
+        files,
+        id,
+        (nodes, edges),
+    )
+}
+
+/// Stage `grammar`'s receipts for `files`, each established on `closure`
+/// or carrying its reason.
+fn stage_walk_receipts(
+    grammar: Grammar,
+    closure: Result<super::InputClosureV1, ClosureGapReason>,
+    capture: &source_capture::Capture,
+    files: &[String],
+    id: &SourceId,
+    (nodes, edges): (&[Node], &[Edge]),
+) -> ReceiptStage {
+    let (state, record) = match closure {
+        Ok(record) => (
+            ReceiptClosure::Established {
+                closure_id: record.closure_id.clone(),
+            },
+            Some(Arc::new(record)),
+        ),
+        Err(reason) => (
+            ReceiptClosure::InputClosureNotEstablished {
+                reasons: vec![reason],
+            },
+            None,
+        ),
+    };
+    stage_lane_receipts_with(grammar, capture, files, id, (nodes, edges), &|receipt| {
+        receipt.with_closure(state.clone(), record.clone())
+    })
 }
 
 fn stage_lane_receipts_with(

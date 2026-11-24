@@ -2907,6 +2907,24 @@ fn extract_tree_packed(
             ),
             _ => ingest::pipelines::extract_dir(root, &pipeline_id).map_err(|e| e.to_string())?,
         };
+        // Over a capture the reader reads only the captured pipeline files,
+        // so its facts are established on that closure (AC-1528).
+        if let Some(capture) = primary {
+            let (published_nodes, published_edges) =
+                publication_view(&pipeline_facts.nodes, &pipeline_facts.edges);
+            let stage = adapters_lang_ts::captured::stage_pipeline_receipts(
+                capture,
+                &captured_pipelines,
+                &adapters_lang_ts::SourceId { repo, commit },
+                (&published_nodes, &published_edges),
+            );
+            admit_surviving_lane_receipts(
+                &pipeline_facts.nodes,
+                &pipeline_facts.edges,
+                stage,
+                receipts,
+            );
+        }
         layers.pipelines = LayerSummary {
             files: pipeline_facts.files,
             nodes: distinct_node_count(&pipeline_facts.nodes),

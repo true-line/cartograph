@@ -558,6 +558,14 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    A registry or remote module call makes them `remote_reference`. The
    walk reads no `*.tfvars`, so none is probed. Per-module scoping of the
    closure, so a remote call taints only its own module, is left for later.
+   *As built (AC-1528, pipeline reader):* the first declarative reader
+   gets receipts. A Pipeline receipt's grammar is chosen by the reader's
+   own selection (`ingest::pipelines::is_pipeline_file`), with contract v4
+   (`pipe-primary-v2:`, `t0.pipeline/declared-v2`) pinned to the YAML
+   grammar. Over a capture the reader reads only the captured workflow
+   files and Dockerfiles and probes no other location, so its facts share
+   one closure: the capture's `Enumeration` under `pipeline-walk-v1` and
+   each captured pipeline file.
 
 Other language adapters and plugins stay `producer_not_participating`. No
 slice switches a registration to Git-object production capture.
