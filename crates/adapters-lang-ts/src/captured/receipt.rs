@@ -136,15 +136,30 @@ fn contract(version: u32, grammar: Grammar) -> Result<Contract, CapturedError> {
             // 0.27.2 parser (AC-1029) must keep validating.
             parser_package_legacy: &["tree-sitter@0.27.0"],
         }),
+        // v3's compact form with an input closure state (ADR-0072 slice 5).
+        4 => Ok(Contract {
+            prefix: "ts-primary-v4:",
+            producer: "t0.adapter-ts/direct-lexical-v4",
+            domain: b"cartograph:ts-primary-receipt:v4\0",
+            grammar_package: GRAMMAR_PACKAGE,
+            parser_package: PARSER_PACKAGE,
+            parser_package_legacy: &[],
+        }),
         _ => Err(CapturedError::Invalid("receipt contract version")),
     }
+}
+
+/// Whether a receipt contract version uses the compact wire form, which
+/// derives every range from the header (v3 and later).
+fn compact_version(version: u32) -> bool {
+    matches!(version, 3 | 4)
 }
 
 /// Map a receipt contract version to the rule-evidence schema version it binds.
 fn rule_schema_version(version: u32) -> Result<u32, CapturedError> {
     match version {
         1 => Ok(1),
-        2 | 3 => Ok(2),
+        2..=4 => Ok(2),
         _ => Err(CapturedError::Invalid("receipt contract version")),
     }
 }
@@ -348,10 +363,52 @@ enum SourceScope {
     PrimarySourceOnly,
 }
 
+/// The closure state a receipt records: contracts v1 to v3 carry the bare
+/// legacy string, v4 a [`ReceiptClosure`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum InputClosure {
+    Legacy(LegacyClosure),
+    Closure(ReceiptClosure),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum InputClosure {
+enum LegacyClosure {
     InputClosureNotEstablished,
+}
+
+impl InputClosure {
+    const LEGACY: Self = Self::Legacy(LegacyClosure::InputClosureNotEstablished);
+}
+
+/// Whether a v4 receipt's fact has an established input closure
+/// (ADR-0072 decision 1). An established closure is not business truth and
+/// never changes tier or confidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReceiptClosure {
+    /// Not established, for these sorted, unique and nonempty reasons.
+    InputClosureNotEstablished {
+        /// Why not.
+        reasons: Vec<super::ClosureGapReason>,
+    },
+    /// The fact is a function of exactly the inputs this closure binds.
+    Established {
+        /// The persisted [`super::InputClosureV1`] id.
+        closure_id: String,
+    },
+}
+
+impl ReceiptClosure {
+    fn valid(&self) -> bool {
+        match self {
+            Self::InputClosureNotEstablished { reasons } => {
+                !reasons.is_empty() && reasons.windows(2).all(|pair| pair[0] < pair[1])
+            }
+            Self::Established { closure_id } => super::is_closure_id(closure_id),
+        }
+    }
 }
 
 /// Compact v3 wire range.
@@ -418,7 +475,7 @@ struct WireContentFull<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     source_sizes: Option<&'a ReceiptSourceSizes>,
     source_scope: SourceScope,
-    input_closure: InputClosure,
+    input_closure: &'a InputClosure,
 }
 
 #[derive(Serialize)]
@@ -441,7 +498,7 @@ struct WireContentCompact<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     source_sizes: Option<&'a ReceiptSourceSizes>,
     source_scope: SourceScope,
-    input_closure: InputClosure,
+    input_closure: &'a InputClosure,
 }
 
 /// One decoded wire range: the v1/v2 full form or the v3 compact form. Each
@@ -546,14 +603,14 @@ impl Content {
             other_files: &self.other_files,
             source_sizes: self.source_sizes.as_ref(),
             source_scope: self.source_scope,
-            input_closure: self.input_closure,
+            input_closure: &self.input_closure,
         }
     }
 }
 
 impl Serialize for Content {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.schema_version == 3 {
+        if compact_version(self.schema_version) {
             let ranges = self
                 .ranges
                 .iter()
@@ -590,7 +647,7 @@ impl Serialize for Content {
                 other_files: &self.other_files,
                 source_sizes: self.source_sizes.as_ref(),
                 source_scope: self.source_scope,
-                input_closure: self.input_closure,
+                input_closure: &self.input_closure,
             }
             .serialize(serializer)
         } else {
@@ -676,7 +733,7 @@ impl<'de> Deserialize<'de> for Content {
                     WireRange::Compact(_) => Err(()),
                 })
                 .collect::<Result<Vec<_>, ()>>(),
-            (3, Some(commit_sha))
+            (3 | 4, Some(commit_sha))
                 if expanded_range_bytes(
                     &wire.ranges,
                     &wire.repo_key,
@@ -688,7 +745,7 @@ impl<'de> Deserialize<'de> for Content {
             {
                 return Err(serde::de::Error::custom("receipt expansion exceeds limit"));
             }
-            (3, Some(commit_sha)) => wire
+            (3 | 4, Some(commit_sha)) => wire
                 .ranges
                 .into_iter()
                 .map(|range| match range {
@@ -1073,7 +1130,7 @@ fn valid_inventory_shape(ranges: &[ReceiptRange], version: u32) -> bool {
             take(RangeRole::DependencyDeclaration, index);
             index += 1;
         }
-        if matches!(version, 2 | 3) {
+        if matches!(version, 2..=4) {
             let mut definition = 0;
             let mut usage = 0;
             let mut expression = 0;
@@ -1167,7 +1224,7 @@ impl Receipt {
             other_files: other_files.into_values().collect(),
             source_sizes: None,
             source_scope: SourceScope::PrimarySourceOnly,
-            input_closure: InputClosure::InputClosureNotEstablished,
+            input_closure: InputClosure::LEGACY,
         };
         let receipt = Self {
             receipt_id: content_id(&content)?,
@@ -1268,6 +1325,38 @@ impl Receipt {
     pub fn grammar(&self) -> Grammar {
         self.content.grammar
     }
+    /// The input closure state of a v4 receipt; `None` for v1 to v3, which
+    /// never establish one.
+    pub fn closure(&self) -> Option<&ReceiptClosure> {
+        match &self.content.input_closure {
+            InputClosure::Legacy(_) => None,
+            InputClosure::Closure(closure) => Some(closure),
+        }
+    }
+
+    /// This freshly minted v3 TypeScript receipt under contract v4, with
+    /// `closure`: same fact, ranges and files, a new identity (ADR-0072
+    /// slice 5). Only a producer that bound the closure's inputs may call
+    /// it; a published receipt is never retrofitted.
+    pub fn with_closure(self, closure: ReceiptClosure) -> Result<Self, CapturedError> {
+        self.validate()?;
+        if self.content.schema_version != 3 || self.content.grammar.provenance_only() {
+            return Err(CapturedError::Invalid("receipt contract"));
+        }
+        let current = contract(4, self.content.grammar)?;
+        let mut content = self.content;
+        content.schema_version = 4;
+        content.producer_contract = current.producer.into();
+        content.grammar_package = current.grammar_package.into();
+        content.parser_package = current.parser_package.into();
+        content.input_closure = InputClosure::Closure(closure);
+        let receipt = Self {
+            receipt_id: content_id(&content)?,
+            content,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
 
     /// Bounded wire reader with fixed diagnostics, including validating serde.
     pub fn from_json(json: &str) -> Result<Self, CapturedError> {
@@ -1290,8 +1379,17 @@ impl Receipt {
         let contract = contract(content.schema_version, content.grammar)?;
         match (content.schema_version, &content.commit_sha) {
             (1 | 2, None) => {}
-            (3, Some(commit_sha)) if bounded_identity(commit_sha, MAX_ID_BYTES) => {}
+            (3 | 4, Some(commit_sha)) if bounded_identity(commit_sha, MAX_ID_BYTES) => {}
             _ => return Err(CapturedError::Invalid("receipt contract")),
+        }
+        // v1 to v3 keep their exact bytes; only v4 records a closure state.
+        let closure_ok = match (&content.input_closure, content.schema_version) {
+            (InputClosure::Legacy(_), 1..=3) => true,
+            (InputClosure::Closure(closure), 4) => closure.valid(),
+            _ => false,
+        };
+        if !closure_ok {
+            return Err(CapturedError::Invalid("receipt input closure"));
         }
         if content.source_id != content.file.source_id
             || content.producer_contract != contract.producer
@@ -1369,7 +1467,7 @@ impl Receipt {
         {
             return Err(CapturedError::Limit("receipt bytes"));
         }
-        if content.schema_version == 3
+        if compact_version(content.schema_version)
             && serde_json::to_vec(&ExpandedReceipt {
                 receipt_id: &self.receipt_id,
                 content: content.as_full_wire(None),
@@ -1528,3 +1626,5 @@ pub use workspace::{fact_match_workspace, fact_match_workspace_bytes};
 mod v2_tests;
 #[cfg(test)]
 mod v3_tests;
+#[cfg(test)]
+mod v4_tests;
