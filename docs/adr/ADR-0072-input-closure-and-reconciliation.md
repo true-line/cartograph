@@ -478,6 +478,15 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    unrelated file changes `Enumeration` and the closure ID but not the fact;
    `tsconfig` and `package.json` probes recorded as present or absent; a
    skipped symlink is named in the enumeration.
+   *As built (AC-1090):* completion still reads its resolution configs
+   (tsconfig and jsconfig, Vite and webpack configs, `package.json`) from
+   the live tree. The selection now lists them, the host retains them with
+   the TS/JS files, and a captured walk reports them bound
+   (`IncrementalStats::resolution_configs`) only when the capture's config
+   set is exactly the set read, byte for byte. A walk closure may name them
+   only then; otherwise completion-decided facts stay
+   `cross_file_input_unbound`. Its other live reads (dependency type
+   packages, Next router directories, asset files) are not bound yet.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
