@@ -520,11 +520,13 @@ traceability rows. Slices 7 and 8 are replaced by ADR-0080 and ADR-0079.
    provenance may bind other TS/JS source files of its capture, as a lane
    receipt does (AC-1039), so a call resolved through a barrel, a base
    class or an interface is receipted on its caller's walk closure. A
-   rule's inventory stays single-file. Facts that also cite a config
-   (`package.json` for Next API routes and package `mod:` nodes) still
-   have none, since a receipt file must be a parsed source, and facts
-   completion edits in place (service-worker registrations) still keep
-   none. Those two are the remaining slice 6 work.
+   rule's inventory stays single-file.
+   *As built (AC-1522):* such a receipt may also cite the walk's captured
+   resolution configs (`package.json`, tsconfig, jsconfig), so a fact such
+   as a Next API route, which cites `package.json`, is receipted too; a
+   primary file is still a parsed source. Facts completion edits in place
+   (service-worker registrations) still keep none; that is the remaining
+   slice 6 work.
 7. **External evidence identity** (`source-capture` manifest v2, registry,
    ingest manifest). Registration kind, capture kind, T1 provenance, graph
    schema bump. *Tests:* identities distinct across media, repository and
