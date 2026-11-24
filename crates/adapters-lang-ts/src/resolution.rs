@@ -169,7 +169,7 @@ impl ResolutionIndex {
     /// and load every tsconfig/jsconfig scope and named workspace package.
     /// Deterministic: entries sorted, config order stable.
     pub(crate) fn load(root: &Path) -> std::io::Result<Self> {
-        Ok(Self::load_reading(root)?.0)
+        Ok(Self::walk(root, false)?.0)
     }
 
     /// [`Self::load`], plus every config it read with the exact bytes read,
@@ -177,6 +177,12 @@ impl ResolutionIndex {
     /// left out, as the index leaves it out; one that is not UTF-8 is read
     /// and contributes nothing.
     pub(crate) fn load_reading(root: &Path) -> std::io::Result<(Self, Vec<ConfigRead>)> {
+        Self::walk(root, true)
+    }
+
+    /// Load the index, keeping each config's bytes only when `keep`, so an
+    /// ordinary load holds one config at a time.
+    fn walk(root: &Path, keep: bool) -> std::io::Result<(Self, Vec<ConfigRead>)> {
         let mut index = Self::default();
         let walked = source_walk::files(
             root,
@@ -191,11 +197,11 @@ impl ResolutionIndex {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
-            reads.push((rel, bytes));
-        }
-        for (rel, bytes) in &reads {
-            if let Ok(text) = std::str::from_utf8(bytes) {
-                index.add(rel, text);
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                index.add(&rel, text);
+            }
+            if keep {
+                reads.push((rel, bytes));
             }
         }
         index.sort();
