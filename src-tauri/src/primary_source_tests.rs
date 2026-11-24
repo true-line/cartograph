@@ -5288,6 +5288,8 @@ fn shipped_bundle_maps_are_read_from_the_capture() {
 // recovered; the Terraform pass parses the retained bytes, not the checkout,
 // and each surviving Terraform fact whose provenance lies in one captured file
 // gets a provenance-only Terraform receipt that reads back its captured span.
+// AC-1526: a walk that read only captured `.tf` files establishes them all
+// on one closure: the capture's enumeration and each captured `.tf` file.
 #[test]
 fn terraform_facts_are_parsed_from_the_capture_and_cited() {
     const TERRAFORM: &str = "resource \"aws_sqs_queue\" \"handler\" {}\n";
@@ -5359,8 +5361,31 @@ fn terraform_facts_are_parsed_from_the_capture_and_cited() {
         .collect();
     assert!(!terraform.is_empty());
     let file = capture.file("main.tf").unwrap();
+    let record = terraform[0]
+        .input_closure()
+        .expect("an established closure");
+    assert_eq!(
+        record.parameters.walk_policy,
+        adapters_lang_ts::captured::TF_MODULE_WALK_POLICY
+    );
+    assert!(
+        matches!(
+            record.inputs.as_slice(),
+            [
+                adapters_lang_ts::captured::ClosureInput::CapturedFile { file: bound },
+                adapters_lang_ts::captured::ClosureInput::Enumeration { capture_id, .. },
+            ] if bound == file.reference() && capture_id == capture.id()
+        ) || matches!(
+            record.inputs.as_slice(),
+            [
+                adapters_lang_ts::captured::ClosureInput::Enumeration { capture_id, .. },
+                adapters_lang_ts::captured::ClosureInput::CapturedFile { file: bound },
+            ] if bound == file.reference() && capture_id == capture.id()
+        )
+    );
     for minted in &terraform {
-        assert!(minted.id().starts_with("tf-primary-v1:"), "{}", minted.id());
+        assert!(minted.id().starts_with("tf-primary-v2:"), "{}", minted.id());
+        assert_eq!(minted.input_closure(), Some(record));
         let receipt = minted.to_receipt().unwrap();
         assert_eq!(
             receipt.grammar(),
