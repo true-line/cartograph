@@ -920,7 +920,7 @@ test('scheduled real-repository lanes stay off pull requests and share one Mac s
   const jobs = Object.fromEntries(
     workflow.split(/^jobs:\n/mu)[1].split(/\n(?= {2}[a-z][\w-]*:\n)/u).map((block) => [block.match(/^ {2}([\w-]+):/u)[1], block]),
   );
-  assert.deepEqual(Object.keys(jobs), ['policy', 'release-tags', 'macos-tests', 'simplelogin-showcase', 'scale-showcase']);
+  assert.deepEqual(Object.keys(jobs), ['policy', 'release-tags', 'macos-tests', 'windows-determinism', 'graph-parity', 'simplelogin-showcase', 'scale-showcase']);
   for (const name of ['macos-tests', 'simplelogin-showcase', 'scale-showcase']) {
     const job = jobs[name];
     assert.match(job, /^ {4}runs-on: \[self-hosted, macOS, ARM64\]$/mu, name);
@@ -935,6 +935,7 @@ test('scheduled real-repository lanes stay off pull requests and share one Mac s
   for (const [name, title] of [
     ['release-tags', 'Scheduled: changelog versions without a release tag'],
     ['macos-tests', 'Scheduled: macOS Rust tests or determinism failing'],
+    ['graph-parity', 'Scheduled: graph hash differs between Windows and macOS'],
     ['simplelogin-showcase', 'Scheduled: SimpleLogin showcase below its thresholds'],
     ['scale-showcase', 'Scheduled: scale showcase below its thresholds'],
   ]) {
@@ -946,8 +947,30 @@ test('scheduled real-repository lanes stay off pull requests and share one Mac s
   assert.ok(mac.includes('cargo test --locked --workspace --exclude app'));
   assert.ok(mac.includes('node scripts/rust-test-shard.mjs "$shard/4" -- --locked -p app --lib'));
   // #1812: the ignored determinism test, exactly, at the pinned commit.
-  assert.match(mac, /DETERMINISM_COMMIT: [0-9a-f]{40}\n/u);
-  assert.ok(mac.includes('-- --ignored --exact \\\n            registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash'));
+  // One pin for the whole workflow, so every platform ingests the same tree.
+  assert.match(workflow.split(/^jobs:\n/mu)[0], /^env:\n(?: {2}#.*\n)+ {2}DETERMINISM_COMMIT: [0-9a-f]{40}\n/mu);
+  assert.equal(workflow.match(/DETERMINISM_COMMIT: [0-9a-f]{40}/gu).length, 1);
+  const determinism = '-- --ignored --exact \\\n            registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash';
+  assert.ok(mac.includes(determinism));
+  // #227 (AC-1711): Windows runs the same test at the same commits on a
+  // hosted runner, with the pin checked out byte for byte, and both
+  // platforms hand their record to the comparison.
+  const windows = jobs['windows-determinism'];
+  assert.match(windows, /^ {4}runs-on: windows-latest$/mu);
+  assert.match(windows, /^ {4}if: github\.event\.schedule == '17 6 \* \* \*' \|\| inputs\.lane == 'macos-tests'$/mu);
+  assert.ok(windows.includes(determinism));
+  assert.ok(windows.includes('git -c core.autocrlf=false -c core.eol=lf worktree add --detach "$tree" "$DETERMINISM_COMMIT"'));
+  assert.doesNotMatch(windows, /issues: write/u);
+  for (const [job, platform] of [[mac, 'macos'], [windows, 'windows']]) {
+    assert.ok(job.includes('CARTOGRAPH_DETERMINISM_RECORD: ${{ runner.temp }}/graph-record\n'), platform);
+    assert.ok(job.includes(`name: graph-record-${platform}\n          path: \${{ runner.temp }}/graph-record\n`), platform);
+  }
+  const parity = jobs['graph-parity'];
+  assert.match(parity, /^ {4}needs: \[policy, macos-tests, windows-determinism\]$/mu);
+  // It still runs when a platform failed, and then fails for the missing record.
+  assert.match(parity, /^ {4}if: \$\{\{ !cancelled\(\) && needs\.policy\.result == 'success' && \(github\.event\.schedule == '17 6 \* \* \*' \|\| inputs\.lane == 'macos-tests'\) \}\}$/mu);
+  assert.match(parity, /^ {4}runs-on: ubuntu-latest$/mu);
+  assert.ok(parity.includes('--record "macOS=$RUNNER_TEMP/records/graph-record-macos" \\\n            --record "Windows=$RUNNER_TEMP/records/graph-record-windows"'));
   assert.ok(jobs['simplelogin-showcase'].includes('node scripts/showcase-watch.mjs simplelogin'));
   assert.ok(jobs['scale-showcase'].includes('node scripts/showcase-watch.mjs scale'));
   assert.ok(jobs['release-tags'].includes('node scripts/release-tags.mjs --window-hours 3'));

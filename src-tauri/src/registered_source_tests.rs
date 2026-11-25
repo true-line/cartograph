@@ -4195,6 +4195,88 @@ fn pinned_repository_reingest_yields_identical_graph_hash() {
     if let Some(difference) = ingest_difference(&first, &ingest(1)) {
         panic!("worker count changed the graph: {difference}");
     }
+    // AC-1711 (#227): the result leaves the machine as a record, so a run on
+    // another platform at the same commits can be compared with this one.
+    if let Ok(directory) = std::env::var("CARTOGRAPH_DETERMINISM_RECORD") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("graph-hash.json"),
+            pinned_ingest_record(&commit, &first),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("facts.tsv"),
+            pinned_fact_digests(&first.facts),
+        )
+        .unwrap();
+    }
+}
+
+// AC-1711: what one platform records about the pinned ingest. It names no
+// path, so two platforms that agree write the same hashes and counts.
+fn pinned_ingest_record(commit: &str, ingest: &PinnedIngest) -> String {
+    let record = serde_json::json!({
+        "pinned_commit": commit,
+        "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        "graph_hash": ingest.graph_hash,
+        "recorded_hash": ingest.recorded_hash,
+        "nodes": ingest.nodes,
+        "edges": ingest.edges,
+    });
+    format!("{}\n", serde_json::to_string_pretty(&record).unwrap())
+}
+
+// AC-1711: one line per fact, in identity order: the identity key, a tab and
+// the SHA-256 of the serialized fact. Small enough to keep with a CI run, and
+// enough for scripts/graph-parity.mjs to name the first fact that differs.
+fn pinned_fact_digests(facts: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    facts
+        .iter()
+        .map(|(key, body)| {
+            let digest = Sha256::digest(body.as_bytes());
+            let hex = digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("{}\t{hex}\n", key.replace(['\t', '\n'], " "))
+        })
+        .collect()
+}
+
+// AC-1711 (#227): the record carries both hashes and the counts and no path;
+// the digest list is one line per fact and changes with a fact's content.
+#[test]
+fn pinned_ingest_record_is_comparable_across_platforms() {
+    let fact = |key: &str, body: &str| (key.to_owned(), body.to_owned());
+    let ingest = PinnedIngest {
+        graph_hash: "aa".into(),
+        recorded_hash: "bb".into(),
+        identities: Vec::new(),
+        facts: vec![fact("edge a -[CALLS]-> b", "1"), fact("node a", "2")],
+        nodes: 1,
+        edges: 1,
+    };
+    let record: serde_json::Value =
+        serde_json::from_str(&pinned_ingest_record("abc", &ingest)).unwrap();
+    assert_eq!(record["pinned_commit"], "abc");
+    assert_eq!(record["graph_hash"], "aa");
+    assert_eq!(record["recorded_hash"], "bb");
+    assert_eq!(record["nodes"], 1);
+    assert_eq!(record["edges"], 1);
+    assert_eq!(
+        record["platform"],
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    );
+    let digests = pinned_fact_digests(&ingest.facts);
+    let lines = digests.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("edge a -[CALLS]-> b\t"));
+    assert_eq!(lines[0].split('\t').nth(1).unwrap().len(), 64);
+    let changed = pinned_fact_digests(&[fact("edge a -[CALLS]-> b", "9"), fact("node a", "2")]);
+    assert_ne!(changed.lines().next(), digests.lines().next());
+    assert_eq!(changed.lines().nth(1), digests.lines().nth(1));
 }
 
 // What one ingest of the pinned checkout yields, for comparison.
