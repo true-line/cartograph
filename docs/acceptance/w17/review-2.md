@@ -3,7 +3,8 @@
 - Reviewer: Claude (agent session for #1752, 2026-11-25). The reviewer wrote
   none of the code that compiled this bundle and accepted no draft. The
   reviewer did run the export: the unmodified showcase harness, which takes
-  no choice that changes the content.
+  no choice that changes the content. **This review was not blind**: see
+  "Limits of this review".
 - Date: 2026-11-25
 - Cartograph: `main` at `d8058a1` (0.80.0)
 - Bundle as-of, copied from `bundle-manifest.md`:
@@ -66,8 +67,8 @@ Chosen from D1 before the fact index was opened.
 
 ## Question 17: entry points
 
-The reviewer's list from the bundle, made before opening
-`entry-points.md`: HTTP requests (426 endpoints and "Serve HTTP requests
+The reviewer's list from the bundle (made after `entry-points.md` had
+already been read, so not blind): HTTP requests (426 endpoints and "Serve HTTP requests
 (container image)"), mail received over SMTP, scheduled jobs (two crontab
 files), the job runner loop, database notifications, the monitoring loop,
 operator commands (two sets) and the operator shell.
@@ -124,7 +125,18 @@ separate rows.
 
 ## Limits of this review
 
-The reviewer ran the export and is an agent, not an engineer about to
-rebuild the system. The sample for questions 4 and 18 is the alias
-lifecycle; areas outside it were read for the checklist but not probed
-against an expected set.
+- **Not blind.** The README asks that the reviewer receive the export and
+  nothing else, and open the held-out lists only after the rest is
+  answered. Here the reviewer ran the export, so had the source checkout
+  and this repository, and read `entry-points.md` and
+  `../w13/expected.json` before finishing questions 1 to 16. The source was
+  opened only to check the five spans of question 14. Questions 17 and 18
+  were therefore scored knowing what to look for: each expected statement
+  was searched for in the bundle and its row read. The counts are what the
+  bundle states; they are not evidence that a reader who did not know the
+  expected set would have found each one.
+- A blind review by someone given only the export is still owed for the
+  bundle made after drafting (`review-3.md`).
+- The reviewer is an agent, not an engineer about to rebuild the system.
+- The sample for questions 4 and 18 is the alias lifecycle; areas outside
+  it were read for the checklist but not probed against an expected set.

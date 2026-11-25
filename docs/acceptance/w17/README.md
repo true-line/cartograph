@@ -14,7 +14,8 @@ export from `main` at `d8058a1`: still no drafted section, so again a
 baseline of the deterministic tiers, and **not sufficient**. Only question
 1 is silent (§1.1 is not drafted), and one of five sampled citations does
 not show its statement. The entry points (8 of 8) and the rebuild probe
-(26 of 26 stated) pass.
+(26 of 26 stated) pass. The reviewer ran the export and had read the
+held-out lists, so this review was not blind.
 
 The review of a bundle made after drafting is still owed, and is committed
 here as `review-3.md`, whatever its result.
