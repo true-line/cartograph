@@ -4,6 +4,9 @@
 # updated by scripts/scheduled-issue.mjs when the lane fails and closed when
 # it passes again.
 #
+# The daily run also ingests one pinned checkout on Windows and on macOS at
+# the same Cartograph commit and compares the whole-graph hashes (#227).
+#
 # The macOS lanes run on the organisation's self-hosted Mac runners, which
 # also package releases. This workflow has no pull_request trigger, so fork
 # code never reaches them, and every Mac job shares one concurrency group so
@@ -35,6 +38,14 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # The determinism pin: Cartograph's own tree at the v0.69.0 cut, where
+  # the check first passed (32,502 nodes, 58,430 edges). Moving it is a
+  # reviewed change, as the result is compared at this commit. The macOS
+  # and Windows determinism jobs ingest the same pin, so their graph hashes
+  # can be compared (#227).
+  DETERMINISM_COMMIT: b0a139c2bb11a0d1310f3e214e5fadc90b5702d1
 
 jobs:
   policy:
@@ -116,10 +127,6 @@ jobs:
       issues: write
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      # The determinism pin: Cartograph's own tree at the v0.69.0 cut, where
-      # the check first passed (32,502 nodes, 58,430 edges). Moving it is a
-      # reviewed change, as the result is compared at this commit.
-      DETERMINISM_COMMIT: b0a139c2bb11a0d1310f3e214e5fadc90b5702d1
     steps:
       - name: Checkout main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -188,11 +195,23 @@ jobs:
         env:
           CARTOGRAPH_DETERMINISM_ROOT: ${{ steps.pin.outputs.tree }}
           CARTOGRAPH_DETERMINISM_COMMIT: ${{ env.DETERMINISM_COMMIT }}
+          # AC-1711: the hashes and fact digests the graph-parity job compares.
+          CARTOGRAPH_DETERMINISM_RECORD: ${{ runner.temp }}/graph-record
         run: |
           set -o pipefail
+          rm -rf "$RUNNER_TEMP/graph-record"
           cargo test --locked -p app --lib -- --ignored --exact \
             registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash --nocapture \
             2>&1 | tee "$RUNNER_TEMP/determinism.log"
+
+      - name: Upload the graph record
+        if: ${{ !cancelled() && steps.determinism.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: graph-record-macos
+          path: ${{ runner.temp }}/graph-record
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Remove the determinism worktree
         if: always()
@@ -231,6 +250,150 @@ jobs:
       - name: Fail on any failed part
         env:
           STATUS: ${{ steps.summary.outputs.status }}
+        run: test "$STATUS" = 0
+
+  # #227 (AC-1711): the same determinism check on Windows, at the same
+  # Cartograph commit and the same pin as the macOS lane, so the two graph
+  # hashes can be compared. Only the app's core test group is built.
+  windows-determinism:
+    name: Windows determinism
+    needs: policy
+    if: github.event.schedule == '17 6 * * *' || inputs.lane == 'macos-tests'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      APP_TEST_GROUP: core
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        shell: pwsh
+        run: |
+          $configuration = Get-Content rust-toolchain.toml -Raw
+          $channel = [regex]::Match($configuration, '(?m)^channel\s*=\s*"(\d+\.\d+\.\d+)"\s*$')
+          if (-not $channel.Success) { throw 'Expected a pinned Rust release in rust-toolchain.toml' }
+          "channel=$($channel.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+      - name: Install pinned Rust toolchain
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        with:
+          task: Install pinned Windows Rust toolchain
+          executable: rustup.exe
+          arguments-json: '["toolchain","install","${{ steps.toolchain.outputs.channel }}","--profile","minimal"]'
+          timeout-seconds: '300'
+
+      # cache-bin off for the reason ci.yml's Windows job ownership gives.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-determinism
+          cache-bin: "false"
+
+      - name: Keep test temporary files in the job's temp directory
+        shell: pwsh
+        run: |
+          $temp = Join-Path $env:RUNNER_TEMP 'tests'
+          New-Item -ItemType Directory -Force -Path $temp | Out-Null
+          "TMP=$temp" >> $env:GITHUB_ENV
+          "TEMP=$temp" >> $env:GITHUB_ENV
+
+      - name: Placeholder frontend dist
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path ui/dist | Out-Null
+
+      # The pin predates .gitattributes, and Git for Windows would rewrite
+      # its text files to CRLF; the bytes ingested must be the committed ones.
+      - name: Check out the determinism pin
+        id: pin
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin "$DETERMINISM_COMMIT"
+          tree="$RUNNER_TEMP/determinism-tree"
+          git -c core.autocrlf=false -c core.eol=lf worktree add --detach "$tree" "$DETERMINISM_COMMIT"
+          test -z "$(git -C "$tree" -c core.autocrlf=false status --porcelain)"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Real-repository determinism
+        shell: bash
+        env:
+          CARTOGRAPH_DETERMINISM_ROOT: ${{ steps.pin.outputs.tree }}
+          CARTOGRAPH_DETERMINISM_COMMIT: ${{ env.DETERMINISM_COMMIT }}
+          CARTOGRAPH_DETERMINISM_RECORD: ${{ runner.temp }}/graph-record
+        run: |
+          cargo test --locked -p app --lib -- --ignored --exact \
+            registered_source_tests::pinned_repository_reingest_yields_identical_graph_hash --nocapture
+
+      - name: Upload the graph record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: graph-record-windows
+          path: ${{ runner.temp }}/graph-record
+          retention-days: 30
+          if-no-files-found: error
+
+  # #227 (AC-1711): one Cartograph commit, one pinned checkout, two
+  # platforms: the whole-graph content hashes must be equal. A difference
+  # names the first differing fact; a platform that recorded nothing fails.
+  graph-parity:
+    name: Graph hash on Windows and macOS
+    needs: [macos-tests, windows-determinism]
+    if: ${{ !cancelled() && (github.event.schedule == '17 6 * * *' || inputs.lane == 'macos-tests') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # A platform whose determinism step failed uploaded nothing; the
+      # comparison then reports that platform as having recorded nothing.
+      - name: Download the graph records
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: graph-record-*
+          path: ${{ runner.temp }}/records
+
+      - name: Compare the graph hashes
+        id: check
+        run: |
+          set +e
+          node scripts/graph-parity.mjs \
+            --record "macOS=$RUNNER_TEMP/records/graph-record-macos" \
+            --record "Windows=$RUNNER_TEMP/records/graph-record-windows" \
+            --report "$RUNNER_TEMP/report.md" --status-output "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Track the result in an issue
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.check.outputs.status }}
+        run: |
+          test -s "$RUNNER_TEMP/report.md" || echo "The graph hash comparison did not produce a report." > "$RUNNER_TEMP/report.md"
+          mode=close
+          [ "$STATUS" = 0 ] || mode=open
+          node scripts/scheduled-issue.mjs "$mode" --title 'Scheduled: graph hash differs between Windows and macOS' --body-file "$RUNNER_TEMP/report.md"
+
+      - name: Fail on a difference
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
         run: test "$STATUS" = 0
 
   # #1768: the pinned SimpleLogin showcase with a release build, compared with
