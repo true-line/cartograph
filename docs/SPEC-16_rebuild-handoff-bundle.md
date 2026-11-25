@@ -219,24 +219,33 @@ and 11 absent, none of the absent in a gap row. Two of eight entry points
 are in the bundle. Mail forwarding, the system's main job, is in no
 capability and no gap row. Questions 17 and 18, the floor on
 questions 3 to 5 and the reading of "Not drafted" as silent were added
-because of that review. The review after drafting is still owed.
+because of that review.
+
+**Review 2** ([`review-2.md`](acceptance/w17/review-2.md), 2026-11-25) took
+the same kind of export from `main` at `d8058a1`, still with no drafted
+section. Result: not sufficient. Question 1 is silent, because §1.1 is not
+drafted, and one of the five sampled citations (a rate limit in D1) resolves
+to a span that does not show the limit. Questions 4, 8 and 15 now pass,
+all eight held-out entry points are in the bundle, and the probe finds 26
+of 26 expected statements stated. The reviewer ran the export and had read
+the held-out lists, so the review was not blind. The review after drafting,
+by someone given only the export, is still owed.
 
 ## Open items
 
-- Capabilities are derived from HTTP controllers. Work that enters another
-  way (mail received, a job or queue worker, an event listener, a command)
-  is under no capability, and nothing records the omission as a gap
-  (review 1, finding 2). Scheduled jobs are recovered as flows and are
-  under no capability either. Tracked in #1997.
-- A recovered rule is a rejection exit. What a successful operation
-  returns and changes, limits set by a decorator or by configuration, and
-  defaults are not recovered as rules and have no gap row (review 1,
-  finding 4). Tracked in #1998.
-- The frames of D1 §1.2, §1.3 and §1.5 print guard names, controller names
-  and source expressions. Rule 3 is met only where accepted prose restates
-  them. Tracked in #1999.
-- Request inputs and response shapes are recovered and are in no exported
-  document, so question 8 is silent on them. Tracked in #1998.
+- Review 1's four open items were found closed by review 2: work that
+  enters other than by HTTP (mail received, scheduled jobs, the job runner,
+  database notifications, commands) is under capabilities (#1997); what a
+  successful operation takes, returns and changes, rate limits and
+  configuration defaults are stated (#1998); D1 §1.2, §1.3 and §1.5 state
+  callers and rules in domain terms, with the source expression kept
+  beside each as evidence (#1999); request inputs and response shapes are
+  in `endpoint-inventory.md` and D1 §1.3 (#1998).
+- Of the 2,250 rule rows of D1 §1.5 in review 2's bundle, 252 read "Not
+  stated in domain terms (Gap)": the condition or outcome is recovered and
+  is outside the rendering rules.
+- A rate-limit row of D1 §1.5 cites the Endpoint, whose evidence is its
+  route and does not show the limit (review 2, finding 2).
 
 - D2 to D10 are not compiled as catalogue documents. Until they are, a
   reviewer finds their content under the current artifact names, and
