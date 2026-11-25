@@ -372,7 +372,28 @@ pub(crate) fn resolve(out: &mut Extraction, limiters: &HashSet<(String, String)>
             .unwrap_or_default()
             .to_string();
         node.props["rate_limits"] = props(&handler, limits, &constants);
+        cite_declarations(&mut node.props);
     }
+}
+
+/// Add the spans the limits rest on (each limit declaration and the
+/// constant it names) to the Endpoint's own evidence. A statement of the
+/// limit cites the Endpoint, so that citation must resolve to a span that
+/// shows the limit, not only to the route (#1752, review 2). The route
+/// spans stay first; a span already cited is not repeated.
+fn cite_declarations(endpoint: &mut serde_json::Value) {
+    let nested = |props: &serde_json::Value| {
+        serde_json::from_value::<core_prov::Provenance>(props["prov"].clone()).ok()
+    };
+    let (Some(limits), Some(mut own)) = (nested(&endpoint["rate_limits"]), nested(endpoint)) else {
+        return;
+    };
+    for span in limits.evidence {
+        if !own.evidence.contains(&span) {
+            own.evidence.push(span);
+        }
+    }
+    endpoint["prov"] = serde_json::to_value(own).expect("provenance serializes");
 }
 
 fn props(
