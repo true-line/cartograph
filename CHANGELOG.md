@@ -1,5 +1,18 @@
 # cartograph
 
+## 0.81.0
+
+### Minor Changes
+
+- 181e581: Releases now also include a native Windows on ARM installer, `Cartograph_<version>_arm64_signed-setup.exe`, signed and timestamped through Azure Artifact Signing like the x64 installer. It is cross-built on x64 and installed and checked on a Windows ARM64 runner before it is attached (#227, ADR-0093).
+
+### Patch Changes
+
+- 4b00472: Recovering from a local `file://` mirror clones the mirror's checked-out branch, never another branch that happens to share its commit.
+- 6dc649c: A rate limit stated in the product specification now cites evidence that shows it. The endpoint's own evidence lists the limit declaration and the configuration constant it names after the route, so following the citation in the fact index leads to the limit itself. Applies to Flask endpoints with flask-limiter limits; re-ingest to pick it up.
+- e6cdd7c: GitHub recovery works on Windows for repositories with long branch names: a clone now fetches only the default branch, so a deeply nested remote branch can no longer fail it with "path too long", and long working-tree paths check out. The GitHub field also accepts pasted forms such as `github.com/owner/repo`, `www.github.com/…`, `http://…`, a `…/tree/main` view, GitHub's `?tab=readme-ov-file` suffix, and wrapping brackets or quotes. A refused address now shows what was entered and the accepted forms, or says to choose "Local folder" for a path.
+- bfc7ad0: Keyboard shortcuts now follow the platform. On Windows and Linux, quick dispatch opens with Ctrl+J (Ctrl+Space is left alone because it switches input methods), and the dispatch hint, Settings and Help name Ctrl shortcuts instead of Cmd. macOS keeps Cmd+Space with the optional Cmd+J fallback.
+
 ## 0.80.0
 
 ### Minor Changes
