@@ -7864,6 +7864,47 @@ def above():
     );
     let extraction = extract_dir(dir.path(), &id()).unwrap();
 
+    // #1752: a statement of a limit cites the Endpoint, so the Endpoint's
+    // own evidence holds the limit declaration and the constant it names
+    // after its route; an endpoint with no limit keeps its route alone.
+    let spans = |path: &str| {
+        let endpoint = extraction
+            .nodes
+            .iter()
+            .find(|node| node.label == "Endpoint" && node.props["path"] == path)
+            .unwrap();
+        let prov: core_prov::Provenance =
+            serde_json::from_value(endpoint.props["prov"].clone()).unwrap();
+        prov.evidence
+            .iter()
+            .map(|span| {
+                let file = std::fs::read(dir.path().join(&span.path)).unwrap();
+                String::from_utf8_lossy(&file[span.byte_start as usize..span.byte_end as usize])
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let cited = spans("/env");
+    assert!(cited[0].contains("@app.route(\"/env\""), "{cited:?}");
+    assert!(
+        cited
+            .iter()
+            .any(|span| span.contains("limiter.limit(ALIAS_LIMIT)")),
+        "{cited:?}"
+    );
+    assert!(
+        cited
+            .iter()
+            .any(|span| span.contains("100/day;50/hour;5/minute")),
+        "{cited:?}"
+    );
+    assert_eq!(cited.iter().collect::<BTreeSet<_>>().len(), cited.len());
+    assert!(
+        spans("/above").iter().all(|span| !span.contains("limiter")),
+        "{:?}",
+        spans("/above")
+    );
+
     let env = rate_limits_at(&extraction, "/env");
     assert_eq!(
         env["entries"][0]["value"], "100/day;50/hour;5/minute",
