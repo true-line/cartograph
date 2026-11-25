@@ -343,8 +343,10 @@ jobs:
   # names the first differing fact; a platform that recorded nothing fails.
   graph-parity:
     name: Graph hash on Windows and macOS
-    needs: [macos-tests, windows-determinism]
-    if: ${{ !cancelled() && (github.event.schedule == '17 6 * * *' || inputs.lane == 'macos-tests') }}
+    needs: [policy, macos-tests, windows-determinism]
+    # A platform failure still reaches the comparison; a policy rejection
+    # (both platform jobs skipped) does not.
+    if: ${{ !cancelled() && needs.policy.result == 'success' && (github.event.schedule == '17 6 * * *' || inputs.lane == 'macos-tests') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

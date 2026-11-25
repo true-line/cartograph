@@ -966,9 +966,9 @@ test('scheduled real-repository lanes stay off pull requests and share one Mac s
     assert.ok(job.includes(`name: graph-record-${platform}\n          path: \${{ runner.temp }}/graph-record\n`), platform);
   }
   const parity = jobs['graph-parity'];
-  assert.match(parity, /^ {4}needs: \[macos-tests, windows-determinism\]$/mu);
+  assert.match(parity, /^ {4}needs: \[policy, macos-tests, windows-determinism\]$/mu);
   // It still runs when a platform failed, and then fails for the missing record.
-  assert.match(parity, /^ {4}if: \$\{\{ !cancelled\(\) && \(github\.event\.schedule == '17 6 \* \* \*' \|\| inputs\.lane == 'macos-tests'\) \}\}$/mu);
+  assert.match(parity, /^ {4}if: \$\{\{ !cancelled\(\) && needs\.policy\.result == 'success' && \(github\.event\.schedule == '17 6 \* \* \*' \|\| inputs\.lane == 'macos-tests'\) \}\}$/mu);
   assert.match(parity, /^ {4}runs-on: ubuntu-latest$/mu);
   assert.ok(parity.includes('--record "macOS=$RUNNER_TEMP/records/graph-record-macos" \\\n            --record "Windows=$RUNNER_TEMP/records/graph-record-windows"'));
   assert.ok(jobs['simplelogin-showcase'].includes('node scripts/showcase-watch.mjs simplelogin'));
