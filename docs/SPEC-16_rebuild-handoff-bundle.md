@@ -219,7 +219,15 @@ and 11 absent, none of the absent in a gap row. Two of eight entry points
 are in the bundle. Mail forwarding, the system's main job, is in no
 capability and no gap row. Questions 17 and 18, the floor on
 questions 3 to 5 and the reading of "Not drafted" as silent were added
-because of that review. The review after drafting is still owed.
+because of that review.
+
+**Review 2** ([`review-2.md`](acceptance/w17/review-2.md), 2026-11-25) took
+the same kind of export from `main` at `d8058a1`, still with no drafted
+section. Result: not sufficient. Question 1 is silent, because §1.1 is not
+drafted, and one of the five sampled citations (a rate limit in D1) resolves
+to a span that does not show the limit. Questions 4, 8 and 15 now pass,
+all eight held-out entry points are in the bundle, and the probe finds 26
+of 26 expected statements stated. The review after drafting is still owed.
 
 ## Open items
 

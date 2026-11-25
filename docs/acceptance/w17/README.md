@@ -7,9 +7,17 @@ sufficiency checklist of [SPEC-16](../../SPEC-16_rebuild-handoff-bundle.md).
 
 [`review.md`](review.md) is review 1 (2026-11-20): a `best-effort` export
 with no drafted section, found **not sufficient**. It skipped step 2 below
-because no draft has been accepted. The review of a bundle made after
-drafting is still owed, and is committed here as `review-2.md`, whatever
-its result.
+because no draft has been accepted.
+
+[`review-2.md`](review-2.md) is review 2 (2026-11-25), of the same kind of
+export from `main` at `d8058a1`: still no drafted section, so again a
+baseline of the deterministic tiers, and **not sufficient**. Only question
+1 is silent (§1.1 is not drafted), and one of five sampled citations does
+not show its statement. The entry points (8 of 8) and the rebuild probe
+(26 of 26 stated) pass.
+
+The review of a bundle made after drafting is still owed, and is committed
+here as `review-3.md`, whatever its result.
 
 ## Producing the bundle
 
