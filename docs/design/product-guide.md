@@ -26,7 +26,8 @@ It works in two stages:
    recorded as a **gap**, never guessed.
 2. **Write documents from those facts.** Rules compile most sections
    directly from the graph. Agents draft the prose sections, citing facts.
-   A person reviews every draft before it is shown anywhere.
+   A person reviews every draft in the Spec Workbench; a draft reaches
+   exports, curated reads and MCP only after it is accepted.
 
 Cartograph never writes code into the system it reads.
 
@@ -89,7 +90,9 @@ Present on every surface:
   on macOS, `Ctrl+1`–`Ctrl+8` on Windows.
 - **Header** with breadcrumb, the loaded system's name and the Help entry.
 - **Status bar** with the egress figure and background activity.
-- **Command palette** (`Cmd+K` / `Ctrl+K`): every surface and command.
+- **Command palette** (`Cmd+K` / `Ctrl+K`): navigation only, to the rail
+  surfaces, Investigations and Help. It runs no other commands and does not
+  list the ingest steps or Agent work packets.
 - **Evidence drawer**: opens from any fact, read-only.
 - **Legend popover**: the tier and shape key.
 - **Knowledge phase notice**: a banner after an ingest when the derivation
