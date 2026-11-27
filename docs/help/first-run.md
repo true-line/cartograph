@@ -1,7 +1,7 @@
 # First run: install, set up, first ingest
 
 This page takes you from a downloaded build to a first recovered system. It
-describes version 0.77 on macOS.
+describes version 0.81 on macOS and Windows.
 
 You need no model provider to recover a system. The deterministic tier (T0)
 reads the code on this machine and calls no model. The local lane and a cloud
@@ -9,8 +9,12 @@ provider are optional and are set up afterwards.
 
 ## 1. Install and open
 
-1. Download the `.dmg` from the release page of the repository and open it.
-   The build is universal: one file for Intel and Apple Silicon Macs.
+Download the file for your machine from the release page of the repository.
+
+**macOS**
+
+1. Open the `.dmg`. The build is universal: one file for Intel and Apple
+   Silicon Macs.
 2. Drag **Cartograph** to **Applications**, then open it.
 
 A signed release opens like any other app. If the file name contains
@@ -19,6 +23,20 @@ does not open it. To open it anyway, choose **System Settings → Privacy &
 Security**, scroll to the message about Cartograph, and choose **Open Anyway**.
 You do this once. Only do it for a build you got from the project's own
 release page.
+
+**Windows**
+
+1. Choose `x64_signed-setup.exe` for most PCs, or `arm64_signed-setup.exe`
+   for a Windows on Arm PC.
+2. Run it and follow the installer, then open **Cartograph** from the Start
+   menu.
+
+The installer is signed. Windows SmartScreen may still show **Windows
+protected your PC** while the signing certificate is new to it. Choose
+**More info**, check that the publisher is shown, then **Run anyway**.
+
+Keyboard shortcuts in this help use `Cmd` as on macOS. On Windows use `Ctrl`
+instead; quick dispatch is `Ctrl+J`.
 
 ## 2. What works with no provider
 
@@ -72,7 +90,8 @@ Where to look afterwards:
 The local lane runs models on this machine through Ollama (ollama.com).
 Nothing leaves the machine.
 
-1. Install Ollama and start it. From a terminal: `ollama serve`.
+1. Install Ollama and start it: open the Ollama app, or from a terminal run
+   `ollama serve`.
 2. In Cartograph open **Settings → Local lane**. It shows whether the server
    answers and which models are installed.
 3. For each missing model it shows the command to fetch it. Run each command
@@ -91,8 +110,9 @@ The three models and their commands:
 ## 5. Add a cloud provider (optional)
 
 1. In **Settings → Provider keys**, paste your API key and choose **Save key**.
-   It is stored in the macOS Keychain and nowhere else, and the app never shows
-   it again. macOS may ask you to allow Cartograph to use the Keychain.
+   It is stored in the macOS Keychain, or the Windows Credential Manager, and
+   nowhere else, and the app never shows it again. macOS may ask you to allow
+   Cartograph to use the Keychain.
 2. Choose **Check connection** to confirm the provider accepts the key. That
    request carries the key and nothing from your sources.
 3. In **Settings**, set a tier's provider to cloud. The app shows a disclosure
@@ -111,7 +131,8 @@ bar shows the total bytes sent.
 
 ## If something does not work
 
-- **The app does not open**: see step 1 for an `unsigned-dev` build.
+- **The app does not open**: see step 1 for an `unsigned-dev` build on
+  macOS, or the SmartScreen prompt on Windows.
 - **A language shows zero files**: Preflight and the coverage inventory say
   whether an adapter exists for it. The **Ingest** help topic has the detail.
 - **"Provider not configured"**: for the local lane check **Settings → Local
