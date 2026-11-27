@@ -8,7 +8,7 @@ import { claudeCodeRequirement } from './build-agent-runtime.mjs';
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 // A workflow's top-level `on:` block, which alone decides what triggers it.
 const triggers = (workflow) => workflow.match(/^on:\n((?: .*\n|\n)*)/mu)?.[1] ?? '';
-const PLAYBOOK_RUNTIME_PIN = '64ec289604e2409eb92fd718495df8a10761a20a';
+const PLAYBOOK_RUNTIME_PIN = '2323e9151d94eebc13cda8c5b1bb49cad14da250';
 
 test('version-cut preserves review, evidence, and immutable-tag gates', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/version-cut.yml'), 'utf8');

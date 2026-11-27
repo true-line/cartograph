@@ -81,7 +81,7 @@ jobs:
             ui/package-lock.json
 
       - name: Install pinned Rust toolchain
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install pinned Windows Rust toolchain
           executable: rustup.exe
@@ -97,7 +97,7 @@ jobs:
       # npm is a .cmd script on Windows, which only a shell can start, so the
       # bounded command runs it through pwsh.
       - name: Install locked root dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install locked root dependencies
           executable: pwsh.exe
@@ -107,7 +107,7 @@ jobs:
           retry-delay-seconds: '5'
 
       - name: Install locked UI dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install locked UI dependencies
           executable: pwsh.exe

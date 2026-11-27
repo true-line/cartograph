@@ -57,7 +57,7 @@ jobs:
         with:
           node-version: 24
       - id: policy
-        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/ci-policy@2323e9151d94eebc13cda8c5b1bb49cad14da250
 
   merge-evidence:
     name: Verify merged commit evidence
@@ -171,7 +171,7 @@ jobs:
       # executable from the pinned, checksum-verified Node) and the same
       # process tests run against that executable.
       - name: Install locked agent runtime dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install locked agent runtime dependencies
           executable: npm
@@ -464,7 +464,7 @@ jobs:
 
       - name: Run explicit local-provider acceptance
         if: matrix.group == 'core' && github.event_name == 'workflow_dispatch' && inputs.local_provider_acceptance
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Run pinned real-local-provider investigation acceptance
           executable: node
@@ -531,7 +531,7 @@ jobs:
           if ($rustup) { "RUSTUP_HOME=$rustup" >> $env:GITHUB_ENV }
 
       - name: Install pinned Rust toolchain
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install pinned Windows Rust toolchain
           executable: rustup.exe
@@ -603,7 +603,7 @@ jobs:
           "TEMP=$temp" >> $env:GITHUB_ENV
 
       - name: Test production job ownership on Windows
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Test native Windows job ownership and process exit
           executable: cargo.exe
@@ -1249,7 +1249,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install locked UI dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install locked UI dependencies
           executable: npm
@@ -1371,7 +1371,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
 
       - name: Install dependencies
-        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@64ec289604e2409eb92fd718495df8a10761a20a
+        uses: true-line/trueline-agent-ci/.github/actions/bounded-command@2323e9151d94eebc13cda8c5b1bb49cad14da250
         with:
           task: Install frontend dependencies
           executable: npm
@@ -1431,7 +1431,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: true-line/trueline-agent-ci
-          ref: 64ec289604e2409eb92fd718495df8a10761a20a
+          ref: 2323e9151d94eebc13cda8c5b1bb49cad14da250
           path: .ci-runtime-policy
           sparse-checkout: tools/ci-runtime
           persist-credentials: false
