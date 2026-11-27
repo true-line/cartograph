@@ -1,7 +1,7 @@
 {
   "name": "cartograph-ui",
   "private": true,
-  "version": "0.81.0",
+  "version": "0.81.1",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE.md",
   "scripts": {

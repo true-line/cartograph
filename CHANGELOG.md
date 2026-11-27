@@ -1,5 +1,11 @@
 # cartograph
 
+## 0.81.1
+
+### Patch Changes
+
+- 4640770: First-run help now covers installing on Windows (x64 and ARM64) and where provider keys are stored there.
+
 ## 0.81.0
 
 ### Minor Changes
