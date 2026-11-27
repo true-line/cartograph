@@ -28,25 +28,52 @@ still need validation; the presence of an artifact is not proof of completeness.
 
 ## Status
 
-As of 0.72 the deterministic foundation is built: the desktop recovery engine,
-language adapters (TypeScript, Python, Go, Rust, Java and Kotlin) and
-infrastructure adapters, graph and flow views, C4 architecture views (system
-context, containers and components), provenance, the specification compiler and
-its exports, a read-only MCP surface, and bounded specialist investigations that
-answer cited questions. The D1 system overview is composed from the knowledge
-graph at system scope, each recovered area has a topic expert that answers from
-its area briefing, and accepted proposals and findings accepted as curated reach
-the exports through the curated projection.
+The latest release is **0.81.0** (2026-11-25). v1.0.0 is not released yet; its
+criteria are in [ROADMAP §11](docs/ROADMAP.md#11-v100-scope-2026-11-17).
 
-Not built yet: agents do not draft the D2 to D10 documents
-([#1748](https://github.com/true-line/cartograph/issues/1748)), and documents are
-not updated when the code drifts
-([#1749](https://github.com/true-line/cartograph/issues/1749)). The plan
-for those stages is [ROADMAP §10](docs/ROADMAP.md#10-realignment-2026-11-09);
-the direction is [ADR-0056](docs/adr/ADR-0056-documentation-reconstruction-pipeline.md).
-Planned capabilities have separate delivery gates and are not shipped until
-those pass. v1.0.0 is the whole pipeline: its criteria are in
-[ROADMAP §11](docs/ROADMAP.md#11-v100-scope-2026-11-17).
+What the app does today:
+
+- **Recover a system** from a GitHub repository, a local folder or a system
+  manifest (several repositories as one system): Connect → Preflight →
+  Recover. The deterministic tier reads TypeScript, Python, Go, Rust, Java and
+  Kotlin, framework adapters and infrastructure as code, and calls no model.
+- **Explore it**: the Atlas topology graph, the Flow Inspector, C4
+  architecture views (context, containers, components), the Gaps & Drift
+  register and Provenance & Eval. Every fact opens its evidence.
+- **Read and curate the recovered documents** in the Spec Workbench: the
+  product specification, flow dossiers, ADRs, endpoint inventory and
+  permissions, pipelines, configuration keys, external services,
+  environments, the gap and drift registers and the fact index, exported as
+  one handoff bundle.
+- **Ask agents**: specialist investigations and a topic expert per recovered
+  area answer with citations; saved conversations are in Agent Chats. A
+  Section Writer drafts a section of the product specification, a person
+  accepts, rejects or returns it, and an accepted section is marked stale
+  when a fact it cites changes and can be re-drafted. Agent output always
+  stays T3 / InferredWeak and is shown only after a person accepts it.
+- **Serve the graph to other agents** through a read-only MCP surface and
+  reviewed agent work packets.
+
+Not done yet: agents drafting the other catalogued documents (D2 to D10) and
+the content-acceptance pilot for drafted sections
+([#1748](https://github.com/true-line/cartograph/issues/1748)). The direction
+is [ADR-0056](docs/adr/ADR-0056-documentation-reconstruction-pipeline.md);
+the document set is the [document catalogue](docs/DOCUMENT-CATALOGUE.md).
+
+### Install
+
+Download from the [latest release](https://github.com/true-line/cartograph/releases/latest):
+
+| Platform | File |
+|---|---|
+| macOS (Intel and Apple Silicon) | `Cartograph_<version>_universal_signed.dmg` |
+| Windows x64 | `Cartograph_<version>_x64_signed-setup.exe` |
+| Windows ARM64 | `Cartograph_<version>_arm64_signed-setup.exe` |
+
+All three are signed. [First run](docs/help/first-run.md) covers install,
+provider setup and the first ingest.
+
+### Build from source
 
 ```sh
 # prerequisites: Node (see .nvmrc) and Rust via rustup — https://rustup.rs
@@ -59,7 +86,9 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 
 | Document | Purpose |
 |---|---|
+| [docs/design/product-guide.md](docs/design/product-guide.md) | Product guide for design: users, screens, journeys and the rules the UI must keep |
 | [docs/help/first-run.md](docs/help/first-run.md) | First run: install the build, set up a provider, first ingest (also in the app under Help) |
+| [docs/help/](docs/help/) | In-app help, one page per surface |
 | [docs/VISION.md](docs/VISION.md) | Product vision: the end state and its elements V1–V13 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Roadmap: workstreams, phases with demos, first issues |
 | [docs/SPEC-00_master.md](docs/SPEC-00_master.md) | Master specification — single source of truth |
@@ -70,7 +99,7 @@ npm run tauri dev   # first run compiles the Rust workspace — takes a few minu
 | [docs/user_stories.md](docs/user_stories.md) | User stories + acceptance criteria (US/AC schema) |
 | [docs/US-TM.md](docs/US-TM.md) | Traceability matrix: US ↔ AC ↔ crate ↔ milestone ↔ ADR ↔ test |
 | [docs/adr/](docs/adr/) | Architecture decision records |
-| [docs/design/production-ui/](docs/design/production-ui/) | Production UI design handoff (authoritative tokens + screenshots) |
+| [docs/design/production-ui/](docs/design/production-ui/) | Original production UI handoff: tokens and prototype screenshots (predates Agent Chats, Investigations and Help) |
 | [docs/design/](docs/design/) | Earlier design tokens + Stitch UI mockups |
 
 Work is tracked in [GitHub Issues + Project](https://github.com/true-line/cartograph/issues);
@@ -81,6 +110,7 @@ Work is tracked in [GitHub Issues + Project](https://github.com/true-line/cartog
 Tauri 2 · Rust core · React + TypeScript + Vite UI · tree-sitter ·
 SQLite/WAL graph store with recursive-CTE traversal (ADR-0008) + state spine ·
 Ollama local-first LLM with pluggable cloud providers (opt-in egress).
+Builds for macOS (universal) and Windows (x64, ARM64).
 
 ## Contributing
 
